@@ -86,7 +86,7 @@ export class HostReadExecutor {
   constructor(private readonly opts: HostReadExecutorOptions) {}
 
   has(operation: Operation): boolean {
-    return this.opts.some((o) => o.operation === operation);
+    return this.opts.ops.some((o) => o.operation === operation);
   }
 
   private opFor(operation: Operation): HostReadOp {

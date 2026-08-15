@@ -57,3 +57,21 @@ plugins never fall back to host execution.
 - `sandbox_bash` is intentionally NOT a shell: `tokenizeCommand` splits on
   whitespace/quotes only, and the broker re-validates every token (§28). No
   pipes, redirection, globs or expansion.
+
+## Gate 4 verification (2026-08-16)
+
+Verified against the installed `@opencode-ai/plugin` typings (opencode
+1.18.18 at `~/.opencode/node_modules/@opencode-ai/plugin/dist/index.d.ts`):
+
+- `tool` hook / `tool()` helper with zod args + `ToolContext`
+  `{sessionID, messageID, agent, directory, worktree, abort, metadata, ask}` —
+  matches `sandbox-tools.ts` usage.
+- `ctx.ask(input: AskInput): Promise<void>` with
+  `AskInput = {permission, patterns, always, metadata}` — `sandbox_apply`
+  rewritten at Gate 4 from the wrong `{title, body, options}` + return-value
+  shape to the typed shape (denial rejects the promise).
+- `tool.execute.before(input: {tool, sessionID, callID}, output: {args})` —
+  matches `routing-guard.ts`.
+- `experimental.chat.system.transform`: `output.system` is `string[]` —
+  `routing-guard.ts` rewritten to push (was string assignment).
+- `permission.ask` hook available for config-fragment-level enforcement.

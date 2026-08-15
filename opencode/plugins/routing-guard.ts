@@ -129,7 +129,9 @@ export default function routingGuardPlugin(): Plugin {
         "- To finish: sandbox_finish, then sandbox_apply (requires user approval). sandbox_discard abandons the result.",
         "",
       ].join("\n");
-      output.system = `${output.system}${rule}`;
+      // output.system is a string[] in the 1.18.x plugin API (verified at
+      // Gate 4 against @opencode-ai/plugin typings; use-grep-tool pushes).
+      output.system = [...output.system, rule];
     },
   };
 }

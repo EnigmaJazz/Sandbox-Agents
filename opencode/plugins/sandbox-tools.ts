@@ -234,14 +234,15 @@ export default function sandboxToolsPlugin() {
           }
           const diff = await c.request("diff", ctx.sessionID, { mode: "active" }, ctx.agent);
           const summary = (diff as { stat?: string }).stat ?? "";
-          const approval = await ctx.ask({
-            title: "Apply sandbox result to the host project?",
-            body: `Host project will receive the B->C delta below.\n\n${summary}`,
-            options: ["approve", "reject"],
+          // opencode 1.18.x: ctx.ask takes {permission, patterns, always,
+          // metadata} and resolves void on approval; a denial REJECTS the
+          // promise (verified against @opencode-ai/plugin typings at Gate 4).
+          await ctx.ask({
+            permission: "sandbox_apply",
+            patterns: ["*"],
+            always: [],
+            metadata: { summary },
           });
-          if (approval !== "approve") {
-            throw new Error("sandbox_apply cancelled by user approval");
-          }
           return c.request("applyResult", ctx.sessionID, { confirm: "APPLY" }, ctx.agent);
         },
       }),
