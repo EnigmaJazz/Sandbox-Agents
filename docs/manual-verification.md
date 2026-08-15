@@ -53,17 +53,75 @@ Checklist (user):
 
 ## Gate 3 — Microsandbox manually verified
 
+Drafted 2026-08-15 against msb v0.6.9 (verified via `msb create --tree`). Run
+from anywhere; every step is copy-paste. Values mirror the broker policy
+(`broker/src/config.ts`: image `debian`, 2 vCPU / 2 GiB, deny-by-default
+network).
+
 ```sh
-msb doctor
-msb image list                      # debian image present (47 MiB)
-# broker net.conf: confirm deny-by-default; add project-required allowlist (S12)
+# 0) Preconditions
+msb doctor                          # all ✓; KVM read/write for user — UNCHANGED
+msb image list                      # debian present (47 MiB)
+
+# 1) Throwaway sandbox — CLI-flags form (proves msb itself + broker policy values)
+mkdir -p /tmp/gate3
+msb create -n gate3-smoke debian \
+  -c 2 --max-cpus 2 -m 2G --max-memory 2G \
+  --no-net -w /work --mkdir /work -H gate3-smoke
+
+# 2) It is running
+msb list | grep gate3-smoke
+msb status gate3-smoke
+
+# 3) Exec works; workdir is /work
+msb exec gate3-smoke -- pwd                  # expect /work
+msb exec gate3-smoke -- cat /etc/os-release
+
+# 4) Isolation: the host is NOT mounted (S11)
+msb exec gate3-smoke -- ls /home             # expect: no such dir
+msb exec gate3-smoke -- test -e /dev/kvm && echo KVM-EXPOSED || echo KVM-NOT-EXPOSED
+msb exec gate3-smoke -- test -S /var/run/docker.sock && echo DOCKER-EXPOSED || echo DOCKER-NOT-EXPOSED
+
+# 5) Network deny-by-default (S12): guest has no routes
+msb exec gate3-smoke -- sh -c 'wc -l < /proc/net/route'   # expect 1 (header only)
+# optional deeper probe if getent exists in the image:
+msb exec gate3-smoke -- getent hosts 100.90.20.31        # expect failure/timeout
+
+# 6) Copy round-trip (the broker's result-export path)
+msb copy gate3-smoke:/etc/os-release /tmp/gate3/os-release && cat /tmp/gate3/os-release
+msb copy /etc/hostname gate3-smoke:/tmp/hostname
+
+# 7) Broker-shaped conf files — validates the schema broker/src/msb.ts generates
+printf '{"mode":"deny"}' > /tmp/gate3/net.conf
+printf '{"cpu":2,"mem":2147483648}' > /tmp/gate3/resource.conf
+printf '{"workdir":"/work"}' > /tmp/gate3/fs.conf
+printf '{"capabilities":[]}' > /tmp/gate3/runtime.conf
+printf '{"secrets":{}}' > /tmp/gate3/secret.conf
+msb create -n gate3-conf-test debian \
+  --conf /tmp/gate3/runtime.conf \
+  --net-conf /tmp/gate3/net.conf \
+  --resource-conf /tmp/gate3/resource.conf \
+  --fs-conf /tmp/gate3/fs.conf \
+  --secret-conf /tmp/gate3/secret.conf \
+  -c 2 --max-cpus 2
+#   ^ if this FAILS on a conf-schema error, that is a Gate 3 FINDING:
+#     fix the generated confs in broker/src/msb.ts before Gate 4
+msb status gate3-conf-test
+msb exec gate3-conf-test -- pwd               # expect /work
+
+# 8) Cleanup
+msb stop gate3-smoke gate3-conf-test
+msb remove gate3-smoke gate3-conf-test
+msb list                                      # empty
 ```
 
-Checklist:
+Checklist (user):
 
-- [ ] Worker image pinned in broker config; LLM cannot choose (S11)
-- [ ] Network deny-by-default confirmed (no LAN/metadata/socket)
-- [ ] `/dev/kvm` access unchanged (already user-accessible per discovery)
+- [ ] Worker image pinned in broker config; LLM cannot choose (S11) —
+      `broker/src/config.ts` `workerImage`; `msb.ts` never accepts a caller image
+- [ ] Network deny-by-default confirmed (no LAN/metadata/socket) — steps 1/5/7
+- [ ] `/dev/kvm` access unchanged (already user-accessible per discovery) — step 0
+- [ ] Step 7 conf-file create succeeds (broker schema proof point)
 
 ## Gate 4 — Broker unit/security tests
 
