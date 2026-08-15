@@ -1,0 +1,39 @@
+# sandbox-broker.service — user-level systemd unit for the sandbox broker.
+#
+# NOT INSTALLED at Gate 1. This file is generated per SYSTEM_PROMPT.md §24
+# and becomes active only after the manual gates (docs/manual-verification.md,
+# Gate 4) and review by the user. Install steps (for the USER, not an agent):
+#
+#   install -m 0644 sandbox-broker.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now sandbox-broker.service
+#
+# Requirements honoured (§24): no root (user unit), explicit executable path,
+# explicit working directory, restart on failure, restrictive umask,
+# journalctl --user logging, no credentials embedded.
+#
+# Paths below are the discovered host paths (see docs/discovery-report.md §2);
+# the WorkingDirectory is the broker checkout inside this repository.
+
+[Unit]
+Description=OpenCode sandbox broker (trusted policy + worker lifecycle)
+Documentation=file:///home/james/agent-sandbox-integration/docs/operations.md
+After=default.target
+
+[Service]
+Type=simple
+# Bun at the discovered Linuxbrew path; entry point explicit (no PATH lookup).
+ExecStart=/home/linuxbrew/.linuxbrew/bin/bun /home/james/agent-sandbox-integration/broker/src/main.ts
+WorkingDirectory=/home/james/agent-sandbox-integration/broker
+Restart=on-failure
+RestartSec=5
+UMask=0077
+Nice=10
+# The broker only talks to localhost Unix sockets; a conservative fd limit.
+LimitNOFILE=4096
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=BROKER_GIT_MODE=planned
+# No credentials in this unit. Secrets are never broker state (§26).
+
+[Install]
+WantedBy=default.target

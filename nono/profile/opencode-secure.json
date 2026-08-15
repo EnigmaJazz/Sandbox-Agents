@@ -1,0 +1,56 @@
+{
+  "meta": {
+    "name": "opencode-secure",
+    "version": "0.1.0",
+    "description": "Secured host OpenCode process for the agentic sandbox integration (SYSTEM_PROMPT.md §15). Control dir writable, project roots read-only, credential stores only what OpenCode itself needs, everything else denied. NOT INSTALLED at Gate 1 — see nono/README.md.",
+    "author": "agentic-sandbox-integration"
+  },
+  "extends": "default",
+  "groups": {
+    "include": []
+  },
+  "workdir": {
+    "access": "none"
+  },
+  "filesystem": {
+    "allow": [
+      "$HOME/.local/share/opencode-sandbox-control",
+      "$HOME/.local/share/opencode",
+      "$HOME/.local/state/opencode",
+      "$HOME/.cache/opencode",
+      "$HOME/.config/opencode",
+      "$TMPDIR"
+    ],
+    "read": [
+      "$HOME/agent-sandbox-integration"
+    ],
+    "deny": [
+      "$HOME/.ssh",
+      "$HOME/.aws",
+      "$HOME/.kube",
+      "$HOME/.gnupg",
+      "$HOME/.config/gcloud",
+      "$HOME/.config/gh"
+    ]
+  },
+  "network": {
+    "allow_domain": [
+      "api.openai.com",
+      "auth.openai.com",
+      "openrouter.ai",
+      "api.deepseek.com"
+    ],
+    "open_port": [
+      13000,
+      8788
+    ],
+    "listen_port": [
+      4096
+    ]
+  },
+  "security": {
+    "signal_mode": "isolated",
+    "process_info_mode": "isolated",
+    "capability_elevation": false
+  }
+}

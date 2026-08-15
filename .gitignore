@@ -1,0 +1,33 @@
+# Dependencies and build artifacts
+node_modules/
+bun.lockb
+bun.lock
+dist/
+out/
+
+# Logs and state
+*.log
+*.jsonl
+
+# Sandbox broker runtime state
+.sandbox-state/
+broker/.sandbox-state/
+
+# Unix sockets
+*.sock
+*.socket
+
+# Tool caches
+.atl/
+
+# Backups and temp files
+*.bak
+*.bak-*
+*.tmp
+*~
+
+# Local environment overrides
+.env
+.env.local
+.env.*
+!.env.example

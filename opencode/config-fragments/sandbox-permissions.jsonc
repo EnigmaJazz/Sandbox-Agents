@@ -1,0 +1,75 @@
+{
+  // ──────────────────────────────────────────────────────────────────────────
+  // sandbox-permissions.jsonc — ADDITIVE permission fragment (spec §14).
+  //
+  // NOT INSTALLED at Gate 1. This is a FRAGMENT: merge it into the user's
+  // opencode.json MANUALLY after reviewing scripts/install-user-files diff
+  // output. It must never be applied by overwriting the user's config.
+  //
+  // Intent (spec §14):
+  //   ordinary host bash           deny
+  //   ordinary host edit/write     deny
+  //   sandbox execution tools      allow
+  //   sandbox editing tools        allow
+  //   sandbox result apply         ask
+  //   sandbox discard              allow
+  //   host read-only tools         allow
+  //   host mutation                absent (no generic host mutation in v1)
+  //   protected secret reads       deny
+  //
+  // WARNING: the "bash": "deny" rule REPLACES any existing bash rule (e.g.
+  // the current "bash *: allow") — that is the point of this fragment, but it
+  // must be applied knowingly and only for sessions protected by the sandbox
+  // stack. It never weakens existing permissions (spec §14: "Do not weaken").
+  //
+  // NOTE on custom tools: in opencode 1.18.x the sandbox_* tools are declared
+  // by plugins (opencode/plugins/sandbox-tools.ts). Permission entries for
+  // tool names follow the same rule-map shape as built-ins; verify the exact
+  // matching semantics for plugin tools at Gate 4.
+  // ──────────────────────────────────────────────────────────────────────────
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "bash": "deny",
+    "edit": "deny",
+    "write": "deny",
+    "apply_patch": "deny",
+    "read": {
+      "allow": [],
+      "deny": [
+        "**/.local/share/opencode/auth.json",
+        "**/.ssh/**",
+        "**/.gnupg/**",
+        "**/.aws/**",
+        "**/.kube/**",
+        "**/.config/gcloud/**",
+        "**/.config/gh/hosts.yml",
+        "**/.git-credentials",
+        "**/.netrc",
+        "**/.env*",
+        "**/*.key",
+        "**/*.pem"
+      ]
+    },
+    "sandbox_read": "allow",
+    "sandbox_list": "allow",
+    "sandbox_grep": "allow",
+    "sandbox_write": "allow",
+    "sandbox_edit": "allow",
+    "sandbox_apply_patch": "allow",
+    "sandbox_bash": "allow",
+    "sandbox_diff": "allow",
+    "sandbox_finish": "allow",
+    "sandbox_apply": "ask",
+    "sandbox_discard": "allow",
+    "host_system": "allow",
+    "host_service_status": "allow",
+    "host_service_logs": "allow",
+    "host_tailscale_status": "allow",
+    "host_memory": "allow",
+    "host_disk_usage": "allow",
+    "host_network_listeners": "allow",
+    "host_process_list": "allow",
+    "host_docker_list": "allow",
+    "host_docker_logs": "allow"
+  }
+}

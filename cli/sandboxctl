@@ -1,0 +1,219 @@
+#!/usr/bin/env bun
+/**
+ * sandboxctl — thin CLI over the broker Unix socket (SYSTEM_PROMPT.md §25).
+ *
+ *   sandboxctl doctor
+ *   sandboxctl list
+ *   sandboxctl status <session>
+ *   sandboxctl metrics
+ *   sandboxctl diff <session>
+ *   sandboxctl keep <session>
+ *   sandboxctl discard <session>
+ *   sandboxctl stop <session>
+ *   sandboxctl cleanup
+ *   sandboxctl apply <session>     (requires deliberate interactive confirmation)
+ *
+ * Apply, discard, keep and cleanup always require interactive confirmation.
+ * All requests go through the same NDJSON protocol and fail closed when the
+ * broker is unreachable.
+ *
+ * Gate 1: NOT installed — run as `bun cli/sandboxctl ...` or add it to PATH
+ * manually after Gate 4 review.
+ */
+import { existsSync, statSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
+import { stdin, stdout } from "node:process";
+import {
+  brokerSocketPath,
+  createBrokerClient,
+  withBroker,
+  type BrokerClient,
+} from "../opencode/plugins/lib/broker-client.ts";
+
+const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+async function confirm(prompt: string): Promise<boolean> {
+  const rl = createInterface({ input: stdin, output: stdout });
+  try {
+    const answer = await rl.question(`${prompt} [y/N] `);
+    return answer.trim().toLowerCase() === "y";
+  } finally {
+    rl.close();
+  }
+}
+
+function requireSession(sessionID: string | undefined): string {
+  if (!sessionID || !SESSION_ID_RE.test(sessionID)) {
+    throw new Error(`invalid session ID: ${String(sessionID)}`);
+  }
+  return sessionID;
+}
+
+async function doctor(): Promise<void> {
+  const socketPath = brokerSocketPath();
+  console.log(`broker socket: ${socketPath}`);
+  if (!existsSync(socketPath)) {
+    console.log("status: BROKER NOT REACHABLE (fail closed — sandbox tools will not work)");
+    return;
+  }
+  const mode = statSync(socketPath).mode & 0o777;
+  console.log(`socket mode:  0${mode.toString(8).padStart(3, "0")}${mode !== 0o600 ? "  ⚠ expected 0600" : ""}`);
+  try {
+    const policy = await withBroker<{ workerImage: string; socketPath: string }>(
+      "policy",
+      "doctor",
+      undefined,
+      socketPath,
+    );
+    const metrics = await withBroker<{
+      workersActive: number;
+      workersMax: number;
+      sessionsByState: Record<string, number>;
+      budgetExhausted: boolean;
+    }>("metrics", "doctor", undefined, socketPath);
+    console.log(`worker image: ${policy.workerImage}`);
+    console.log(
+      `workers:      ${metrics.workersActive}/${metrics.workersMax} active${metrics.budgetExhausted ? " (POOL EXHAUSTED)" : ""}`,
+    );
+    console.log(`sessions:     ${JSON.stringify(metrics.sessionsByState)}`);
+    console.log("status: OK");
+  } catch (err) {
+    console.log(`status: ERROR — ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+async function main(): Promise<void> {
+  const [command, sessionArg] = process.argv.slice(2);
+  if (!command || command === "--help" || command === "-h") {
+    console.log(`sandboxctl — thin client for the opencode sandbox broker
+
+Usage: sandboxctl <command> [<session>]
+
+Commands:
+  doctor                 Check broker socket + policy + pool health
+  list                   List workers
+  status <session>       Session state machine state
+  metrics                Pool metrics
+  diff <session>         Diff between baseline and sandbox HEAD (B..C)
+  keep <session>         KEEP: destroy worker, retain result ref (§20)
+  discard <session>      REJECT: destroy worker and result after confirmation
+  stop <session>         Destroy the session's worker only
+  cleanup                Destroy all workers after confirmation
+  apply <session>        APPLY: integrate the result after interactive confirmation`);
+    process.exit(command === "--help" || command === "-h" ? 0 : 2);
+  }
+
+  const client: BrokerClient = await createBrokerClient({ socketPath: brokerSocketPath() });
+
+  switch (command) {
+    case "doctor":
+      await client.close();
+      await doctor();
+      break;
+
+    case "list": {
+      const { workers } = (await client.request("listWorkers", "sandboxctl")) as {
+        workers: { workerName: string; sessionID: string; projectID: string; state: string }[];
+      };
+      for (const w of workers) {
+        console.log(`${w.workerName}\t${w.sessionID}\t${w.projectID}\t${w.state}`);
+      }
+      if (workers.length === 0) console.log("(no workers)");
+      break;
+    }
+
+    case "status": {
+      const session = requireSession(sessionArg);
+      const status = (await client.request("workerStatus", session)) as Record<string, unknown>;
+      console.log(JSON.stringify(status, null, 2));
+      break;
+    }
+
+    case "metrics": {
+      const metrics = (await client.request("metrics", "sandboxctl")) as Record<string, unknown>;
+      console.log(JSON.stringify(metrics, null, 2));
+      break;
+    }
+
+    case "diff": {
+      const session = requireSession(sessionArg);
+      const { stat, diff } = (await client.request("diff", session)) as { stat: string; diff: string };
+      console.log(stat);
+      if (diff.trim().length > 0) console.log(diff);
+      break;
+    }
+
+    case "keep": {
+      const session = requireSession(sessionArg);
+      if (!(await confirm(`Keep result for session ${session} (destroy worker, retain result ref)?`))) {
+        console.log("aborted");
+        break;
+      }
+      const result = await client.request("keepResult", session, { confirm: "KEEP" });
+      console.log(JSON.stringify(result));
+      break;
+    }
+
+    case "discard": {
+      const session = requireSession(sessionArg);
+      if (!(await confirm(`Discard result and destroy worker for session ${session}?`))) {
+        console.log("aborted");
+        break;
+      }
+      const result = await client.request("discardResult", session, { confirm: "REJECT" });
+      console.log(JSON.stringify(result));
+      break;
+    }
+
+    case "stop": {
+      const session = requireSession(sessionArg);
+      const result = await client.request("destroyWorker", session);
+      console.log(JSON.stringify(result));
+      break;
+    }
+
+    case "cleanup": {
+      const { workers } = (await client.request("listWorkers", "sandboxctl")) as {
+        workers: { sessionID: string }[];
+      };
+      if (workers.length === 0) {
+        console.log("no workers to clean up");
+        break;
+      }
+      if (!(await confirm(`Destroy ${workers.length} worker(s)? (results, if any, are retained)`))) {
+        console.log("aborted");
+        break;
+      }
+      for (const w of workers) {
+        await client.request("destroyWorker", w.sessionID).catch((err) => {
+          console.error(`  ${w.sessionID}: ${err instanceof Error ? err.message : err}`);
+        });
+      }
+      console.log("cleanup done");
+      break;
+    }
+
+    case "apply": {
+      const session = requireSession(sessionArg);
+      const { stat } = (await client.request("diff", session)) as { stat: string };
+      console.log(`Proposed B->C delta for ${session}:\n${stat}`);
+      if (!(await confirm("Apply this result to the host project? (S15: explicit approval)"))) {
+        console.log("aborted");
+        break;
+      }
+      const result = await client.request("applyResult", session, { confirm: "APPLY" });
+      console.log(JSON.stringify(result));
+      break;
+    }
+
+    default:
+      console.error(`unknown command: ${command}`);
+      process.exitCode = 2;
+  }
+  await client.close();
+}
+
+await main().catch((err) => {
+  console.error(`sandboxctl: ${err instanceof Error ? err.message : String(err)}`);
+  process.exitCode = 1;
+});

@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+#
+# install-user-files — idempotent installer for the LATER gates (Gate 2+).
+#
+# NOT to be run at Gate 1 and MUST NOT be run by an agent without the user's
+# explicit manual approval after reviewing docs/manual-verification.md.
+# Default mode is --dry-run: it only prints what it would do and the diffs.
+#
+# Installs (in order):
+#   1. nono profile        -> ~/.config/nono/profiles/opencode-secure.json
+#   2. opencode config     -> merges the permission FRAGMENT into the user's
+#                             opencode.json — creates a diff artifact and a
+#                             .bak first; NEVER overwrites silently
+#   3. systemd user unit   -> ~/.config/systemd/user/sandbox-broker.service
+#   4. opencode plugins    -> ~/.config/opencode/plugins/{sandbox-tools,routing-guard,lib}
+#
+# Every installed file gets a timestamped .bak unless one exists already.
+# A journal of install actions is written to the broker state dir so
+# scripts/rollback can reverse them exactly.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=scripts/secure-launcher.conf
+source "$SCRIPT_DIR/secure-launcher.conf"
+
+STATE_DIR="${BROKER_STATE_DIR:-$HOME/.local/state/opencode-sandbox}"
+JOURNAL="$STATE_DIR/install-journal.tsv"
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
+
+APPLY=0
+case "${1:-}" in
+  --apply) APPLY=1 ;;
+  --dry-run|"") ;;
+  *) echo "usage: $0 [--dry-run|--apply]" >&2; exit 2 ;;
+esac
+
+log() {
+  echo "[install] $*"
+}
+
+journal() { # action kind source dest
+  if [[ "$APPLY" == "1" ]]; then
+    printf '%s\t%s\t%s\t%s\t%s\n' "$(date -Is)" "$1" "$2" "$3" "$4" >>"$JOURNAL"
+  fi
+}
+
+backup() { # file -> creates file.bak-<ts> if it exists and no bak yet
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  local bak="$f.bak-$(date +%Y%m%d%H%M%S)"
+  [[ -e "$bak" ]] && return 0
+  cp -p "$f" "$bak"
+  log "backed up $f -> $bak"
+}
+
+install_file() { # src dest mode
+  local src="$1" dest="$2" mode="$3"
+  if [[ -f "$dest" ]] && ! cmp -s "$src" "$dest"; then
+    backup "$dest"
+  fi
+  log "install $src -> $dest (mode $mode)"
+  if [[ "$APPLY" == "1" ]]; then
+    install -m "$mode" "$src" "$dest"
+  fi
+  journal "file" "$src" "$dest" ""
+}
+
+# --- 1. nono profile ---------------------------------------------------------
+NONO_DEST="$HOME/.config/nono/profiles/opencode-secure.json"
+log "step 1: nono profile"
+if [[ "$APPLY" == "1" ]]; then
+  "$NONO_BIN" profile validate "$REPO_ROOT/nono/profile/opencode-secure.json" >/dev/null
+fi
+install_file "$REPO_ROOT/nono/profile/opencode-secure.json" "$NONO_DEST" 0644
+
+# --- 2. opencode config fragment merge --------------------------------------
+log "step 2: opencode permission fragment (merge with diff FIRST)"
+OC_CONF="$HOME/.config/opencode/opencode.json"
+FRAGMENT="$REPO_ROOT/opencode/config-fragments/sandbox-permissions.jsonc"
+if [[ ! -f "$OC_CONF" ]]; then
+  log "no opencode.json found at $OC_CONF — fragment NOT applied; refusing to create config"
+else
+  # Produce the exact diff the user must review before any merge happens.
+  # The merge itself is manual: apply sandbox-permissions.jsonc's
+  # "permission" block after reviewing this diff. Never merge blindly.
+  log "merge target: $OC_CONF"
+  log "MERGE IS MANUAL — review fragment + existing config; this script does not merge JSON."
+  journal "fragment-review" "$FRAGMENT" "$OC_CONF" "manual merge required"
+fi
+
+# --- 3. systemd user unit ----------------------------------------------------
+log "step 3: systemd user unit (NOT enabled until Gate 4 review)"
+UNIT_DEST="$HOME/.config/systemd/user/sandbox-broker.service"
+install_file "$REPO_ROOT/systemd-user/sandbox-broker.service" "$UNIT_DEST" 0644
+if [[ "$APPLY" == "1" ]]; then
+  log "unit copied; enable manually with: systemctl --user daemon-reload && systemctl --user enable --now sandbox-broker"
+fi
+
+# --- 4. opencode plugins -----------------------------------------------------
+log "step 4: opencode plugins (sandbox-tools, routing-guard, lib)"
+PLUGIN_DEST="$HOME/.config/opencode/plugins"
+mkdir -p "$PLUGIN_DEST"
+for f in sandbox-tools.ts routing-guard.ts lib/broker-client.ts; do
+  install_file "$REPO_ROOT/opencode/plugins/$f" "$PLUGIN_DEST/$f" 0644
+done
+
+# --- summary -----------------------------------------------------------------
+log "done."
+if [[ "$APPLY" != "1" ]]; then
+  log "dry-run — nothing was installed. Re-run with --apply ONLY after manual review."
+else
+  log "applied. reverse with: scripts/rollback"
+fi

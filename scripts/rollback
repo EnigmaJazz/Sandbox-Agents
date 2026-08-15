@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+#
+# rollback — reverse scripts/install-user-files exactly (docs/recovery.md).
+#
+# Restores .bak files, removes the systemd unit it installed (and disables it
+# if it was enabled), removes the nono profile it installed (only when the
+# installed file matches what we installed — never a user's own file), and
+# removes the plugins it installed. Logs every action.
+#
+# NEVER run this without reviewing what it will do first: run `rollback
+# --dry-run` (default) to list actions, then `rollback --apply`.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=scripts/secure-launcher.conf
+source "$SCRIPT_DIR/secure-launcher.conf"
+
+STATE_DIR="${BROKER_STATE_DIR:-$HOME/.local/state/opencode-sandbox}"
+JOURNAL="$STATE_DIR/install-journal.tsv"
+
+APPLY=0
+case "${1:-}" in
+  --apply) APPLY=1 ;;
+  --dry-run|"") ;;
+  *) echo "usage: $0 [--dry-run|--apply]" >&2; exit 2 ;;
+esac
+
+log() { echo "[rollback] $*"; }
+
+do_it() { # fn applies only with --apply
+  if [[ "$APPLY" == "1" ]]; then "$@"; else log "would run: $*"; fi
+}
+
+# --- 1. plugins --------------------------------------------------------------
+log "plugins"
+for f in sandbox-tools.ts routing-guard.ts lib/broker-client.ts; do
+  DEST="$HOME/.config/opencode/plugins/$f"
+  if [[ -f "$DEST" ]] && cmp -s "$REPO_ROOT/opencode/plugins/$f" "$DEST"; then
+    log "remove installed plugin $DEST (matches repo copy)"
+    do_it rm -f "$DEST"
+  else
+    log "skip $DEST (not ours or already gone)"
+  fi
+done
+
+# --- 2. nono profile ---------------------------------------------------------
+NONO_DEST="$HOME/.config/nono/profiles/opencode-secure.json"
+if [[ -f "$NONO_DEST" ]] && cmp -s "$REPO_ROOT/nono/profile/opencode-secure.json" "$NONO_DEST"; then
+  log "remove installed nono profile $NONO_DEST (matches repo copy)"
+  do_it rm -f "$NONO_DEST"
+else
+  log "skip $NONO_DEST (not ours or already gone)"
+fi
+
+# --- 3. systemd unit ---------------------------------------------------------
+UNIT_DEST="$HOME/.config/systemd/user/sandbox-broker.service"
+if [[ -f "$UNIT_DEST" ]] && cmp -s "$REPO_ROOT/systemd-user/sandbox-broker.service" "$UNIT_DEST"; then
+  log "disable + remove unit $UNIT_DEST"
+  if [[ "$APPLY" == "1" ]]; then
+    systemctl --user disable --now sandbox-broker.service 2>/dev/null || true
+    systemctl --user daemon-reload 2>/dev/null || true
+    rm -f "$UNIT_DEST"
+  fi
+else
+  log "skip $UNIT_DEST (not ours or already gone)"
+fi
+
+# --- 4. restore .bak files (config merge backstop) ---------------------------
+log "restore .bak files (newest first)"
+for bak in "$HOME/.config/nono/profiles/opencode-secure.json.bak-"* \
+           "$HOME/.config/systemd/user/sandbox-broker.service.bak-"*; do
+  [[ -e "$bak" ]] || continue
+  ORIG="${bak%.bak-*}"
+  log "restore $ORIG <- $bak"
+  do_it cp -p "$bak" "$ORIG"
+done
+
+# opencode.json .bak files are restored only with explicit confirmation, since
+# they may predate this project.
+OC_BAKS=("$HOME/.config/opencode/opencode.json.bak-"*)
+if [[ -e "${OC_BAKS[0]:-}" ]]; then
+  log "note: opencode.json backups exist (${OC_BAKS[0]}) — restore manually if the fragment merge must be reverted"
+fi
+
+log "done."
+if [[ "$APPLY" != "1" ]]; then
+  log "dry-run — nothing changed. Re-run with --apply to execute."
+fi

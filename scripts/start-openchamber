@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+#
+# start-openchamber — connect OpenChamber to the EXISTING secured opencode
+# server (spec §23). OpenChamber must never silently launch a second unmanaged
+# opencode server.
+#
+# NOT INSTALLED at Gate 1. Unlocked by manual gates (docs/manual-verification.md
+# Gate 9). The exact environment contract with OpenChamber v1.18.4 was
+# partially observed during discovery (startup.env carries OPENCODE_PID) and
+# MUST be re-verified at Gate 9 before this launcher is trusted.
+#
+# Behaviour:
+#   1. Verifies exactly one intended opencode server is listening on
+#      127.0.0.1:4096 (spec §23: only one server active).
+#   2. Verifies that server was started by start-secure-opencode
+#      (parent process chain includes nono).
+#   3. Launches OpenChamber with OPENCODE_PID pointing at that server so it
+#      attaches instead of spawning its own.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/secure-launcher.conf
+source "$SCRIPT_DIR/secure-launcher.conf"
+
+for bin in "$OPENCHAMBER_BIN" "$OPENCODE_BIN"; do
+  if [[ ! -x "$bin" ]]; then
+    echo "missing required binary: $bin" >&2
+    exit 4
+  fi
+done
+
+# --- Find the secured server (exactly one, owned by nono) -------------------
+listener_pids="$(ss -lntp "sport = :$OPENCODE_PORT" 2>/dev/null | awk 'NR>1 {print $NF}' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
+mapfile -t pids <<<"$listener_pids"
+pids=("${pids[@]/#/}")   # strip empty entries
+
+if [[ ${#pids[@]} -eq 0 || -z "${pids[0]}" ]]; then
+  echo "no opencode server found on ${OPENCODE_HOSTNAME}:${OPENCODE_PORT}" >&2
+  echo "start it first: scripts/start-secure-opencode" >&2
+  exit 5
+fi
+
+if [[ ${#pids[@]} -gt 1 ]]; then
+  echo "more than one process listening on :${OPENCODE_PORT} — refusing (spec §23)" >&2
+  printf '  %s\n' "${pids[@]}" >&2
+  exit 5
+fi
+
+SERVER_PID="${pids[0]}"
+
+# Verify the server was launched under nono (parent chain), so we never attach
+# to an unmanaged opencode instance.
+PARENT_PID="$(ps -o ppid= -p "$SERVER_PID" | tr -d ' ')"
+CHAIN_OK=0
+for _ in 1 2 3 4 5; do
+  if [[ -z "$PARENT_PID" || "$PARENT_PID" == "0" ]]; then
+    break
+  fi
+  PARENT_CMD="$(ps -o comm= -p "$PARENT_PID" | tr -d ' ' || true)"
+  if [[ "$PARENT_CMD" == "nono" || "$PARENT_CMD" == *nono* ]]; then
+    CHAIN_OK=1
+    break
+  fi
+  PARENT_PID="$(ps -o ppid= -p "$PARENT_PID" | tr -d ' ' || true)"
+done
+
+if [[ "$CHAIN_OK" != "1" ]]; then
+  echo "opencode server on :${OPENCODE_PORT} was NOT started under nono — refusing to attach (spec §23)" >&2
+  exit 5
+fi
+
+echo "attaching OpenChamber to secured opencode server pid ${SERVER_PID} (127.0.0.1:${OPENCODE_PORT})"
+export OPENCODE_PID="$SERVER_PID"
+# OpenChamber's own config dir stays untouched; we only set the attach var.
+exec "$OPENCHAMBER_BIN" "$@"
