@@ -38,9 +38,12 @@ else
   msb image list 2>&1 | head -5
 fi
 
-# Clean up leftovers from a previous run (ignore failures).
-msb stop gate3-smoke gate3-conf-test >/dev/null 2>&1 || true
-msb remove gate3-smoke gate3-conf-test >/dev/null 2>&1 || true
+# Clean up leftovers from a previous run — the whole gate3-* namespace
+# (aborted runs can leave extra named sandboxes behind).
+for leftover in $(msb list 2>/dev/null | awk '{print $1}' | grep '^gate3-'); do
+  msb stop "$leftover" >/dev/null 2>&1 || true
+  msb remove "$leftover" >/dev/null 2>&1 || true
+done
 rm -rf /tmp/gate3
 mkdir -p /tmp/gate3
 
@@ -66,7 +69,7 @@ fi
 
 # ── 3) Exec works; workdir is /work (exec needs its own -w; the broker
 #        always passes cwd, Gate 3 finding) ──────────────────────────────────
-if [ "$(msb exec -w /work gate3-smoke -- pwd 2>/dev/null)" = "/work" ]; then
+if [ "$(msb exec -w /work gate3-smoke -- pwd 2>/dev/null | tail -1)" = "/work" ]; then
   ok "exec pwd = /work (with -w, as the broker does)"
 else
   bad "exec pwd = /work (with -w)"
@@ -162,7 +165,7 @@ if msb create -n gate3-conf-test debian \
   -c 2 --max-cpus 2 --mkdir /work \
   >/tmp/gate3/conf-create.log 2>&1; then
   ok "broker-shaped conf-file create (net/resource/fs/runtime/secret)"
-  if [ "$(msb exec -w /work gate3-conf-test -- pwd 2>/dev/null)" = "/work" ]; then
+  if [ "$(msb exec -w /work gate3-conf-test -- pwd 2>/dev/null | tail -1)" = "/work" ]; then
     ok "conf-test exec pwd = /work"
   else
     bad "conf-test exec pwd = /work"
@@ -177,10 +180,12 @@ else
   tail -8 /tmp/gate3/conf-create.log
 fi
 
-# ── 8) Cleanup ──────────────────────────────────────────────────────────────
-msb stop gate3-smoke gate3-conf-test >/dev/null 2>&1 || true
-msb remove gate3-smoke gate3-conf-test >/dev/null 2>&1 || true
-left=$(msb list 2>/dev/null | grep -c gate3 || true)
+# ── 8) Cleanup — remove the whole gate3-* namespace ─────────────────────────
+for leftover in $(msb list 2>/dev/null | awk '{print $1}' | grep '^gate3-'); do
+  msb stop "$leftover" >/dev/null 2>&1 || true
+  msb remove "$leftover" >/dev/null 2>&1 || true
+done
+left=$(msb list 2>/dev/null | grep -c '^gate3-' || true)
 if [ "$left" = "0" ]; then
   ok "cleanup (no gate3 sandboxes left)"
 else
