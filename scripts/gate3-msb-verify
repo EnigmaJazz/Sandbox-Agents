@@ -72,7 +72,7 @@ fi
 # msb prints a '   • Backend      local' status line to STDOUT before/after
 # the real output — filter it out and take the last remaining line.
 worker_pwd() {
-  msb exec --stream -w /work "$1" -- pwd 2>/dev/null | tr -d '\r' | grep -v '^[[:space:]]*•' | tail -1
+  msb exec -w /work "$1" -- pwd < /dev/null 2>/dev/null | tr -d '\r' | grep -v '^[[:space:]]*•' | tail -1
 }
 val=$(worker_pwd gate3-smoke)
 if [ "$val" = "/work" ]; then
@@ -81,7 +81,7 @@ else
   bad "exec pwd = /work (captured: [$val])"
 fi
 
-if msb exec gate3-smoke -- cat /etc/os-release >/dev/null 2>&1; then
+if msb exec gate3-smoke -- cat /etc/os-release < /dev/null >/dev/null 2>&1; then
   ok "exec cat /etc/os-release"
 else
   bad "exec cat /etc/os-release"
@@ -89,7 +89,7 @@ fi
 
 # ── 4) Isolation: the host is NOT mounted (S11) ─────────────────────────────
 # The debian image ships its OWN empty /home — probe a host-specific path.
-if ! msb exec gate3-smoke -- ls /home/james >/dev/null 2>&1; then
+if ! msb exec gate3-smoke -- ls /home/james < /dev/null >/dev/null 2>&1; then
   ok "host /home/james not visible in guest"
 else
   bad "host /home/james not visible in guest"
@@ -98,18 +98,18 @@ fi
 # /dev/kvm: msb exposes the HOST kvm (10,232) to the guest, mode 600 root:root.
 # A root guest user can open it; the broker's mitigation is non-root exec (-u
 # nobody). Verify BOTH: root CAN open (documents exposure) and nobody CANNOT.
-if msb exec gate3-smoke -- sh -c 'exec 3<>/dev/kvm 2>/dev/null' >/dev/null 2>&1; then
+if msb exec gate3-smoke -- sh -c 'exec 3<>/dev/kvm 2>/dev/null' < /dev/null >/dev/null 2>&1; then
   note "host /dev/kvm is openable by guest root (msb passthrough — documented)"
 else
   ok "host /dev/kvm not openable by guest root"
 fi
-if ! msb exec -u nobody gate3-smoke -- sh -c 'exec 3<>/dev/kvm 2>/dev/null' >/dev/null 2>&1; then
+if ! msb exec -u nobody gate3-smoke -- sh -c 'exec 3<>/dev/kvm 2>/dev/null' < /dev/null >/dev/null 2>&1; then
   ok "/dev/kvm denied to non-root guest user (broker runs -u nobody)"
 else
   bad "/dev/kvm denied to non-root guest user"
 fi
 
-if ! msb exec gate3-smoke -- test -S /var/run/docker.sock 2>/dev/null; then
+if ! msb exec gate3-smoke -- test -S /var/run/docker.sock < /dev/null 2>/dev/null; then
   ok "docker socket not exposed to guest"
 else
   bad "docker socket not exposed to guest"
@@ -118,11 +118,11 @@ fi
 # ── 5) Network deny-by-default (S12) ────────────────────────────────────────
 # Route table: the guest has its own link-local/subnet routes by design; the
 # FUNCTIONAL check is reachability. Route count is informational.
-routes=$(msb exec gate3-smoke -- sh -c 'wc -l < /proc/net/route' 2>/dev/null || echo -1)
+routes=$(msb exec gate3-smoke -- sh -c 'wc -l < /proc/net/route' < /dev/null 2>/dev/null || echo -1)
 note "guest /proc/net/route has $routes lines (own subnet routes are normal)"
 
-if msb exec gate3-smoke -- sh -c 'command -v getent' >/dev/null 2>&1; then
-  if msb exec gate3-smoke -- getent hosts 100.90.20.31 >/dev/null 2>&1; then
+if msb exec gate3-smoke -- sh -c 'command -v getent' < /dev/null >/dev/null 2>&1; then
+  if msb exec gate3-smoke -- getent hosts 100.90.20.31 < /dev/null >/dev/null 2>&1; then
     bad "LAN host unreachable (getent RESOLVED it — network leak!)"
   else
     ok "LAN host unreachable via getent"
@@ -134,7 +134,7 @@ fi
 # ── 6) Copy round-trip (the broker's result-export path) ────────────────────
 # msb copy REFUSES symlink escapes (security-positive, e.g. /etc/os-release is
 # a symlink) — so copy a REGULAR file: create one in the guest first.
-if msb exec -w /work gate3-smoke -- sh -c 'echo gate3 > /work/copy-probe.txt' >/dev/null 2>&1 \
+if msb exec -w /work gate3-smoke -- sh -c 'echo gate3 > /work/copy-probe.txt' < /dev/null >/dev/null 2>&1 \
   && msb copy gate3-smoke:/work/copy-probe.txt /tmp/gate3/copy-probe.txt >/dev/null 2>&1 \
   && grep -q gate3 /tmp/gate3/copy-probe.txt; then
   ok "copy sandbox -> host (regular file)"
@@ -176,7 +176,7 @@ if msb create -n gate3-conf-test debian \
   else
     bad "conf-test exec pwd = /work (captured: [$(worker_pwd gate3-conf-test)])"
   fi
-  if ! msb exec -u nobody gate3-conf-test -- sh -c 'exec 3<>/dev/kvm 2>/dev/null' >/dev/null 2>&1; then
+  if ! msb exec -u nobody gate3-conf-test -- sh -c 'exec 3<>/dev/kvm 2>/dev/null' < /dev/null >/dev/null 2>&1; then
     ok "conf-test /dev/kvm denied to non-root guest user"
   else
     bad "conf-test /dev/kvm denied to non-root guest user"

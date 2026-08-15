@@ -33,6 +33,11 @@ export interface SpawnOptions {
 
 export type SpawnFn = (args: string[], opts: SpawnOptions) => Promise<SpawnResult>;
 
+/** CRLF -> LF normalization (Gate 3: msb exec PTY path emits \r\n on some hosts). */
+export function normalizeLineEndings(s: string): string {
+  return s.replace(/\r\n/g, "\n");
+}
+
 /**
  * Render a byte count as an msb memory size string (e.g. 2147483648 -> "2048M").
  * msb 0.6.9 resource.conf requires a size STRING (Gate 3 finding: integers are
@@ -171,7 +176,13 @@ export class MsbAdapter {
     if (result.timedOut) {
       throw new MsbError(`msb ${args[0] ?? "?"} timed out`, args[0]);
     }
-    return result;
+    // Normalize CRLF -> LF (Gate 3 finding: msb exec's PTY path can emit \r\n;
+    // --stream is environment-dependent — this normalization is not).
+    return {
+      ...result,
+      stdout: normalizeLineEndings(result.stdout),
+      stderr: normalizeLineEndings(result.stderr),
+    };
   }
 
   /**
@@ -254,9 +265,6 @@ export class MsbAdapter {
     const args = [
       "exec",
       workerName,
-      // --stream: no PTY, no CRLF translation (byte-faithful — Gate 3 finding:
-      // default PTY path can emit \r\n, corrupting file/JSON output).
-      "--stream",
       // Gate 3 finding: msb exposes the host /dev/kvm (10,232) into the guest,
       // mode 600 root:root — a root guest user can open it (nested KVM). Run
       // every worker command as a non-root user to deny access (S11).

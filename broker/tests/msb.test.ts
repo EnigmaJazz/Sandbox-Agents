@@ -132,10 +132,19 @@ describe("argv construction", () => {
     await adapter.exec("w1", ["true"], { cwd: "/work" });
     expect(calls[0]?.argv).toContain("-u");
     expect(calls[0]?.argv).toContain(cfg.resource.workerUser);
-    // --stream: no PTY, no CRLF translation (Gate 3 finding)
-    expect(calls[0]?.argv).toContain("--stream");
     expect(calls[0]?.argv).toContain("-w");
     expect(calls[0]?.argv).toContain("/work");
+  });
+
+  test("exec output is CRLF-normalized (Gate 3: PTY path emits \\r\\n on some hosts)", async () => {
+    setSpawnImpl(async () => ({
+      status: 0,
+      stdout: "   • Backend      local\r\n/work\r\n",
+      stderr: "",
+      timedOut: false,
+    }));
+    const res = await adapter.exec("w1", ["pwd"], { cwd: "/work" });
+    expect(res.stdout).toBe("   • Backend      local\n/work\n");
   });
 });
 
