@@ -92,6 +92,49 @@ describe("argv construction", () => {
   test("worker names are derived from session IDs (never user-supplied)", () => {
     expect(adapter.workerNameFor("sess-1")).toBe(`${cfg.workerNamePrefix}-sess-1`);
   });
+
+  test("generated conf files match the msb 0.6.9 schema proven at Gate 3", async () => {
+    const calls = installFakeSpawn();
+    const dir = mkdtempSync(join(tmpdir(), "msb-conf-"));
+    const configDir = join(dir, "conf");
+    await adapter.createWorker({
+      name: "oc-sandbox-sess1",
+      cpu: 2,
+      memBytes: 2 * GiB,
+      image: cfg.workerImage,
+      configDir,
+      networkMode: "deny-by-default",
+    });
+    const { readFileSync } = await import("node:fs");
+    const net = JSON.parse(readFileSync(join(configDir, "net.conf"), "utf8"));
+    const res = JSON.parse(readFileSync(join(configDir, "resource.conf"), "utf8"));
+    const fsC = JSON.parse(readFileSync(join(configDir, "fs.conf"), "utf8"));
+    const rt = JSON.parse(readFileSync(join(configDir, "runtime.conf"), "utf8"));
+    const sec = JSON.parse(readFileSync(join(configDir, "secret.conf"), "utf8"));
+    // net.conf: policy enum none|public|open — deny-by-default is "none" (S12)
+    expect(net).toEqual({ policy: "none" });
+    // resource.conf: cpus (plural) + memory as a size STRING (Gate 3 finding)
+    expect(res).toEqual({ cpus: 2, memory: "2048M" });
+    // fs.conf: only mounts/patch_files/patches; no workdir here
+    expect(fsC).toEqual({});
+    // runtime.conf: security restricted + workdir (capabilities is NOT a field)
+    expect(rt).toEqual({ security: "restricted", workdir: "/work" });
+    // secret.conf: unwrapped map, no `secrets` wrapper
+    expect(sec).toEqual({});
+    // workdir is created via argv flag
+    expect(calls[0]?.argv).toContain("--mkdir");
+    expect(calls[0]?.argv).toContain("/work");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("exec runs worker commands as the non-root workerUser (S11 KVM deny)", async () => {
+    const calls = installFakeSpawn();
+    await adapter.exec("w1", ["true"], { cwd: "/work" });
+    expect(calls[0]?.argv).toContain("-u");
+    expect(calls[0]?.argv).toContain(cfg.resource.workerUser);
+    expect(calls[0]?.argv).toContain("-w");
+    expect(calls[0]?.argv).toContain("/work");
+  });
 });
 
 describe("timeout handling", () => {

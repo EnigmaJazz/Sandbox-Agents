@@ -53,10 +53,37 @@ Checklist (user):
 
 ## Gate 3 — Microsandbox manually verified
 
-Drafted 2026-08-15 against msb v0.6.9 (verified via `msb create --tree`). Run
-from anywhere; every step is copy-paste. Values mirror the broker policy
-(`broker/src/config.ts`: image `debian`, 2 vCPU / 2 GiB, deny-by-default
-network).
+Drafted 2026-08-15 against msb v0.6.9 (verified via `msb create --tree` and
+live Gate 3 runs). Values mirror the broker policy (`broker/src/config.ts`:
+image `debian`, 2 vCPU / 2 GiB, deny-by-default network). Run via
+`scripts/gate3-msb-verify` for PASS/FAIL output.
+
+### Gate 3 findings resolved (2026-08-15)
+
+1. **F1 /dev/kvm passthrough (S11):** msb exposes the HOST `/dev/kvm`
+   (major:minor 10,232) into the guest, mode 600 root:root; `--rm /dev/kvm`
+   does NOT remove it. Guest root can open it (nested KVM). **Mitigation:**
+   the broker runs every worker command as `-u nobody` (non-root) — verified
+   the guest node denies non-root opens. `broker/src/config.ts`
+   `resource.workerUser`.
+2. **F2 conf schemas (step 7 proof point):** the broker's generated confs were
+   invalid for msb 0.6.9. Corrected shapes now locked by unit tests:
+   - `runtime.conf`: `{"security":"restricted","workdir":"/work"}`
+     (`capabilities` is not a field)
+   - `net.conf`: `{"policy":"none"}` (enum `none|public|open`; `mode` is not
+     a field)
+   - `resource.conf`: `{"cpus":2,"memory":"2048M"}` (`cpus` plural;
+     memory is a SIZE STRING)
+   - `fs.conf`: `{}` (only `mounts|patch_files|patches`; no `workdir`)
+   - `secret.conf`: `{}` (unwrapped — no `secrets` wrapper)
+   - plus argv `--mkdir /work` (workdir must exist in the guest)
+3. **F3 copy symlink policy:** `msb copy` refuses symlinks escaping the
+   destination (`os-release -> ../usr/lib/os-release`) — security-positive;
+   probes must copy regular files.
+4. **Probe corrections:** debian image ships its own empty `/home` (probe
+   `/home/james`); exec needs explicit `-w` (create-time `-w` is
+   interactive-only); guest has own subnet routes by design (functional
+   network check = reachability, e.g. `getent`).
 
 ```sh
 # 0) Preconditions
@@ -82,32 +109,33 @@ msb exec gate3-smoke -- ls /home             # expect: no such dir
 msb exec gate3-smoke -- test -e /dev/kvm && echo KVM-EXPOSED || echo KVM-NOT-EXPOSED
 msb exec gate3-smoke -- test -S /var/run/docker.sock && echo DOCKER-EXPOSED || echo DOCKER-NOT-EXPOSED
 
-# 5) Network deny-by-default (S12): guest has no routes
-msb exec gate3-smoke -- sh -c 'wc -l < /proc/net/route'   # expect 1 (header only)
-# optional deeper probe if getent exists in the image:
+# 5) Network deny-by-default (S12): guest routes are its own subnet; the
+#    functional check is reachability
+msb exec gate3-smoke -- sh -c 'wc -l < /proc/net/route'   # informational
 msb exec gate3-smoke -- getent hosts 100.90.20.31        # expect failure/timeout
 
-# 6) Copy round-trip (the broker's result-export path)
-msb copy gate3-smoke:/etc/os-release /tmp/gate3/os-release && cat /tmp/gate3/os-release
+# 6) Copy round-trip (regular file — msb refuses symlink escapes)
+msb exec -w /work gate3-smoke -- sh -c 'echo gate3 > /work/copy-probe.txt'
+msb copy gate3-smoke:/work/copy-probe.txt /tmp/gate3/copy-probe.txt && cat /tmp/gate3/copy-probe.txt
 msb copy /etc/hostname gate3-smoke:/tmp/hostname
 
-# 7) Broker-shaped conf files — validates the schema broker/src/msb.ts generates
-printf '{"mode":"deny"}' > /tmp/gate3/net.conf
-printf '{"cpu":2,"mem":2147483648}' > /tmp/gate3/resource.conf
-printf '{"workdir":"/work"}' > /tmp/gate3/fs.conf
-printf '{"capabilities":[]}' > /tmp/gate3/runtime.conf
-printf '{"secrets":{}}' > /tmp/gate3/secret.conf
+# 7) Broker-shaped conf files — corrected schemas (see findings above)
+printf '{"security":"restricted","workdir":"/work"}' > /tmp/gate3/runtime.conf
+printf '{"policy":"none"}' > /tmp/gate3/net.conf
+printf '{"cpus":2,"memory":"2048M"}' > /tmp/gate3/resource.conf
+printf '{}' > /tmp/gate3/fs.conf
+printf '{}' > /tmp/gate3/secret.conf
 msb create -n gate3-conf-test debian \
   --conf /tmp/gate3/runtime.conf \
   --net-conf /tmp/gate3/net.conf \
   --resource-conf /tmp/gate3/resource.conf \
   --fs-conf /tmp/gate3/fs.conf \
   --secret-conf /tmp/gate3/secret.conf \
-  -c 2 --max-cpus 2
-#   ^ if this FAILS on a conf-schema error, that is a Gate 3 FINDING:
-#     fix the generated confs in broker/src/msb.ts before Gate 4
+  -c 2 --max-cpus 2 --mkdir /work
 msb status gate3-conf-test
-msb exec gate3-conf-test -- pwd               # expect /work
+msb exec -w /work gate3-conf-test -- pwd               # expect /work
+# KVM mitigation: non-root guest user cannot open /dev/kvm
+msb exec -u nobody gate3-conf-test -- sh -c 'exec 3<>/dev/kvm 2>/dev/null && echo KVM-OPENABLE || echo KVM-NOT-OPENABLE'
 
 # 8) Cleanup
 msb stop gate3-smoke gate3-conf-test

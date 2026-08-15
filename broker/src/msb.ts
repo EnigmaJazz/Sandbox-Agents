@@ -34,6 +34,17 @@ export interface SpawnOptions {
 export type SpawnFn = (args: string[], opts: SpawnOptions) => Promise<SpawnResult>;
 
 /**
+ * Render a byte count as an msb memory size string (e.g. 2147483648 -> "2048M").
+ * msb 0.6.9 resource.conf requires a size STRING (Gate 3 finding: integers are
+ * rejected). Round to whole MiB.
+ */
+export function memSizeString(bytes: number): string {
+  const MiB = 1024 * 1024;
+  const mebibytes = Math.max(1, Math.round(bytes / MiB));
+  return `${mebibytes}M`;
+}
+
+/**
  * Generic direct-process spawner: argv[0] is the absolute executable path,
  * remaining entries are argument vectors. No shell is ever involved.
  */
@@ -176,28 +187,30 @@ export class MsbAdapter {
     const secretConf = join(spec.configDir, "secret.conf");
 
     // FS: worker project workdir only; host is NOT mounted (S11).
-    writeFileSync(fsConf, "{\n  \"workdir\": \"/work\"\n}\n", { mode: 0o600 });
-    // Network: deny-by-default placeholder (S12); final allowlist at Gate 3.
+    // fs.conf accepts ONLY mounts/patch_files/patches (msb 0.6.9, Gate 3).
+    writeFileSync(fsConf, "{}\n", { mode: 0o600 });
+    // Network: deny-by-default (S12) — policy enum is none|public|open.
     writeFileSync(
       netConf,
-      JSON.stringify(
-        {
-          mode: "deny",
-          note: this.config.network.note,
-        },
-        null,
-        2,
-      ),
+      JSON.stringify({ policy: "none" }, null, 2) + "\n",
       { mode: 0o600 },
     );
+    // resource.conf: cpus (plural) + memory as a SIZE STRING (e.g. "2048M").
     writeFileSync(
       resourceConf,
-      JSON.stringify({ cpu: spec.cpu, mem: spec.memBytes }, null, 2),
+      JSON.stringify({ cpus: spec.cpu, memory: memSizeString(spec.memBytes) }, null, 2) + "\n",
       { mode: 0o600 },
     );
     // No secrets, no OAuth, no host mounts, no devices (S8/S9/S11).
-    writeFileSync(runtimeConf, "{\n  \"capabilities\": []\n}\n", { mode: 0o600 });
-    writeFileSync(secretConf, "{\n  \"secrets\": {}\n}\n", { mode: 0o600 });
+    // runtime.conf: `capabilities` is NOT a field (Gate 3 finding); use
+    // security "restricted"; /work must exist -> --mkdir /work below.
+    writeFileSync(
+      runtimeConf,
+      JSON.stringify({ security: "restricted", workdir: "/work" }, null, 2) + "\n",
+      { mode: 0o600 },
+    );
+    // secret.conf is the UNWRAPPED secret-name map (no `secrets` wrapper).
+    writeFileSync(secretConf, "{}\n", { mode: 0o600 });
 
     const args = [
       "create",
@@ -218,6 +231,8 @@ export class MsbAdapter {
       String(spec.cpu),
       "--max-cpus",
       String(spec.cpu),
+      "--mkdir",
+      "/work",
     ];
     const res = await this.run(args, { timeoutMs: 180_000 });
     if (res.status !== 0 && !res.timedOut) {
@@ -239,6 +254,11 @@ export class MsbAdapter {
     const args = [
       "exec",
       workerName,
+      // Gate 3 finding: msb exposes the host /dev/kvm (10,232) into the guest,
+      // mode 600 root:root — a root guest user can open it (nested KVM). Run
+      // every worker command as a non-root user to deny access (S11).
+      "-u",
+      this.config.resource.workerUser,
       ...envArgs,
       ...(opts.cwd ? ["-w", opts.cwd] : []),
       ...(opts.timeoutMs ? ["--timeout", String(cappedTimeoutMs(opts.timeoutMs, this.config.resource.execTimeoutMsMax))] : []),

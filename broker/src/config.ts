@@ -49,6 +49,8 @@ export interface ResourceConfig {
   logLinesMax: number;
   /** Env keys allowed into worker exec (S8/S9: never credentials). */
   envAllowedKeys: string[];
+  /** Guest user for worker commands (S11: non-root denies /dev/kvm — Gate 3). */
+  workerUser: string;
 }
 
 export interface HostReadToolConfig {
@@ -199,6 +201,7 @@ export function defaultConfig(overrides: Partial<BrokerConfig> = {}): BrokerConf
       grepQueryMaxBytes: 1024,
       logLinesMax: 500,
       envAllowedKeys: ["PATH", "HOME", "TERM", "LANG", "LC_ALL", "TMPDIR", "CI", "NO_COLOR", "GIT_*"],
+      workerUser: "nobody",
     },
     hostRead: DEFAULT_HOST_READ_CONFIG,
     network: {
