@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+#
+# gate3-msb-verify — Gate 3 manual verification of Microsandbox (msb).
+#
+# SYSTEM_PROMPT.md §27 Gate 3: "Microsandbox manually verified".
+# The exact command sequence from docs/manual-verification.md, packaged with
+# PASS/FAIL reporting so the output can be pasted back for review.
+#
+# Creates TWO throwaway debian sandboxes (gate3-smoke, gate3-conf-test),
+# verifies broker policy values and isolation, then removes them.
+# Requires: msb on PATH (msb 0.6.9 verified).
+#
+# This is a manual user gate — it is NOT part of any agent workflow and does
+# NOT install anything. It only uses msb, /tmp, and the msb sandbox pool.
+set -uo pipefail
+
+PASS=0
+FAIL=0
+ok()   { PASS=$((PASS + 1)); printf 'PASS  %s\n' "$1"; }
+bad()  { FAIL=$((FAIL + 1)); printf 'FAIL  %s\n' "$1"; }
+note() { printf 'NOTE  %s\n' "$1"; }
+
+echo "== Gate 3: Microsandbox manual verification — $(date -Is) =="
+echo
+
+# ── 0) Preconditions ────────────────────────────────────────────────────────
+if msb doctor >/dev/null 2>&1; then
+  ok "msb doctor (KVM access unchanged — read/write for user)"
+else
+  bad "msb doctor"
+  msb doctor 2>&1 | tail -5
+fi
+
+if msb image list 2>/dev/null | grep -q '^debian'; then
+  ok "image 'debian' present"
+else
+  bad "image 'debian' present"
+  msb image list 2>&1 | head -5
+fi
+
+# Clean up leftovers from a previous run (ignore failures).
+msb stop gate3-smoke gate3-conf-test >/dev/null 2>&1 || true
+msb remove gate3-smoke gate3-conf-test >/dev/null 2>&1 || true
+rm -rf /tmp/gate3
+mkdir -p /tmp/gate3
+
+# ── 1) Throwaway sandbox — CLI-flags form (broker policy values) ───────────
+if msb create -n gate3-smoke debian \
+  -c 2 --max-cpus 2 -m 2G --max-memory 2G \
+  --no-net -w /work --mkdir /work -H gate3-smoke \
+  >/tmp/gate3/create.log 2>&1; then
+  ok "create gate3-smoke (2 vCPU / 2 GiB, --no-net, workdir /work)"
+else
+  bad "create gate3-smoke"
+  tail -5 /tmp/gate3/create.log
+  echo "== RESULT: $PASS passed, $FAIL failed (aborted at create) =="
+  exit 1
+fi
+
+# ── 2) It is running ────────────────────────────────────────────────────────
+if msb list 2>/dev/null | grep -q gate3-smoke; then
+  ok "gate3-smoke listed by msb"
+else
+  bad "gate3-smoke listed by msb"
+fi
+
+# ── 3) Exec works; workdir is /work ─────────────────────────────────────────
+if [ "$(msb exec gate3-smoke -- pwd 2>/dev/null)" = "/work" ]; then
+  ok "exec pwd = /work"
+else
+  bad "exec pwd = /work"
+fi
+
+if msb exec gate3-smoke -- cat /etc/os-release >/dev/null 2>&1; then
+  ok "exec cat /etc/os-release"
+else
+  bad "exec cat /etc/os-release"
+fi
+
+# ── 4) Isolation: the host is NOT mounted (S11) ─────────────────────────────
+if ! msb exec gate3-smoke -- ls /home >/dev/null 2>&1; then
+  ok "host /home not visible in guest"
+else
+  bad "host /home not visible in guest"
+fi
+
+if ! msb exec gate3-smoke -- test -e /dev/kvm 2>/dev/null; then
+  ok "/dev/kvm not exposed to guest"
+else
+  bad "/dev/kvm not exposed to guest"
+fi
+
+if ! msb exec gate3-smoke -- test -S /var/run/docker.sock 2>/dev/null; then
+  ok "docker socket not exposed to guest"
+else
+  bad "docker socket not exposed to guest"
+fi
+
+# ── 5) Network deny-by-default (S12) ────────────────────────────────────────
+routes=$(msb exec gate3-smoke -- sh -c 'wc -l < /proc/net/route' 2>/dev/null || echo -1)
+if [ "$routes" = "1" ]; then
+  ok "guest has no routes (deny-by-default)"
+else
+  bad "guest has no routes (got '$routes' lines in /proc/net/route)"
+fi
+
+if msb exec gate3-smoke -- sh -c 'command -v getent' >/dev/null 2>&1; then
+  if msb exec gate3-smoke -- getent hosts 100.90.20.31 >/dev/null 2>&1; then
+    bad "LAN host unreachable (getent RESOLVED it — network leak!)"
+  else
+    ok "LAN host unreachable via getent"
+  fi
+else
+  note "getent absent in image — route check above is the network proof"
+fi
+
+# ── 6) Copy round-trip (the broker's result-export path) ────────────────────
+if msb copy gate3-smoke:/etc/os-release /tmp/gate3/os-release >/dev/null 2>&1 \
+  && [ -s /tmp/gate3/os-release ]; then
+  ok "copy sandbox -> host (/etc/os-release)"
+else
+  bad "copy sandbox -> host (/etc/os-release)"
+fi
+
+if msb copy /etc/hostname gate3-smoke:/tmp/hostname >/dev/null 2>&1; then
+  ok "copy host -> sandbox (/etc/hostname)"
+else
+  bad "copy host -> sandbox (/etc/hostname)"
+fi
+
+# ── 7) Broker-shaped conf files — schema proof point ────────────────────────
+printf '{"mode":"deny"}' >/tmp/gate3/net.conf
+printf '{"cpu":2,"mem":2147483648}' >/tmp/gate3/resource.conf
+printf '{"workdir":"/work"}' >/tmp/gate3/fs.conf
+printf '{"capabilities":[]}' >/tmp/gate3/runtime.conf
+printf '{"secrets":{}}' >/tmp/gate3/secret.conf
+
+if msb create -n gate3-conf-test debian \
+  --conf /tmp/gate3/runtime.conf \
+  --net-conf /tmp/gate3/net.conf \
+  --resource-conf /tmp/gate3/resource.conf \
+  --fs-conf /tmp/gate3/fs.conf \
+  --secret-conf /tmp/gate3/secret.conf \
+  -c 2 --max-cpus 2 \
+  >/tmp/gate3/conf-create.log 2>&1; then
+  ok "broker-shaped conf-file create (net/resource/fs/runtime/secret)"
+  if [ "$(msb exec gate3-conf-test -- pwd 2>/dev/null)" = "/work" ]; then
+    ok "conf-test exec pwd = /work"
+  else
+    bad "conf-test exec pwd = /work"
+  fi
+else
+  bad "broker-shaped conf-file create — SCHEMA FINDING: fix broker/src/msb.ts"
+  tail -8 /tmp/gate3/conf-create.log
+fi
+
+# ── 8) Cleanup ──────────────────────────────────────────────────────────────
+msb stop gate3-smoke gate3-conf-test >/dev/null 2>&1 || true
+msb remove gate3-smoke gate3-conf-test >/dev/null 2>&1 || true
+left=$(msb list 2>/dev/null | grep -c gate3 || true)
+if [ "$left" = "0" ]; then
+  ok "cleanup (no gate3 sandboxes left)"
+else
+  bad "cleanup (left: $left)"
+fi
+
+echo
+echo "== RESULT: $PASS passed, $FAIL failed — $(date -Is) =="
+echo "Logs kept at /tmp/gate3/ (create.log, conf-create.log, os-release)"
+exit $((FAIL > 0 ? 1 : 0))
