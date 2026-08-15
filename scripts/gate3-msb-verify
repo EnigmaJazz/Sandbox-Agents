@@ -69,10 +69,16 @@ fi
 
 # ── 3) Exec works; workdir is /work (exec needs its own -w; the broker
 #        always passes cwd, Gate 3 finding) ──────────────────────────────────
-if [ "$(msb exec -w /work gate3-smoke -- pwd 2>/dev/null | tail -1)" = "/work" ]; then
+# msb prints a '   • Backend      local' status line to STDOUT before/after
+# the real output — filter it out and take the last remaining line.
+worker_pwd() {
+  msb exec -w /work "$1" -- pwd 2>/dev/null | grep -v '^[[:space:]]*•' | tail -1
+}
+val=$(worker_pwd gate3-smoke)
+if [ "$val" = "/work" ]; then
   ok "exec pwd = /work (with -w, as the broker does)"
 else
-  bad "exec pwd = /work (with -w)"
+  bad "exec pwd = /work (captured: [$val])"
 fi
 
 if msb exec gate3-smoke -- cat /etc/os-release >/dev/null 2>&1; then
@@ -165,10 +171,10 @@ if msb create -n gate3-conf-test debian \
   -c 2 --max-cpus 2 --mkdir /work \
   >/tmp/gate3/conf-create.log 2>&1; then
   ok "broker-shaped conf-file create (net/resource/fs/runtime/secret)"
-  if [ "$(msb exec -w /work gate3-conf-test -- pwd 2>/dev/null | tail -1)" = "/work" ]; then
+  if [ "$(worker_pwd gate3-conf-test)" = "/work" ]; then
     ok "conf-test exec pwd = /work"
   else
-    bad "conf-test exec pwd = /work"
+    bad "conf-test exec pwd = /work (captured: [$(worker_pwd gate3-conf-test)])"
   fi
   if ! msb exec -u nobody gate3-conf-test -- sh -c 'exec 3<>/dev/kvm 2>/dev/null' >/dev/null 2>&1; then
     ok "conf-test /dev/kvm denied to non-root guest user"
