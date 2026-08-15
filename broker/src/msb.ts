@@ -254,6 +254,9 @@ export class MsbAdapter {
     const args = [
       "exec",
       workerName,
+      // --stream: no PTY, no CRLF translation (byte-faithful — Gate 3 finding:
+      // default PTY path can emit \r\n, corrupting file/JSON output).
+      "--stream",
       // Gate 3 finding: msb exposes the host /dev/kvm (10,232) into the guest,
       // mode 600 root:root — a root guest user can open it (nested KVM). Run
       // every worker command as a non-root user to deny access (S11).

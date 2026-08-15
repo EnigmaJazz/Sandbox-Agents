@@ -132,6 +132,8 @@ describe("argv construction", () => {
     await adapter.exec("w1", ["true"], { cwd: "/work" });
     expect(calls[0]?.argv).toContain("-u");
     expect(calls[0]?.argv).toContain(cfg.resource.workerUser);
+    // --stream: no PTY, no CRLF translation (Gate 3 finding)
+    expect(calls[0]?.argv).toContain("--stream");
     expect(calls[0]?.argv).toContain("-w");
     expect(calls[0]?.argv).toContain("/work");
   });

@@ -72,7 +72,7 @@ fi
 # msb prints a '   • Backend      local' status line to STDOUT before/after
 # the real output — filter it out and take the last remaining line.
 worker_pwd() {
-  msb exec -w /work "$1" -- pwd 2>/dev/null | grep -v '^[[:space:]]*•' | tail -1
+  msb exec --stream -w /work "$1" -- pwd 2>/dev/null | tr -d '\r' | grep -v '^[[:space:]]*•' | tail -1
 }
 val=$(worker_pwd gate3-smoke)
 if [ "$val" = "/work" ]; then
