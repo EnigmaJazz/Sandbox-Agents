@@ -53,6 +53,10 @@ Checklist (user):
 
 ## Gate 3 — Microsandbox manually verified
 
+**Status: PASSED (user-certified 2026-08-16)** — `scripts/gate3-msb-verify`
+16/16 on both host environments. Findings resolved in `ef208e2`, `b837aa5`,
+`9518d5b`, `b643dc1` (see findings below).
+
 Drafted 2026-08-15 against msb v0.6.9 (verified via `msb create --tree` and
 live Gate 3 runs). Values mirror the broker policy (`broker/src/config.ts`:
 image `debian`, 2 vCPU / 2 GiB, deny-by-default network). Run via
