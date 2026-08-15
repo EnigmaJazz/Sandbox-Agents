@@ -101,7 +101,7 @@ fi
 # --- 4. opencode plugins -----------------------------------------------------
 log "step 4: opencode plugins (sandbox-tools, routing-guard, lib)"
 PLUGIN_DEST="$HOME/.config/opencode/plugins"
-mkdir -p "$PLUGIN_DEST"
+mkdir -p "$PLUGIN_DEST/lib"
 for f in sandbox-tools.ts routing-guard.ts lib/broker-client.ts; do
   install_file "$REPO_ROOT/opencode/plugins/$f" "$PLUGIN_DEST/$f" 0644
 done
