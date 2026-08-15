@@ -15,6 +15,7 @@
   "filesystem": {
     "allow": [
       "$HOME/.local/share/opencode-sandbox-control",
+      "$HOME/.opencode",
       "$HOME/.local/share/opencode",
       "$HOME/.local/state/opencode",
       "$HOME/.cache/opencode",

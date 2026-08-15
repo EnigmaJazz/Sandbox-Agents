@@ -25,7 +25,7 @@ Per spec §15 we therefore:
 |---|---|
 | Workdir | `none` — no automatic CWD sharing |
 | Control dir | RW (`~/.local/share/opencode-sandbox-control`) |
-| OpenCode state | RW `~/.local/share/opencode`, `~/.local/state/opencode`, `~/.cache/opencode`, `~/.config/opencode` (required by the process itself, incl. OAuth storage §16) |
+| OpenCode state | RW `~/.opencode` (binary+node_modules — Landlock needs read to exec, user-approved 2026-08-15), `~/.local/share/opencode`, `~/.local/state/opencode`, `~/.cache/opencode`, `~/.config/opencode` (required by the process itself, incl. OAuth storage §16) |
 | Project roots | RO (placeholder list — finalize at Gate 2) |
 | Everything else | denied (no deny-within-allow carve-outs — Landlock hard error, discovery §4) |
 | Network | Proxy allowlist: OpenAI/OpenRouter/DeepSeek domains + localhost ports 13000/8788, listen 4096 (placeholder — finalize at Gate 2) |
@@ -53,6 +53,15 @@ scripts/start-secure-opencode
 ```
 
 Then the human reviews the resolved capability table before `--apply`.
+
+## Gate 2 decision (2026-08-15, user)
+
+Keep the profile minimal (extends `default`). The user-made everyday profile
+(`opencode-sandbox.json`) carries the runtime groups needed to load OpenCode
+without plugin failure (`opencode_linux`, `node_runtime`, `git_config`, ...);
+these are intentionally NOT mirrored here. Runtime-group and tightening tests
+are deferred to Gate 5 (real launch under nono), where evidence decides what
+the secure profile actually needs.
 
 ## Linux note (Landlock)
 
