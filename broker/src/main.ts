@@ -54,6 +54,47 @@ function usage(): string {
   ].join("\n");
 }
 
+/**
+ * Env-driven policy overrides: BROKER_PROJECTS (JSON array of {id, path}),
+ * BROKER_EXTERNAL_ROOTS (JSON array of approved read-only paths, S6) and
+ * BROKER_WORKER_ROOT_DISK. Projects/roots come from trusted configuration —
+ * never from request payloads (§7).
+ */
+function parseBrokerEnv(): { projects?: { id: string; path: string }[]; approvedExternalReadRoots?: string[] } {
+  const raw = process.env.BROKER_PROJECTS;
+  const out: { projects?: { id: string; path: string }[]; approvedExternalReadRoots?: string[] } = {};
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) throw new Error("BROKER_PROJECTS must be a JSON array");
+      out.projects = parsed.map((p, i) => {
+        const o = p as { id?: unknown; path?: unknown };
+        if (typeof o?.id !== "string" || typeof o?.path !== "string") {
+          throw new Error(`BROKER_PROJECTS[${i}] must have string id and path`);
+        }
+        return { id: o.id, path: o.path };
+      });
+    } catch (err) {
+      console.error(`invalid BROKER_PROJECTS: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  }
+  const roots = process.env.BROKER_EXTERNAL_ROOTS;
+  if (roots) {
+    try {
+      const parsed = JSON.parse(roots) as unknown;
+      if (!Array.isArray(parsed) || parsed.some((p) => typeof p !== "string")) {
+        throw new Error("BROKER_EXTERNAL_ROOTS must be a JSON array of strings");
+      }
+      out.approvedExternalReadRoots = parsed as string[];
+    } catch (err) {
+      console.error(`invalid BROKER_EXTERNAL_ROOTS: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  }
+  return out;
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
@@ -64,6 +105,7 @@ async function main(): Promise<void> {
     socketPath: args.socket ?? process.env.BROKER_SOCKET,
     stateDir: args.stateDir ?? process.env.BROKER_STATE_DIR,
     logPath: args.logFile ?? process.env.BROKER_LOG_FILE,
+    ...parseBrokerEnv(),
   });
   const server = new BrokerServer(config);
   const shutdown = () => {

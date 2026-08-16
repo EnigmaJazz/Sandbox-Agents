@@ -12,7 +12,7 @@
  */
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, copyFileSync } from "node:fs";
 import type { BrokerConfig } from "./config.ts";
 import type { WorkerState } from "./types.ts";
 import { ValidationError } from "./validation.ts";
@@ -242,13 +242,43 @@ export class MsbAdapter {
       String(spec.cpu),
       "--max-cpus",
       String(spec.cpu),
-      "--mkdir",
-      "/work",
     ];
+    // Gate 5: a prepared worker root disk (git + 0777 /work) replaces the
+    // --mkdir patch. msb WRITES the root-disk file during create (template
+    // corruption observed — Gate 5 finding), so clone the template into the
+    // per-worker config dir first; the template stays pristine.
+    if (this.config.workerRootDisk) {
+      const workerDisk = join(spec.configDir, "worker.ext4");
+      mkdirSync(spec.configDir, { recursive: true });
+      copyFileSync(this.config.workerRootDisk, workerDisk);
+      args.push("--root-disk", `${workerDisk}:format=raw,fstype=ext4`);
+    } else {
+      args.push("--mkdir", "/work");
+    }
     const res = await this.run(args, { timeoutMs: 180_000 });
     if (res.status !== 0 && !res.timedOut) {
       throw new MsbError(`msb create failed (status ${res.status}): ${trim(res.stderr || res.stdout)}`);
     }
+    // Gate 5 finding: the guest agent comes up asynchronously after create;
+    // copies/execs issued too early hit the still-booting ext4 (EBADMSG/EIO)
+    // or a missing relay. Wait for agent readiness before returning.
+    await this.waitReady(spec.name);
+  }
+
+  /** Poll `msb exec <name> -- true` until the guest agent answers (or timeout). */
+  private async waitReady(workerName: string, timeoutMs = 60_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    let last: SpawnResult | null = null;
+    while (Date.now() < deadline) {
+      last = await this.run(["exec", workerName, "-u", this.config.resource.workerUser, "--", "true"], {
+        timeoutMs: 10_000,
+      }).catch(() => null);
+      if (last && last.status === 0) return;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    throw new MsbError(
+      `worker ${workerName} did not become ready within ${timeoutMs}ms (last status: ${last?.status ?? "n/a"})`,
+    );
   }
 
   /** Run a command inside the worker. argv vector only. */

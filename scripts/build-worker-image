@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+#
+# build-worker-image — build the prepared worker root disk (Gate 5+).
+#
+# The broker's workers come from a SINGLE trusted disk image (spec §21): a
+# debian rootfs with git + ca-certificates and a writable, nobody-owned /work.
+# This script builds it once and stores it at
+# $BROKER_WORKER_ROOT_DISK (default ~/.local/share/opencode-sandbox/
+# worker-image/worker.ext4), which the broker uses via
+# `msb create --root-disk <disk>:format=raw,fstype=ext4`.
+#
+# Notes:
+# - The build sandbox runs with NETWORK PUBLIC only to run apt-get; the
+#   final worker policy is deny-by-default (--no-net) — network is never
+#   granted at runtime.
+# - /work must be nobody-owned (not merely 0777): git refuses root-owned
+#   repo roots under the non-root exec user ("dubious ownership", Gate 5
+#   finding).
+# - Rebuild is idempotent: it removes the throwaway build sandbox after use.
+#
+# Run by the USER (or an agent with explicit approval); not installed anywhere.
+set -euo pipefail
+
+NAME=worker-image-build
+MSB="${MSB_BINARY:-$HOME/.local/bin/msb}"
+DEST="${BROKER_WORKER_ROOT_DISK:-$HOME/.local/share/opencode-sandbox/worker-image/worker.ext4}"
+
+echo "[build-worker-image] building '$DEST' from debian + git"
+"$MSB" stop "$NAME" >/dev/null 2>&1 || true
+"$MSB" remove "$NAME" >/dev/null 2>&1 || true
+
+"$MSB" create -n "$NAME" debian -c 2 --max-cpus 2 -m 1G --max-memory 1G \
+  --net public --mkdir /work >/dev/null
+
+echo "[build-worker-image] installing ca-certificates + git (apt, may take minutes)"
+"$MSB" exec "$NAME" -- sh -c \
+  'apt-get update -qq && apt-get install -y -qq ca-certificates git >/dev/null \
+   && chmod 0777 /work && chown -R nobody:nogroup /work \
+   && sync \
+   && command -v git && git --version'
+
+"$MSB" stop "$NAME" >/dev/null
+# msb stop returns before the VMM/fs fully quiesces; copying too early can
+# capture a mid-write ext4 (Gate 5 finding: "Directory block failed checksum"
+# / "Read-only file system" on first boot of the stored disk).
+sleep 3
+
+mkdir -p "$(dirname "$DEST")"
+cp "$HOME/.microsandbox/sandboxes/$NAME/upper.ext4" "$DEST"
+# NOTE: do NOT fsck the copied disk. msb's upper filesystem is left in a
+# state only its own guest kernel handles; host e2fsck repair corrupts the
+# group descriptors (Gate 5 finding — 'EUCLEAN: Structure needs cleaning').
+chmod 700 "$(dirname "$DEST")"
+
+# Boot-test the stored disk before declaring success: create a throwaway
+# worker from it, exec true, remove it. Fail loudly if it cannot boot.
+TEST=worker-image-boottest
+"$MSB" stop "$TEST" >/dev/null 2>&1 || true
+"$MSB" remove "$TEST" >/dev/null 2>&1 || true
+if "$MSB" create -n "$TEST" debian \
+    --root-disk "$DEST:format=raw,fstype=ext4" \
+    -c 1 --max-cpus 1 -m 512M --max-memory 512M --no-net \
+    >/dev/null 2>&1; then
+  "$MSB" exec "$TEST" -- true >/dev/null 2>&1 \
+    || { echo "[build-worker-image] FAIL: stored disk does not boot"; "$MSB" remove "$TEST" >/dev/null 2>&1; exit 1; }
+else
+  echo "[build-worker-image] FAIL: stored disk does not start"; exit 1
+fi
+"$MSB" remove "$TEST" >/dev/null 2>&1 || true
+"$MSB" remove "$NAME" >/dev/null 2>&1 || true
+
+echo "[build-worker-image] done: $DEST (boot-tested)"

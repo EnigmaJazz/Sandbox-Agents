@@ -149,11 +149,11 @@ msb list                                      # empty
 
 Checklist (user):
 
-- [ ] Worker image pinned in broker config; LLM cannot choose (S11) —
+- [x] Worker image pinned in broker config; LLM cannot choose (S11) —
       `broker/src/config.ts` `workerImage`; `msb.ts` never accepts a caller image
-- [ ] Network deny-by-default confirmed (no LAN/metadata/socket) — steps 1/5/7
-- [ ] `/dev/kvm` access unchanged (already user-accessible per discovery) — step 0
-- [ ] Step 7 conf-file create succeeds (broker schema proof point)
+- [x] Network deny-by-default confirmed (no LAN/metadata/socket) — steps 1/5/7
+- [x] `/dev/kvm` access unchanged (already user-accessible per discovery) — step 0
+- [x] Step 7 conf-file create succeeds (broker schema proof point)
 
 ## Gate 4 — Broker unit/security tests
 
@@ -164,10 +164,10 @@ SANDBOX_GATED_TESTS=security bun test tests/security/   # broker live
 
 Checklist:
 
-- [ ] All unit tests pass
-- [ ] Security suite passes (secret protection, OAuth absence, host escape,
+- [x] All unit tests pass
+- [x] Security suite passes (secret protection, OAuth absence, host escape,
       LAN isolation, fail closed, divergence, argument attacks)
-- [ ] Plugins loaded in opencode: verify `tool` hook + `ctx.ask()` signature
+- [x] Plugins loaded in opencode: verify `tool` hook + `ctx.ask()` signature
       against installed 1.18.18 (plugins/README.md)
 - [ ] systemd unit reviewed and enabled (user action):
       `systemctl --user enable --now sandbox-broker`

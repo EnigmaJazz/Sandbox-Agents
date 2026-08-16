@@ -90,7 +90,7 @@ export class HostReadExecutor {
   }
 
   private opFor(operation: Operation): HostReadOp {
-    const op = this.opts.find((o) => o.operation === operation);
+    const op = this.opts.ops.find((o) => o.operation === operation);
     if (!op) {
       throw new HostReadError(
         `host capability '${operation}' is not enabled (binary missing or policy-disabled)`,

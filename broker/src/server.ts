@@ -152,6 +152,10 @@ export class BrokerServer {
         ok: false,
         error: { code: "protocol", message: "request line exceeds size cap" },
       });
+      // Close the connection after the fail-closed response. Note: bun's
+      // node:net client may not emit 'close' for server-initiated closes —
+      // the client sees readyState transition to "closed" (observed at
+      // Gate 4 security-suite bring-up).
       socket.close();
       return;
     }

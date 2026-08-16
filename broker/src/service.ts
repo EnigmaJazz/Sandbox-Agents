@@ -43,7 +43,7 @@ import {
 } from "./gitops.ts";
 import { MsbError } from "./msb.ts";
 import { StateError } from "./state.ts";
-import { PolicyError } from "./policy.ts";
+import { PolicyError, checkAdmission } from "./policy.ts";
 import type { BrokerRequestEnvelope, SessionRecord, WorkerRecord, MetricsRecord, PolicyRecord, Operation } from "./types.ts";
 
 export interface OpContext {
@@ -140,8 +140,9 @@ export function buildEnsureWorkerOp(ctx: OpContext): OpHandler {
       ensureGitRepo(ctx, repoDir);
 
       // Snapshot: synthetic baseline B under refs/opencode-sandbox/baseline/<id>.
+      // MUST be awaited — the bundle is required before createWorker/copyIn.
       const bundle = bundlePathFor(ctx.config.stateDir, req.sessionID);
-      runSnapshot(ctx, repoDir, req.sessionID, bundle);
+      await runSnapshot(ctx, repoDir, req.sessionID, bundle);
 
       // Create the worker from the TRUSTED image with policy-derived resources.
       await ctx.adapter.createWorker({
@@ -155,6 +156,32 @@ export function buildEnsureWorkerOp(ctx: OpContext): OpHandler {
 
       // Transfer the baseline bundle into the worker repo.
       await ctx.adapter.copyIn(workerName, bundle, `/work/${req.sessionID}.bundle`);
+
+      // §17: prepare the worker repo — init, fetch the baseline bundle, create
+      // the work branch. All argv vectors, no shell. `sync` first: msb copy's
+      // return does not guarantee the guest fs flushed the bundle (Gate 5
+      // finding: fetch read a partially-written pack -> "non-monotonic index").
+      const prep = [
+        ["sync"],
+        ["git", "init", "-q"],
+        ["git", "config", "user.name", "opencode-sandbox"],
+        ["git", "config", "user.email", "sandbox@local"],
+        ["git", "fetch", `/work/${req.sessionID}.bundle`, `${baselineRef(req.sessionID)}:refs/heads/baseline`],
+        ["git", "checkout", "-q", "-b", "work", "baseline"],
+      ] as const;
+      for (const argv of prep) {
+        // Gate 5 finding: the guest upper fs can transiently serve a partially
+        // written pack/idx ("non-monotonic index") — bounded retry.
+        let res: Awaited<ReturnType<typeof ctx.adapter.exec>> | null = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          res = await ctx.adapter.exec(workerName, [...argv], { cwd: "/work", timeoutMs: 120_000 });
+          if (res.status === 0) break;
+          await new Promise((r) => setTimeout(r, 400));
+        }
+        if (!res || res.status !== 0) {
+          throw new MsbError(`worker repo prep failed (${argv[1]}): ${trimErr(res?.stderr || res?.stdout || "")}`);
+        }
+      }
 
       ctx.pool.allocations.push({ cpu: ctx.budget.perWorkerCpu, memBytes: ctx.budget.perWorkerMemBytes });
       record = store.transition(req.sessionID, "CREATING_SANDBOX", "SANDBOX_ACTIVE", {
@@ -194,18 +221,70 @@ function ensureGitRepo(ctx: OpContext, repoDir: string): void {
   }
 }
 
-/** Run the snapshot plan; in "planned" mode it validates and reports gated. */
-function runSnapshot(ctx: OpContext, repoDir: string, sessionID: string, bundle: string): void {
+/**
+ * Snapshot plan execution (real mode, Gate 5): synthetic baseline B under
+ * refs/opencode-sandbox/baseline/<sessionID> via a TEMPORARY index, then a
+ * bundle for the worker. The user's branch/index are never touched (§17).
+ * Any failure fails closed (S14) — no partial state is published.
+ */
+async function runSnapshot(
+  ctx: OpContext,
+  repoDir: string,
+  sessionID: string,
+  bundle: string,
+): Promise<string> {
   mkdirSync(join(ctx.config.stateDir, "bundles"), { recursive: true, mode: 0o700 });
+  mkdirSync(join(ctx.config.stateDir, "tmp"), { recursive: true, mode: 0o700 });
+  const gitDir = join(repoDir, ".git");
   const tmpIndex = join(ctx.config.stateDir, "tmp", `${sessionID}.index`);
-  if (ctx.git.runnerMode !== "real") {
-    throw new StateError(
-      `snapshot is gated: set BROKER_GIT_MODE=real only after Gate 5 manual review (session ${sessionID})`,
-    );
+  const ref = baselineRef(sessionID);
+  const env = {
+    GIT_DIR: gitDir,
+    GIT_INDEX_FILE: tmpIndex,
+    GIT_AUTHOR_NAME: "opencode-sandbox",
+    GIT_AUTHOR_EMAIL: "sandbox@local",
+    GIT_COMMITTER_NAME: "opencode-sandbox",
+    GIT_COMMITTER_EMAIL: "sandbox@local",
+  };
+  const git = (argv: string[], timeoutMs = 120_000) =>
+    ctx.git.spawn(argv, { env, cwd: repoDir, timeoutMs });
+
+  // HEAD must exist: the baseline commit B has HEAD as its parent.
+  const head = await git(["git", "rev-parse", "--verify", "HEAD"]);
+  if (head.status !== 0) {
+    throw new StateError(`project has no HEAD commit; cannot snapshot (${repoDir})`);
   }
-  void repoDir;
-  void tmpIndex;
-  void bundle;
+
+  // Stage the full working tree (HEAD + staged + unstaged + untracked,
+  // respecting .gitignore) into the TEMPORARY index only.
+  const add = await git(["git", "add", "-A", "--"]);
+  if (add.status !== 0) {
+    throw new StateError(`snapshot add failed: ${trimErr(add.stderr)}`);
+  }
+  const tree = await git(["git", "write-tree"]);
+  if (tree.status !== 0) {
+    throw new StateError(`snapshot write-tree failed: ${trimErr(tree.stderr)}`);
+  }
+  const commit = await git([
+    "git", "commit-tree", tree.stdout.trim(), "-p", "HEAD",
+    "-m", `opencode-sandbox baseline for ${sessionID}`,
+  ]);
+  if (commit.status !== 0) {
+    throw new StateError(`snapshot commit-tree failed: ${trimErr(commit.stderr)}`);
+  }
+  const update = await git(["git", "update-ref", ref, commit.stdout.trim()]);
+  if (update.status !== 0) {
+    throw new StateError(`snapshot update-ref failed: ${trimErr(update.stderr)}`);
+  }
+  const bundleCreate = await git(["git", "bundle", "create", bundle, ref]);
+  if (bundleCreate.status !== 0) {
+    throw new StateError(`snapshot bundle failed: ${trimErr(bundleCreate.stderr)}`);
+  }
+  return ref;
+}
+
+function trimErr(s: string): string {
+  return s.trim().slice(0, 500);
 }
 
 // ---------------------------------------------------------------------------
@@ -274,10 +353,21 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
     const workerTmp = `/work/.broker-tmp/write-${randomUUID()}.tmp`;
     try {
       mkdirSync(join(ctx.config.stateDir, "tmp"), { recursive: true, mode: 0o700 });
-      writeFileSync(hostTmp, payload.content as string, { mode: 0o600 });
+      // 0644: msb copy preserves the host mode with ROOT ownership in the
+      // guest; 0600 would be unreadable to the non-root worker user
+      // (Gate 5 finding — chmod by nobody on a root-owned file is EPERM).
+      writeFileSync(hostTmp, payload.content as string, { mode: 0o644 });
+      // mkdir the worker tmp dir BEFORE the copy (copy of a missing parent
+      // fails with ENOENT — Gate 5 finding); argv vectors, no shell.
+      const mkdirRes = await ctx.adapter.exec(
+        worker,
+        ["mkdir", "-p", workerDirOf(workerTmp)],
+        { timeoutMs: 30_000 },
+      );
+      if (mkdirRes.status !== 0) {
+        throw new MsbError(`writeFile mkdir failed in worker (status ${mkdirRes.status}): ${mkdirRes.stderr.trim()}`);
+      }
       await ctx.adapter.copyIn(worker, hostTmp, workerTmp);
-      // mkdir -p + mv as argv vectors; no shell.
-      await ctx.adapter.exec(worker, ["mkdir", "-p", workerDirOf(workerTmp)], { timeoutMs: 30_000 });
       const moved = await ctx.adapter.exec(worker, ["mv", "-f", workerTmp, payload.path as string], {
         timeoutMs: 30_000,
       });
@@ -306,7 +396,8 @@ export function buildApplyOp(ctx: OpContext): OpHandler {
     const hostTmp = join(ctx.config.stateDir, "tmp", `patch-${req.sessionID}-${randomUUID()}.patch`);
     const workerTmp = `/work/.broker-tmp/apply-${randomUUID()}.patch`;
     try {
-      writeFileSync(hostTmp, payload.patch as string, { mode: 0o600 });
+      // 0644: readable by the non-root worker user (Gate 5 finding).
+      writeFileSync(hostTmp, payload.patch as string, { mode: 0o644 });
       await ctx.adapter.copyIn(worker, hostTmp, workerTmp);
       // §19.6: `git apply --check` before applying, inside the worker repo.
       const check = await ctx.adapter.exec(worker, ["git", "apply", "--check", workerTmp], {

@@ -79,6 +79,12 @@ export interface BrokerConfig {
   msbBinary: string;
   /** Single trusted image; the LLM can never choose the image (§11, §21). */
   workerImage: string;
+  /**
+   * Optional prepared worker root disk (ext4 with git + 0777 /work, Gate 5).
+   * When set, createWorker uses `--root-disk <disk>:format=raw,fstype=ext4`
+   * instead of `--mkdir /work` (patches conflict with a managed root disk).
+   */
+  workerRootDisk?: string;
   workerNamePrefix: string;
   projects: ProjectConfig[];
   /** S6: explicit external read roots. Never grant whole-home access. */
@@ -173,6 +179,7 @@ export function defaultConfig(overrides: Partial<BrokerConfig> = {}): BrokerConf
     logPath: process.env.BROKER_LOG_FILE,
     msbBinary: process.env.MSB_BINARY ?? "/home/james/.local/bin/msb",
     workerImage: process.env.MSB_WORKER_IMAGE ?? "debian",
+    workerRootDisk: process.env.BROKER_WORKER_ROOT_DISK || undefined,
     workerNamePrefix: "oc-sandbox",
     projects: DEFAULT_PROJECTS,
     approvedExternalReadRoots: DEFAULT_APPROVED_EXTERNAL_READ_ROOTS,
