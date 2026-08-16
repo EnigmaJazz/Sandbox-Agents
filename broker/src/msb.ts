@@ -12,7 +12,7 @@
  */
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { mkdirSync, writeFileSync, copyFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type { BrokerConfig } from "./config.ts";
 import type { WorkerState } from "./types.ts";
 import { ValidationError } from "./validation.ts";
@@ -250,7 +250,16 @@ export class MsbAdapter {
     if (this.config.workerRootDisk) {
       const workerDisk = join(spec.configDir, "worker.ext4");
       mkdirSync(spec.configDir, { recursive: true });
-      copyFileSync(this.config.workerRootDisk, workerDisk);
+      // Sparse copy (cp --sparse=always): copyFileSync materializes the full
+      // 4G image INCLUDING holes (~4G real per worker -> EDQUOT, Gate 5
+      // live finding). GNU cp preserves the sparsity.
+      const copy = await spawnImpl(
+        ["cp", "--sparse=always", this.config.workerRootDisk, workerDisk],
+        { timeoutMs: 120_000 },
+      );
+      if (copy.status !== 0 && !copy.timedOut) {
+        throw new MsbError(`worker disk copy failed (status ${copy.status}): ${trim(copy.stderr)}`);
+      }
       args.push("--root-disk", `${workerDisk}:format=raw,fstype=ext4`);
     } else {
       args.push("--mkdir", "/work");

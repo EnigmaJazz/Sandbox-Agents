@@ -195,6 +195,16 @@ export function buildEnsureWorkerOp(ctx: OpContext): OpHandler {
       return { worker: workerName, state: record.state, reused: false };
     } catch (err) {
       // §10: creation failure -> FAILED_CLOSED. Never fall back to host (S14).
+      // Gate 5 live finding: a partially created worker must not be left
+      // running (resource leak) — stop + remove it best-effort.
+      if (workerName) {
+        try {
+          await ctx.adapter.stop(workerName);
+          await ctx.adapter.remove(workerName);
+        } catch {
+          /* cleanup is best-effort; the session is closed regardless */
+        }
+      }
       try {
         store.transition(req.sessionID, "CREATING_SANDBOX", "FAILED_CLOSED", {
           error: err instanceof Error ? err.message : String(err),
@@ -280,6 +290,9 @@ async function runSnapshot(
   if (bundleCreate.status !== 0) {
     throw new StateError(`snapshot bundle failed: ${trimErr(bundleCreate.stderr)}`);
   }
+  // systemd UMask=0077 makes git create the bundle 0600 -> root-owned in the
+  // guest -> unreadable by the non-root worker user (Gate 5 live finding).
+  chmodSync(bundle, 0o644);
   return ref;
 }
 
@@ -357,6 +370,10 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
       // guest; 0600 would be unreadable to the non-root worker user
       // (Gate 5 finding — chmod by nobody on a root-owned file is EPERM).
       writeFileSync(hostTmp, payload.content as string, { mode: 0o644 });
+      // chmod, not the create mode: the broker's umask (systemd UMask=0077)
+      // masks 0644 down to 0600, which becomes root-owned 0600 in the guest
+      // and unreadable by the non-root worker user (Gate 5 live finding).
+      chmodSync(hostTmp, 0o644);
       // mkdir the worker tmp dir BEFORE the copy (copy of a missing parent
       // fails with ENOENT — Gate 5 finding); argv vectors, no shell.
       const mkdirRes = await ctx.adapter.exec(
@@ -398,6 +415,8 @@ export function buildApplyOp(ctx: OpContext): OpHandler {
     try {
       // 0644: readable by the non-root worker user (Gate 5 finding).
       writeFileSync(hostTmp, payload.patch as string, { mode: 0o644 });
+      // chmod, not the create mode: see buildWriteFileOp — umask masking.
+      chmodSync(hostTmp, 0o644);
       await ctx.adapter.copyIn(worker, hostTmp, workerTmp);
       // §19.6: `git apply --check` before applying, inside the worker repo.
       const check = await ctx.adapter.exec(worker, ["git", "apply", "--check", workerTmp], {
