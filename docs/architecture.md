@@ -95,6 +95,27 @@ and survives broker restarts. State is NEVER inferred from a worker name
 
 - **Broker is trusted** (policy, allowlists, git boundary). It runs outside
   nono (spec §6), as the user, on a 0600 Unix socket.
+
+### Why the broker is a user service, not a root/system service (2026-08-16)
+
+Decision (user-confirmed): the broker stays a `systemd --user` unit; it is
+NEVER promoted to a root/system service.
+
+- **No privilege is needed**: KVM is user-granted (`msb doctor` read/write for
+  the user, Gate 3), the socket lives in `$XDG_RUNTIME_DIR` (0600 user-only —
+  a property a root service could not preserve), and state lives in the
+  user's home.
+- **Least privilege**: the broker parses UNTRUSTED NDJSON from model-driven
+  sessions — its input is the attack surface this system defends. A
+  user-level compromise equals the user account (the broker's own trust
+  boundary, since it applies the user's project deltas). A root broker
+  would make the same compromise a full host takeover.
+- **systemd --user already provides** restart-on-failure, `journalctl --user`
+  logging, and boot enablement (linger); a system unit adds nothing except
+  elevation.
+- **Future host-admin automation** (S10 host mutation, e.g. `systemctl
+  restart` on user request) must be built as a SEPARATE narrow root helper
+  with a fixed API (or polkit) — never by elevating the broker.
 - **OpenCode is constrained by nono** (control dir RW, projects RO) and by
   OpenCode permissions (no host bash/edit/write; secret-read denies).
 - **Workers are untrusted** (run LLM code): no host mounts, no Docker socket,
