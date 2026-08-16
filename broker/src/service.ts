@@ -168,6 +168,10 @@ export function buildEnsureWorkerOp(ctx: OpContext): OpHandler {
         ["git", "config", "user.email", "sandbox@local"],
         ["git", "fetch", `/work/${req.sessionID}.bundle`, `${baselineRef(req.sessionID)}:refs/heads/baseline`],
         ["git", "checkout", "-q", "-b", "work", "baseline"],
+        // Mirror the host-side baseline ref name in the worker so buildDiffOp
+        // (git diff refs/opencode-sandbox/baseline/<id> HEAD) resolves (Gate 6
+        // demo finding: the worker only had refs/heads/baseline).
+        ["git", "update-ref", baselineRef(req.sessionID), "refs/heads/baseline"],
       ] as const;
       for (const argv of prep) {
         // Gate 5 finding: the guest upper fs can transiently serve a partially
@@ -496,16 +500,15 @@ export function buildPrepareResultOp(ctx: OpContext): OpHandler {
   return async (req) => {
     payloadOf(req);
     let record = recordOr404(ctx.store, req.sessionID);
-    if (record.state === "RESULT_READY") {
-      return { resultRef: record.resultRef, state: record.state };
-    }
-    if (record.state !== "SANDBOX_ACTIVE") {
+    if (record.state !== "SANDBOX_ACTIVE" && record.state !== "RESULT_READY") {
       throw new StateError(`cannot prepare result from state ${record.state}`);
     }
+    // Always re-export: runPrepare commits only new changes, so a retained
+    // result after a failed apply is refreshed, not frozen (Gate 6 finding).
     const ref = await runPrepare(ctx, req.sessionID);
-    record = ctx.store.transition(req.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", {
-      resultRef: ref,
-    });
+    if (record.state === "SANDBOX_ACTIVE") {
+      record = ctx.store.transition(req.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", { resultRef: ref });
+    }
     return { resultRef: ref, state: record.state, imported: true };
   };
 }
@@ -519,7 +522,33 @@ async function runPrepare(ctx: OpContext, sessionID: string): Promise<string> {
   const hostBundle = bundlePathFor(ctx.config.stateDir, sessionID);
   const workerBundle = `/work/.broker-tmp/result-${sessionID}.bundle`;
 
-  // Worker side: publish result ref + bundle (all argv vectors).
+  // Worker side: stage the working tree (transfer artifacts excluded), commit
+  // it when there is anything new, then publish result ref + bundle. Without
+  // this commit HEAD stays at the baseline and the B->C delta is empty, so
+  // apply always failed with "No valid patches in input" (Gate 6 finding).
+  const add = await ctx.adapter.exec(
+    worker,
+    ["git", "add", "-A", "--", ".", ":(exclude).broker-tmp", ":(exclude)*.bundle"],
+    { cwd: "/work", timeoutMs: 60_000 },
+  );
+  if (add.status !== 0) {
+    throw new MsbError(`result staging failed: ${trimErr(add.stderr)}`);
+  }
+  // Nothing staged -> nothing new to export; keeps re-finish idempotent.
+  const staged = await ctx.adapter.exec(worker, ["git", "diff", "--cached", "--quiet"], {
+    cwd: "/work",
+    timeoutMs: 60_000,
+  });
+  if (staged.status !== 0) {
+    const commit = await ctx.adapter.exec(
+      worker,
+      ["git", "commit", "-q", "-m", `opencode-sandbox result for ${sessionID}`],
+      { cwd: "/work", timeoutMs: 60_000 },
+    );
+    if (commit.status !== 0) {
+      throw new MsbError(`result commit failed: ${trimErr(commit.stderr)}`);
+    }
+  }
   await ctx.adapter.exec(worker, ["git", "update-ref", ref, "HEAD"], { cwd: "/work", timeoutMs: 60_000 });
   await ctx.adapter.exec(worker, ["git", "bundle", "create", workerBundle, ref], {
     cwd: "/work",
