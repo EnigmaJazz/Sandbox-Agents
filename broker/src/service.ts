@@ -555,13 +555,15 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     if (record.state !== "RESULT_READY") {
       throw new StateError(`cannot apply result from state ${record.state}`);
     }
+    const project = ctx.config.projects.find((p) => p.id === record.projectID);
+    if (!project) throw new StateError("project not in allowlist");
     const resultRefName = record.resultRef ?? resultRef(req.sessionID);
     const baselineRefName = record.baselineRef ?? baselineRef(req.sessionID);
 
     record = ctx.store.transition(req.sessionID, "RESULT_READY", "APPLY_PENDING", {});
 
     // §19.1 / S16: host must still match the baseline the worker was built from.
-    const divergence = await hostDivergence(ctx, baselineRefName);
+    const divergence = await hostDivergence(ctx, record.projectID, baselineRefName);
     if (divergence.length > 0) {
       ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
         error: `host diverged from baseline; result retained for reconciliation (${divergence.slice(0, 10).join(", ")})`,
@@ -573,7 +575,7 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     }
 
     // §19.2-5: inspect changed paths; reject protected/symlink/submodule.
-    const changed = await changedPathsBetween(ctx, baselineRefName, resultRefName);
+    const changed = await changedPathsBetween(ctx, record.projectID, baselineRefName, resultRefName);
     const rejectedProtected = checkProtectedPaths(changed, [
       ...ctx.config.protectedPaths,
       ...ctx.config.protectedSecurityFiles,
@@ -588,6 +590,7 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     // §19.6: dry-run check then apply; working-tree only (no index/branch).
     const patchFile = patchPathFor(ctx.config.stateDir, req.sessionID);
     const patch = await ctx.git.spawn(["git", "diff", baselineRefName, resultRefName, "--", "."], {
+      cwd: project.path,
       timeoutMs: 60_000,
     });
     if (patch.status !== 0) {
@@ -596,14 +599,14 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     }
     mkdirSync(join(ctx.config.stateDir, "patches"), { recursive: true, mode: 0o700 });
     writeFileSync(patchFile, patch.stdout, { mode: 0o600 });
-    const check = await ctx.git.spawn(buildCheckArgv(patchFile), { timeoutMs: 60_000 });
+    const check = await ctx.git.spawn(buildCheckArgv(patchFile), { cwd: project.path, timeoutMs: 60_000 });
     if (check.status !== 0) {
       ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
         error: `git apply --check failed: ${check.stderr.trim()}`,
       });
       throw new StateError(`git apply --check failed (${check.stderr.trim()}); result retained`);
     }
-    const applied = await ctx.git.spawn(["git", "apply", patchFile], { timeoutMs: 120_000 });
+    const applied = await ctx.git.spawn(["git", "apply", patchFile], { cwd: project.path, timeoutMs: 120_000 });
     if (applied.status !== 0) {
       ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
         error: `apply failed: ${applied.stderr.trim()}`,
@@ -619,17 +622,17 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
 }
 
 /** S16: compare current host tree with the baseline tree. */
-async function hostDivergence(ctx: OpContext, baselineRefName: string): Promise<string[]> {
-  const project = ctx.config.projects[0]; // Gate 1: single-project assumption, revisit per-session at Gate 5
+async function hostDivergence(ctx: OpContext, projectID: string, baselineRefName: string): Promise<string[]> {
+  const project = ctx.config.projects.find((p) => p.id === projectID);
   if (!project) throw new StateError("no projects configured");
   const gitDir = join(project.path, ".git");
   const tmpIndex = join(ctx.config.stateDir, "tmp", `divergence-${randomUUID()}.index`);
   const env = { GIT_DIR: gitDir, GIT_INDEX_FILE: tmpIndex };
-  const currentTree = await ctx.git.spawn(["git", "add", "-A", "--"], { env, timeoutMs: 60_000 });
+  const currentTree = await ctx.git.spawn(["git", "add", "-A", "--"], { env, cwd: project.path, timeoutMs: 60_000 });
   if (currentTree.status !== 0) {
     throw new StateError(`cannot read host working tree: ${currentTree.stderr.trim()}`);
   }
-  const lsFiles = await ctx.git.spawn(["git", "ls-files", "-s"], { env, timeoutMs: 60_000 });
+  const lsFiles = await ctx.git.spawn(["git", "ls-files", "-s"], { env, cwd: project.path, timeoutMs: 60_000 });
   const baseline = await ctx.git.spawn(["git", "ls-tree", "-r", baselineRefName], { env, timeoutMs: 60_000 });
   return computeDivergence(
     parseLsTreeLines(baseline.stdout.split("\n")),
@@ -638,8 +641,8 @@ async function hostDivergence(ctx: OpContext, baselineRefName: string): Promise<
 }
 
 /** §19.2: changed paths between baseline B and result C. */
-async function changedPathsBetween(ctx: OpContext, baselineRefName: string, resultRefName: string): Promise<string[]> {
-  const project = ctx.config.projects[0];
+async function changedPathsBetween(ctx: OpContext, projectID: string, baselineRefName: string, resultRefName: string): Promise<string[]> {
+  const project = ctx.config.projects.find((p) => p.id === projectID);
   if (!project) throw new StateError("no projects configured");
   const gitDir = join(project.path, ".git");
   const raw = await ctx.git.spawn(
