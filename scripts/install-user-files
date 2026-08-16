@@ -90,12 +90,17 @@ else
   journal "fragment-review" "$FRAGMENT" "$OC_CONF" "manual merge required"
 fi
 
-# --- 3. systemd user unit ----------------------------------------------------
-log "step 3: systemd user unit (NOT enabled until Gate 4 review)"
+# --- 3. systemd user unit + broker env -----------------------------------
+log "step 3: systemd user unit + broker.env (NOT enabled until Gate 4 review)"
 UNIT_DEST="$HOME/.config/systemd/user/sandbox-broker.service"
 install_file "$REPO_ROOT/systemd-user/sandbox-broker.service" "$UNIT_DEST" 0644
+# Operational policy (git mode, worker disk, project registry) — loaded via
+# EnvironmentFile because systemd Environment= cannot hold JSON values.
+ENV_DEST="$HOME/.config/opencode-sandbox/broker.env"
+mkdir -p "$(dirname "$ENV_DEST")"
+install_file "$REPO_ROOT/systemd-user/broker.env" "$ENV_DEST" 0644
 if [[ "$APPLY" == "1" ]]; then
-  log "unit copied; enable manually with: systemctl --user daemon-reload && systemctl --user enable --now sandbox-broker"
+  log "unit + env copied; enable manually with: systemctl --user daemon-reload && systemctl --user enable --now sandbox-broker"
 fi
 
 # --- 4. opencode plugins -----------------------------------------------------

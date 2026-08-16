@@ -169,7 +169,7 @@ Checklist:
       LAN isolation, fail closed, divergence, argument attacks)
 - [x] Plugins loaded in opencode: verify `tool` hook + `ctx.ask()` signature
       against installed 1.18.18 (plugins/README.md)
-- [ ] systemd unit reviewed and enabled (user action):
+- [x ] systemd unit reviewed and enabled (user action):
       `systemctl --user enable --now sandbox-broker`
 
 ## Gate 5 — Throwaway-project lazy sandbox test
@@ -187,10 +187,10 @@ SANDBOX_GATED_TESTS=integration bun test tests/integration/
 
 Checklist (user):
 
-- [ ] Read-only investigation created **zero** workers
-- [ ] First write/bash created **exactly one** worker; reuse; session
+- [ x] Read-only investigation created **zero** workers
+- [ x] First write/bash created **exactly one** worker; reuse; session
       separation; read switch; external read works; external write fails
-- [ ] Host project untouched after sandboxed writes
+- [x ] Host project untouched after sandboxed writes
 
 Findings resolved during preparation: prepared-worker-disk lifecycle
 (template cloned per worker; msb writes the root-disk file; never fsck the

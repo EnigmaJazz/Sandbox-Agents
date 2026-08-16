@@ -32,7 +32,10 @@ Nice=10
 # The broker only talks to localhost Unix sockets; a conservative fd limit.
 LimitNOFILE=4096
 Environment=XDG_RUNTIME_DIR=/run/user/1000
-Environment=BROKER_GIT_MODE=planned
+# Gate 5+ operational policy lives in broker.env (EnvironmentFile — systemd
+# Environment= cannot hold JSON values): git real mode, prepared worker disk,
+# approved projects registry. See systemd-user/broker.env in this repo.
+EnvironmentFile=%h/.config/opencode-sandbox/broker.env
 # No credentials in this unit. Secrets are never broker state (§26).
 
 [Install]
