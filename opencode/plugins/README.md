@@ -75,3 +75,23 @@ Verified against the installed `@opencode-ai/plugin` typings (opencode
 - `experimental.chat.system.transform`: `output.system` is `string[]` —
   `routing-guard.ts` rewritten to push (was string assignment).
 - `permission.ask` hook available for config-fragment-level enforcement.
+
+### Live-load verification (2026-08-16, isolated)
+
+Verified plugin loading in a REAL opencode 1.18.18 process WITHOUT touching
+the live global plugins dir: scratch config via `XDG_CONFIG_HOME` redirect
+(`/tmp/oc-plugin-test/opencode/`, plugins copied from the repo). Results:
+
+- `sandbox-tools.ts` tools registered: `sandbox_read`/`sandbox_bash` etc.
+  present in the model toolset; `sandbox_bash` with the broker down fails
+  closed (`Failed to connect` — S14).
+- `routing-guard.ts` active: the ordinary `bash` tool was blocked with the
+  exact S1/S10 redirect message in a live run.
+- Cosmetic: opencode 1.18.18 also scans plugins-dir .ts files as command
+  candidates and logs `failed to load plugin ... error="empty command"` for
+  plugin files — the plugin itself loads fine (tools work); the line is
+  expected and harmless.
+
+Global install of the plugins is deliberately deferred until the broker
+runs and other opencode sessions are idle (fail-closed guard + broker-first
+ordering; Gate 4 decision, user).
