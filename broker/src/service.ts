@@ -9,7 +9,7 @@
  * result steps verify and FAIL with a clear message instead of running git
  * against the host repo. Set BROKER_GIT_MODE=real only after Gate 5 review.
  */
-import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { BrokerConfig } from "./config.ts";
