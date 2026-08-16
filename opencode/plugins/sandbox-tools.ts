@@ -105,6 +105,57 @@ export function tokenizeCommand(command: string): string[] {
 const pathArg = z.string().min(1).max(4096);
 const contentArg = z.string().max(1024 * 1024);
 
+/**
+ * Format a broker response as an opencode ToolResult string.
+ *
+ * opencode 1.18 tool.execute MUST return a string (or {output: string});
+ * returning the raw broker object crashed the plugin runtime with
+ * "undefined is not an object (evaluating 'c.split')" (Gate 5 live finding).
+ */
+function formatResult(operation: string, result: unknown): string {
+  const r = (result ?? {}) as Record<string, unknown>;
+  switch (operation) {
+    case "readFile":
+      return String(r.content ?? "");
+    case "exec": {
+      const stdout = String(r.stdout ?? "");
+      const stderr = String(r.stderr ?? "");
+      const status = Number(r.status ?? 0);
+      const body = stderr.length > 0 ? `${stdout}\n${stderr}`.trim() : stdout;
+      return status === 0 ? body : `exit ${status}\n${body}`.trim();
+    }
+    case "listDir":
+      return JSON.stringify(r.entries ?? [], null, 2);
+    case "grep": {
+      const m = r.matches;
+      return typeof m === "string" ? m : JSON.stringify(m ?? [], null, 2);
+    }
+    case "diff": {
+      const diff = r.diff;
+      const stat = r.stat;
+      if (typeof diff === "string" && diff.length > 0) return diff;
+      if (typeof stat === "string" && stat.length > 0) return stat;
+      return JSON.stringify(r, null, 2);
+    }
+    case "writeFile":
+      return `wrote ${String(r.path ?? "?")}`;
+    case "applyPatch":
+      return `patch applied${r.changedLines !== undefined ? ` (${String(r.changedLines)} lines changed)` : ""}`;
+    case "ensureWorker":
+      return `worker ${String(r.worker ?? "?")} ${r.reused ? "reused" : "created"} (state ${String(r.state ?? "?")})`;
+    case "workerStatus":
+      return `state: ${String(r.state ?? "?")}`;
+    case "prepareResult":
+      return `result ready: ${String(r.resultRef ?? "?")}`;
+    case "applyResult":
+      return `applied to host: ${String(r.resultRef ?? "?")}`;
+    case "discardResult":
+      return `discarded; worker ${String(r.state ?? "?")}`;
+    default:
+      return JSON.stringify(r, null, 2);
+  }
+}
+
 export default function sandboxToolsPlugin() {
   return {
     tool: {
@@ -115,7 +166,7 @@ export default function sandboxToolsPlugin() {
         args: { path: pathArg },
         execute: async (args, ctx) => {
           const c = await client();
-          return c.request("readFile", ctx.sessionID, { path: args.path }, ctx.agent);
+          return formatResult("readFile", await c.request("readFile", ctx.sessionID, { path: args.path }, ctx.agent));
         },
       }),
 
@@ -124,7 +175,7 @@ export default function sandboxToolsPlugin() {
         args: { path: pathArg },
         execute: async (args, ctx) => {
           const c = await client();
-          return c.request("listDir", ctx.sessionID, { path: args.path }, ctx.agent);
+          return formatResult("listDir", await c.request("listDir", ctx.sessionID, { path: args.path }, ctx.agent));
         },
       }),
 
@@ -135,7 +186,7 @@ export default function sandboxToolsPlugin() {
         args: { query: z.string().min(1).max(1024), path: pathArg },
         execute: async (args, ctx) => {
           const c = await client();
-          return c.request("grep", ctx.sessionID, { query: args.query, path: args.path }, ctx.agent);
+          return formatResult("grep", await c.request("grep", ctx.sessionID, { query: args.query, path: args.path }, ctx.agent));
         },
       }),
 
@@ -147,7 +198,7 @@ export default function sandboxToolsPlugin() {
         execute: async (args, ctx) => {
           await ensureWorker(ctx.sessionID, ctx.directory);
           const c = await client();
-          return c.request("writeFile", ctx.sessionID, { path: args.path, content: args.content }, ctx.agent);
+          return formatResult("writeFile", await c.request("writeFile", ctx.sessionID, { path: args.path, content: args.content }, ctx.agent));
         },
       }),
 
@@ -159,7 +210,7 @@ export default function sandboxToolsPlugin() {
         execute: async (args, ctx) => {
           await ensureWorker(ctx.sessionID, ctx.directory);
           const c = await client();
-          return c.request("writeFile", ctx.sessionID, { path: args.path, content: args.content }, ctx.agent);
+          return formatResult("writeFile", await c.request("writeFile", ctx.sessionID, { path: args.path, content: args.content }, ctx.agent));
         },
       }),
 
@@ -171,7 +222,7 @@ export default function sandboxToolsPlugin() {
         execute: async (args, ctx) => {
           await ensureWorker(ctx.sessionID, ctx.directory);
           const c = await client();
-          return c.request("applyPatch", ctx.sessionID, { patch: args.patch }, ctx.agent);
+          return formatResult("applyPatch", await c.request("applyPatch", ctx.sessionID, { patch: args.patch }, ctx.agent));
         },
       }),
 
@@ -190,11 +241,14 @@ export default function sandboxToolsPlugin() {
           await ensureWorker(ctx.sessionID, ctx.directory);
           const argv = tokenizeCommand(args.command);
           const c = await client();
-          return c.request(
+          return formatResult(
             "exec",
-            ctx.sessionID,
-            { argv, ...(args.cwd ? { cwd: args.cwd } : {}), ...(args.timeoutMs ? { timeoutMs: args.timeoutMs } : {}) },
-            ctx.agent,
+            await c.request(
+              "exec",
+              ctx.sessionID,
+              { argv, ...(args.cwd ? { cwd: args.cwd } : {}), ...(args.timeoutMs ? { timeoutMs: args.timeoutMs } : {}) },
+              ctx.agent,
+            ),
           );
         },
       }),
@@ -204,7 +258,7 @@ export default function sandboxToolsPlugin() {
         args: {},
         execute: async (_args, ctx) => {
           const c = await client();
-          return c.request("diff", ctx.sessionID, {}, ctx.agent);
+          return formatResult("diff", await c.request("diff", ctx.sessionID, {}, ctx.agent));
         },
       }),
 
@@ -215,7 +269,7 @@ export default function sandboxToolsPlugin() {
         args: {},
         execute: async (_args, ctx) => {
           const c = await client();
-          return c.request("prepareResult", ctx.sessionID, {}, ctx.agent);
+          return formatResult("prepareResult", await c.request("prepareResult", ctx.sessionID, {}, ctx.agent));
         },
       }),
 
@@ -243,7 +297,7 @@ export default function sandboxToolsPlugin() {
             always: [],
             metadata: { summary },
           });
-          return c.request("applyResult", ctx.sessionID, { confirm: "APPLY" }, ctx.agent);
+          return formatResult("applyResult", await c.request("applyResult", ctx.sessionID, { confirm: "APPLY" }, ctx.agent));
         },
       }),
 
@@ -253,7 +307,7 @@ export default function sandboxToolsPlugin() {
         args: {},
         execute: async (_args, ctx) => {
           const c = await client();
-          return c.request("discardResult", ctx.sessionID, { confirm: "REJECT" }, ctx.agent);
+          return formatResult("discardResult", await c.request("discardResult", ctx.sessionID, { confirm: "REJECT" }, ctx.agent));
         },
       }),
     },
