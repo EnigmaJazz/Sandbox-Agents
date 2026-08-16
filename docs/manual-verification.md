@@ -174,15 +174,29 @@ Checklist:
 
 ## Gate 5 — Throwaway-project lazy sandbox test
 
+**Status: prepared 2026-08-16** — implementation in `21ff185`; integration
+suite 7/7 (my run). User-certify by running:
+
 ```sh
+# 0) build the prepared worker disk (debian + git), if not already present
+scripts/build-worker-image
+
+# 1) the Gate 5 suite (spawns its own test broker + throwaway project)
 SANDBOX_GATED_TESTS=integration bun test tests/integration/
 ```
 
-Checklist:
+Checklist (user):
 
 - [ ] Read-only investigation created **zero** workers
 - [ ] First write/bash created **exactly one** worker; reuse; session
       separation; read switch; external read works; external write fails
+- [ ] Host project untouched after sandboxed writes
+
+Findings resolved during preparation: prepared-worker-disk lifecycle
+(template cloned per worker; msb writes the root-disk file; never fsck the
+copied upper.ext4 — host e2fsck corrupts it), guest-fs boot/read races
+(waitReady + bounded prep retry; fetch without `-q`), non-root file modes
+(host-tmp 0644), snapshot must be awaited before createWorker.
 
 ## Gate 6 — Git result round-trip
 
