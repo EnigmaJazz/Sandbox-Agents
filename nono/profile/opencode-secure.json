@@ -1,8 +1,8 @@
 {
   "meta": {
     "name": "opencode-secure",
-    "version": "0.1.0",
-    "description": "Secured host OpenCode process for the agentic sandbox integration (SYSTEM_PROMPT.md §15). Control dir writable, project roots read-only, credential stores only what OpenCode itself needs, everything else denied. NOT INSTALLED at Gate 1 — see nono/README.md.",
+    "version": "0.1.1",
+    "description": "Secured host OpenCode process for the agentic sandbox integration (SYSTEM_PROMPT.md . Control dir writable, project roots read-only, credential stores only what OpenCode itself needs, everything else denied. NOT INSTALLED at Gate 1 — see nono/README.md.",
     "author": "agentic-sandbox-integration"
   },
   "extends": "default",
@@ -20,10 +20,30 @@
       "$HOME/.local/state/opencode",
       "$HOME/.cache/opencode",
       "$HOME/.config/opencode",
+      "$HOME/.local/share/cortexkit",
+      "$HOME/.config/cortexkit",
+      "$HOME/.gentle-ai",
       "$TMPDIR"
     ],
+    "allow_file": [
+      "$HOME/.auto-update-history.json",
+      "$HOME/.local/share/.auto-update-history.json",
+      "/mnt/ai_storage/kinver-hub/.auto-update-history.json",
+      "$HOME/ai-workspace/.auto-update-history.json",
+      "$HOME/ai-workspace/tasker/.auto-update-history.json",
+      "/home/james/.auto-update-history.json"
+    ],
     "read": [
-      "$HOME/agent-sandbox-integration"
+      "$HOME/agent-sandbox-integration",
+      "/mnt/ai_storage/kinver-hub/proxy",
+      "/home/james/peak-redir",
+      "/home/james/opencode-workspace",
+      "/home/james/ai-workspace/tasker/tesla",
+      "/home/james/ai-workspace/workflow_optimisation",
+      "/home/james/weight_loss",
+      "/home/james/nono-opencode-test",
+      "/home/james/omni-router-setup",
+      "/home/james/mem-opt"
     ],
     "deny": [
       "$HOME/.ssh",
@@ -38,15 +58,22 @@
     "allow_domain": [
       "api.openai.com",
       "auth.openai.com",
+      "chatgpt.com",
+      "opencode.ai",
+      "models.opencode.ai",
       "openrouter.ai",
       "api.deepseek.com"
     ],
     "open_port": [
+      4096,
       13000,
       8788
     ],
     "listen_port": [
       4096
+    ],
+    "no_proxy": [
+      "localhost"
     ]
   },
   "security": {

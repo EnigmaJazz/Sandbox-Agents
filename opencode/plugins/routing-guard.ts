@@ -95,9 +95,17 @@ export default function routingGuardPlugin(): Plugin {
       const sessionID = input.sessionID;
       if (READ_TOOLS.has(toolName)) {
         const c = await broker(); // throws if broker down → tool call fails (fail closed)
-        const status = (await c.request("workerStatus", sessionID, undefined, undefined)) as {
-          state: string;
-        };
+        // Gate 6 finding: an unknown session (never registered or cleared)
+        // is HOST_READ_ONLY — host reads are the intended pre-activation
+        // mode (S3); do not fail the read.
+        let status: { state: string };
+        try {
+          status = (await c.request("workerStatus", sessionID, undefined, undefined)) as {
+            state: string;
+          };
+        } catch {
+          return; // unknown session: allow host reads (HOST_READ_ONLY)
+        }
         if (status.state === "SANDBOX_ACTIVE" || status.state === "RESULT_READY") {
           const roots = await approvedRoots();
           const args = (output?.args ?? {}) as Record<string, unknown>;
@@ -121,12 +129,20 @@ export default function routingGuardPlugin(): Plugin {
         "",
         "## Sandbox routing rule (enforced by the routing guard plugin)",
         "- Before any project modification or execution, you may READ the host project freely (HOST_READ_ONLY).",
-        "- The FIRST write/edit/patch/bash/install/test action activates this session's isolated sandbox worker.",
+        "- The FIRST sandbox tool use (read, write, edit, patch, or command) activates this session's isolated sandbox worker.",
         "- After activation, ALL project reads must use sandbox_read / sandbox_list / sandbox_grep. Ordinary read/grep/glob/list on project paths are blocked.",
         "- All project edits and arbitrary commands run inside the sandbox worker. The host working tree remains unchanged.",
         "- You may still read approved external reference roots on the host (S6).",
         "- NEVER attempt host mutation (bash/edit/write outside the sandbox). Host changes require explicit user action.",
         "- To finish: sandbox_finish, then sandbox_apply (requires user approval). sandbox_discard abandons the result.",
+        "",
+        "## Sandbox tool contract",
+        "- Reads: use the PLAIN host read/grep tools BEFORE activation (HOST_READ_ONLY). sandbox_read / sandbox_list / sandbox_grep need an ACTIVE worker and fail pre-activation - never call them first.",
+        "- All sandbox_* file paths are RELATIVE to the project root (e.g. broker/src/service.ts) - never absolute (/work/...).",
+        "- The FIRST mutation or execution (sandbox_write / sandbox_edit / sandbox_apply_patch / sandbox_bash) activates the worker. After activation, ALL project reads, writes and execution use the sandbox tools.",
+        "- sandbox_bash is NOT a shell: argv only - no pipes, redirects, globs, &&, ;, or $(). Use it ONLY for read-only commands; never for file modification or git apply/reset/checkout.",
+        "- sandbox_finish exports the result; sandbox_apply presents the diff, REQUIRES human approval, blocks until the user responds (expected), then applies. One apply per session.",
+        "- sandbox_discard abandons the result. Host bash/edit/write are guard-blocked (S1/S10) - never attempt them.",
         "",
       ].join("\n");
       // output.system is a string[] in the 1.18.x plugin API (verified at

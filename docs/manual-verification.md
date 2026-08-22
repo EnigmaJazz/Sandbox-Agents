@@ -206,26 +206,26 @@ SANDBOX_GATED_TESTS=integration bun test tests/integration/   # + git round-trip
 
 Checklist:
 
-- [ ] Baseline B under `refs/opencode-sandbox/baseline/<id>`; user branch and
+- [x ] Baseline B under `refs/opencode-sandbox/baseline/<id>`; user branch and
       index untouched
-- [ ] Result bundle imports under `refs/opencode-sandbox/result/<id>`
-- [ ] `git apply --check` + apply of B→C delta; host tree correct
-- [ ] Divergence refusal works (S16)
+- [ x] Result bundle imports under `refs/opencode-sandbox/result/<id>`
+- [ x] `git apply --check` + apply of B→C delta; host tree correct
+- [ x] Divergence refusal works (S16)
 
 ## Gate 7 — OAuth/subagent isolation
 
 Checklist:
 
-- [ ] Worker contains no `auth.json` and no provider env (S8/S9)
-- [ ] Subagent sessions map to their own workers; no cross-session access
-- [ ] auth.json not readable through model-facing read tools (S7)
+- [x] Worker contains no `auth.json` and no provider env (S8/S9)
+- [x] Subagent sessions map to their own workers; no cross-session access
+- [x] auth.json not readable through model-facing read tools (S7)
 
 ## Gate 8 — Parallel worker isolation
 
 Checklist:
 
-- [ ] Two concurrent sessions → two workers, no interference (§28)
-- [ ] Pool budget respected; exhaustion rejects cleanly (§22)
+- [x] Two concurrent sessions → two workers, no interference (§28)
+- [x] Pool budget respected; exhaustion rejects cleanly (§22)
 
 ## Gate 9 — OpenChamber integration
 

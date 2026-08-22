@@ -3,16 +3,18 @@
 # build-worker-image — build the prepared worker root disk (Gate 5+).
 #
 # The broker's workers come from a SINGLE trusted disk image (spec §21): a
-# debian rootfs with git + ca-certificates and a writable, nobody-owned /work.
-# This script builds it once and stores it at
+# debian rootfs with git + ca-certificates, bun + python3/pytest (test
+# runners for worker-side `bun test` / `pytest`), and a writable,
+# nobody-owned /work. This script builds it once and stores it at
 # $BROKER_WORKER_ROOT_DISK (default ~/.local/share/opencode-sandbox/
 # worker-image/worker.ext4), which the broker uses via
 # `msb create --root-disk <disk>:format=raw,fstype=ext4`.
 #
 # Notes:
-# - The build sandbox runs with NETWORK PUBLIC only to run apt-get; the
-#   final worker policy is deny-by-default (--no-net) — network is never
-#   granted at runtime.
+# - The build sandbox runs with NETWORK PUBLIC only to run apt-get and to
+#   download the pinned bun release zip (github.com / objects.githubusercontent.com
+#   must be reachable from the build sandbox); the final worker policy is
+#   deny-by-default (--no-net) — network is never granted at runtime.
 # - /work must be nobody-owned (not merely 0777): git refuses root-owned
 #   repo roots under the non-root exec user ("dubious ownership", Gate 5
 #   finding).
@@ -24,20 +26,34 @@ set -euo pipefail
 NAME=worker-image-build
 MSB="${MSB_BINARY:-$HOME/.local/bin/msb}"
 DEST="${BROKER_WORKER_ROOT_DISK:-$HOME/.local/share/opencode-sandbox/worker-image/worker.ext4}"
+# Pin the bun version installed in the image (host runs bun 1.3.14).
+BUN_VERSION="${BUN_VERSION:-1.3.14}"
 
-echo "[build-worker-image] building '$DEST' from debian + git"
+echo "[build-worker-image] building '$DEST' from debian + git + bun + python3/pytest"
 "$MSB" stop "$NAME" >/dev/null 2>&1 || true
 "$MSB" remove "$NAME" >/dev/null 2>&1 || true
 
 "$MSB" create -n "$NAME" debian -c 2 --max-cpus 2 -m 1G --max-memory 1G \
   --net public --mkdir /work >/dev/null
 
-echo "[build-worker-image] installing ca-certificates + git (apt, may take minutes)"
+echo "[build-worker-image] installing ca-certificates + git + python3/pytest (apt, may take minutes)"
 "$MSB" exec "$NAME" -- sh -c \
-  'apt-get update -qq && apt-get install -y -qq ca-certificates git >/dev/null \
+  'apt-get update -qq && apt-get install -y -qq ca-certificates git python3 python3-pytest >/dev/null \
    && chmod 0777 /work && chown -R nobody:nogroup /work \
    && sync \
-   && command -v git && git --version'
+   && command -v git && git --version \
+   && command -v python3 && python3 --version \
+   && python3 -m pytest --version'
+
+echo "[build-worker-image] installing bun $BUN_VERSION (pinned release zip)"
+"$MSB" exec "$NAME" -- sh -c \
+  'apt-get install -y -qq unzip curl >/dev/null \
+   && curl -fsSL -o /tmp/bun-linux-x64.zip https://github.com/oven-sh/bun/releases/download/bun-v'"$BUN_VERSION"'/bun-linux-x64.zip \
+   && unzip -o /tmp/bun-linux-x64.zip -d /opt/bun \
+   && cp /opt/bun/bun-linux-x64/bun /usr/local/bin/bun \
+   && chmod 0755 /usr/local/bin/bun \
+   && command -v bun && bun --version \
+   && rm -rf /tmp/bun-linux-x64.zip /opt/bun'
 
 "$MSB" stop "$NAME" >/dev/null
 # msb stop returns before the VMM/fs fully quiesces; copying too early can
@@ -53,7 +69,9 @@ cp "$HOME/.microsandbox/sandboxes/$NAME/upper.ext4" "$DEST"
 chmod 700 "$(dirname "$DEST")"
 
 # Boot-test the stored disk before declaring success: create a throwaway
-# worker from it, exec true, remove it. Fail loudly if it cannot boot.
+# worker from it (--no-net, so no downloads — presence/version checks only),
+# exec a test-runner sanity check, remove it. Fail loudly if it cannot boot
+# or is missing bun/python3/pytest.
 TEST=worker-image-boottest
 "$MSB" stop "$TEST" >/dev/null 2>&1 || true
 "$MSB" remove "$TEST" >/dev/null 2>&1 || true
@@ -61,8 +79,8 @@ if "$MSB" create -n "$TEST" debian \
     --root-disk "$DEST:format=raw,fstype=ext4" \
     -c 1 --max-cpus 1 -m 512M --max-memory 512M --no-net \
     >/dev/null 2>&1; then
-  "$MSB" exec "$TEST" -- true >/dev/null 2>&1 \
-    || { echo "[build-worker-image] FAIL: stored disk does not boot"; "$MSB" remove "$TEST" >/dev/null 2>&1; exit 1; }
+  "$MSB" exec "$TEST" -- sh -c 'command -v bun && bun --version && command -v python3 && python3 -m pytest --version' >/dev/null 2>&1 \
+    || { echo "[build-worker-image] FAIL: stored disk does not boot or lacks bun/python3/pytest"; "$MSB" remove "$TEST" >/dev/null 2>&1; exit 1; }
 else
   echo "[build-worker-image] FAIL: stored disk does not start"; exit 1
 fi

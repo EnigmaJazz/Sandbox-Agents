@@ -13,8 +13,13 @@
  * quotes only) and every token is re-validated broker-side against the
  * §28 attack table. No globbing, expansion, redirection or pipes.
  *
- * sandbox_apply requires human approval via ctx.ask() before the broker may
- * apply the B->C delta (S15, §19.9).
+ * sandbox_apply normally requires human approval via ctx.ask() before the
+ * broker may apply the B->C delta (S15, §19.9).
+ * sandbox_copy_out / sandbox_copy_in move
+ * single files between the worker and the host under the same approval gate
+ * (S15): the broker verifies the host path against the
+ * BROKER_EXTERNAL_COPY_TARGETS allowlist before showing a preview and
+ * requesting confirmation.
  *
  * Gate 1: NOT installed. Wiring is verified at Gate 4 against the installed
  * opencode 1.18.x plugin API (typings at ~/.opencode/node_modules/@opencode-ai/plugin).
@@ -45,17 +50,9 @@ async function ensureWorker(sessionID: string, directory: string | undefined): P
   return c.request("ensureWorker", sessionID, { projectDir: directory ?? process.cwd() });
 }
 
-async function requireWorkerState(sessionID: string): Promise<string> {
-  const c = await client();
-  const status = (await c.request("workerStatus", sessionID)) as { state: string };
-  return status.state;
-}
-
 function notActiveError(): Error {
   return new Error(
-    "This session has no active sandbox worker yet. " +
-      "Use sandbox_write / sandbox_bash / sandbox_edit / sandbox_apply_patch to create one (§11), " +
-      "or sandbox_read / sandbox_list / sandbox_grep to read host project state before activation.",
+    "This session has no active sandbox worker yet. The FIRST sandbox mutation (sandbox_write / sandbox_edit / sandbox_apply_patch / sandbox_bash) opens the worker automatically - no separate activation step. Until then use the host read/grep tools. All sandbox_* file paths are RELATIVE to the project root (e.g. broker/src/service.ts) - never absolute.",
   );
 }
 
@@ -104,6 +101,14 @@ export function tokenizeCommand(command: string): string[] {
 
 const pathArg = z.string().min(1).max(4096);
 const contentArg = z.string().max(1024 * 1024);
+const sddIdentifierArg = z.string().regex(/^[A-Za-z0-9._-]{1,128}$/).refine((value) => !value.includes(".."));
+const sddRequestIdArg = z.string().regex(/^[A-Za-z0-9-]{1,128}$/);
+const sddPositiveIntArg = z.number().int().positive();
+
+function currentProjectDirectory(directory: string | undefined): string {
+  if (!directory) throw new Error("host-side SDD runtime requires the current project directory");
+  return directory;
+}
 
 /**
  * Format a broker response as an opencode ToolResult string.
@@ -125,7 +130,7 @@ function formatResult(operation: string, result: unknown): string {
       return status === 0 ? body : `exit ${status}\n${body}`.trim();
     }
     case "listDir":
-      return JSON.stringify(r.entries ?? [], null, 2);
+      return String(r.listing ?? "");
     case "grep": {
       const m = r.matches;
       return typeof m === "string" ? m : JSON.stringify(m ?? [], null, 2);
@@ -151,6 +156,14 @@ function formatResult(operation: string, result: unknown): string {
       return `applied to host: ${String(r.resultRef ?? "?")}`;
     case "discardResult":
       return `discarded; worker ${String(r.state ?? "?")}`;
+    case "copyOutInfo":
+      return JSON.stringify(r, null, 2);
+    case "copyOut":
+      return `copied to host: ${String(r.target ?? "?")}`;
+    case "copyInInfo":
+      return JSON.stringify(r, null, 2);
+    case "copyIn":
+      return `copied to worker: ${String(r.path ?? "?")}`;
     default:
       return JSON.stringify(r, null, 2);
   }
@@ -161,8 +174,9 @@ export default function sandboxToolsPlugin() {
     tool: {
       sandbox_read: tool({
         description:
-          "Read a file from the ACTIVE sandbox workspace of this session. " +
-          "Fails if no worker exists yet (use host reads before activation).",
+          "Read a file from the ACTIVE sandbox workspace. Requires an ACTIVE worker and never " +
+          "creates one; before activation, use host read/grep tools. path is relative to the " +
+          "sandbox project root, never absolute or traversal.",
         args: { path: pathArg },
         execute: async (args, ctx) => {
           const c = await client();
@@ -171,7 +185,10 @@ export default function sandboxToolsPlugin() {
       }),
 
       sandbox_list: tool({
-        description: "List a directory inside the ACTIVE sandbox workspace of this session.",
+        description:
+          "List a directory inside the ACTIVE sandbox workspace. Requires an ACTIVE worker and " +
+          "never creates one; before activation, use host read/grep tools. path is relative to " +
+          "the sandbox project root, never absolute or traversal.",
         args: { path: pathArg },
         execute: async (args, ctx) => {
           const c = await client();
@@ -181,8 +198,9 @@ export default function sandboxToolsPlugin() {
 
       sandbox_grep: tool({
         description:
-          "Search inside the ACTIVE sandbox workspace of this session. " +
-          "The query is a plain substring/pattern passed to grep -e; no shell expansion.",
+          "Search inside the ACTIVE sandbox workspace. Requires an ACTIVE worker and never creates " +
+          "one; before activation, use host grep. query is a grep pattern, not shell syntax. path " +
+          "is relative to the sandbox project root, never absolute or traversal.",
         args: { query: z.string().min(1).max(1024), path: pathArg },
         execute: async (args, ctx) => {
           const c = await client();
@@ -192,8 +210,10 @@ export default function sandboxToolsPlugin() {
 
       sandbox_write: tool({
         description:
-          "Create or overwrite a file inside this session's isolated sandbox workspace. " +
-          "The first call activates the worker (lazy creation). The host project is untouched.",
+          "Create or overwrite a file in the worker-only sandbox. The first useful mutation " +
+          "activates the worker naturally—no dummy sandbox_bash; no approval is required and the " +
+          "host stays unchanged. path is relative to the sandbox project root, never absolute or " +
+          "traversal. The broker appends a final newline when absent.",
         args: { path: pathArg, content: contentArg },
         execute: async (args, ctx) => {
           await ensureWorker(ctx.sessionID, ctx.directory);
@@ -204,8 +224,10 @@ export default function sandboxToolsPlugin() {
 
       sandbox_edit: tool({
         description:
-          "Replace the full contents of a file inside this session's sandbox workspace. " +
-          "Activates the worker on first use; the host project is untouched until approved apply.",
+          "Replace the full contents of a file in the worker-only sandbox. The first useful " +
+          "mutation activates the worker naturally—no dummy sandbox_bash; no approval is required " +
+          "and the host stays unchanged until sandbox_apply. path is relative to the sandbox " +
+          "project root, never absolute or traversal. The broker appends a final newline when absent.",
         args: { path: pathArg, content: contentArg },
         execute: async (args, ctx) => {
           await ensureWorker(ctx.sessionID, ctx.directory);
@@ -216,8 +238,12 @@ export default function sandboxToolsPlugin() {
 
       sandbox_apply_patch: tool({
         description:
-          "Apply a unified diff patch inside this session's sandbox workspace. " +
-          "Validated with git apply --check first. Activates the worker on first use.",
+          "Apply ONLY a complete plain-text Git unified diff in the worker-only sandbox. No Markdown " +
+          "fences, *** Begin Patch envelopes, shell commands, or code snippets. Patch paths are " +
+          "relative to the sandbox project root, never /work or absolute/traversal, and must match " +
+          "the current worker checkout. git apply --check runs first. The first useful mutation " +
+          "activates the worker naturally—no dummy sandbox_bash; no approval is required and the " +
+          "host stays unchanged.",
         args: { patch: z.string().min(1).max(4 * 1024 * 1024) },
         execute: async (args, ctx) => {
           await ensureWorker(ctx.sessionID, ctx.directory);
@@ -228,10 +254,10 @@ export default function sandboxToolsPlugin() {
 
       sandbox_bash: tool({
         description:
-          "Run a command inside this session's sandbox workspace. NOT a host shell: the " +
-          "command is tokenized (no pipes, redirection, globs or variable expansion) and " +
-          "executed in the isolated worker. Use sandbox_write / sandbox_apply_patch for edits. " +
-          "The first call activates the worker.",
+          "Run a read-only command in the isolated worker only. The command becomes an argv vector, " +
+          "never a shell: no pipes, redirection, globbing, or expansion. Do not edit files or run " +
+          "git apply/reset/checkout. Optional cwd is relative to the sandbox project root, never " +
+          "absolute. The first useful execution activates the worker naturally—no dummy activation.",
         args: {
           command: z.string().min(1).max(64 * 1024),
           cwd: pathArg.optional(),
@@ -254,7 +280,9 @@ export default function sandboxToolsPlugin() {
       }),
 
       sandbox_diff: tool({
-        description: "Show the diff between the session's baseline and the sandbox HEAD (B..C).",
+        description:
+          "Show the committed baseline-to-worker HEAD diff (B→C). Requires an ACTIVE worker and " +
+          "never activates one. Run sandbox_finish first if current uncommitted edits must be included.",
         args: {},
         execute: async (_args, ctx) => {
           const c = await client();
@@ -264,8 +292,9 @@ export default function sandboxToolsPlugin() {
 
       sandbox_finish: tool({
         description:
-          "Finalize the sandbox work: export the worker result bundle and import it under " +
-          "refs/opencode-sandbox/result/<sessionID>. The host working tree stays unchanged (S15).",
+          "Prepare and export the sandbox result bundle. The host working tree stays unchanged and " +
+          "no approval is required. Host ref import occurs only in real Git mode. Transitions to " +
+          "RESULT_READY and retains the worker until sandbox_apply, sandbox_discard, or keep.",
         args: {},
         execute: async (_args, ctx) => {
           const c = await client();
@@ -275,39 +304,139 @@ export default function sandboxToolsPlugin() {
 
       sandbox_apply: tool({
         description:
-          "Ask the user to approve applying the finished sandbox result (B->C delta) to the " +
-          "host project. Requires sandbox_finish first; requires explicit human approval " +
-          "(S15, §19). The broker re-checks host divergence (S16) before applying.",
+          "Ask the user to approve applying the finished sandbox result (B->C delta) to the host " +
+          "project; requires explicit human approval (S15, §19). The result is prepared automatically " +
+          "when needed and previewed first. On approval, the broker re-checks host divergence (S16) " +
+          "and protected paths before applying. Success is APPLIED, releases the worker, and ends " +
+          "this session's worker lifecycle; denial or failure retains the result.",
         args: {},
         execute: async (_args, ctx) => {
           const c = await client();
-          const status = (await c.request("workerStatus", ctx.sessionID)) as { state: string };
-          if (status.state !== "RESULT_READY") {
-            const prepared = await c.request("prepareResult", ctx.sessionID, {}, ctx.agent);
-            void prepared;
+          const workerStatus = (await c.request("workerStatus", ctx.sessionID, {}, ctx.agent)) as { state?: string };
+          if (workerStatus.state !== "RESULT_READY") {
+            await c.request("prepareResult", ctx.sessionID, {}, ctx.agent);
           }
           const diff = await c.request("diff", ctx.sessionID, { mode: "active" }, ctx.agent);
           const summary = (diff as { stat?: string }).stat ?? "";
-          // opencode 1.18.x: ctx.ask takes {permission, patterns, always,
-          // metadata} and resolves void on approval; a denial REJECTS the
-          // promise (verified against @opencode-ai/plugin typings at Gate 4).
+          const diffRes = diff as { stat?: string; diff?: string; compare?: string };
+          const rawPreview = (diffRes.compare ?? "").trim() ? diffRes.compare : diffRes.diff;
+          const pol = (await c.request("policy", ctx.sessionID, {}, ctx.agent)) as {
+            resourceCaps?: { maxApplyDiffLines?: number };
+          };
+          const previewCap = pol.resourceCaps?.maxApplyDiffLines ?? 200;
+          const diffPreview = (rawPreview ?? "").split("\n").slice(0, previewCap).join("\n");
           await ctx.ask({
             permission: "sandbox_apply",
             patterns: ["*"],
             always: [],
-            metadata: { summary },
+            metadata: { summary, diff: diffPreview },
           });
           return formatResult("applyResult", await c.request("applyResult", ctx.sessionID, { confirm: "APPLY" }, ctx.agent));
         },
       }),
 
+      sandbox_copy_out: tool({
+        description:
+          "Copy a file from the ACTIVE sandbox workspace to a host file. Requires an ACTIVE worker " +
+          "and never activates one. workerPath is relative to the sandbox project root, never " +
+          "absolute or traversal; hostTarget must be absolute and in BROKER_EXTERNAL_COPY_TARGETS. " +
+          "Shows a preview and asks for explicit human approval (S15). Source-code targets are bounded " +
+          "by the fully visible review limit (maxApplyDiffLines); large code changes must use " +
+          "sandbox_apply or be split. If the target exists, the broker creates <target>.bak before " +
+          "atomic replacement.",
+        args: { workerPath: pathArg, hostTarget: z.string().min(1).max(4096) },
+        execute: async (args, ctx) => {
+          const c = await client();
+          const info = (await c.request("copyOutInfo", ctx.sessionID, { workerPath: args.workerPath, hostTarget: args.hostTarget }, ctx.agent)) as {
+            target?: string;
+            totalLines?: number;
+            preview?: string;
+          };
+          await ctx.ask({
+            permission: "sandbox_copy_out",
+            patterns: ["*"],
+            always: [],
+            metadata: {
+              target: info.target ?? args.hostTarget,
+              totalLines: info.totalLines ?? 0,
+              preview: info.preview ?? "",
+            },
+          });
+          return formatResult("copyOut", await c.request("copyOut", ctx.sessionID, { workerPath: args.workerPath, hostTarget: args.hostTarget, confirm: "COPY" }, ctx.agent));
+        },
+      }),
+
+      sandbox_copy_in: tool({
+        description:
+          "Copy a host file into the sandbox workspace. The first useful copy-in activates the " +
+          "worker naturally; no dummy sandbox_bash needed. hostSource must be absolute, existing, " +
+          "regular, and in BROKER_EXTERNAL_COPY_TARGETS; workerPath is relative to the sandbox " +
+          "project root, never absolute or traversal. Shows file info and asks for explicit human " +
+          "approval (S15). The host is not modified; the worker destination is overwritten.",
+        args: { hostSource: z.string().min(1).max(4096), workerPath: pathArg },
+        execute: async (args, ctx) => {
+          await ensureWorker(ctx.sessionID, ctx.directory);
+          const c = await client();
+          const info = (await c.request("copyInInfo", ctx.sessionID, { hostSource: args.hostSource, workerPath: args.workerPath }, ctx.agent)) as {
+            source?: string;
+            bytes?: number;
+          };
+          await ctx.ask({
+            permission: "sandbox_copy_in",
+            patterns: ["*"],
+            always: [],
+            metadata: { source: info.source ?? args.hostSource, bytes: info.bytes ?? 0 },
+          });
+          return formatResult("copyIn", await c.request("copyIn", ctx.sessionID, { hostSource: args.hostSource, workerPath: args.workerPath, confirm: "COPY" }, ctx.agent));
+        },
+      }),
+
       sandbox_discard: tool({
         description:
-          "Discard this session's sandbox result and destroy its worker (REJECT semantics, §20).",
+          "Discard only a prepared or retained sandbox result. No approval is required; destroys the " +
+          "result and worker, leaves the host unchanged, and ends in terminal REJECTED.",
         args: {},
         execute: async (_args, ctx) => {
           const c = await client();
           return formatResult("discardResult", await c.request("discardResult", ctx.sessionID, { confirm: "REJECT" }, ctx.agent));
+        },
+      }),
+
+      host_sdd_status: tool({
+        description:
+          "Run a host-side, allowlisted SDD runtime status operation. The broker uses the current " +
+          "canonical project root and exact operation-specific argv, never sandbox_bash; this tool " +
+          "never accepts arbitrary cwd, binary, or argv and does not activate a worker. Returns JSON.",
+        args: {},
+        execute: async (_args, ctx) => {
+          const c = await client();
+          const result = await c.request("sddStatus", ctx.sessionID, {
+            projectDir: currentProjectDirectory(ctx.directory),
+          }, ctx.agent);
+          return JSON.stringify(result, null, 2);
+        },
+      }),
+
+      host_sdd_attempt_acquire: tool({
+        description:
+          "Run a host-side, allowlisted SDD runtime attempt-acquire operation. The broker uses the " +
+          "current canonical project root and exact operation-specific argv, never sandbox_bash; " +
+          "this tool never accepts arbitrary cwd, binary, or argv and does not activate a worker. Returns JSON.",
+        args: {
+          change: sddIdentifierArg,
+          requestId: sddRequestIdArg,
+          workUnit: sddIdentifierArg,
+          evidenceGoal: sddIdentifierArg,
+          maxAttempts: sddPositiveIntArg,
+          maxChangedLines: sddPositiveIntArg,
+        },
+        execute: async (args, ctx) => {
+          const c = await client();
+          const result = await c.request("sddAttemptAcquire", ctx.sessionID, {
+            projectDir: currentProjectDirectory(ctx.directory),
+            ...args,
+          }, ctx.agent);
+          return JSON.stringify(result, null, 2);
         },
       }),
     },

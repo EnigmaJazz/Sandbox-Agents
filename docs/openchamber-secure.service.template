@@ -1,0 +1,26 @@
+# Secure OpenChamber web server (user systemd unit, Gate 9).
+# Reviewed and installed manually by the user at ~/.config/systemd/user/.
+# Not installed by any repo script. See docs/manual-verification.md Gate 9.
+#
+# Web UI password comes from the protected env file
+# ~/.config/openchamber/secure.env (chmod 600), key OPENCHAMBER_UI_PASSWORD.
+[Unit]
+Description=Secure OpenChamber web server
+PartOf=graphical-session.target
+Requires=secure-opencode.service
+After=secure-opencode.service network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+EnvironmentFile=-%h/.config/openchamber/secure.env
+Environment=OPENCODE_SKIP_START=true
+Environment=OPENCODE_HOST=http://127.0.0.1:4096
+Environment=OPENCODE_PORT=4096
+# Docker Open WebUI owns port 3000; Tailscale :8446 proxies to 127.0.0.1:8789.
+ExecStart=/usr/bin/env OPENCODE_SKIP_START=true OPENCODE_HOST=http://127.0.0.1:4096 OPENCODE_PORT=4096 /home/james/agent-sandbox-integration/scripts/start-openchamber serve --foreground --port 8789
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

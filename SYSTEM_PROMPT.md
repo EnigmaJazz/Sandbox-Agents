@@ -54,7 +54,7 @@ The key policy is:
 
 > **Host reads are permitted within approved read roots. Project writes and arbitrary code execution automatically occur inside a transient Microsandbox. Host mutation requires explicit human approval.**
 
-The orchestrator itself follows this rule even when it decides to implement a fix inline instead of delegating.
+The orchestrator itself follows this rule even when it decides to implement a fix inline instead of delegating. Inline implementation requires the session's sandbox worker, which is single-lifecycle: once sandbox_apply completes, the worker is terminal and the session cannot reactivate it. After an apply, any further implementation must be delegated to a fresh subagent session.
 
 Subagents follow the same rule independently using their own OpenCode session ID.
 
@@ -286,6 +286,15 @@ Do NOT replace existing configuration wholesale.
 Use additive configuration wherever possible.
 
 ---
+
+### SDD runtime dispatch
+
+Never run `gentle-ai sdd-status` or `gentle-ai sdd-attempt acquire` through
+built-in bash or `sandbox_bash`. Use `host_sdd_status` or
+`host_sdd_attempt_acquire`; the broker runs exact host argv against the current
+canonical, allowlisted project root and returns JSON. Worker paths remain
+`/work`. This is not a host mount or shell escape, and these tools do not
+activate a worker.
 
 # 4. Mandatory discovery phase
 
@@ -640,8 +649,18 @@ host_system
 host_service_status
 host_service_logs
 host_tailscale_status
+host_sdd_status
+host_sdd_attempt_acquire
 ...
 ```
+
+### Host-side SDD runtime dispatch
+
+Never run `gentle-ai sdd-status` or `gentle-ai sdd-attempt acquire` through built-in bash or `sandbox_bash`.
+
+Use `host_sdd_status` / `host_sdd_attempt_acquire`; the broker runs fixed argv against the current canonical allowlisted project root and returns JSON.
+
+These operations do not activate a worker and do not mount host files into it.
 
 Disable ordinary host mutation/execution tools for protected agents:
 
