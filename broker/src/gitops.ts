@@ -94,7 +94,26 @@ export function buildDiffArgv(baseline: string, result: string): string[][] {
   return [
     ["git", "diff", "--stat", baseline, result],
     ["git", "diff", "--raw", "-z", baseline, result],
+    buildChangedPathsArgv(baseline, result),
   ];
+}
+
+export function buildChangedPathsArgv(baseline: string, result: string): string[] {
+  return ["git", "diff", "--name-only", "--no-renames", "-z", baseline, result, "--", "."];
+}
+
+export interface NulDelimitedPaths {
+  paths: string[];
+  complete: boolean;
+}
+
+/** Parse `git diff --name-only -z` output without treating path bytes as lines. */
+export function parseNulDelimitedPaths(output: string): NulDelimitedPaths {
+  if (output.length === 0) return { paths: [], complete: true };
+  if (!output.endsWith("\u0000")) return { paths: [], complete: false };
+  const paths = output.slice(0, -1).split("\u0000");
+  if (paths.some((path) => path.length === 0)) return { paths: [], complete: false };
+  return { paths, complete: true };
 }
 
 /**
@@ -142,9 +161,8 @@ export function classifyRawDiff(lines: readonly string[]): FileChange[] {
     const newMode = m[2];
     const status = m[3];
     const path = m[4];
-    const mode = newMode ?? oldMode ?? "";
-    const isSymlink = mode.startsWith("120000");
-    const isSubmodule = mode.startsWith("160000");
+    const isSymlink = oldMode === "120000" || newMode === "120000";
+    const isSubmodule = oldMode === "160000" || newMode === "160000";
     let kind: ChangeKind;
     if (isSymlink) kind = "symlink";
     else if (isSubmodule) kind = "submodule";

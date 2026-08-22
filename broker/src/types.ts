@@ -49,6 +49,9 @@ export type Operation =
   | "destroyWorker"
   | "listWorkers"
   | "metrics"
+  // Host-side SDD runtime: fixed argv and trusted project roots only.
+  | "sddStatus"
+  | "sddAttemptAcquire"
   // §8 structured read-only host API (never mutation)
   | "hostSystemSummary"
   | "hostMemory"
@@ -60,6 +63,11 @@ export type Operation =
   | "hostTailscaleStatus"
   | "hostDockerList"
   | "hostDockerLogs"
+  // copy tool: worker <-> allowlisted host file transfer (S15)
+  | "copyOutInfo"
+  | "copyOut"
+  | "copyInInfo"
+  | "copyIn"
   // read-only policy/introspection (used by the routing guard plugin)
   | "policy";
 
@@ -81,6 +89,8 @@ export const OPERATIONS: readonly Operation[] = [
   "destroyWorker",
   "listWorkers",
   "metrics",
+  "sddStatus",
+  "sddAttemptAcquire",
   "hostSystemSummary",
   "hostMemory",
   "hostDiskUsage",
@@ -91,6 +101,10 @@ export const OPERATIONS: readonly Operation[] = [
   "hostTailscaleStatus",
   "hostDockerList",
   "hostDockerLogs",
+  "copyOutInfo",
+  "copyOut",
+  "copyInInfo",
+  "copyIn",
   "policy",
 ];
 
@@ -152,6 +166,20 @@ export interface BrokerResponseEnvelope {
 export interface EnsureWorkerPayload {
   /** Project directory (from ToolContext.directory); mapped to a projectID via the trusted allowlist. */
   projectDir: string;
+}
+
+export interface SddStatusPayload {
+  projectDir: string;
+}
+
+export interface SddAttemptAcquirePayload {
+  projectDir: string;
+  change: string;
+  requestId: string;
+  workUnit: string;
+  evidenceGoal: string;
+  maxAttempts: number;
+  maxChangedLines: number;
 }
 
 export interface ExecPayload {

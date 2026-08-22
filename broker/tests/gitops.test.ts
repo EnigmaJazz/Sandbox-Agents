@@ -15,6 +15,7 @@ import {
   resultRef,
   buildSnapshotPlan,
   buildResultImportPlan,
+  buildDiffArgv,
   buildApplyArgv,
   buildCheckArgv,
   classifyRawDiff,
@@ -103,6 +104,20 @@ describe("snapshot plan (§17) — never touches the user's index/branch", () =>
   test("state-dir artifact paths are session-scoped", () => {
     expect(patchPathFor("/state", "s1")).toBe("/state/patches/s1.patch");
     expect(bundlePathFor("/state", "s1")).toBe("/state/bundles/s1.bundle");
+  });
+
+  test("diff path discovery is NUL-safe and disables rename detection", () => {
+    expect(buildDiffArgv(`${BASELINE_REF_PREFIX}/sess123`, `${RESULT_REF_PREFIX}/sess123`)).toContainEqual([
+      "git",
+      "diff",
+      "--name-only",
+      "--no-renames",
+      "-z",
+      `${BASELINE_REF_PREFIX}/sess123`,
+      `${RESULT_REF_PREFIX}/sess123`,
+      "--",
+      ".",
+    ]);
   });
 });
 

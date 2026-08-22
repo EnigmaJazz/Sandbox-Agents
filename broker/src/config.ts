@@ -36,6 +36,8 @@ export interface ResourceConfig {
   maxWorkers: number;
   maxAggregateCpu: number;
   maxAggregateMemBytes: number;
+  /** Max B->C patch lines an apply may carry (approval preview limit). */
+  maxApplyDiffLines: number;
   execTimeoutMsDefault: number;
   execTimeoutMsMax: number;
   contentMaxBytes: number;
@@ -71,6 +73,12 @@ export interface HostReadConfig {
   dockerLogs: HostReadToolConfig;
 }
 
+export interface SddRuntimeConfig {
+  /** Trusted host executable; never supplied by a request payload. */
+  binary: string;
+  outputMaxBytes: number;
+}
+
 export interface BrokerConfig {
   socketPath: string;
   stateDir: string;
@@ -89,14 +97,25 @@ export interface BrokerConfig {
   projects: ProjectConfig[];
   /** S6: explicit external read roots. Never grant whole-home access. */
   approvedExternalReadRoots: string[];
+  /** Explicit absolute host FILE targets sandbox_copy_out/in may use (S15). */
+  externalCopyTargets: string[];
   /** S7 + S17 protected paths (glob patterns, applied to canonical paths). */
   protectedPaths: string[];
   /** S17: security components agents must never modify. */
   protectedSecurityFiles: string[];
   resource: ResourceConfig;
   hostRead: HostReadConfig;
+  sddRuntime: SddRuntimeConfig;
   network: { mode: "deny-by-default"; note: string };
 }
+
+export type BrokerConfigOverrides = Omit<
+  Partial<BrokerConfig>,
+  "resource" | "sddRuntime"
+> & {
+  resource?: Partial<ResourceConfig>;
+  sddRuntime?: Partial<SddRuntimeConfig>;
+};
 
 /** S7: sensitive host paths always denied to model/tool access. */
 export const DEFAULT_PROTECTED_PATHS: string[] = [
@@ -148,6 +167,9 @@ export const DEFAULT_APPROVED_EXTERNAL_READ_ROOTS: string[] = [
   // "/home/james/reference",
 ];
 
+/** Default external copy targets — empty; filled via BROKER_EXTERNAL_COPY_TARGETS. */
+export const DEFAULT_EXTERNAL_COPY_TARGETS: string[] = [];
+
 /** Fixed executables discovered on this host (discovery report §2, §5). */
 export const DEFAULT_HOST_READ_CONFIG: HostReadConfig = {
   systemSummary: { enabled: true, binary: "/usr/bin/uname" },
@@ -164,7 +186,7 @@ export const DEFAULT_HOST_READ_CONFIG: HostReadConfig = {
 
 const GiB = 1024 * 1024 * 1024;
 
-export function defaultConfig(overrides: Partial<BrokerConfig> = {}): BrokerConfig {
+export function defaultConfig(overrides: BrokerConfigOverrides = {}): BrokerConfig {
   const runtimeDir =
     process.env.XDG_RUNTIME_DIR && process.env.XDG_RUNTIME_DIR.length > 0
       ? process.env.XDG_RUNTIME_DIR
@@ -183,6 +205,7 @@ export function defaultConfig(overrides: Partial<BrokerConfig> = {}): BrokerConf
     workerNamePrefix: "oc-sandbox",
     projects: DEFAULT_PROJECTS,
     approvedExternalReadRoots: DEFAULT_APPROVED_EXTERNAL_READ_ROOTS,
+    externalCopyTargets: DEFAULT_EXTERNAL_COPY_TARGETS,
     protectedPaths: DEFAULT_PROTECTED_PATHS,
     protectedSecurityFiles: DEFAULT_PROTECTED_SECURITY_FILES,
     resource: {
@@ -196,6 +219,7 @@ export function defaultConfig(overrides: Partial<BrokerConfig> = {}): BrokerConf
       maxWorkers: 4,
       maxAggregateCpu: 8,
       maxAggregateMemBytes: 8 * GiB,
+      maxApplyDiffLines: 200,
       execTimeoutMsDefault: 120_000,
       execTimeoutMsMax: 600_000,
       contentMaxBytes: 1 * 1024 * 1024,
@@ -211,6 +235,10 @@ export function defaultConfig(overrides: Partial<BrokerConfig> = {}): BrokerConf
       workerUser: "nobody",
     },
     hostRead: DEFAULT_HOST_READ_CONFIG,
+    sddRuntime: {
+      binary: process.env.BROKER_GENTLE_AI_BINARY ?? "gentle-ai",
+      outputMaxBytes: 512 * 1024,
+    },
     network: {
       mode: "deny-by-default",
       note: "Placeholder: final worker net config (S12) is generated at Gate 3 with allowlist domains only.",
@@ -220,6 +248,7 @@ export function defaultConfig(overrides: Partial<BrokerConfig> = {}): BrokerConf
     ...cfg,
     ...dropUndefined(overrides),
     resource: { ...cfg.resource, ...dropUndefined(overrides.resource) },
+    sddRuntime: { ...cfg.sddRuntime, ...dropUndefined(overrides.sddRuntime) },
   };
 }
 

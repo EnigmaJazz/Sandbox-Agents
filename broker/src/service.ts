@@ -9,7 +9,7 @@
  * result steps verify and FAIL with a clear message instead of running git
  * against the host repo. Set BROKER_GIT_MODE=real only after Gate 5 review.
  */
-import { existsSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync, chmodSync, copyFileSync, renameSync, statSync, readFileSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { BrokerConfig } from "./config.ts";
@@ -22,6 +22,7 @@ import type { SpawnFn } from "./msb.ts";
 import {
   assertArgv,
   assertContent,
+  assertExternalCopyTarget,
   assertGrepQuery,
   assertPayloadKeys,
   assertPositiveInt,
@@ -35,12 +36,19 @@ import {
   buildCheckArgv,
   bundlePathFor,
   patchPathFor,
-  classifyRawDiff,
+  buildChangedPathsArgv,
+  parseNulDelimitedPaths,
   checkProtectedPaths,
+  classifyRawDiff,
   computeDivergence,
   parseLsFilesLines,
   parseLsTreeLines,
 } from "./gitops.ts";
+import {
+  assertCopyOutReviewLimit,
+  countCopyLines,
+  isSourceCodeTarget,
+} from "./copy-review.ts";
 import { MsbError } from "./msb.ts";
 import { StateError } from "./state.ts";
 import { PolicyError, checkAdmission } from "./policy.ts";
@@ -373,7 +381,12 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
       // 0644: msb copy preserves the host mode with ROOT ownership in the
       // guest; 0600 would be unreadable to the non-root worker user
       // (Gate 5 finding — chmod by nobody on a root-owned file is EPERM).
-      writeFileSync(hostTmp, payload.content as string, { mode: 0o644 });
+      const rawContent = payload.content as string;
+      // Gate 6 follow-up: guarantee a trailing newline so the B->C diff and
+      // git apply never reject on a missing final newline (layers above were
+      // observed stripping it).
+      const content = rawContent.endsWith("\n") ? rawContent : `${rawContent}\n`;
+      writeFileSync(hostTmp, content, { mode: 0o644 });
       // chmod, not the create mode: the broker's umask (systemd UMask=0077)
       // masks 0644 down to 0600, which becomes root-owned 0600 in the guest
       // and unreadable by the non-root worker user (Gate 5 live finding).
@@ -402,6 +415,123 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Copy tool (S15): worker file <-> allowlisted host file
+// ---------------------------------------------------------------------------
+
+export function buildCopyOutInfoOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as { workerPath?: unknown; hostTarget?: unknown };
+    assertSandboxPath(payload.workerPath, ctx.config.resource.pathMaxBytes);
+    const target = assertExternalCopyTarget(payload.hostTarget, ctx.config.externalCopyTargets);
+    const record = recordOr404(ctx.store, req.sessionID);
+    const worker = requireActiveWorker(record);
+    const result = await ctx.adapter.exec(worker, ["cat", "--", payload.workerPath as string], {
+      cwd: "/work",
+      timeoutMs: 30_000,
+    });
+    if (result.status !== 0) {
+      throw new MsbError(`copyOutInfo failed in worker (status ${result.status}): ${result.stderr.trim()}`);
+    }
+    const lines = result.stdout.split("\n");
+    const totalLines = countCopyLines(result.stdout);
+    assertCopyOutReviewLimit(target, totalLines, ctx.config.resource.maxApplyDiffLines);
+    const preview =
+      !isSourceCodeTarget(target) && totalLines > 400
+        ? `${lines.slice(0, 400).join("\n")}\n(... truncated: ${totalLines} total lines)`
+        : result.stdout;
+    return { target, totalLines, preview };
+  };
+}
+
+export function buildCopyOutOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as { workerPath?: unknown; hostTarget?: unknown; confirm?: unknown };
+    if (payload.confirm !== "COPY") {
+      throw new ValidationError('copyOut requires confirm: "COPY"');
+    }
+    assertSandboxPath(payload.workerPath, ctx.config.resource.pathMaxBytes);
+    const canonicalTarget = assertExternalCopyTarget(payload.hostTarget, ctx.config.externalCopyTargets);
+    const record = recordOr404(ctx.store, req.sessionID);
+    const worker = requireActiveWorker(record);
+
+    const hostTmp = join(ctx.config.stateDir, "tmp", `copy-${req.sessionID}-${randomUUID()}.tmp`);
+    try {
+      mkdirSync(join(ctx.config.stateDir, "tmp"), { recursive: true, mode: 0o700 });
+      // copyOut throws MsbError on failure (msb.ts) — the host target is
+      // never written partially.
+      // msb needs an absolute endpoint; workerPath is validated relative.
+      const workerAbs = (payload.workerPath as string).startsWith("/")
+        ? (payload.workerPath as string)
+        : `/work/${payload.workerPath as string}`;
+      await ctx.adapter.copyOut(worker, workerAbs, hostTmp);
+      // Recheck the bytes actually copied before creating a backup or touching the host target.
+      const copiedContent = readFileSync(hostTmp, "utf8");
+      assertCopyOutReviewLimit(canonicalTarget, countCopyLines(copiedContent), ctx.config.resource.maxApplyDiffLines);
+      // Gate 6: keep a recoverable backup of the host target before overwriting
+      // it (copy_out is a whole-file host write; a bad copy must be restorable).
+      if (existsSync(canonicalTarget)) {
+        copyFileSync(canonicalTarget, `${canonicalTarget}.bak`);
+      }
+      // Atomic publish: rename into place, then fix the mode. The host umask
+      // (systemd UMask=0077) masks 0644 down to 0600, so chmod explicitly.
+      renameSync(hostTmp, canonicalTarget);
+      chmodSync(canonicalTarget, 0o644);
+      return { target: canonicalTarget, copied: true };
+    } finally {
+      rmSync(hostTmp, { force: true });
+    }
+  };
+}
+
+export function buildCopyInInfoOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as { hostSource?: unknown; workerPath?: unknown };
+    const canonicalSource = assertExternalCopyTarget(payload.hostSource, ctx.config.externalCopyTargets);
+    assertSandboxPath(payload.workerPath, ctx.config.resource.pathMaxBytes);
+    let st: Stats;
+    try {
+      st = statSync(canonicalSource);
+    } catch {
+      throw new ValidationError("copy source does not exist on the host");
+    }
+    if (!st.isFile()) {
+      throw new ValidationError("copy source must be a regular file");
+    }
+    return { source: canonicalSource, bytes: st.size };
+  };
+}
+
+export function buildCopyInOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as { hostSource?: unknown; workerPath?: unknown; confirm?: unknown };
+    if (payload.confirm !== "COPY") {
+      throw new ValidationError('copyIn requires confirm: "COPY"');
+    }
+    const canonicalSource = assertExternalCopyTarget(payload.hostSource, ctx.config.externalCopyTargets);
+    assertSandboxPath(payload.workerPath, ctx.config.resource.pathMaxBytes);
+    const record = recordOr404(ctx.store, req.sessionID);
+    const worker = requireActiveWorker(record);
+
+    const workerTmp = `/work/.broker-tmp/copy-${randomUUID()}.tmp`;
+    const mkdirRes = await ctx.adapter.exec(worker, ["mkdir", "-p", workerDirOf(workerTmp)], {
+      timeoutMs: 30_000,
+    });
+    if (mkdirRes.status !== 0) {
+      throw new MsbError(`copyIn mkdir failed in worker (status ${mkdirRes.status}): ${mkdirRes.stderr.trim()}`);
+    }
+    // copyIn throws MsbError on failure (msb.ts).
+    await ctx.adapter.copyIn(worker, canonicalSource, workerTmp);
+    const moved = await ctx.adapter.exec(worker, ["mv", "-f", workerTmp, payload.workerPath as string], {
+      timeoutMs: 30_000,
+    });
+    if (moved.status !== 0) {
+      throw new MsbError(`copyIn failed in worker (status ${moved.status}): ${moved.stderr.trim()}`);
+    }
+    return { path: payload.workerPath };
+  };
+}
+
 function workerDirOf(filePath: string): string {
   const idx = filePath.lastIndexOf("/");
   return idx > 0 ? filePath.slice(0, idx) : "/work";
@@ -418,9 +548,18 @@ export function buildApplyOp(ctx: OpContext): OpHandler {
     const workerTmp = `/work/.broker-tmp/apply-${randomUUID()}.patch`;
     try {
       // 0644: readable by the non-root worker user (Gate 5 finding).
-      writeFileSync(hostTmp, payload.patch as string, { mode: 0o644 });
+      // Trailing-newline guarantee: the transport strips the final \n and
+      // git apply rejects patches whose last line lacks it (live finding).
+      const patchContent = (payload.patch as string).endsWith("\n")
+        ? (payload.patch as string)
+        : `${payload.patch as string}\n`;
+      writeFileSync(hostTmp, patchContent, { mode: 0o644 });
       // chmod, not the create mode: see buildWriteFileOp — umask masking.
       chmodSync(hostTmp, 0o644);
+      const mkdirRes = await ctx.adapter.exec(worker, ["mkdir", "-p", workerDirOf(workerTmp)], { timeoutMs: 30_000 });
+      if (mkdirRes.status !== 0) {
+        throw new MsbError(`applyPatch mkdir failed in worker (status ${mkdirRes.status}): ${mkdirRes.stderr.trim()}`);
+      }
       await ctx.adapter.copyIn(worker, hostTmp, workerTmp);
       // §19.6: `git apply --check` before applying, inside the worker repo.
       const check = await ctx.adapter.exec(worker, ["git", "apply", "--check", workerTmp], {
@@ -476,8 +615,11 @@ export function buildGrepOp(ctx: OpContext): OpHandler {
 
 export function buildDiffOp(ctx: OpContext): OpHandler {
   return async (req) => {
-    payloadOf(req);
+    const payload = payloadOf(req) as { mode?: unknown };
+    const mode = payload.mode ?? "active";
+    if (mode !== "active" && mode !== "retained") throw new ValidationError("diff mode must be active or retained");
     const record = recordOr404(ctx.store, req.sessionID);
+    if (mode === "retained") return buildRetainedDiff(ctx, record);
     const worker = requireActiveWorker(record);
     const ref = record.baselineRef ?? baselineRef(record.sessionID);
     const stat = await ctx.adapter.exec(worker, ["git", "diff", "--stat", ref, "HEAD"], {
@@ -488,7 +630,60 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
       cwd: "/work",
       timeoutMs: 60_000,
     });
-    return { stat: stat.stdout, diff: diff.stdout, exitCode: diff.status };
+    // Gate 6 follow-up: for whole-file temps (added paths ending in ".new"),
+    // also report the diff against the sibling original (or a
+    // .broker-tmp/ref-<added> delivery reference) so the approval prompt
+    // shows the real change instead of the full new file.
+    let compare = "";
+    const nameStatus = await ctx.adapter.exec(worker, ["git", "diff", "--name-status", ref, "HEAD"], {
+      cwd: "/work",
+      timeoutMs: 60_000,
+    });
+    for (const line of nameStatus.stdout.split("\n")) {
+      const m = /^A[\t ]+(.+)$/.exec(line.trim());
+      if (!m) continue;
+      const added = m[1]!;
+      if (!added.endsWith(".new")) continue;
+      const candidates = [added.slice(0, -4), `.broker-tmp/ref-${added}`];
+      for (const cand of candidates) {
+        // Gate 6 finding: git diff --no-index treats a MISSING path as
+        // empty and exits 1, so a non-existent sibling would be accepted
+        // as a full-file diff and shadow the ref. Probe existence first.
+        const exists = await ctx.adapter.exec(worker, ["test", "-e", cand], {
+          cwd: "/work",
+          timeoutMs: 30_000,
+        });
+        if (exists.status !== 0) continue;
+        const cmp = await ctx.adapter.exec(worker, ["git", "diff", "--no-index", "--", cand, added], {
+          cwd: "/work",
+          timeoutMs: 60_000,
+        });
+        // exit 0 = identical, 1 = differences; anything else skips.
+        if (cmp.status !== 0 && cmp.status !== 1) continue;
+        compare += cmp.stdout + "\n";
+        break;
+      }
+    }
+    const changedPathResult = await ctx.adapter.exec(
+      worker,
+      buildChangedPathsArgv(ref, "HEAD"),
+      {
+        cwd: "/work",
+        timeoutMs: 60_000,
+      },
+    );
+    const parsedChangedPaths =
+      changedPathResult.status === 0
+        ? parseNulDelimitedPaths(changedPathResult.stdout)
+        : { paths: [], complete: false };
+    return {
+      stat: stat.stdout,
+      diff: diff.stdout,
+      compare,
+      changedPaths: parsedChangedPaths.paths,
+      changedPathsComplete: changedPathResult.status === 0 && parsedChangedPaths.complete,
+      exitCode: diff.status,
+    };
   };
 }
 
@@ -565,7 +760,10 @@ async function runPrepare(ctx: OpContext, sessionID: string): Promise<string> {
   if (verify.status !== 0) {
     throw new MsbError(`result bundle verification failed: ${verify.stderr.trim()}`);
   }
+  if (record.projectID === undefined) throw new StateError("project not in allowlist");
+  const projectID: string = record.projectID;
   const imported = await ctx.git.spawn(["git", "fetch", "--no-tags", hostBundle, `${ref}:${ref}`], {
+    cwd: projectDirFor(ctx, projectID),
     timeoutMs: 120_000,
   });
   if (imported.status !== 0) {
@@ -578,13 +776,15 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const payload = payloadOf(req) as { confirm?: unknown };
     if (payload.confirm !== "APPLY") {
-      throw new ValidationError("applyResult requires confirm: \"APPLY\"");
+      throw new ValidationError('applyResult requires confirm: "APPLY"');
     }
     let record = recordOr404(ctx.store, req.sessionID);
     if (record.state !== "RESULT_READY") {
       throw new StateError(`cannot apply result from state ${record.state}`);
     }
-    const project = ctx.config.projects.find((p) => p.id === record.projectID);
+    if (record.projectID === undefined) throw new StateError("project not in allowlist");
+    const projectID: string = record.projectID;
+    const project = ctx.config.projects.find((p) => p.id === projectID);
     if (!project) throw new StateError("project not in allowlist");
     const resultRefName = record.resultRef ?? resultRef(req.sessionID);
     const baselineRefName = record.baselineRef ?? baselineRef(req.sessionID);
@@ -592,7 +792,7 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     record = ctx.store.transition(req.sessionID, "RESULT_READY", "APPLY_PENDING", {});
 
     // §19.1 / S16: host must still match the baseline the worker was built from.
-    const divergence = await hostDivergence(ctx, record.projectID, baselineRefName);
+    const divergence = await hostDivergence(ctx, projectID, baselineRefName);
     if (divergence.length > 0) {
       ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
         error: `host diverged from baseline; result retained for reconciliation (${divergence.slice(0, 10).join(", ")})`,
@@ -604,7 +804,7 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     }
 
     // §19.2-5: inspect changed paths; reject protected/symlink/submodule.
-    const changed = await changedPathsBetween(ctx, record.projectID, baselineRefName, resultRefName);
+    const changed = await changedPathsBetween(ctx, projectID, baselineRefName, resultRefName);
     const rejectedProtected = checkProtectedPaths(changed, [
       ...ctx.config.protectedPaths,
       ...ctx.config.protectedSecurityFiles,
@@ -616,6 +816,17 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
       throw new StateError(`result touches protected paths (S7/S17): ${rejectedProtected.join(", ")}`);
     }
 
+    const rawChanges = await rawChangesBetween(ctx, projectID, baselineRefName, resultRefName);
+    const rejectedUnsafe = rawChanges
+      .filter((change) => change.kind === "symlink" || change.kind === "submodule")
+      .map((change) => `${change.kind}:${change.path}`);
+    if (rejectedUnsafe.length > 0) {
+      ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
+        error: `result contains unsafe symlink/submodule changes: ${rejectedUnsafe.join(", ")}`,
+      });
+      throw new StateError(`result contains unsafe symlink/submodule changes: ${rejectedUnsafe.join(", ")}`);
+    }
+
     // §19.6: dry-run check then apply; working-tree only (no index/branch).
     const patchFile = patchPathFor(ctx.config.stateDir, req.sessionID);
     const patch = await ctx.git.spawn(["git", "diff", baselineRefName, resultRefName, "--", "."], {
@@ -625,6 +836,17 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     if (patch.status !== 0) {
       ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", { error: "diff generation failed" });
       throw new StateError("diff generation failed; result retained");
+    }
+    // Gate 6: the approval prompt preview caps at maxApplyDiffLines — never
+    // ask the human to approve a delta larger than the preview can show.
+    const patchLines = patch.stdout.split("\n").length;
+    if (patchLines > ctx.config.resource.maxApplyDiffLines) {
+      ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
+        error: `apply delta too large to review (${patchLines} > ${ctx.config.resource.maxApplyDiffLines} lines)`,
+      });
+      throw new StateError(
+        `apply delta exceeds the reviewable preview limit (${patchLines} lines > ${ctx.config.resource.maxApplyDiffLines}); split the change into smaller applies and retry`,
+      );
     }
     mkdirSync(join(ctx.config.stateDir, "patches"), { recursive: true, mode: 0o700 });
     writeFileSync(patchFile, patch.stdout, { mode: 0o600 });
@@ -646,6 +868,10 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
       error: undefined,
       resultRef: resultRefName,
     });
+    // Gate 6 finding: APPLIED is terminal for the session's worker - release
+    // the transient worker and its pool allocation now instead of leaking
+    // them until an explicit stop/cleanup (pool exhaustion after demos).
+    await releaseWorker(ctx, record);
     return { state: record.state, applied: true, resultRef: resultRefName };
   };
 }
@@ -675,14 +901,59 @@ async function changedPathsBetween(ctx: OpContext, projectID: string, baselineRe
   if (!project) throw new StateError("no projects configured");
   const gitDir = join(project.path, ".git");
   const raw = await ctx.git.spawn(
-    ["git", "diff", "--raw", "-z", baselineRefName, resultRefName],
+    buildChangedPathsArgv(baselineRefName, resultRefName),
     { env: { GIT_DIR: gitDir }, timeoutMs: 60_000 },
   );
   if (raw.status !== 0) {
     throw new StateError(`cannot diff result: ${raw.stderr.trim()}`);
   }
-  const changes = classifyRawDiff(raw.stdout.split("\u0000"));
-  return changes.map((c) => c.path);
+  const parsed = parseNulDelimitedPaths(raw.stdout);
+  if (!parsed.complete) {
+    throw new StateError("cannot diff result: changed path metadata incomplete");
+  }
+  return parsed.paths;
+}
+
+async function buildRetainedDiff(ctx: OpContext, record: SessionRecord): Promise<Record<string, unknown>> {
+  if (record.state !== "RESULT_READY" && record.state !== "RETAINED") throw new StateError(`cannot inspect retained result from state ${record.state}`);
+  const project = ctx.config.projects.find((p) => p.id === record.projectID);
+  if (!project) throw new StateError("project not in allowlist");
+  const baseline = record.baselineRef ?? baselineRef(record.sessionID);
+  const result = record.resultRef;
+  if (!result) throw new StateError("retained result has no result ref");
+  const run = (argv: string[]) => ctx.git.spawn(argv, { cwd: project.path, timeoutMs: 60_000 });
+  const stat = await run(["git", "diff", "--stat", baseline, result]);
+  const diff = await run(["git", "diff", baseline, result]);
+  const changedPathResult = await run(buildChangedPathsArgv(baseline, result));
+  const parsedChangedPaths = changedPathResult.status === 0
+    ? parseNulDelimitedPaths(changedPathResult.stdout)
+    : { paths: [], complete: false };
+  return {
+    stat: stat.stdout,
+    diff: diff.stdout,
+    compare: "",
+    changedPaths: parsedChangedPaths.paths,
+    changedPathsComplete: changedPathResult.status === 0 && parsedChangedPaths.complete,
+    exitCode: diff.status,
+  };
+}
+
+async function rawChangesBetween(ctx: OpContext, projectID: string, baselineRefName: string, resultRefName: string) {
+  const project = ctx.config.projects.find((p) => p.id === projectID);
+  if (!project) throw new StateError("no projects configured");
+  const gitDir = join(project.path, ".git");
+  const raw = await ctx.git.spawn(
+    ["git", "diff", "--raw", "--no-renames", baselineRefName, resultRefName, "--", "."],
+    { env: { GIT_DIR: gitDir }, cwd: project.path, timeoutMs: 60_000 },
+  );
+  if (raw.status !== 0) throw new StateError(`cannot classify result diff: ${raw.stderr.trim()}`);
+  if (raw.stdout.includes("\u0000")) throw new StateError("cannot classify result diff: raw metadata malformed");
+  const lines = raw.stdout.length === 0 ? [] : raw.stdout.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  if (lines.some((line) => line.length === 0)) throw new StateError("cannot classify result diff: raw metadata malformed");
+  const changes = classifyRawDiff(lines);
+  if (changes.length !== lines.length) throw new StateError("cannot classify result diff: raw metadata malformed");
+  return changes;
 }
 
 export function buildKeepResultOp(ctx: OpContext): OpHandler {
@@ -703,7 +974,7 @@ export function buildKeepResultOp(ctx: OpContext): OpHandler {
       throw new StateError(`cannot keep result from state ${record.state}`);
     }
     if (record.workerName && record.workerState === "ACTIVE") {
-      await ctx.adapter.remove(record.workerName).catch(() => undefined);
+      await releaseWorker(ctx, record);
     }
     ctx.store.touch(req.sessionID, { workerState: record.workerName ? "DESTROYED" : undefined });
     record = ctx.store.transition(req.sessionID, record.state, "RETAINED", {
@@ -753,7 +1024,7 @@ export function buildDestroyWorkerOp(ctx: OpContext): OpHandler {
       return { destroyed: true, worker: null };
     }
     if (record.workerState === "ACTIVE" || record.workerState === "CREATING") {
-      await ctx.adapter.remove(record.workerName).catch(() => undefined);
+      await releaseWorker(ctx, record);
     }
     ctx.store.touch(req.sessionID, { workerState: "DESTROYED" });
     return { destroyed: true, worker: record.workerName };
@@ -826,6 +1097,7 @@ export function buildPolicyOp(ctx: OpContext): OpHandler {
         maxWorkers: ctx.budget.maxWorkers,
         maxAggregateCpu: ctx.budget.maxAggregateCpu,
         maxAggregateMemBytes: ctx.budget.maxAggregateMemBytes,
+        maxApplyDiffLines: ctx.config.resource.maxApplyDiffLines,
       },
       network: ctx.config.network,
     };
@@ -844,5 +1116,24 @@ export function buildHostOp(ctx: OpContext): OpHandler {
   };
 }
 
-// Re-exported helpers used by tests.
+/** Release a session's transient worker and its pool allocation (S22). */
+async function releaseWorker(ctx: OpContext, record: SessionRecord): Promise<void> {
+  if (record.workerName && record.workerState !== "DESTROYED" && record.workerState !== "FAILED") {
+    // Gate 6 finding: msb remove fails while a guest is still running, so
+    // stop first, then remove; retry once in case removal races the stop.
+    await ctx.adapter.stop(record.workerName).catch(() => undefined);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await ctx.adapter.remove(record.workerName);
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
+  }
+  ctx.pool.allocations = ctx.pool.allocations.filter(
+    (a) => a.memBytes !== (record.resources?.memBytes ?? -1) || a.cpu !== (record.resources?.cpu ?? -1),
+  );
+}
+
 export { formatBytes };

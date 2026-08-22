@@ -13,8 +13,8 @@
  *   a shell, but no payload may be safe to pipe through one either).
  */
 import { realpathSync } from "node:fs";
-import { isAbsolute, normalize, relative, sep } from "node:path";
-import { FORBIDDEN_WORKER_FIELDS, type BrokerResponseEnvelope } from "./types.ts";
+import { basename, dirname, isAbsolute, join, normalize, sep } from "node:path";
+import { FORBIDDEN_WORKER_FIELDS, type BrokerResponseEnvelope, OPERATIONS } from "./types.ts";
 
 export class ValidationError extends Error {
   readonly code = "validation" as const;
@@ -32,7 +32,7 @@ export class ValidationError extends Error {
 export const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 /** Project IDs: lowercase start, then word chars/dot/dash/underscore. */
 export const PROJECT_ID_RE = /^[a-z][a-z0-9._-]{0,63}$/;
-/** Agent names: conservative charset, length-capped. Logging only. */
+/** Agent names: conservative charset, length-capped. */
 export const AGENT_NAME_RE = /^[A-Za-z0-9_.-]{0,128}$/;
 export const REQUEST_ID_RE = /^[A-Za-z0-9-]{1,128}$/;
 
@@ -203,8 +203,6 @@ export function assertServiceOrContainerName(value: unknown, what: string): asse
   if (typeof value !== "string" || !/^[A-Za-z0-9_.:@-]{1,128}$/.test(value)) {
     throw new ValidationError(`invalid ${what} name`);
   }
-  // Argument injection: a leading dash would be parsed as a CLI flag by
-  // systemctl/journalctl/docker.
   if (value.startsWith("-")) {
     throw new ValidationError(`${what} name must not start with '-'`);
   }
@@ -245,7 +243,7 @@ export function assertContent(content: unknown, maxBytes: number): asserts conte
 // Payload key allowlists (§7: reject resource-request fields)
 // ---------------------------------------------------------------------------
 
-const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
+export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   ensureWorker: ["projectDir"],
   exec: ["argv", "cwd", "timeoutMs", "env"],
   readFile: ["path"],
@@ -261,6 +259,16 @@ const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   metrics: [],
   prepareResult: [],
   workerStatus: [],
+  sddStatus: ["projectDir"],
+  sddAttemptAcquire: [
+    "projectDir",
+    "change",
+    "requestId",
+    "workUnit",
+    "evidenceGoal",
+    "maxAttempts",
+    "maxChangedLines",
+  ],
   hostSystemSummary: [],
   hostMemory: [],
   hostNetworkListeners: [],
@@ -271,6 +279,10 @@ const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   hostServiceStatus: ["service"],
   hostServiceLogs: ["service", "lines", "since"],
   hostDockerLogs: ["container", "lines"],
+  copyOutInfo: ["workerPath", "hostTarget"],
+  copyOut: ["workerPath", "hostTarget", "confirm"],
+  copyInInfo: ["hostSource", "workerPath"],
+  copyIn: ["hostSource", "workerPath", "confirm"],
   policy: [],
 };
 
@@ -299,11 +311,7 @@ export function assertPayloadKeys(operation: string, payload: unknown): void {
 // Host read path canonicalization (S6): approved roots + symlink escape
 // ---------------------------------------------------------------------------
 
-/**
- * Canonicalize an absolute host path and verify it stays inside one of the
- * approved external read roots. Uses realpath (resolves symlinks) and a
- * separator-boundary prefix check; reject anything that escapes.
- */
+/** Canonicalize an absolute host path and verify it stays inside an approved root. */
 export function canonicalizeWithinRoots(
   path: unknown,
   approvedRoots: readonly string[],
@@ -341,10 +349,34 @@ export function canonicalizeWithinRoots(
   throw new ValidationError(`path escapes approved read roots (S6): ${canonical}`);
 }
 
-/**
- * Divergence-only helper used by gitops: is `child` (canonical) inside
- * `parent` (canonical) at a path-boundary? No filesystem access.
- */
+/** Validate an absolute host FILE target against an exact allowlist. */
+export function assertExternalCopyTarget(target: unknown, allowlist: readonly string[]): string {
+  if (typeof target !== "string" || target.length === 0 || !isAbsolute(target)) {
+    throw new ValidationError("copy target must be an absolute path");
+  }
+  assertMaxBytes(target, 4096, "target");
+  assertNoControlChars(target, "target");
+  const canonicalTarget = (() => {
+    try {
+      return join(realpathSync(dirname(target)), basename(target));
+    } catch {
+      throw new ValidationError("copy target parent does not resolve: " + target);
+    }
+  })();
+  const canonicalAllowlist = allowlist.map((entry) => {
+    try {
+      return join(realpathSync(dirname(entry)), basename(entry));
+    } catch {
+      throw new ValidationError("copy allowlist entry does not resolve: " + entry);
+    }
+  });
+  if (!canonicalAllowlist.includes(canonicalTarget)) {
+    throw new ValidationError("copy target is not in the external copy allowlist (S15)");
+  }
+  return canonicalTarget;
+}
+
+/** Divergence-only helper used by gitops: is `child` inside `parent`? */
 export function isWithin(parent: string, child: string): boolean {
   if (child === parent) return true;
   return child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
@@ -412,8 +444,6 @@ export function validateEnvelope(raw: unknown): {
     payload: req.payload,
   };
 }
-
-import { OPERATIONS } from "./types.ts";
 
 /** True when the response is an error (used by tests + client). */
 export function isErrorResponse(resp: BrokerResponseEnvelope): boolean {

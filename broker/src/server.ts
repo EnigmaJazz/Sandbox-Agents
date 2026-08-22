@@ -1,4 +1,4 @@
-/**
+/*
  * NDJSON-over-Unix-socket transport for the sandbox broker
  * (SYSTEM_PROMPT.md §6-§10, §20, §26).
  *
@@ -17,14 +17,20 @@ import { join } from "node:path";
 import type { BrokerConfig } from "./config.ts";
 import { computeBudget, discoverHostResources } from "./policy.ts";
 import { SessionStore, StateError } from "./state.ts";
-import { MsbAdapter, MsbError, spawnArgv } from "./msb.ts";
+import { MsbAdapter, MsbError, spawnArgv, type SpawnFn } from "./msb.ts";
 import { HostReadExecutor, buildHostReadOps } from "./hostread.ts";
+import { SddRuntimeExecutor } from "./sdd-runtime.ts";
+import { buildSddAttemptAcquireOp, buildSddStatusOp } from "./sdd-service.ts";
 import { Logger, durationMs, startTimer } from "./logging.ts";
 import { ValidationError } from "./validation.ts";
 import { PolicyError } from "./policy.ts";
 import {
   buildApplyOp,
   buildApplyResultOp,
+  buildCopyInInfoOp,
+  buildCopyInOp,
+  buildCopyOutInfoOp,
+  buildCopyOutOp,
   buildDestroyWorkerOp,
   buildDiffOp,
   buildDiscardResultOp,
@@ -59,9 +65,11 @@ interface SocketLike {
   close(): void;
 }
 
+type ServerContext = OpContext & { sddRuntime: SddRuntimeExecutor };
+
 export class BrokerServer {
   private readonly logger: Logger;
-  private readonly ctx: OpContext;
+  private readonly ctx: ServerContext;
   private readonly sessionLocks = new Map<string, Promise<unknown>>();
   private readonly buffers = new WeakMap<SocketLike, Buffer>();
   private listener: { stop(): void } | null = null;
@@ -76,12 +84,19 @@ export class BrokerServer {
     const adapter = new MsbAdapter(config);
     const resources = discoverHostResources();
     const budget = computeBudget(resources, config.resource);
+    const spawn: SpawnFn = (argv, opts) => spawnArgv(argv, opts);
     const hostRead = new HostReadExecutor({
-      spawn: (argv, opts) => spawnArgv(argv, opts),
+      spawn,
       ops: buildHostReadOps(config.hostRead),
       approvedReadRoots: config.approvedExternalReadRoots,
       logLinesMax: config.resource.logLinesMax,
       outputMaxBytes: config.resource.outputMaxBytes,
+    });
+    const sddRuntime = new SddRuntimeExecutor({
+      binary: config.sddRuntime.binary,
+      projects: config.projects,
+      outputMaxBytes: config.sddRuntime.outputMaxBytes,
+      spawn,
     });
     this.ctx = {
       config,
@@ -91,9 +106,10 @@ export class BrokerServer {
       resources,
       pool: { allocations: [] },
       hostRead,
+      sddRuntime,
       logger: this.logger,
       git: {
-        spawn: (argv, opts) => spawnArgv(argv, opts),
+        spawn,
         runnerMode: process.env.BROKER_GIT_MODE === "real" ? "real" : "planned",
       },
     };
@@ -123,8 +139,6 @@ export class BrokerServer {
       },
     });
     this.listener = listener;
-    // The socket must be user-only (spec §6). Bun applies the process umask;
-    // enforce 0600 explicitly after bind.
     chmodSync(socketPath, 0o600);
     this.logger.log({ operation: "broker.start", result: "ok" });
   }
@@ -138,10 +152,6 @@ export class BrokerServer {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // NDJSON framing
-  // -------------------------------------------------------------------------
-
   private onData(socket: SocketLike, data: Buffer): void {
     const prev = this.buffers.get(socket) ?? Buffer.alloc(0);
     const buf = Buffer.concat([prev, data]);
@@ -152,10 +162,6 @@ export class BrokerServer {
         ok: false,
         error: { code: "protocol", message: "request line exceeds size cap" },
       });
-      // Close the connection after the fail-closed response. Note: bun's
-      // node:net client may not emit 'close' for server-initiated closes —
-      // the client sees readyState transition to "closed" (observed at
-      // Gate 4 security-suite bring-up).
       socket.close();
       return;
     }
@@ -271,8 +277,20 @@ export class BrokerServer {
         return buildListWorkersOp(this.ctx)(req);
       case "metrics":
         return buildMetricsOp(this.ctx)(req);
+      case "sddStatus":
+        return buildSddStatusOp(this.ctx)(req);
+      case "sddAttemptAcquire":
+        return buildSddAttemptAcquireOp(this.ctx)(req);
       case "policy":
         return buildPolicyOp(this.ctx)(req);
+      case "copyOutInfo":
+        return buildCopyOutInfoOp(this.ctx)(req);
+      case "copyOut":
+        return buildCopyOutOp(this.ctx)(req);
+      case "copyInInfo":
+        return buildCopyInInfoOp(this.ctx)(req);
+      case "copyIn":
+        return buildCopyInOp(this.ctx)(req);
       default:
         return buildHostOp(this.ctx)(req);
     }
