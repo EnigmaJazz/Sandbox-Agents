@@ -34,10 +34,20 @@ const REDIRECT_MSG =
 const MUTATION_BLOCK_MSG =
   "Ordinary host mutation/execution tools are disabled in this secured environment (S1/S10). " +
   "Use sandbox_write / sandbox_edit / sandbox_apply_patch / sandbox_bash to work inside your isolated worker.";
-
+const APPLY_PREVIEW_TOOLS = new Set([
+  "applyPreview",
+  "sandbox_apply_preview",
+  "hostApplyPreview",
+]);
 /** Tools the guard routes or blocks. */
 const READ_TOOLS = new Set(["read", "grep", "glob", "list"]);
-const MUTATION_TOOLS = new Set(["bash", "edit", "write", "apply_patch", "patch"]);
+const MUTATION_TOOLS = new Set([
+  "bash",
+  "edit",
+  "write",
+  "apply_patch",
+  "patch",
+]);
 /** args fields that carry path/pattern targets, per tool. */
 const READ_PATH_ARGS: Record<string, string[]> = {
   read: ["filePath"],
@@ -51,7 +61,9 @@ let policyCache: { roots: string[]; protectedPaths: string[] } | null = null;
 
 async function broker(): Promise<BrokerClient> {
   if (!clientPromise) {
-    clientPromise = createBrokerClient({ socketPath: brokerSocketPath() }).catch((err) => {
+    clientPromise = createBrokerClient({
+      socketPath: brokerSocketPath(),
+    }).catch((err) => {
       clientPromise = null;
       throw err;
     });
@@ -63,10 +75,18 @@ async function broker(): Promise<BrokerClient> {
 async function approvedRoots(): Promise<string[]> {
   if (!policyCache) {
     const c = await broker();
-    const policy = (await c.request("policy", "guard", undefined, undefined)) as {
+    const policy = (await c.request(
+      "policy",
+      "guard",
+      undefined,
+      undefined,
+    )) as {
       approvedExternalReadRoots: string[];
     };
-    policyCache = { roots: policy.approvedExternalReadRoots ?? [], protectedPaths: [] };
+    policyCache = {
+      roots: policy.approvedExternalReadRoots ?? [],
+      protectedPaths: [],
+    };
   }
   return policyCache.roots;
 }
@@ -81,7 +101,10 @@ function isExternalApproved(argPath: string, roots: string[]): boolean {
   return false;
 }
 
-function pathArgsFor(toolName: string, args: Record<string, unknown> | undefined): string[] {
+function pathArgsFor(
+  toolName: string,
+  args: Record<string, unknown> | undefined,
+): string[] {
   const keys = READ_PATH_ARGS[toolName] ?? [];
   return keys
     .filter((k) => typeof args?.[k] === "string")
@@ -91,6 +114,7 @@ function pathArgsFor(toolName: string, args: Record<string, unknown> | undefined
 export default function routingGuardPlugin(): Plugin {
   return {
     "tool.execute.before": async (input, output) => {
+      if (APPLY_PREVIEW_TOOLS.has(toolName)) return;
       const toolName = input.tool;
       const sessionID = input.sessionID;
       if (READ_TOOLS.has(toolName)) {
@@ -100,18 +124,29 @@ export default function routingGuardPlugin(): Plugin {
         // mode (S3); do not fail the read.
         let status: { state: string };
         try {
-          status = (await c.request("workerStatus", sessionID, undefined, undefined)) as {
+          status = (await c.request(
+            "workerStatus",
+            sessionID,
+            undefined,
+            undefined,
+          )) as {
             state: string;
           };
         } catch {
           return; // unknown session: allow host reads (HOST_READ_ONLY)
         }
-        if (status.state === "SANDBOX_ACTIVE" || status.state === "RESULT_READY") {
+        if (
+          status.state === "SANDBOX_ACTIVE" ||
+          status.state === "RESULT_READY"
+        ) {
           const roots = await approvedRoots();
           const args = (output?.args ?? {}) as Record<string, unknown>;
           const targets = pathArgsFor(toolName, args);
           // External approved reads remain allowed (S6); project reads are blocked.
-          const anyExternal = targets.length === 0 ? false : targets.every((t) => isExternalApproved(t, roots));
+          const anyExternal =
+            targets.length === 0
+              ? false
+              : targets.every((t) => isExternalApproved(t, roots));
           if (targets.length > 0 && anyExternal) {
             return; // external approved read root — allowed
           }

@@ -71,6 +71,7 @@ export interface HostReadConfig {
   tailscaleStatus: HostReadToolConfig;
   dockerList: HostReadToolConfig;
   dockerLogs: HostReadToolConfig;
+  applyPreview: HostReadToolConfig;
 }
 
 export interface SddRuntimeConfig {
@@ -247,6 +248,7 @@ export const DEFAULT_HOST_READ_CONFIG: HostReadConfig = {
   tailscaleStatus: { enabled: true, binary: "/usr/bin/tailscale" },
   dockerList: { enabled: false, binary: "/usr/bin/docker" },
   dockerLogs: { enabled: false, binary: "/usr/bin/docker" },
+  applyPreview: { enabled: true, binary: "/bin/cat" },
 };
 
 const GiB = 1024 * 1024 * 1024;
@@ -266,7 +268,9 @@ function positiveIntEnv(name: string, fallback: number): number {
   return parsed;
 }
 
-export function defaultConfig(overrides: BrokerConfigOverrides = {}): BrokerConfig {
+export function defaultConfig(
+  overrides: BrokerConfigOverrides = {},
+): BrokerConfig {
   const runtimeDir =
     process.env.XDG_RUNTIME_DIR && process.env.XDG_RUNTIME_DIR.length > 0
       ? process.env.XDG_RUNTIME_DIR
@@ -317,7 +321,17 @@ export function defaultConfig(overrides: BrokerConfigOverrides = {}): BrokerConf
       pathMaxBytes: 4 * 1024,
       grepQueryMaxBytes: 1024,
       logLinesMax: 500,
-      envAllowedKeys: ["PATH", "HOME", "TERM", "LANG", "LC_ALL", "TMPDIR", "CI", "NO_COLOR", "GIT_*"],
+      envAllowedKeys: [
+        "PATH",
+        "HOME",
+        "TERM",
+        "LANG",
+        "LC_ALL",
+        "TMPDIR",
+        "CI",
+        "NO_COLOR",
+        "GIT_*",
+      ],
       workerUser: "nobody",
     },
     hostRead: DEFAULT_HOST_READ_CONFIG,
@@ -339,9 +353,16 @@ export function defaultConfig(overrides: BrokerConfigOverrides = {}): BrokerConf
     readOnlyAgents: overrides.readOnlyAgents ?? cfg.readOnlyAgents,
   };
   // Normalize roleModels keys: hyphen → underscore for fresh-eyes
-  if ((merged.roleModels as Record<string, unknown>)["fresh-eyes"] !== undefined) {
-    const hyphen = (merged.roleModels as Record<string, unknown>)["fresh-eyes"] as RoleModelEntry;
-    if (!merged.roleModels.fresh_eyes || (merged.roleModels.fresh_eyes as unknown[]).length === 0) {
+  if (
+    (merged.roleModels as Record<string, unknown>)["fresh-eyes"] !== undefined
+  ) {
+    const hyphen = (merged.roleModels as Record<string, unknown>)[
+      "fresh-eyes"
+    ] as RoleModelEntry;
+    if (
+      !merged.roleModels.fresh_eyes ||
+      (merged.roleModels.fresh_eyes as unknown[]).length === 0
+    ) {
       merged.roleModels.fresh_eyes = hyphen;
     }
     delete (merged.roleModels as Record<string, unknown>)["fresh-eyes"];

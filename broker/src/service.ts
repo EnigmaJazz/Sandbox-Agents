@@ -9,7 +9,18 @@
  * result steps verify and FAIL with a clear message instead of running git
  * against the host repo. Set BROKER_GIT_MODE=real only after Gate 5 review.
  */
-import { existsSync, mkdirSync, writeFileSync, rmSync, chmodSync, copyFileSync, renameSync, statSync, readFileSync, type Stats } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  chmodSync,
+  copyFileSync,
+  renameSync,
+  statSync,
+  readFileSync,
+  type Stats,
+} from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { BrokerConfig } from "./config.ts";
@@ -52,8 +63,19 @@ import {
 import { MsbError } from "./msb.ts";
 import { StateError } from "./state.ts";
 import { PolicyError, checkAdmission, type Admission } from "./policy.ts";
-import { PendingQueue, QueuedTimedOutError, type QueuedEntry } from "./queue.ts";
-import type { BrokerRequestEnvelope, SessionRecord, WorkerRecord, MetricsRecord, PolicyRecord, Operation } from "./types.ts";
+import {
+  PendingQueue,
+  QueuedTimedOutError,
+  type QueuedEntry,
+} from "./queue.ts";
+import type {
+  BrokerRequestEnvelope,
+  SessionRecord,
+  WorkerRecord,
+  MetricsRecord,
+  PolicyRecord,
+  Operation,
+} from "./types.ts";
 
 export interface OpContext {
   config: BrokerConfig;
@@ -89,13 +111,19 @@ function payloadOf(req: BrokerRequestEnvelope): Payload {
 /** Worker ops require an ACTIVE worker; state/workerState are authoritative (§10). */
 function requireActiveWorker(record: SessionRecord): string {
   if (record.state !== "SANDBOX_ACTIVE" && record.state !== "RESULT_READY") {
-    throw new StateError(`session ${record.sessionID} is not sandbox-active (state=${record.state})`);
+    throw new StateError(
+      `session ${record.sessionID} is not sandbox-active (state=${record.state})`,
+    );
   }
   if (!record.workerName) {
-    throw new StateError(`session ${record.sessionID} has no worker recorded — fail closed`);
+    throw new StateError(
+      `session ${record.sessionID} has no worker recorded — fail closed`,
+    );
   }
   if (record.workerState === "DESTROYED" || record.workerState === "FAILED") {
-    throw new StateError(`worker for session ${record.sessionID} is ${record.workerState}; re-ensure before use`);
+    throw new StateError(
+      `worker for session ${record.sessionID} is ${record.workerState}; re-ensure before use`,
+    );
   }
   return record.workerName;
 }
@@ -115,18 +143,26 @@ function recordOr404(store: SessionStore, sessionID: string): SessionRecord {
 export function buildEnsureWorkerOp(ctx: OpContext): OpHandler {
   return async (req) => {
     // Orchestrator read-only: refuse before any touch/admission side effect (R2).
-    const existing = ctx.store.get(req.sessionID)
-    const trusted = existing?.agent ?? req.agent
-    const readOnly = (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? []
+    const existing = ctx.store.get(req.sessionID);
+    const trusted = existing?.agent ?? req.agent;
+    const readOnly =
+      (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? [];
     if (trusted && readOnly.includes(trusted)) {
-      throw new PolicyError(`orchestrator agent "${trusted}" is not allowed to create a worker (orchestrator-readonly)`)
+      throw new PolicyError(
+        `orchestrator agent "${trusted}" is not allowed to create a worker (orchestrator-readonly)`,
+      );
     }
     if (req.agent && readOnly.includes(req.agent) && req.agent !== trusted) {
-      throw new PolicyError(`orchestrator agent "${req.agent}" is not allowed to create a worker (orchestrator-readonly)`)
+      throw new PolicyError(
+        `orchestrator agent "${req.agent}" is not allowed to create a worker (orchestrator-readonly)`,
+      );
     }
     const payload = payloadOf(req) as { projectDir?: unknown };
     const projectID = resolveProjectID(payload.projectDir, ctx.config.projects);
-    const record = ctx.store.touch(req.sessionID, { projectID, agent: req.agent });
+    const record = ctx.store.touch(req.sessionID, {
+      projectID,
+      agent: req.agent,
+    });
 
     // Fast paths. State gates run BEFORE admission so FAILED_CLOSED and
     // mid-creation sessions never park in the pool queue.
@@ -136,14 +172,26 @@ export function buildEnsureWorkerOp(ctx: OpContext): OpHandler {
         // Worker reuse (§28): same session keeps its worker — unless the idle
         // reaper already released it (no workerName / DESTROYED / FAILED), in
         // which case fall through and (re)create on demand.
-        if (record.workerName && record.workerState !== "DESTROYED" && record.workerState !== "FAILED") {
-          return { worker: record.workerName, state: record.state, reused: true };
+        if (
+          record.workerName &&
+          record.workerState !== "DESTROYED" &&
+          record.workerState !== "FAILED"
+        ) {
+          return {
+            worker: record.workerName,
+            state: record.state,
+            reused: true,
+          };
         }
         break;
       case "FAILED_CLOSED":
-        throw new StateError(`session ${req.sessionID} is FAILED_CLOSED; manual review required`);
+        throw new StateError(
+          `session ${req.sessionID} is FAILED_CLOSED; manual review required`,
+        );
       case "CREATING_SANDBOX":
-        throw new StateError(`sandbox creation already in progress for ${req.sessionID} — retry`);
+        throw new StateError(
+          `sandbox creation already in progress for ${req.sessionID} — retry`,
+        );
       case "HOST_READ_ONLY":
       case "APPLIED":
       case "RETAINED":
@@ -182,25 +230,36 @@ async function createWorkerForSession(
   projectID: string,
 ): Promise<unknown> {
   // Orchestrator read-only: fail closed even for queued creations
-  const existing2 = ctx.store.get(sessionID)
-  const trusted2 = existing2?.agent ?? req.agent
-  const ro2 = (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? []
+  const existing2 = ctx.store.get(sessionID);
+  const trusted2 = existing2?.agent ?? req.agent;
+  const ro2 =
+    (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? [];
   if (trusted2 && ro2.includes(trusted2)) {
-    throw new PolicyError(`orchestrator agent "${trusted2}" is not allowed to create a worker (orchestrator-readonly)`)
+    throw new PolicyError(
+      `orchestrator agent "${trusted2}" is not allowed to create a worker (orchestrator-readonly)`,
+    );
   }
   const store = ctx.store;
   const record = recordOr404(store, sessionID);
   switch (record.state) {
     case "SANDBOX_ACTIVE":
     case "RESULT_READY":
-      if (record.workerName && record.workerState !== "DESTROYED" && record.workerState !== "FAILED") {
+      if (
+        record.workerName &&
+        record.workerState !== "DESTROYED" &&
+        record.workerState !== "FAILED"
+      ) {
         return { worker: record.workerName, state: record.state, reused: true };
       }
       break;
     case "FAILED_CLOSED":
-      throw new StateError(`session ${sessionID} is FAILED_CLOSED; manual review required`);
+      throw new StateError(
+        `session ${sessionID} is FAILED_CLOSED; manual review required`,
+      );
     case "CREATING_SANDBOX":
-      throw new StateError(`sandbox creation already in progress for ${sessionID} — retry`);
+      throw new StateError(
+        `sandbox creation already in progress for ${sessionID} — retry`,
+      );
     case "HOST_READ_ONLY":
     case "APPLIED":
     case "RETAINED":
@@ -246,7 +305,12 @@ async function createWorkerForSession(
       ["git", "init", "-q"],
       ["git", "config", "user.name", "opencode-sandbox"],
       ["git", "config", "user.email", "sandbox@local"],
-      ["git", "fetch", `/work/${sessionID}.bundle`, `${baselineRef(sessionID)}:refs/heads/baseline`],
+      [
+        "git",
+        "fetch",
+        `/work/${sessionID}.bundle`,
+        `${baselineRef(sessionID)}:refs/heads/baseline`,
+      ],
       ["git", "checkout", "-q", "-b", "work", "baseline"],
       // Mirror the host-side baseline ref name in the worker so buildDiffOp
       // (git diff refs/opencode-sandbox/baseline/<id> HEAD) resolves (Gate 6
@@ -258,24 +322,40 @@ async function createWorkerForSession(
       // written pack/idx ("non-monotonic index") — bounded retry.
       let res: Awaited<ReturnType<typeof ctx.adapter.exec>> | null = null;
       for (let attempt = 0; attempt < 3; attempt++) {
-        res = await ctx.adapter.exec(workerName, [...argv], { cwd: "/work", timeoutMs: 120_000 });
+        res = await ctx.adapter.exec(workerName, [...argv], {
+          cwd: "/work",
+          timeoutMs: 120_000,
+        });
         if (res.status === 0) break;
         await new Promise((r) => setTimeout(r, 400));
       }
       if (!res || res.status !== 0) {
-        throw new MsbError(`worker repo prep failed (${argv[1]}): ${trimErr(res?.stderr || res?.stdout || "")}`);
+        throw new MsbError(
+          `worker repo prep failed (${argv[1]}): ${trimErr(res?.stderr || res?.stdout || "")}`,
+        );
       }
     }
 
-    ctx.pool.allocations.push({ cpu: ctx.budget.perWorkerCpu, memBytes: ctx.budget.perWorkerMemBytes });
-    const next = store.transition(sessionID, "CREATING_SANDBOX", "SANDBOX_ACTIVE", {
-      workerName,
-      workerState: "ACTIVE",
-      baselineRef: baselineRef(sessionID),
-      resultRef: undefined,
-      error: undefined,
-      resources: { cpu: ctx.budget.perWorkerCpu, memBytes: ctx.budget.perWorkerMemBytes },
+    ctx.pool.allocations.push({
+      cpu: ctx.budget.perWorkerCpu,
+      memBytes: ctx.budget.perWorkerMemBytes,
     });
+    const next = store.transition(
+      sessionID,
+      "CREATING_SANDBOX",
+      "SANDBOX_ACTIVE",
+      {
+        workerName,
+        workerState: "ACTIVE",
+        baselineRef: baselineRef(sessionID),
+        resultRef: undefined,
+        error: undefined,
+        resources: {
+          cpu: ctx.budget.perWorkerCpu,
+          memBytes: ctx.budget.perWorkerMemBytes,
+        },
+      },
+    );
     return { worker: workerName, state: next.state, reused: false };
   } catch (err) {
     // §10: creation failure -> FAILED_CLOSED. Never fall back to host (S14).
@@ -307,18 +387,24 @@ async function createWorkerForSession(
  * open on the socket until a slot frees (drain), the bounded timeout fires
  * (queued_timed_out with the real position), or the client disconnects.
  */
-function parkAndWait(ctx: OpContext, req: BrokerRequestEnvelope, projectID: string): Promise<unknown> {
+function parkAndWait(
+  ctx: OpContext,
+  req: BrokerRequestEnvelope,
+  projectID: string,
+): Promise<unknown> {
   const queue = ctx.queue;
   if (!queue) {
-    throw new StateError("worker queue is not configured — cannot park request");
+    throw new StateError(
+      "worker queue is not configured — cannot park request",
+    );
   }
   const existing = queue.find(req.sessionID);
-  if (existing) {
-    // Idempotency: the same session is already parked — share its result.
-    return existing.pending;
-  }
+  if (existing)
+    return Promise.resolve({ queued: true, position: existing.position });
   if (queue.length >= ctx.config.queueMaxLength) {
-    throw new PolicyError(`worker queue full (${ctx.config.queueMaxLength}); retry later`);
+    throw new PolicyError(
+      `worker queue full (${ctx.config.queueMaxLength}); retry later`,
+    );
   }
   const timeoutMs = ctx.config.queueTimeoutMs;
   let resolve!: (v: unknown) => void;
@@ -327,6 +413,7 @@ function parkAndWait(ctx: OpContext, req: BrokerRequestEnvelope, projectID: stri
     resolve = res;
     reject = rej;
   });
+  pending.catch(() => {});
   const entry: QueuedEntry = {
     sessionID: req.sessionID,
     request: req,
@@ -349,7 +436,7 @@ function parkAndWait(ctx: OpContext, req: BrokerRequestEnvelope, projectID: stri
   }
   entry.timer = timer;
   queue.enqueue(entry);
-  return pending;
+  return Promise.resolve({ queued: true, position: entry.position });
 }
 
 /**
@@ -388,10 +475,22 @@ export function drainQueue(ctx: OpContext): void {
   }
 }
 
-async function runQueuedCreation(ctx: OpContext, entry: QueuedEntry): Promise<void> {
+async function runQueuedCreation(
+  ctx: OpContext,
+  entry: QueuedEntry,
+): Promise<void> {
   try {
-    const result = await createWorkerForSession(ctx, entry.request, entry.sessionID, entry.projectID);
-    entry.resolve({ ...(result as Record<string, unknown>), queued: true, queuePosition: entry.position });
+    const result = await createWorkerForSession(
+      ctx,
+      entry.request,
+      entry.sessionID,
+      entry.projectID,
+    );
+    entry.resolve({
+      ...(result as Record<string, unknown>),
+      queued: true,
+      queuePosition: entry.position,
+    });
   } catch (err) {
     entry.reject(err);
   } finally {
@@ -427,7 +526,10 @@ async function runSnapshot(
   sessionID: string,
   bundle: string,
 ): Promise<string> {
-  mkdirSync(join(ctx.config.stateDir, "bundles"), { recursive: true, mode: 0o700 });
+  mkdirSync(join(ctx.config.stateDir, "bundles"), {
+    recursive: true,
+    mode: 0o700,
+  });
   mkdirSync(join(ctx.config.stateDir, "tmp"), { recursive: true, mode: 0o700 });
   const gitDir = join(repoDir, ".git");
   const tmpIndex = join(ctx.config.stateDir, "tmp", `${sessionID}.index`);
@@ -446,7 +548,9 @@ async function runSnapshot(
   // HEAD must exist: the baseline commit B has HEAD as its parent.
   const head = await git(["git", "rev-parse", "--verify", "HEAD"]);
   if (head.status !== 0) {
-    throw new StateError(`project has no HEAD commit; cannot snapshot (${repoDir})`);
+    throw new StateError(
+      `project has no HEAD commit; cannot snapshot (${repoDir})`,
+    );
   }
 
   // Stage the full working tree (HEAD + staged + unstaged + untracked,
@@ -460,19 +564,30 @@ async function runSnapshot(
     throw new StateError(`snapshot write-tree failed: ${trimErr(tree.stderr)}`);
   }
   const commit = await git([
-    "git", "commit-tree", tree.stdout.trim(), "-p", "HEAD",
-    "-m", `opencode-sandbox baseline for ${sessionID}`,
+    "git",
+    "commit-tree",
+    tree.stdout.trim(),
+    "-p",
+    "HEAD",
+    "-m",
+    `opencode-sandbox baseline for ${sessionID}`,
   ]);
   if (commit.status !== 0) {
-    throw new StateError(`snapshot commit-tree failed: ${trimErr(commit.stderr)}`);
+    throw new StateError(
+      `snapshot commit-tree failed: ${trimErr(commit.stderr)}`,
+    );
   }
   const update = await git(["git", "update-ref", ref, commit.stdout.trim()]);
   if (update.status !== 0) {
-    throw new StateError(`snapshot update-ref failed: ${trimErr(update.stderr)}`);
+    throw new StateError(
+      `snapshot update-ref failed: ${trimErr(update.stderr)}`,
+    );
   }
   const bundleCreate = await git(["git", "bundle", "create", bundle, ref]);
   if (bundleCreate.status !== 0) {
-    throw new StateError(`snapshot bundle failed: ${trimErr(bundleCreate.stderr)}`);
+    throw new StateError(
+      `snapshot bundle failed: ${trimErr(bundleCreate.stderr)}`,
+    );
   }
   // systemd UMask=0077 makes git create the bundle 0600 -> root-owned in the
   // guest -> unreadable by the non-root worker user (Gate 5 live finding).
@@ -490,7 +605,12 @@ function trimErr(s: string): string {
 
 export function buildExecOp(ctx: OpContext): OpHandler {
   return async (req) => {
-    const payload = payloadOf(req) as { argv?: unknown; cwd?: unknown; timeoutMs?: unknown; env?: unknown };
+    const payload = payloadOf(req) as {
+      argv?: unknown;
+      cwd?: unknown;
+      timeoutMs?: unknown;
+      env?: unknown;
+    };
     assertArgv(payload.argv, {
       itemMaxBytes: ctx.config.resource.argvItemMaxBytes,
       maxItems: ctx.config.resource.argvMaxItems,
@@ -500,7 +620,11 @@ export function buildExecOp(ctx: OpContext): OpHandler {
       payload.timeoutMs === undefined
         ? ctx.config.resource.execTimeoutMsDefault
         : payload.timeoutMs;
-    assertPositiveInt(timeoutMs, ctx.config.resource.execTimeoutMsMax, "timeoutMs");
+    assertPositiveInt(
+      timeoutMs,
+      ctx.config.resource.execTimeoutMsMax,
+      "timeoutMs",
+    );
     let cwd: string | undefined;
     if (payload.cwd !== undefined) {
       assertSandboxPath(payload.cwd, ctx.config.resource.pathMaxBytes);
@@ -528,11 +652,17 @@ export function buildReadFileOp(ctx: OpContext): OpHandler {
     assertSandboxPath(payload.path, ctx.config.resource.pathMaxBytes);
     const record = recordOr404(ctx.store, req.sessionID);
     const worker = requireActiveWorker(record);
-    const result = await ctx.adapter.exec(worker, ["cat", "--", payload.path as string], {
-      timeoutMs: 30_000,
-    });
+    const result = await ctx.adapter.exec(
+      worker,
+      ["cat", "--", payload.path as string],
+      {
+        timeoutMs: 30_000,
+      },
+    );
     if (result.status !== 0) {
-      throw new MsbError(`readFile failed in worker (status ${result.status}): ${result.stderr.trim()}`);
+      throw new MsbError(
+        `readFile failed in worker (status ${result.status}): ${result.stderr.trim()}`,
+      );
     }
     return { content: result.stdout };
   };
@@ -546,10 +676,17 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
     const record = recordOr404(ctx.store, req.sessionID);
     const worker = requireActiveWorker(record);
 
-    const hostTmp = join(ctx.config.stateDir, "tmp", `write-${req.sessionID}-${randomUUID()}.tmp`);
+    const hostTmp = join(
+      ctx.config.stateDir,
+      "tmp",
+      `write-${req.sessionID}-${randomUUID()}.tmp`,
+    );
     const workerTmp = `/work/.broker-tmp/write-${randomUUID()}.tmp`;
     try {
-      mkdirSync(join(ctx.config.stateDir, "tmp"), { recursive: true, mode: 0o700 });
+      mkdirSync(join(ctx.config.stateDir, "tmp"), {
+        recursive: true,
+        mode: 0o700,
+      });
       // 0644: msb copy preserves the host mode with ROOT ownership in the
       // guest; 0600 would be unreadable to the non-root worker user
       // (Gate 5 finding — chmod by nobody on a root-owned file is EPERM).
@@ -557,7 +694,9 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
       // Gate 6 follow-up: guarantee a trailing newline so the B->C diff and
       // git apply never reject on a missing final newline (layers above were
       // observed stripping it).
-      const content = rawContent.endsWith("\n") ? rawContent : `${rawContent}\n`;
+      const content = rawContent.endsWith("\n")
+        ? rawContent
+        : `${rawContent}\n`;
       writeFileSync(hostTmp, content, { mode: 0o644 });
       // chmod, not the create mode: the broker's umask (systemd UMask=0077)
       // masks 0644 down to 0600, which becomes root-owned 0600 in the guest
@@ -571,14 +710,22 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
         { timeoutMs: 30_000 },
       );
       if (mkdirRes.status !== 0) {
-        throw new MsbError(`writeFile mkdir failed in worker (status ${mkdirRes.status}): ${mkdirRes.stderr.trim()}`);
+        throw new MsbError(
+          `writeFile mkdir failed in worker (status ${mkdirRes.status}): ${mkdirRes.stderr.trim()}`,
+        );
       }
       await ctx.adapter.copyIn(worker, hostTmp, workerTmp);
-      const moved = await ctx.adapter.exec(worker, ["mv", "-f", workerTmp, payload.path as string], {
-        timeoutMs: 30_000,
-      });
+      const moved = await ctx.adapter.exec(
+        worker,
+        ["mv", "-f", workerTmp, payload.path as string],
+        {
+          timeoutMs: 30_000,
+        },
+      );
       if (moved.status !== 0) {
-        throw new MsbError(`writeFile failed in worker (status ${moved.status}): ${moved.stderr.trim()}`);
+        throw new MsbError(
+          `writeFile failed in worker (status ${moved.status}): ${moved.stderr.trim()}`,
+        );
       }
       return { path: payload.path };
     } finally {
@@ -593,21 +740,37 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
 
 export function buildCopyOutInfoOp(ctx: OpContext): OpHandler {
   return async (req) => {
-    const payload = payloadOf(req) as { workerPath?: unknown; hostTarget?: unknown };
+    const payload = payloadOf(req) as {
+      workerPath?: unknown;
+      hostTarget?: unknown;
+    };
     assertSandboxPath(payload.workerPath, ctx.config.resource.pathMaxBytes);
-    const target = assertExternalCopyTarget(payload.hostTarget, ctx.config.externalCopyTargets);
+    const target = assertExternalCopyTarget(
+      payload.hostTarget,
+      ctx.config.externalCopyTargets,
+    );
     const record = recordOr404(ctx.store, req.sessionID);
     const worker = requireActiveWorker(record);
-    const result = await ctx.adapter.exec(worker, ["cat", "--", payload.workerPath as string], {
-      cwd: "/work",
-      timeoutMs: 30_000,
-    });
+    const result = await ctx.adapter.exec(
+      worker,
+      ["cat", "--", payload.workerPath as string],
+      {
+        cwd: "/work",
+        timeoutMs: 30_000,
+      },
+    );
     if (result.status !== 0) {
-      throw new MsbError(`copyOutInfo failed in worker (status ${result.status}): ${result.stderr.trim()}`);
+      throw new MsbError(
+        `copyOutInfo failed in worker (status ${result.status}): ${result.stderr.trim()}`,
+      );
     }
     const lines = result.stdout.split("\n");
     const totalLines = countCopyLines(result.stdout);
-    assertCopyOutReviewLimit(target, totalLines, ctx.config.resource.maxApplyDiffLines);
+    assertCopyOutReviewLimit(
+      target,
+      totalLines,
+      ctx.config.resource.maxApplyDiffLines,
+    );
     const preview =
       !isSourceCodeTarget(target) && totalLines > 400
         ? `${lines.slice(0, 400).join("\n")}\n(... truncated: ${totalLines} total lines)`
@@ -618,18 +781,32 @@ export function buildCopyOutInfoOp(ctx: OpContext): OpHandler {
 
 export function buildCopyOutOp(ctx: OpContext): OpHandler {
   return async (req) => {
-    const payload = payloadOf(req) as { workerPath?: unknown; hostTarget?: unknown; confirm?: unknown };
+    const payload = payloadOf(req) as {
+      workerPath?: unknown;
+      hostTarget?: unknown;
+      confirm?: unknown;
+    };
     if (payload.confirm !== "COPY") {
       throw new ValidationError('copyOut requires confirm: "COPY"');
     }
     assertSandboxPath(payload.workerPath, ctx.config.resource.pathMaxBytes);
-    const canonicalTarget = assertExternalCopyTarget(payload.hostTarget, ctx.config.externalCopyTargets);
+    const canonicalTarget = assertExternalCopyTarget(
+      payload.hostTarget,
+      ctx.config.externalCopyTargets,
+    );
     const record = recordOr404(ctx.store, req.sessionID);
     const worker = requireActiveWorker(record);
 
-    const hostTmp = join(ctx.config.stateDir, "tmp", `copy-${req.sessionID}-${randomUUID()}.tmp`);
+    const hostTmp = join(
+      ctx.config.stateDir,
+      "tmp",
+      `copy-${req.sessionID}-${randomUUID()}.tmp`,
+    );
     try {
-      mkdirSync(join(ctx.config.stateDir, "tmp"), { recursive: true, mode: 0o700 });
+      mkdirSync(join(ctx.config.stateDir, "tmp"), {
+        recursive: true,
+        mode: 0o700,
+      });
       // copyOut throws MsbError on failure (msb.ts) — the host target is
       // never written partially.
       // msb needs an absolute endpoint; workerPath is validated relative.
@@ -639,7 +816,11 @@ export function buildCopyOutOp(ctx: OpContext): OpHandler {
       await ctx.adapter.copyOut(worker, workerAbs, hostTmp);
       // Recheck the bytes actually copied before creating a backup or touching the host target.
       const copiedContent = readFileSync(hostTmp, "utf8");
-      assertCopyOutReviewLimit(canonicalTarget, countCopyLines(copiedContent), ctx.config.resource.maxApplyDiffLines);
+      assertCopyOutReviewLimit(
+        canonicalTarget,
+        countCopyLines(copiedContent),
+        ctx.config.resource.maxApplyDiffLines,
+      );
       // Gate 6: keep a recoverable backup of the host target before overwriting
       // it (copy_out is a whole-file host write; a bad copy must be restorable).
       if (existsSync(canonicalTarget)) {
@@ -658,8 +839,14 @@ export function buildCopyOutOp(ctx: OpContext): OpHandler {
 
 export function buildCopyInInfoOp(ctx: OpContext): OpHandler {
   return async (req) => {
-    const payload = payloadOf(req) as { hostSource?: unknown; workerPath?: unknown };
-    const canonicalSource = assertExternalCopyTarget(payload.hostSource, ctx.config.externalCopyTargets);
+    const payload = payloadOf(req) as {
+      hostSource?: unknown;
+      workerPath?: unknown;
+    };
+    const canonicalSource = assertExternalCopyTarget(
+      payload.hostSource,
+      ctx.config.externalCopyTargets,
+    );
     assertSandboxPath(payload.workerPath, ctx.config.resource.pathMaxBytes);
     let st: Stats;
     try {
@@ -676,29 +863,48 @@ export function buildCopyInInfoOp(ctx: OpContext): OpHandler {
 
 export function buildCopyInOp(ctx: OpContext): OpHandler {
   return async (req) => {
-    const payload = payloadOf(req) as { hostSource?: unknown; workerPath?: unknown; confirm?: unknown };
+    const payload = payloadOf(req) as {
+      hostSource?: unknown;
+      workerPath?: unknown;
+      confirm?: unknown;
+    };
     if (payload.confirm !== "COPY") {
       throw new ValidationError('copyIn requires confirm: "COPY"');
     }
-    const canonicalSource = assertExternalCopyTarget(payload.hostSource, ctx.config.externalCopyTargets);
+    const canonicalSource = assertExternalCopyTarget(
+      payload.hostSource,
+      ctx.config.externalCopyTargets,
+    );
     assertSandboxPath(payload.workerPath, ctx.config.resource.pathMaxBytes);
     const record = recordOr404(ctx.store, req.sessionID);
     const worker = requireActiveWorker(record);
 
     const workerTmp = `/work/.broker-tmp/copy-${randomUUID()}.tmp`;
-    const mkdirRes = await ctx.adapter.exec(worker, ["mkdir", "-p", workerDirOf(workerTmp)], {
-      timeoutMs: 30_000,
-    });
+    const mkdirRes = await ctx.adapter.exec(
+      worker,
+      ["mkdir", "-p", workerDirOf(workerTmp)],
+      {
+        timeoutMs: 30_000,
+      },
+    );
     if (mkdirRes.status !== 0) {
-      throw new MsbError(`copyIn mkdir failed in worker (status ${mkdirRes.status}): ${mkdirRes.stderr.trim()}`);
+      throw new MsbError(
+        `copyIn mkdir failed in worker (status ${mkdirRes.status}): ${mkdirRes.stderr.trim()}`,
+      );
     }
     // copyIn throws MsbError on failure (msb.ts).
     await ctx.adapter.copyIn(worker, canonicalSource, workerTmp);
-    const moved = await ctx.adapter.exec(worker, ["mv", "-f", workerTmp, payload.workerPath as string], {
-      timeoutMs: 30_000,
-    });
+    const moved = await ctx.adapter.exec(
+      worker,
+      ["mv", "-f", workerTmp, payload.workerPath as string],
+      {
+        timeoutMs: 30_000,
+      },
+    );
     if (moved.status !== 0) {
-      throw new MsbError(`copyIn failed in worker (status ${moved.status}): ${moved.stderr.trim()}`);
+      throw new MsbError(
+        `copyIn failed in worker (status ${moved.status}): ${moved.stderr.trim()}`,
+      );
     }
     return { path: payload.workerPath };
   };
@@ -716,7 +922,11 @@ export function buildApplyOp(ctx: OpContext): OpHandler {
     const record = recordOr404(ctx.store, req.sessionID);
     const worker = requireActiveWorker(record);
 
-    const hostTmp = join(ctx.config.stateDir, "tmp", `patch-${req.sessionID}-${randomUUID()}.patch`);
+    const hostTmp = join(
+      ctx.config.stateDir,
+      "tmp",
+      `patch-${req.sessionID}-${randomUUID()}.patch`,
+    );
     const workerTmp = `/work/.broker-tmp/apply-${randomUUID()}.patch`;
     try {
       // 0644: readable by the non-root worker user (Gate 5 finding).
@@ -728,23 +938,39 @@ export function buildApplyOp(ctx: OpContext): OpHandler {
       writeFileSync(hostTmp, patchContent, { mode: 0o644 });
       // chmod, not the create mode: see buildWriteFileOp — umask masking.
       chmodSync(hostTmp, 0o644);
-      const mkdirRes = await ctx.adapter.exec(worker, ["mkdir", "-p", workerDirOf(workerTmp)], { timeoutMs: 30_000 });
+      const mkdirRes = await ctx.adapter.exec(
+        worker,
+        ["mkdir", "-p", workerDirOf(workerTmp)],
+        { timeoutMs: 30_000 },
+      );
       if (mkdirRes.status !== 0) {
-        throw new MsbError(`applyPatch mkdir failed in worker (status ${mkdirRes.status}): ${mkdirRes.stderr.trim()}`);
+        throw new MsbError(
+          `applyPatch mkdir failed in worker (status ${mkdirRes.status}): ${mkdirRes.stderr.trim()}`,
+        );
       }
       await ctx.adapter.copyIn(worker, hostTmp, workerTmp);
       // §19.6: `git apply --check` before applying, inside the worker repo.
-      const check = await ctx.adapter.exec(worker, ["git", "apply", "--check", workerTmp], {
-        cwd: "/work",
-        timeoutMs: 60_000,
-      });
+      const check = await ctx.adapter.exec(
+        worker,
+        ["git", "apply", "--check", workerTmp],
+        {
+          cwd: "/work",
+          timeoutMs: 60_000,
+        },
+      );
       if (check.status !== 0) {
-        throw new MsbError(`patch does not apply cleanly: ${check.stderr.trim()}`);
+        throw new MsbError(
+          `patch does not apply cleanly: ${check.stderr.trim()}`,
+        );
       }
-      const applied = await ctx.adapter.exec(worker, ["git", "apply", workerTmp], {
-        cwd: "/work",
-        timeoutMs: 60_000,
-      });
+      const applied = await ctx.adapter.exec(
+        worker,
+        ["git", "apply", workerTmp],
+        {
+          cwd: "/work",
+          timeoutMs: 60_000,
+        },
+      );
       if (applied.status !== 0) {
         throw new MsbError(`patch apply failed: ${applied.stderr.trim()}`);
       }
@@ -761,9 +987,13 @@ export function buildListDirOp(ctx: OpContext): OpHandler {
     assertSandboxPath(payload.path, ctx.config.resource.pathMaxBytes);
     const record = recordOr404(ctx.store, req.sessionID);
     const worker = requireActiveWorker(record);
-    const result = await ctx.adapter.exec(worker, ["ls", "-la", payload.path as string], {
-      timeoutMs: 30_000,
-    });
+    const result = await ctx.adapter.exec(
+      worker,
+      ["ls", "-la", payload.path as string],
+      {
+        timeoutMs: 30_000,
+      },
+    );
     return { listing: result.stdout };
   };
 }
@@ -778,7 +1008,14 @@ export function buildGrepOp(ctx: OpContext): OpHandler {
     // `grep -e <query>` keeps the pattern out of any shell/glob interpretation.
     const result = await ctx.adapter.exec(
       worker,
-      ["grep", "-rn", "--exclude-dir=.git", "-e", payload.query as string, payload.path as string],
+      [
+        "grep",
+        "-rn",
+        "--exclude-dir=.git",
+        "-e",
+        payload.query as string,
+        payload.path as string,
+      ],
       { timeoutMs: 60_000 },
     );
     return { matches: result.stdout, exitCode: result.status };
@@ -789,15 +1026,20 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const payload = payloadOf(req) as { mode?: unknown };
     const mode = payload.mode ?? "active";
-    if (mode !== "active" && mode !== "retained") throw new ValidationError("diff mode must be active or retained");
+    if (mode !== "active" && mode !== "retained")
+      throw new ValidationError("diff mode must be active or retained");
     const record = recordOr404(ctx.store, req.sessionID);
     if (mode === "retained") return buildRetainedDiff(ctx, record);
     const worker = requireActiveWorker(record);
     const ref = record.baselineRef ?? baselineRef(record.sessionID);
-    const stat = await ctx.adapter.exec(worker, ["git", "diff", "--stat", ref, "HEAD"], {
-      cwd: "/work",
-      timeoutMs: 60_000,
-    });
+    const stat = await ctx.adapter.exec(
+      worker,
+      ["git", "diff", "--stat", ref, "HEAD"],
+      {
+        cwd: "/work",
+        timeoutMs: 60_000,
+      },
+    );
     const diff = await ctx.adapter.exec(worker, ["git", "diff", ref, "HEAD"], {
       cwd: "/work",
       timeoutMs: 60_000,
@@ -807,10 +1049,14 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
     // .broker-tmp/ref-<added> delivery reference) so the approval prompt
     // shows the real change instead of the full new file.
     let compare = "";
-    const nameStatus = await ctx.adapter.exec(worker, ["git", "diff", "--name-status", ref, "HEAD"], {
-      cwd: "/work",
-      timeoutMs: 60_000,
-    });
+    const nameStatus = await ctx.adapter.exec(
+      worker,
+      ["git", "diff", "--name-status", ref, "HEAD"],
+      {
+        cwd: "/work",
+        timeoutMs: 60_000,
+      },
+    );
     for (const line of nameStatus.stdout.split("\n")) {
       const m = /^A[\t ]+(.+)$/.exec(line.trim());
       if (!m) continue;
@@ -826,10 +1072,14 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
           timeoutMs: 30_000,
         });
         if (exists.status !== 0) continue;
-        const cmp = await ctx.adapter.exec(worker, ["git", "diff", "--no-index", "--", cand, added], {
-          cwd: "/work",
-          timeoutMs: 60_000,
-        });
+        const cmp = await ctx.adapter.exec(
+          worker,
+          ["git", "diff", "--no-index", "--", cand, added],
+          {
+            cwd: "/work",
+            timeoutMs: 60_000,
+          },
+        );
         // exit 0 = identical, 1 = differences; anything else skips.
         if (cmp.status !== 0 && cmp.status !== 1) continue;
         compare += cmp.stdout + "\n";
@@ -853,7 +1103,8 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
       diff: diff.stdout,
       compare,
       changedPaths: parsedChangedPaths.paths,
-      changedPathsComplete: changedPathResult.status === 0 && parsedChangedPaths.complete,
+      changedPathsComplete:
+        changedPathResult.status === 0 && parsedChangedPaths.complete,
       exitCode: diff.status,
     };
   };
@@ -874,7 +1125,12 @@ export function buildPrepareResultOp(ctx: OpContext): OpHandler {
     // result after a failed apply is refreshed, not frozen (Gate 6 finding).
     const ref = await runPrepare(ctx, req.sessionID);
     if (record.state === "SANDBOX_ACTIVE") {
-      record = ctx.store.transition(req.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", { resultRef: ref });
+      record = ctx.store.transition(
+        req.sessionID,
+        "SANDBOX_ACTIVE",
+        "RESULT_READY",
+        { resultRef: ref },
+      );
     }
     return { resultRef: ref, state: record.state, imported: true };
   };
@@ -885,7 +1141,10 @@ async function runPrepare(ctx: OpContext, sessionID: string): Promise<string> {
   const record = recordOr404(ctx.store, sessionID);
   const worker = requireActiveWorker(record);
   const ref = resultRef(sessionID);
-  mkdirSync(join(ctx.config.stateDir, "bundles"), { recursive: true, mode: 0o700 });
+  mkdirSync(join(ctx.config.stateDir, "bundles"), {
+    recursive: true,
+    mode: 0o700,
+  });
   const hostBundle = bundlePathFor(ctx.config.stateDir, sessionID);
   const workerBundle = `/work/.broker-tmp/result-${sessionID}.bundle`;
 
@@ -895,17 +1154,29 @@ async function runPrepare(ctx: OpContext, sessionID: string): Promise<string> {
   // apply always failed with "No valid patches in input" (Gate 6 finding).
   const add = await ctx.adapter.exec(
     worker,
-    ["git", "add", "-A", "--", ".", ":(exclude).broker-tmp", ":(exclude)*.bundle"],
+    [
+      "git",
+      "add",
+      "-A",
+      "--",
+      ".",
+      ":(exclude).broker-tmp",
+      ":(exclude)*.bundle",
+    ],
     { cwd: "/work", timeoutMs: 60_000 },
   );
   if (add.status !== 0) {
     throw new MsbError(`result staging failed: ${trimErr(add.stderr)}`);
   }
   // Nothing staged -> nothing new to export; keeps re-finish idempotent.
-  const staged = await ctx.adapter.exec(worker, ["git", "diff", "--cached", "--quiet"], {
-    cwd: "/work",
-    timeoutMs: 60_000,
-  });
+  const staged = await ctx.adapter.exec(
+    worker,
+    ["git", "diff", "--cached", "--quiet"],
+    {
+      cwd: "/work",
+      timeoutMs: 60_000,
+    },
+  );
   if (staged.status !== 0) {
     const commit = await ctx.adapter.exec(
       worker,
@@ -916,11 +1187,18 @@ async function runPrepare(ctx: OpContext, sessionID: string): Promise<string> {
       throw new MsbError(`result commit failed: ${trimErr(commit.stderr)}`);
     }
   }
-  await ctx.adapter.exec(worker, ["git", "update-ref", ref, "HEAD"], { cwd: "/work", timeoutMs: 60_000 });
-  await ctx.adapter.exec(worker, ["git", "bundle", "create", workerBundle, ref], {
+  await ctx.adapter.exec(worker, ["git", "update-ref", ref, "HEAD"], {
     cwd: "/work",
-    timeoutMs: 120_000,
+    timeoutMs: 60_000,
   });
+  await ctx.adapter.exec(
+    worker,
+    ["git", "bundle", "create", workerBundle, ref],
+    {
+      cwd: "/work",
+      timeoutMs: 120_000,
+    },
+  );
   await ctx.adapter.copyOut(worker, workerBundle, hostBundle);
 
   // Host side: verify + import under the sandbox result namespace.
@@ -928,16 +1206,24 @@ async function runPrepare(ctx: OpContext, sessionID: string): Promise<string> {
     // Import is gated; the bundle is retained in the state dir for Gate 6.
     return ref;
   }
-  const verify = await ctx.git.spawn(["git", "bundle", "verify", hostBundle], { timeoutMs: 60_000 });
-  if (verify.status !== 0) {
-    throw new MsbError(`result bundle verification failed: ${verify.stderr.trim()}`);
-  }
-  if (record.projectID === undefined) throw new StateError("project not in allowlist");
-  const projectID: string = record.projectID;
-  const imported = await ctx.git.spawn(["git", "fetch", "--no-tags", hostBundle, `${ref}:${ref}`], {
-    cwd: projectDirFor(ctx, projectID),
-    timeoutMs: 120_000,
+  const verify = await ctx.git.spawn(["git", "bundle", "verify", hostBundle], {
+    timeoutMs: 60_000,
   });
+  if (verify.status !== 0) {
+    throw new MsbError(
+      `result bundle verification failed: ${verify.stderr.trim()}`,
+    );
+  }
+  if (record.projectID === undefined)
+    throw new StateError("project not in allowlist");
+  const projectID: string = record.projectID;
+  const imported = await ctx.git.spawn(
+    ["git", "fetch", "--no-tags", hostBundle, `${ref}:${ref}`],
+    {
+      cwd: projectDirFor(ctx, projectID),
+      timeoutMs: 120_000,
+    },
+  );
   if (imported.status !== 0) {
     throw new MsbError(`result import failed: ${imported.stderr.trim()}`);
   }
@@ -954,14 +1240,20 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     if (record.state !== "RESULT_READY") {
       throw new StateError(`cannot apply result from state ${record.state}`);
     }
-    if (record.projectID === undefined) throw new StateError("project not in allowlist");
+    if (record.projectID === undefined)
+      throw new StateError("project not in allowlist");
     const projectID: string = record.projectID;
     const project = ctx.config.projects.find((p) => p.id === projectID);
     if (!project) throw new StateError("project not in allowlist");
     const resultRefName = record.resultRef ?? resultRef(req.sessionID);
     const baselineRefName = record.baselineRef ?? baselineRef(req.sessionID);
 
-    record = ctx.store.transition(req.sessionID, "RESULT_READY", "APPLY_PENDING", {});
+    record = ctx.store.transition(
+      req.sessionID,
+      "RESULT_READY",
+      "APPLY_PENDING",
+      {},
+    );
 
     // §19.1 / S16: host must still match the baseline the worker was built from.
     const divergence = await hostDivergence(ctx, projectID, baselineRefName);
@@ -976,7 +1268,12 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     }
 
     // §19.2-5: inspect changed paths; reject protected/symlink/submodule.
-    const changed = await changedPathsBetween(ctx, projectID, baselineRefName, resultRefName);
+    const changed = await changedPathsBetween(
+      ctx,
+      projectID,
+      baselineRefName,
+      resultRefName,
+    );
     const rejectedProtected = checkProtectedPaths(changed, [
       ...ctx.config.protectedPaths,
       ...ctx.config.protectedSecurityFiles,
@@ -985,28 +1282,44 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
       ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
         error: `result touches protected paths: ${rejectedProtected.join(", ")}`,
       });
-      throw new StateError(`result touches protected paths (S7/S17): ${rejectedProtected.join(", ")}`);
+      throw new StateError(
+        `result touches protected paths (S7/S17): ${rejectedProtected.join(", ")}`,
+      );
     }
 
-    const rawChanges = await rawChangesBetween(ctx, projectID, baselineRefName, resultRefName);
+    const rawChanges = await rawChangesBetween(
+      ctx,
+      projectID,
+      baselineRefName,
+      resultRefName,
+    );
     const rejectedUnsafe = rawChanges
-      .filter((change) => change.kind === "symlink" || change.kind === "submodule")
+      .filter(
+        (change) => change.kind === "symlink" || change.kind === "submodule",
+      )
       .map((change) => `${change.kind}:${change.path}`);
     if (rejectedUnsafe.length > 0) {
       ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
         error: `result contains unsafe symlink/submodule changes: ${rejectedUnsafe.join(", ")}`,
       });
-      throw new StateError(`result contains unsafe symlink/submodule changes: ${rejectedUnsafe.join(", ")}`);
+      throw new StateError(
+        `result contains unsafe symlink/submodule changes: ${rejectedUnsafe.join(", ")}`,
+      );
     }
 
     // §19.6: dry-run check then apply; working-tree only (no index/branch).
     const patchFile = patchPathFor(ctx.config.stateDir, req.sessionID);
-    const patch = await ctx.git.spawn(["git", "diff", baselineRefName, resultRefName, "--", "."], {
-      cwd: project.path,
-      timeoutMs: 60_000,
-    });
+    const patch = await ctx.git.spawn(
+      ["git", "diff", baselineRefName, resultRefName, "--", "."],
+      {
+        cwd: project.path,
+        timeoutMs: 60_000,
+      },
+    );
     if (patch.status !== 0) {
-      ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", { error: "diff generation failed" });
+      ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
+        error: "diff generation failed",
+      });
       throw new StateError("diff generation failed; result retained");
     }
     // Gate 6: the approval prompt preview caps at maxApplyDiffLines — never
@@ -1020,21 +1333,34 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
         `apply delta exceeds the reviewable preview limit (${patchLines} lines > ${ctx.config.resource.maxApplyDiffLines}); split the change into smaller applies and retry`,
       );
     }
-    mkdirSync(join(ctx.config.stateDir, "patches"), { recursive: true, mode: 0o700 });
+    mkdirSync(join(ctx.config.stateDir, "patches"), {
+      recursive: true,
+      mode: 0o700,
+    });
     writeFileSync(patchFile, patch.stdout, { mode: 0o600 });
-    const check = await ctx.git.spawn(buildCheckArgv(patchFile), { cwd: project.path, timeoutMs: 60_000 });
+    const check = await ctx.git.spawn(buildCheckArgv(patchFile), {
+      cwd: project.path,
+      timeoutMs: 60_000,
+    });
     if (check.status !== 0) {
       ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
         error: `git apply --check failed: ${check.stderr.trim()}`,
       });
-      throw new StateError(`git apply --check failed (${check.stderr.trim()}); result retained`);
+      throw new StateError(
+        `git apply --check failed (${check.stderr.trim()}); result retained`,
+      );
     }
-    const applied = await ctx.git.spawn(["git", "apply", patchFile], { cwd: project.path, timeoutMs: 120_000 });
+    const applied = await ctx.git.spawn(["git", "apply", patchFile], {
+      cwd: project.path,
+      timeoutMs: 120_000,
+    });
     if (applied.status !== 0) {
       ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
         error: `apply failed: ${applied.stderr.trim()}`,
       });
-      throw new StateError(`apply failed (${applied.stderr.trim()}); host unchanged`);
+      throw new StateError(
+        `apply failed (${applied.stderr.trim()}); host unchanged`,
+      );
     }
     record = ctx.store.transition(req.sessionID, "APPLY_PENDING", "APPLIED", {
       error: undefined,
@@ -1049,18 +1375,39 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
 }
 
 /** S16: compare current host tree with the baseline tree. */
-async function hostDivergence(ctx: OpContext, projectID: string, baselineRefName: string): Promise<string[]> {
+async function hostDivergence(
+  ctx: OpContext,
+  projectID: string,
+  baselineRefName: string,
+): Promise<string[]> {
   const project = ctx.config.projects.find((p) => p.id === projectID);
   if (!project) throw new StateError("no projects configured");
   const gitDir = join(project.path, ".git");
-  const tmpIndex = join(ctx.config.stateDir, "tmp", `divergence-${randomUUID()}.index`);
+  const tmpIndex = join(
+    ctx.config.stateDir,
+    "tmp",
+    `divergence-${randomUUID()}.index`,
+  );
   const env = { GIT_DIR: gitDir, GIT_INDEX_FILE: tmpIndex };
-  const currentTree = await ctx.git.spawn(["git", "add", "-A", "--"], { env, cwd: project.path, timeoutMs: 60_000 });
+  const currentTree = await ctx.git.spawn(["git", "add", "-A", "--"], {
+    env,
+    cwd: project.path,
+    timeoutMs: 60_000,
+  });
   if (currentTree.status !== 0) {
-    throw new StateError(`cannot read host working tree: ${currentTree.stderr.trim()}`);
+    throw new StateError(
+      `cannot read host working tree: ${currentTree.stderr.trim()}`,
+    );
   }
-  const lsFiles = await ctx.git.spawn(["git", "ls-files", "-s"], { env, cwd: project.path, timeoutMs: 60_000 });
-  const baseline = await ctx.git.spawn(["git", "ls-tree", "-r", baselineRefName], { env, timeoutMs: 60_000 });
+  const lsFiles = await ctx.git.spawn(["git", "ls-files", "-s"], {
+    env,
+    cwd: project.path,
+    timeoutMs: 60_000,
+  });
+  const baseline = await ctx.git.spawn(
+    ["git", "ls-tree", "-r", baselineRefName],
+    { env, timeoutMs: 60_000 },
+  );
   return computeDivergence(
     parseLsTreeLines(baseline.stdout.split("\n")),
     parseLsFilesLines(lsFiles.stdout.split("\n")),
@@ -1068,7 +1415,12 @@ async function hostDivergence(ctx: OpContext, projectID: string, baselineRefName
 }
 
 /** §19.2: changed paths between baseline B and result C. */
-async function changedPathsBetween(ctx: OpContext, projectID: string, baselineRefName: string, resultRefName: string): Promise<string[]> {
+async function changedPathsBetween(
+  ctx: OpContext,
+  projectID: string,
+  baselineRefName: string,
+  resultRefName: string,
+): Promise<string[]> {
   const project = ctx.config.projects.find((p) => p.id === projectID);
   if (!project) throw new StateError("no projects configured");
   const gitDir = join(project.path, ".git");
@@ -1081,50 +1433,79 @@ async function changedPathsBetween(ctx: OpContext, projectID: string, baselineRe
   }
   const parsed = parseNulDelimitedPaths(raw.stdout);
   if (!parsed.complete) {
-    throw new StateError("cannot diff result: changed path metadata incomplete");
+    throw new StateError(
+      "cannot diff result: changed path metadata incomplete",
+    );
   }
   return parsed.paths;
 }
 
-async function buildRetainedDiff(ctx: OpContext, record: SessionRecord): Promise<Record<string, unknown>> {
-  if (record.state !== "RESULT_READY" && record.state !== "RETAINED") throw new StateError(`cannot inspect retained result from state ${record.state}`);
+async function buildRetainedDiff(
+  ctx: OpContext,
+  record: SessionRecord,
+): Promise<Record<string, unknown>> {
+  if (record.state !== "RESULT_READY" && record.state !== "RETAINED")
+    throw new StateError(
+      `cannot inspect retained result from state ${record.state}`,
+    );
   const project = ctx.config.projects.find((p) => p.id === record.projectID);
   if (!project) throw new StateError("project not in allowlist");
   const baseline = record.baselineRef ?? baselineRef(record.sessionID);
   const result = record.resultRef;
   if (!result) throw new StateError("retained result has no result ref");
-  const run = (argv: string[]) => ctx.git.spawn(argv, { cwd: project.path, timeoutMs: 60_000 });
+  const run = (argv: string[]) =>
+    ctx.git.spawn(argv, { cwd: project.path, timeoutMs: 60_000 });
   const stat = await run(["git", "diff", "--stat", baseline, result]);
   const diff = await run(["git", "diff", baseline, result]);
   const changedPathResult = await run(buildChangedPathsArgv(baseline, result));
-  const parsedChangedPaths = changedPathResult.status === 0
-    ? parseNulDelimitedPaths(changedPathResult.stdout)
-    : { paths: [], complete: false };
+  const parsedChangedPaths =
+    changedPathResult.status === 0
+      ? parseNulDelimitedPaths(changedPathResult.stdout)
+      : { paths: [], complete: false };
   return {
     stat: stat.stdout,
     diff: diff.stdout,
     compare: "",
     changedPaths: parsedChangedPaths.paths,
-    changedPathsComplete: changedPathResult.status === 0 && parsedChangedPaths.complete,
+    changedPathsComplete:
+      changedPathResult.status === 0 && parsedChangedPaths.complete,
     exitCode: diff.status,
   };
 }
 
-async function rawChangesBetween(ctx: OpContext, projectID: string, baselineRefName: string, resultRefName: string) {
+async function rawChangesBetween(
+  ctx: OpContext,
+  projectID: string,
+  baselineRefName: string,
+  resultRefName: string,
+) {
   const project = ctx.config.projects.find((p) => p.id === projectID);
   if (!project) throw new StateError("no projects configured");
   const gitDir = join(project.path, ".git");
   const raw = await ctx.git.spawn(
-    ["git", "diff", "--raw", "--no-renames", baselineRefName, resultRefName, "--", "."],
+    [
+      "git",
+      "diff",
+      "--raw",
+      "--no-renames",
+      baselineRefName,
+      resultRefName,
+      "--",
+      ".",
+    ],
     { env: { GIT_DIR: gitDir }, cwd: project.path, timeoutMs: 60_000 },
   );
-  if (raw.status !== 0) throw new StateError(`cannot classify result diff: ${raw.stderr.trim()}`);
-  if (raw.stdout.includes("\u0000")) throw new StateError("cannot classify result diff: raw metadata malformed");
+  if (raw.status !== 0)
+    throw new StateError(`cannot classify result diff: ${raw.stderr.trim()}`);
+  if (raw.stdout.includes("\u0000"))
+    throw new StateError("cannot classify result diff: raw metadata malformed");
   const lines = raw.stdout.length === 0 ? [] : raw.stdout.split("\n");
   if (lines[lines.length - 1] === "") lines.pop();
-  if (lines.some((line) => line.length === 0)) throw new StateError("cannot classify result diff: raw metadata malformed");
+  if (lines.some((line) => line.length === 0))
+    throw new StateError("cannot classify result diff: raw metadata malformed");
   const changes = classifyRawDiff(lines);
-  if (changes.length !== lines.length) throw new StateError("cannot classify result diff: raw metadata malformed");
+  if (changes.length !== lines.length)
+    throw new StateError("cannot classify result diff: raw metadata malformed");
   return changes;
 }
 
@@ -1138,9 +1519,14 @@ export function buildKeepResultOp(ctx: OpContext): OpHandler {
     if (record.state === "SANDBOX_ACTIVE") {
       // §20 KEEP: prepare the result first, then retire the transient worker.
       const ref = await runPrepare(ctx, req.sessionID);
-      record = ctx.store.transition(req.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", {
-        resultRef: ref,
-      });
+      record = ctx.store.transition(
+        req.sessionID,
+        "SANDBOX_ACTIVE",
+        "RESULT_READY",
+        {
+          resultRef: ref,
+        },
+      );
     }
     if (record.state !== "RESULT_READY" && record.state !== "APPLIED") {
       throw new StateError(`cannot keep result from state ${record.state}`);
@@ -1148,7 +1534,9 @@ export function buildKeepResultOp(ctx: OpContext): OpHandler {
     if (record.workerName && record.workerState === "ACTIVE") {
       await releaseWorker(ctx, record);
     }
-    ctx.store.touch(req.sessionID, { workerState: record.workerName ? "DESTROYED" : undefined });
+    ctx.store.touch(req.sessionID, {
+      workerState: record.workerName ? "DESTROYED" : undefined,
+    });
     record = ctx.store.transition(req.sessionID, record.state, "RETAINED", {
       error: undefined,
     });
@@ -1176,7 +1564,9 @@ export function buildDiscardResultOp(ctx: OpContext): OpHandler {
     }
     const ref = record.resultRef ?? resultRef(req.sessionID);
     if (ctx.git.runnerMode === "real") {
-      await ctx.git.spawn(["git", "update-ref", "-d", ref], { timeoutMs: 30_000 });
+      await ctx.git.spawn(["git", "update-ref", "-d", ref], {
+        timeoutMs: 30_000,
+      });
     }
     ctx.store.transition(req.sessionID, record.state, "REJECTED", {
       workerState: record.workerName ? "DESTROYED" : undefined,
@@ -1205,7 +1595,12 @@ export function buildWorkerStatusOp(ctx: OpContext): OpHandler {
   return async (req) => {
     payloadOf(req);
     const record = recordOr404(ctx.store, req.sessionID);
-    return { sessionID: record.sessionID, state: record.state, worker: record.workerName ?? null, workerState: record.workerState ?? null };
+    return {
+      sessionID: record.sessionID,
+      state: record.state,
+      worker: record.workerName ?? null,
+      workerState: record.workerState ?? null,
+    };
   };
 }
 
@@ -1259,7 +1654,10 @@ export function buildPolicyOp(ctx: OpContext): OpHandler {
       socketPath: ctx.config.socketPath,
       projects: ctx.config.projects,
       approvedExternalReadRoots: ctx.config.approvedExternalReadRoots,
-      protectedPaths: [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles],
+      protectedPaths: [
+        ...ctx.config.protectedPaths,
+        ...ctx.config.protectedSecurityFiles,
+      ],
       workerImage: ctx.config.workerImage,
       resourceCaps: {
         perWorkerCpu: ctx.budget.perWorkerCpu,
@@ -1270,8 +1668,11 @@ export function buildPolicyOp(ctx: OpContext): OpHandler {
         maxApplyDiffLines: ctx.config.resource.maxApplyDiffLines,
       },
       network: ctx.config.network,
-      readOnlyAgents: (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? [],
-      roleModels: (ctx.config as { roleModels?: Record<string, unknown> }).roleModels ?? {},
+      readOnlyAgents:
+        (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? [],
+      roleModels:
+        (ctx.config as { roleModels?: Record<string, unknown> }).roleModels ??
+        {},
     };
     return policy;
   };
@@ -1283,7 +1684,10 @@ export function buildHostOp(ctx: OpContext): OpHandler {
     if (!ctx.hostRead.has(op)) {
       throw new StateError(`host read '${op}' is not enabled`);
     }
-    const result = await ctx.hostRead.execute(op, payloadOf(req) as Record<string, unknown> | undefined);
+    const result = await ctx.hostRead.execute(
+      op,
+      payloadOf(req) as Record<string, unknown> | undefined,
+    );
     return result;
   };
 }
@@ -1313,8 +1717,15 @@ function removePoolAllocation(ctx: OpContext, record: SessionRecord): void {
  * drain lives here so every release path (apply, keep, destroy, reaper)
  * also admits parked ensureWorker requests.
  */
-export async function releaseWorker(ctx: OpContext, record: SessionRecord): Promise<void> {
-  if (record.workerName && record.workerState !== "DESTROYED" && record.workerState !== "FAILED") {
+export async function releaseWorker(
+  ctx: OpContext,
+  record: SessionRecord,
+): Promise<void> {
+  if (
+    record.workerName &&
+    record.workerState !== "DESTROYED" &&
+    record.workerState !== "FAILED"
+  ) {
     // Gate 6 finding: msb remove fails while a guest is still running, so
     // stop first, then remove; retry once in case removal races the stop.
     await ctx.adapter.stop(record.workerName).catch(() => undefined);
@@ -1338,7 +1749,9 @@ export function buildRegisterProjectOp(ctx: OpContext): OpHandler {
     const allowedKeys = ["path", "dryRun", "createRemote", "makePublic"];
     for (const k of Object.keys(rawPayload)) {
       if (!allowedKeys.includes(k)) {
-        throw new ValidationError(`unexpected field '${k}' in registerProject payload`);
+        throw new ValidationError(
+          `unexpected field '${k}' in registerProject payload`,
+        );
       }
     }
     const p = rawPayload.path;
@@ -1348,13 +1761,22 @@ export function buildRegisterProjectOp(ctx: OpContext): OpHandler {
     if (p.includes("\u0000")) {
       throw new ValidationError("path contains NUL");
     }
-    if (rawPayload.dryRun !== undefined && typeof rawPayload.dryRun !== "boolean") {
+    if (
+      rawPayload.dryRun !== undefined &&
+      typeof rawPayload.dryRun !== "boolean"
+    ) {
       throw new ValidationError("dryRun must be a boolean");
     }
-    if (rawPayload.createRemote !== undefined && typeof rawPayload.createRemote !== "boolean") {
+    if (
+      rawPayload.createRemote !== undefined &&
+      typeof rawPayload.createRemote !== "boolean"
+    ) {
       throw new ValidationError("createRemote must be a boolean");
     }
-    if (rawPayload.makePublic !== undefined && typeof rawPayload.makePublic !== "boolean") {
+    if (
+      rawPayload.makePublic !== undefined &&
+      typeof rawPayload.makePublic !== "boolean"
+    ) {
       throw new ValidationError("makePublic must be a boolean");
     }
     if (rawPayload.makePublic && !rawPayload.createRemote) {
@@ -1371,9 +1793,16 @@ export function buildRegisterProjectOp(ctx: OpContext): OpHandler {
       timeoutMs: 60_000,
     });
     if (result.status !== 0) {
-      throw new MsbError(`registerProject failed (status ${result.status}): ${result.stderr.trim()}`);
+      throw new MsbError(
+        `registerProject failed (status ${result.status}): ${result.stderr.trim()}`,
+      );
     }
-    return { ok: true, stdout: result.stdout, stderr: result.stderr, status: result.status };
+    return {
+      ok: true,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      status: result.status,
+    };
   };
 }
 export const registerProjectOperationMap = {
