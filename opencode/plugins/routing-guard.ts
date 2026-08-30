@@ -114,9 +114,9 @@ function pathArgsFor(
 export default function routingGuardPlugin(): Plugin {
   return {
     "tool.execute.before": async (input, output) => {
-      if (APPLY_PREVIEW_TOOLS.has(toolName)) return;
       const toolName = input.tool;
       const sessionID = input.sessionID;
+      if (APPLY_PREVIEW_TOOLS.has(toolName)) return;
       if (READ_TOOLS.has(toolName)) {
         const c = await broker(); // throws if broker down → tool call fails (fail closed)
         // Gate 6 finding: an unknown session (never registered or cleared)

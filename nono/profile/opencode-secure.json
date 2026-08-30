@@ -27,7 +27,7 @@
       "$HOME/.cache/opencode",
       "$HOME/.config/opencode",
       "$HOME/.local/share/cortexkit",
-      "$HOME/.confiG/cortexkit",
+      "$HOME/.config/cortexkit",
       "$HOME/.gentle-ai",
       "$TMPDIR",
       "$HOME/.cache/workflow-health-check",
