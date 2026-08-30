@@ -1,0 +1,82 @@
+// ──────────────────────────────────────────────────────────────────────────
+// role-agents.jsonc — role model + capability configuration fragment.
+//
+// NOT INSTALLED at Gate 1 / Phase A. This is a FRAGMENT: merge it into the
+// user's opencode.json MANUALLY after reviewing the change. It must never be
+// applied by overwriting the user's config automatically.
+//
+// Gate: Phase 0.2 + Phase B/C (SDD change role-based-subagents).
+// Intent: central roleModels mapping (role-model R4, model-policy independence);
+//         every new agent is hidden, mode:subagent, tools allowlist, deny tasks.
+//         The broker remains authoritative for every stateful decision; config
+//         is the static capability boundary. The envelope `agent` field stays
+//         logging-only.
+// ──────────────────────────────────────────────────────────────────────────
+{
+  // Per-role model selection. Changing any entry affects only that role's
+  // model — authorization outcomes are unchanged (R4 model substitution).
+  // Canonical key is fresh_eyes (underscore). Tooling normalizes hyphen→underscore.
+  "roleModels": {
+    "general": [],
+    "researcher": ["openai/gpt-5.6-luna", "low"],
+    "worker": ["kinver/professional", ""],
+    "advisor": ["openai/gpt-5.6-sol", "high"],
+    "solver": ["opencode-go/deepseek-v4-flash", ""],
+    "challenger": ["opencode-go/glm-5.2", "high"],
+    "judge": ["opencode-go/qwen3.7-plus", "high"],
+    "fresh_eyes": ["opencode-go/kimi-k2.7-code", ""]
+  },
+  // Agent definitions — each is hidden, subagent-only, explicit tools
+  // allowlist + task deny. Orchestrator (gentle-orchestrator) has zero
+  // sandbox_* tools (orchestrator-readonly R1); researcher is read-only;
+  // worker is the only mutation/execution role.
+  "agent": {
+    "researcher": {
+      "hidden": true,
+      "mode": "subagent",
+      "model": "openai/gpt-5.6-luna",
+      "tools": {
+        "*": false,
+        "read": true,
+        "grep": true,
+        "glob": true,
+        "webfetch": true,
+        "codegraph_codegraph_explore": true,
+        "sandbox_read": true,
+        "sandbox_list": true,
+        "sandbox_grep": true,
+        "sandbox_diff": true
+      },
+      "permission": {
+        "task": { "*": "deny" }
+      }
+    },
+    "worker": {
+      "hidden": true,
+      "mode": "subagent",
+      "model": "kinver/professional",
+      "tools": {
+        "*": false,
+        "read": true,
+        "grep": true,
+        "glob": true,
+        "sandbox_read": true,
+        "sandbox_list": true,
+        "sandbox_grep": true,
+        "sandbox_write": true,
+        "sandbox_edit": true,
+        "sandbox_apply_patch": true,
+        "sandbox_bash": true,
+        "sandbox_diff": true,
+        "sandbox_finish": true,
+        "sandbox_apply": true,
+        "sandbox_copy_in": true,
+        "sandbox_copy_out": true,
+        "sandbox_discard": true
+      },
+      "permission": {
+        "task": { "*": "deny" }
+      }
+    }
+  }
+}

@@ -114,6 +114,16 @@ function recordOr404(store: SessionStore, sessionID: string): SessionRecord {
 
 export function buildEnsureWorkerOp(ctx: OpContext): OpHandler {
   return async (req) => {
+    // Orchestrator read-only: refuse before any touch/admission side effect (R2).
+    const existing = ctx.store.get(req.sessionID)
+    const trusted = existing?.agent ?? req.agent
+    const readOnly = (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? []
+    if (trusted && readOnly.includes(trusted)) {
+      throw new PolicyError(`orchestrator agent "${trusted}" is not allowed to create a worker (orchestrator-readonly)`)
+    }
+    if (req.agent && readOnly.includes(req.agent) && req.agent !== trusted) {
+      throw new PolicyError(`orchestrator agent "${req.agent}" is not allowed to create a worker (orchestrator-readonly)`)
+    }
     const payload = payloadOf(req) as { projectDir?: unknown };
     const projectID = resolveProjectID(payload.projectDir, ctx.config.projects);
     const record = ctx.store.touch(req.sessionID, { projectID, agent: req.agent });
@@ -171,6 +181,13 @@ async function createWorkerForSession(
   sessionID: string,
   projectID: string,
 ): Promise<unknown> {
+  // Orchestrator read-only: fail closed even for queued creations
+  const existing2 = ctx.store.get(sessionID)
+  const trusted2 = existing2?.agent ?? req.agent
+  const ro2 = (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? []
+  if (trusted2 && ro2.includes(trusted2)) {
+    throw new PolicyError(`orchestrator agent "${trusted2}" is not allowed to create a worker (orchestrator-readonly)`)
+  }
   const store = ctx.store;
   const record = recordOr404(store, sessionID);
   switch (record.state) {
@@ -1253,6 +1270,8 @@ export function buildPolicyOp(ctx: OpContext): OpHandler {
         maxApplyDiffLines: ctx.config.resource.maxApplyDiffLines,
       },
       network: ctx.config.network,
+      readOnlyAgents: (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? [],
+      roleModels: (ctx.config as { roleModels?: Record<string, unknown> }).roleModels ?? {},
     };
     return policy;
   };

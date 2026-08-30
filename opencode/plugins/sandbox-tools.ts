@@ -32,6 +32,14 @@ import {
   type BrokerClient,
 } from "./lib/broker-client.ts";
 
+const READ_ONLY_AGENTS: readonly string[] = ["gentle-orchestrator"];
+
+function assertNotOrchestrator(agent: string | undefined, toolName: string): void {
+  if (agent && READ_ONLY_AGENTS.includes(agent)) {
+    throw new Error(`orchestrator agent "${agent}" is not allowed to use sandbox operation "${toolName}" (orchestrator-readonly)`);
+  }
+}
+
 let clientPromise: Promise<BrokerClient> | null = null;
 
 function client(): Promise<BrokerClient> {
@@ -179,6 +187,7 @@ export default function sandboxToolsPlugin() {
           "sandbox project root, never absolute or traversal.",
         args: { path: pathArg },
         execute: async (args, ctx) => {
+          assertNotOrchestrator(ctx.agent, "sandbox_read");
           const c = await client();
           return formatResult("readFile", await c.request("readFile", ctx.sessionID, { path: args.path }, ctx.agent));
         },
@@ -191,6 +200,7 @@ export default function sandboxToolsPlugin() {
           "the sandbox project root, never absolute or traversal.",
         args: { path: pathArg },
         execute: async (args, ctx) => {
+          assertNotOrchestrator(ctx.agent, "sandbox_list");
           const c = await client();
           return formatResult("listDir", await c.request("listDir", ctx.sessionID, { path: args.path }, ctx.agent));
         },
@@ -203,6 +213,7 @@ export default function sandboxToolsPlugin() {
           "is relative to the sandbox project root, never absolute or traversal.",
         args: { query: z.string().min(1).max(1024), path: pathArg },
         execute: async (args, ctx) => {
+          assertNotOrchestrator(ctx.agent, "sandbox_grep");
           const c = await client();
           return formatResult("grep", await c.request("grep", ctx.sessionID, { query: args.query, path: args.path }, ctx.agent));
         },
@@ -216,6 +227,7 @@ export default function sandboxToolsPlugin() {
           "traversal. The broker appends a final newline when absent.",
         args: { path: pathArg, content: contentArg },
         execute: async (args, ctx) => {
+          assertNotOrchestrator(ctx.agent, "sandbox_write");
           await ensureWorker(ctx.sessionID, ctx.directory);
           const c = await client();
           return formatResult("writeFile", await c.request("writeFile", ctx.sessionID, { path: args.path, content: args.content }, ctx.agent));
@@ -230,6 +242,7 @@ export default function sandboxToolsPlugin() {
           "project root, never absolute or traversal. The broker appends a final newline when absent.",
         args: { path: pathArg, content: contentArg },
         execute: async (args, ctx) => {
+          assertNotOrchestrator(ctx.agent, "sandbox_edit");
           await ensureWorker(ctx.sessionID, ctx.directory);
           const c = await client();
           return formatResult("writeFile", await c.request("writeFile", ctx.sessionID, { path: args.path, content: args.content }, ctx.agent));
@@ -246,6 +259,7 @@ export default function sandboxToolsPlugin() {
           "host stays unchanged.",
         args: { patch: z.string().min(1).max(4 * 1024 * 1024) },
         execute: async (args, ctx) => {
+          assertNotOrchestrator(ctx.agent, "sandbox_apply_patch");
           await ensureWorker(ctx.sessionID, ctx.directory);
           const c = await client();
           return formatResult("applyPatch", await c.request("applyPatch", ctx.sessionID, { patch: args.patch }, ctx.agent));
@@ -264,6 +278,7 @@ export default function sandboxToolsPlugin() {
           timeoutMs: z.number().int().min(1).max(600_000).optional(),
         },
         execute: async (args, ctx) => {
+          assertNotOrchestrator(ctx.agent, "sandbox_bash");
           await ensureWorker(ctx.sessionID, ctx.directory);
           const argv = tokenizeCommand(args.command);
           const c = await client();
@@ -285,6 +300,7 @@ export default function sandboxToolsPlugin() {
           "never activates one. Run sandbox_finish first if current uncommitted edits must be included.",
         args: {},
         execute: async (_args, ctx) => {
+          assertNotOrchestrator(ctx.agent, "sandbox_diff");
           const c = await client();
           return formatResult("diff", await c.request("diff", ctx.sessionID, {}, ctx.agent));
         },
@@ -297,6 +313,7 @@ export default function sandboxToolsPlugin() {
           "RESULT_READY and retains the worker until sandbox_apply, sandbox_discard, or keep.",
         args: {},
         execute: async (_args, ctx) => {
+          assertNotOrchestrator(ctx.agent, "sandbox_finish");
           const c = await client();
           return formatResult("prepareResult", await c.request("prepareResult", ctx.sessionID, {}, ctx.agent));
         },
@@ -311,6 +328,7 @@ export default function sandboxToolsPlugin() {
           "this session's worker lifecycle; denial or failure retains the result.",
         args: {},
         execute: async (_args, ctx) => {
+          assertNotOrchestrator(ctx.agent, "sandbox_apply");
           const c = await client();
           const workerStatus = (await c.request("workerStatus", ctx.sessionID, {}, ctx.agent)) as { state?: string };
           if (workerStatus.state !== "RESULT_READY") {
@@ -346,6 +364,7 @@ export default function sandboxToolsPlugin() {
           "atomic replacement.",
         args: { workerPath: pathArg, hostTarget: z.string().min(1).max(4096) },
         execute: async (args, ctx) => {
+          assertNotOrchestrator(ctx.agent, "sandbox_copy_out");
           const c = await client();
           const info = (await c.request("copyOutInfo", ctx.sessionID, { workerPath: args.workerPath, hostTarget: args.hostTarget }, ctx.agent)) as {
             target?: string;
@@ -375,6 +394,7 @@ export default function sandboxToolsPlugin() {
           "approval (S15). The host is not modified; the worker destination is overwritten.",
         args: { hostSource: z.string().min(1).max(4096), workerPath: pathArg },
         execute: async (args, ctx) => {
+          assertNotOrchestrator(ctx.agent, "sandbox_copy_in");
           await ensureWorker(ctx.sessionID, ctx.directory);
           const c = await client();
           const info = (await c.request("copyInInfo", ctx.sessionID, { hostSource: args.hostSource, workerPath: args.workerPath }, ctx.agent)) as {
@@ -397,6 +417,7 @@ export default function sandboxToolsPlugin() {
           "result and worker, leaves the host unchanged, and ends in terminal REJECTED.",
         args: {},
         execute: async (_args, ctx) => {
+          assertNotOrchestrator(ctx.agent, "sandbox_discard");
           const c = await client();
           return formatResult("discardResult", await c.request("discardResult", ctx.sessionID, { confirm: "REJECT" }, ctx.agent));
         },

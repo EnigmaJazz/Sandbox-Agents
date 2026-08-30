@@ -7,7 +7,8 @@
  *   security profile) are REJECTED by validation.ts — those are server-side
  *   policy owned by the trusted broker (§11).
  * - `agent` is free-form human-supplied context from OpenCode and is used for
- *   LOGGING ONLY. It is never used for authorization decisions.
+ *   LOGGING ONLY, except where the broker derives a trusted role from its
+ *   allowlisted role/session registry (role-based subagents).
  */
 
 /** Session lifecycle states (SYSTEM_PROMPT.md §10). */
@@ -132,7 +133,7 @@ export interface BrokerRequestEnvelope {
   id: string;
   operation: Operation;
   sessionID: string;
-  /** Agent name, if supplied. Logged only — never trusted for authorization. */
+  /** Agent name, if supplied. Logged only — never trusted for authorization except via readOnlyAgents allowlist. */
   agent?: string;
   payload?: unknown;
 }
@@ -315,4 +316,8 @@ export interface PolicyRecord {
     maxAggregateMemBytes: number;
   };
   network: { mode: "deny-by-default" | "allowlist"; note: string };
+  /** Orchestrator read-only agents — authoritative broker view. */
+  readOnlyAgents: string[];
+  /** Per-role model mapping (policy-independent). */
+  roleModels: Record<string, unknown>;
 }

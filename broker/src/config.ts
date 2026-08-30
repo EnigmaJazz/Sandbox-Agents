@@ -79,6 +79,23 @@ export interface SddRuntimeConfig {
   outputMaxBytes: number;
 }
 
+// ---------------------------------------------------------------------------
+// Role model configuration (role-model R4, delegation-roles R5)
+// ---------------------------------------------------------------------------
+
+export type RoleModelEntry = [] | [string, string];
+
+export interface RoleModelsConfig {
+  general: RoleModelEntry;
+  researcher: RoleModelEntry;
+  worker: RoleModelEntry;
+  advisor: RoleModelEntry;
+  solver: RoleModelEntry;
+  challenger: RoleModelEntry;
+  judge: RoleModelEntry;
+  fresh_eyes: RoleModelEntry;
+}
+
 export interface BrokerConfig {
   socketPath: string;
   stateDir: string;
@@ -124,6 +141,17 @@ export interface BrokerConfig {
    * fails immediately with "queue full" instead of parking unboundedly.
    */
   queueMaxLength: number;
+  /**
+   * Orchestrator sessions that must never enter a sandbox (orchestrator-readonly R2).
+   * The broker refuses ensureWorker for these trusted agent identities before any
+   * touch/admission side effect.
+   */
+  readOnlyAgents: string[];
+  /**
+   * Per-role model selection (role-model R4). Changing any entry affects only
+   * that role's model — authorization outcomes are unchanged (policy independence).
+   */
+  roleModels: RoleModelsConfig;
   resource: ResourceConfig;
   hostRead: HostReadConfig;
   sddRuntime: SddRuntimeConfig;
@@ -132,10 +160,11 @@ export interface BrokerConfig {
 
 export type BrokerConfigOverrides = Omit<
   Partial<BrokerConfig>,
-  "resource" | "sddRuntime"
+  "resource" | "sddRuntime" | "roleModels"
 > & {
   resource?: Partial<ResourceConfig>;
   sddRuntime?: Partial<SddRuntimeConfig>;
+  roleModels?: Partial<RoleModelsConfig>;
 };
 
 /** S7: sensitive host paths always denied to model/tool access. */
@@ -177,6 +206,21 @@ export const DEFAULT_PROTECTED_SECURITY_FILES: string[] = [
   "tests/acceptance/**",
   "docs/threat-model.md",
 ];
+
+/** Orchestrator read-only agents (orchestrator-readonly R2). */
+export const DEFAULT_READ_ONLY_AGENTS: string[] = ["gentle-orchestrator"];
+
+/** Role-model defaults per capability-model §6 (model-policy independence). */
+export const DEFAULT_ROLE_MODELS: RoleModelsConfig = {
+  general: [],
+  researcher: ["openai/gpt-5.6-luna", "low"],
+  worker: ["kinver/professional", ""],
+  advisor: ["openai/gpt-5.6-sol", "high"],
+  solver: ["opencode-go/deepseek-v4-flash", ""],
+  challenger: ["opencode-go/glm-5.2", "high"],
+  judge: ["opencode-go/qwen3.7-plus", "high"],
+  fresh_eyes: ["opencode-go/kimi-k2.7-code", ""],
+};
 
 /** Default project allowlist (id -> canonical path). Gate 1 placeholder. */
 export const DEFAULT_PROJECTS: ProjectConfig[] = [
@@ -248,6 +292,8 @@ export function defaultConfig(overrides: BrokerConfigOverrides = {}): BrokerConf
     reapIdleMs: positiveIntEnv("BROKER_REAP_IDLE_MS", 3_600_000),
     queueTimeoutMs: positiveIntEnv("BROKER_QUEUE_TIMEOUT_MS", 600_000),
     queueMaxLength: positiveIntEnv("BROKER_QUEUE_MAX_LENGTH", 32),
+    readOnlyAgents: [...DEFAULT_READ_ONLY_AGENTS],
+    roleModels: { ...DEFAULT_ROLE_MODELS },
     resource: {
       reserveCpuFraction: 0.25,
       reserveMemFraction: 0.25,
@@ -284,12 +330,23 @@ export function defaultConfig(overrides: BrokerConfigOverrides = {}): BrokerConf
       note: "Placeholder: final worker net config (S12) is generated at Gate 3 with allowlist domains only.",
     },
   };
-  return {
+  const merged: BrokerConfig = {
     ...cfg,
     ...dropUndefined(overrides),
     resource: { ...cfg.resource, ...dropUndefined(overrides.resource) },
     sddRuntime: { ...cfg.sddRuntime, ...dropUndefined(overrides.sddRuntime) },
+    roleModels: { ...cfg.roleModels, ...dropUndefined(overrides.roleModels) },
+    readOnlyAgents: overrides.readOnlyAgents ?? cfg.readOnlyAgents,
   };
+  // Normalize roleModels keys: hyphen → underscore for fresh-eyes
+  if ((merged.roleModels as Record<string, unknown>)["fresh-eyes"] !== undefined) {
+    const hyphen = (merged.roleModels as Record<string, unknown>)["fresh-eyes"] as RoleModelEntry;
+    if (!merged.roleModels.fresh_eyes || (merged.roleModels.fresh_eyes as unknown[]).length === 0) {
+      merged.roleModels.fresh_eyes = hyphen;
+    }
+    delete (merged.roleModels as Record<string, unknown>)["fresh-eyes"];
+  }
+  return merged;
 }
 
 /** Remove undefined keys so partial overrides never clobber defaults. */
