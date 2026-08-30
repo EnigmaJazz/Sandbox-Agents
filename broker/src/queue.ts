@@ -71,12 +71,13 @@ export class PendingQueue {
     return this.entries.splice(i, 1)[0];
   }
 
-  /** Remove a parked entry and reject it (disconnect cleanup, timers). */
+  /** Remove a parked entry and reject it (disconnect cleanup, timers). Frees the queue slot; caller should drainQueue. */
   cancel(sessionID: string, message: string): QueuedEntry | undefined {
     const entry = this.remove(sessionID);
     if (!entry) return undefined;
     if (entry.timer) clearTimeout(entry.timer);
     entry.reject(new PolicyError(message));
+    // FIFO entry removed and queue slot freed; drainQueue will admit next head if pool allows (called by server onSocketClose / releaseWorker).
     return entry;
   }
 }

@@ -29,7 +29,8 @@ import { Logger, durationMs, startTimer } from "./logging.ts";
 import { ValidationError } from "./validation.ts";
 import { PolicyError } from "./policy.ts";
 import { PendingQueue, QueuedTimedOutError } from "./queue.ts";
-import { startReaper, type ReaperHandle } from "./reaper.ts";
+import { reapOnDisconnect, startReaper, type ReaperHandle } from "./reaper.ts";
+import { drainQueue } from "./service.ts";
 import {
   buildApplyOp,
   buildApplyResultOp,
@@ -137,8 +138,6 @@ export class BrokerServer {
         },
         data: (socket, data: Buffer) => this.onData(socket as unknown as SocketLike, data),
         close: (socket) => {
-          // Feature 2: drop queue entries parked by this socket's sessions so
-          // a dead client can neither hold queue slots nor get a worker later.
           this.onSocketClose(socket as unknown as SocketLike);
         },
         error: (socket, err) => {
@@ -147,6 +146,7 @@ export class BrokerServer {
             result: "error",
             error: String(err?.message ?? err),
           });
+          this.onSocketClose(socket as unknown as SocketLike);
         },
       },
     });
@@ -247,12 +247,27 @@ export class BrokerServer {
     }
   }
 
-  /** Feature 2 disconnect cleanup: cancel queue entries for this socket. */
+  /** Feature 2 disconnect cleanup: cancel queue entries and reap idle SANDBOX_ACTIVE workers. */
   private onSocketClose(socket: SocketLike): void {
     const sessions = this.sessionsBySocket.get(socket);
     if (!sessions) return;
     for (const sessionID of sessions) {
-      this.ctx.queue.cancel(sessionID, "client disconnected while queued for a worker slot");
+      const cancelled = this.ctx.queue.cancel(sessionID, "client disconnected while queued for a worker slot");
+      if (cancelled) {
+        try {
+          drainQueue(this.ctx);
+        } catch {
+          /* drain is best-effort */
+        }
+      }
+      void reapOnDisconnect(this.ctx, sessionID, this.config.disconnectReapMs, (entry) =>
+        this.logger.log({
+          operation: "reaper",
+          sessionID: entry.sessionID,
+          result: entry.action === "error" ? "error" : "ok",
+          error: entry.detail,
+        }),
+      ).catch(() => {});
     }
     this.sessionsBySocket.delete(socket);
   }

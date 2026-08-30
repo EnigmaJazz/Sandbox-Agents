@@ -115,3 +115,43 @@ export async function sweepIdle(
   }
   return { reaped };
 }
+
+/**
+ * Disconnect-triggered reap (Feature 2b): reap a single SANDBOX_ACTIVE
+ * session that lost its client socket and has been idle longer than
+ * disconnectIdleMs with no result. Used by server onSocketClose; the
+ * periodic sweepIdle (1h) remains as safety net.
+ */
+export async function reapOnDisconnect(
+  ctx: OpContext,
+  sessionID: string,
+  disconnectIdleMs: number,
+  onLog?: (entry: ReaperLogEntry) => void,
+): Promise<boolean> {
+  const record = ctx.store.get(sessionID);
+  if (!record) return false;
+  if (record.state !== "SANDBOX_ACTIVE") return false;
+  if (record.resultRef) return false;
+  if (!record.workerName) return false;
+  if (record.workerState === "DESTROYED" || record.workerState === "FAILED") return false;
+  const age = Date.now() - Date.parse(record.updatedAt);
+  if (!(age > disconnectIdleMs)) return false;
+  try {
+    await releaseWorker(ctx, record);
+    ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "FAILED_CLOSED", {
+      workerName: undefined,
+      workerState: "DESTROYED",
+      error: "client disconnected",
+      reapedAt: new Date().toISOString(),
+    });
+    onLog?.({ sessionID, action: "reaped_active", detail: "client disconnected" });
+    return true;
+  } catch (err) {
+    onLog?.({
+      sessionID,
+      action: "error",
+      detail: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}

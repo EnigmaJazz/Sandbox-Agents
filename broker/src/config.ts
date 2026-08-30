@@ -133,6 +133,13 @@ export interface BrokerConfig {
    */
   reapIdleMs: number;
   /**
+   * Disconnect reap (Feature 2b): if a client disconnects while its session
+   * is SANDBOX_ACTIVE with no result and idle past this threshold, the
+   * broker releases the worker and closes the session as FAILED_CLOSED.
+   * The 1h reapIdleMs remains as safety net for leaks without disconnect.
+   */
+  disconnectReapMs: number;
+  /**
    * Pool queue (Feature 2): how long a pool-exhausted ensureWorker parks for
    * a freed slot before failing with queued_timed_out (ms).
    */
@@ -294,6 +301,7 @@ export function defaultConfig(
     protectedSecurityFiles: DEFAULT_PROTECTED_SECURITY_FILES,
     reapIntervalMs: positiveIntEnv("BROKER_REAP_INTERVAL_MS", 60_000),
     reapIdleMs: positiveIntEnv("BROKER_REAP_IDLE_MS", 3_600_000),
+    disconnectReapMs: positiveIntEnv("BROKER_DISCONNECT_REAP_MS", 30_000),
     queueTimeoutMs: positiveIntEnv("BROKER_QUEUE_TIMEOUT_MS", 600_000),
     queueMaxLength: positiveIntEnv("BROKER_QUEUE_MAX_LENGTH", 32),
     readOnlyAgents: [...DEFAULT_READ_ONLY_AGENTS],
