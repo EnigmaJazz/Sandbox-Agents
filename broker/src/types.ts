@@ -70,7 +70,8 @@ export type Operation =
   | "copyInInfo"
   | "copyIn"
   // read-only policy/introspection (used by the routing guard plugin)
-  | "policy";
+  | "policy"
+  | "registerProject";
 
 /** Every Operation that exists in the protocol. Immutable; unknown ops fail closed. */
 export const OPERATIONS: readonly Operation[] = [
@@ -107,6 +108,7 @@ export const OPERATIONS: readonly Operation[] = [
   "copyInInfo",
   "copyIn",
   "policy",
+  "registerProject",
 ];
 
 /** Worker policy fields the LLM must NEVER be able to supply (§7, §11). */
@@ -255,6 +257,10 @@ export interface HostProcessListPayload {
 export interface HostDockerLogsPayload {
   container: string;
   lines?: number;
+}
+
+export interface RegisterProjectPayload {
+  path: string;
 }
 
 // ---------------------------------------------------------------------------

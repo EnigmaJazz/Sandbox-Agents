@@ -10,7 +10,7 @@
  * against the host repo. Set BROKER_GIT_MODE=real only after Gate 5 review.
  */
 import { existsSync, mkdirSync, writeFileSync, rmSync, chmodSync, copyFileSync, renameSync, statSync, readFileSync, type Stats } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { BrokerConfig } from "./config.ts";
 import type { SessionStore } from "./state.ts";
@@ -1331,5 +1331,36 @@ export async function releaseWorker(ctx: OpContext, record: SessionRecord): Prom
   // Feature 2: a slot just freed — admit parked requests (fire-and-forget).
   drainQueue(ctx);
 }
+
+export function buildRegisterProjectOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const rawPayload = (req.payload ?? {}) as Record<string, unknown>;
+    const allowedKeys = ["path"];
+    for (const k of Object.keys(rawPayload)) {
+      if (!allowedKeys.includes(k)) {
+        throw new ValidationError(`unexpected field '${k}' in registerProject payload`);
+      }
+    }
+    const p = rawPayload.path;
+    if (typeof p !== "string" || p.length === 0 || !isAbsolute(p)) {
+      throw new ValidationError("path must be an absolute string");
+    }
+    if (p.includes("\u0000")) {
+      throw new ValidationError("path contains NUL");
+    }
+    const repoRoot = resolve(join(import.meta.dir, "../.."));
+    const result = await ctx.git.spawn(["bun", "scripts/register-project.ts", p], {
+      cwd: repoRoot,
+      timeoutMs: 60_000,
+    });
+    if (result.status !== 0) {
+      throw new MsbError(`registerProject failed (status ${result.status}): ${result.stderr.trim()}`);
+    }
+    return { ok: true, stdout: result.stdout, stderr: result.stderr, status: result.status };
+  };
+}
+export const registerProjectOperationMap = {
+  registerProject: buildRegisterProjectOp,
+};
 
 export { formatBytes };
