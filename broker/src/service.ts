@@ -1137,7 +1137,7 @@ export function buildPrepareResultOp(ctx: OpContext): OpHandler {
 }
 
 /** Worker-side bundle export + host-side import under the sandbox namespace. */
-async function runPrepare(ctx: OpContext, sessionID: string): Promise<string> {
+export async function runPrepare(ctx: OpContext, sessionID: string): Promise<string> {
   const record = recordOr404(ctx.store, sessionID);
   const worker = requireActiveWorker(record);
   const ref = resultRef(sessionID);

@@ -20,11 +20,11 @@
  * The sweep is idempotent (workerName cleared after a reap) and one bad
  * record never kills the sweep (per-record catch, log, continue).
  */
-import { releaseWorker, type OpContext } from "./service.ts";
+import { releaseWorker, runPrepare, type OpContext } from "./service.ts";
 
 export interface ReaperLogEntry {
   sessionID: string;
-  action: "reaped_result_ready" | "reaped_active" | "error";
+  action: "reaped_result_ready" | "reaped_active" | "auto_finished" | "error";
   detail?: string;
 }
 
@@ -43,13 +43,26 @@ export interface ReaperHandle {
 /** Run the interval loop; returns a handle that stops it. */
 export function startReaper(ctx: OpContext, opts: ReaperOptions): ReaperHandle {
   const timer = setInterval(() => {
-    void sweepIdle(ctx, opts.idleMs, opts.onLog).catch((err) => {
-      opts.onLog?.({
-        sessionID: "",
-        action: "error",
-        detail: err instanceof Error ? err.message : String(err),
-      });
-    });
+    void (async () => {
+      try {
+        await sweepUnfinished(ctx, 60_000, opts.onLog);
+      } catch (err) {
+        opts.onLog?.({
+          sessionID: "",
+          action: "error",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
+      try {
+        await sweepIdle(ctx, opts.idleMs, opts.onLog);
+      } catch (err) {
+        opts.onLog?.({
+          sessionID: "",
+          action: "error",
+          detail: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
   }, opts.intervalMs);
   if (typeof (timer as { unref?: () => void }).unref === "function") {
     (timer as { unref: () => void }).unref();
@@ -114,6 +127,64 @@ export async function sweepIdle(
     }
   }
   return { reaped };
+}
+
+/**
+ * Auto-finish guard: if a session ends with SANDBOX_ACTIVE and has unstaged
+ * changes and no recent activity (>60s), automatically call runPrepare to
+ * export to RESULT_READY (same as sandbox_finish) so S17 workers don't need
+ * explicit finish.
+ *
+ * Checks: SANDBOX_ACTIVE, worker ACTIVE, no resultRef, idle >60s -> runPrepare -> RESULT_READY
+ * Wired into periodic sweep; existing reaper is kept.
+ */
+export async function sweepUnfinished(
+  ctx: OpContext,
+  idleMs = 60_000,
+  onLog?: (entry: ReaperLogEntry) => void,
+): Promise<{ finished: number }> {
+  const now = Date.now();
+  let finished = 0;
+  for (const record of ctx.store.list()) {
+    try {
+      if (record.state !== "SANDBOX_ACTIVE") continue;
+      if (!record.workerName) continue;
+      if (record.workerState !== "ACTIVE") continue;
+      if (record.resultRef) continue;
+      if (record.workerState === "DESTROYED" || record.workerState === "FAILED") continue;
+      const age = now - Date.parse(record.updatedAt);
+      if (!(age > idleMs)) continue;
+      // Has unstaged changes check: query worker git status --porcelain.
+      // If no changes, skip auto-finish (nothing to export).
+      let hasChanges = true;
+      try {
+        const status = await ctx.adapter.exec(record.workerName, ["git", "status", "--porcelain"], {
+          cwd: "/work",
+          timeoutMs: 30_000,
+        });
+        if (status.status === 0) {
+          hasChanges = status.stdout.trim().length > 0;
+          if (!hasChanges) continue;
+        }
+      } catch {
+        hasChanges = true;
+      }
+      if (!hasChanges) continue;
+      const ref = await runPrepare(ctx, record.sessionID);
+      ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", {
+        resultRef: ref,
+      });
+      onLog?.({ sessionID: record.sessionID, action: "auto_finished", detail: ref });
+      finished++;
+    } catch (err) {
+      onLog?.({
+        sessionID: record.sessionID,
+        action: "error",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return { finished };
 }
 
 /**
