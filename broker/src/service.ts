@@ -51,7 +51,8 @@ import {
 } from "./copy-review.ts";
 import { MsbError } from "./msb.ts";
 import { StateError } from "./state.ts";
-import { PolicyError, checkAdmission } from "./policy.ts";
+import { PolicyError, checkAdmission, type Admission } from "./policy.ts";
+import { PendingQueue, QueuedTimedOutError, type QueuedEntry } from "./queue.ts";
 import type { BrokerRequestEnvelope, SessionRecord, WorkerRecord, MetricsRecord, PolicyRecord, Operation } from "./types.ts";
 
 export interface OpContext {
@@ -61,6 +62,12 @@ export interface OpContext {
   budget: Budget;
   resources: HostResources;
   pool: WorkerPool;
+  /**
+   * FIFO pending queue for pool-exhausted ensureWorker requests (Feature 2).
+   * The server always provides one; operation-level unit tests that never
+   * queue may omit it (drain/park guard on absence).
+   */
+  queue?: PendingQueue;
   hostRead: HostReadExecutor;
   logger: Logger;
   git: {
@@ -102,21 +109,27 @@ function recordOr404(store: SessionStore, sessionID: string): SessionRecord {
 }
 
 // ---------------------------------------------------------------------------
-// ensureWorker — lazy creation (§4, §11, §13)
+// ensureWorker — lazy creation (§4, §11, §13) + pool queue (Feature 2)
 // ---------------------------------------------------------------------------
 
 export function buildEnsureWorkerOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const payload = payloadOf(req) as { projectDir?: unknown };
     const projectID = resolveProjectID(payload.projectDir, ctx.config.projects);
-    const store = ctx.store;
-    let record = store.touch(req.sessionID, { projectID, agent: req.agent });
+    const record = ctx.store.touch(req.sessionID, { projectID, agent: req.agent });
 
+    // Fast paths. State gates run BEFORE admission so FAILED_CLOSED and
+    // mid-creation sessions never park in the pool queue.
     switch (record.state) {
       case "SANDBOX_ACTIVE":
       case "RESULT_READY":
-        // Worker reuse (§28): same session keeps its worker.
-        return { worker: record.workerName, state: record.state, reused: true };
+        // Worker reuse (§28): same session keeps its worker — unless the idle
+        // reaper already released it (no workerName / DESTROYED / FAILED), in
+        // which case fall through and (re)create on demand.
+        if (record.workerName && record.workerState !== "DESTROYED" && record.workerState !== "FAILED") {
+          return { worker: record.workerName, state: record.state, reused: true };
+        }
+        break;
       case "FAILED_CLOSED":
         throw new StateError(`session ${req.sessionID} is FAILED_CLOSED; manual review required`);
       case "CREATING_SANDBOX":
@@ -128,107 +141,249 @@ export function buildEnsureWorkerOp(ctx: OpContext): OpHandler {
         break;
     }
 
-    // Admission: reject when the pool budget is exhausted (§22).
-    const admission = checkAdmission(ctx.pool, ctx.budget, {});
+    // Admission (Feature 2): pool-exhausted requests PARK in the FIFO queue
+    // instead of killing the subagent session; request-level refusals (invalid
+    // or above-policy) still fail immediately — queueing can never fix them.
+    const admission = admissionFor(ctx);
     if (!admission.allowed) {
-      throw new PolicyError(
-        `${admission.reason}${admission.queueHint > 0 ? ` (queue position ~${admission.queueHint})` : ""}`,
-      );
+      if (!admission.queueable) {
+        throw new PolicyError(
+          `${admission.reason}${admission.queueHint > 0 ? ` (queue position ~${admission.queueHint})` : ""}`,
+        );
+      }
+      return parkAndWait(ctx, req, projectID);
     }
 
-    record = store.transition(req.sessionID, record.state, "CREATING_SANDBOX", {
-      projectID,
-      agent: req.agent,
-      error: undefined,
+    return createWorkerForSession(ctx, req, req.sessionID, projectID);
+  };
+}
+
+/**
+ * Shared creation path: snapshot -> createWorker -> copyIn -> prep -> pool
+ * allocation -> SANDBOX_ACTIVE. Used by the direct admission path AND by the
+ * queue drain (a parked request re-runs the FULL creation path once a slot
+ * frees). Re-validates the record state because time passed while parked.
+ * Any failure fails closed (S14): CREATING_SANDBOX -> FAILED_CLOSED.
+ */
+async function createWorkerForSession(
+  ctx: OpContext,
+  req: BrokerRequestEnvelope,
+  sessionID: string,
+  projectID: string,
+): Promise<unknown> {
+  const store = ctx.store;
+  const record = recordOr404(store, sessionID);
+  switch (record.state) {
+    case "SANDBOX_ACTIVE":
+    case "RESULT_READY":
+      if (record.workerName && record.workerState !== "DESTROYED" && record.workerState !== "FAILED") {
+        return { worker: record.workerName, state: record.state, reused: true };
+      }
+      break;
+    case "FAILED_CLOSED":
+      throw new StateError(`session ${sessionID} is FAILED_CLOSED; manual review required`);
+    case "CREATING_SANDBOX":
+      throw new StateError(`sandbox creation already in progress for ${sessionID} — retry`);
+    case "HOST_READ_ONLY":
+    case "APPLIED":
+    case "RETAINED":
+    case "REJECTED":
+      break;
+  }
+
+  store.transition(sessionID, record.state, "CREATING_SANDBOX", {
+    projectID,
+    agent: req.agent,
+    error: undefined,
+  });
+
+  const workerName = ctx.adapter.workerNameFor(sessionID);
+  try {
+    const repoDir = projectDirFor(ctx, projectID);
+    ensureGitRepo(ctx, repoDir);
+
+    // Snapshot: synthetic baseline B under refs/opencode-sandbox/baseline/<id>.
+    // MUST be awaited — the bundle is required before createWorker/copyIn.
+    const bundle = bundlePathFor(ctx.config.stateDir, sessionID);
+    await runSnapshot(ctx, repoDir, sessionID, bundle);
+
+    // Create the worker from the TRUSTED image with policy-derived resources.
+    await ctx.adapter.createWorker({
+      name: workerName,
+      cpu: ctx.budget.perWorkerCpu,
+      memBytes: ctx.budget.perWorkerMemBytes,
+      image: ctx.config.workerImage,
+      configDir: join(ctx.config.stateDir, "workers", workerName),
+      networkMode: "deny-by-default",
     });
 
-    const workerName = ctx.adapter.workerNameFor(req.sessionID);
-    try {
-      const repoDir = projectDirFor(ctx, projectID);
-      ensureGitRepo(ctx, repoDir);
+    // Transfer the baseline bundle into the worker repo.
+    await ctx.adapter.copyIn(workerName, bundle, `/work/${sessionID}.bundle`);
 
-      // Snapshot: synthetic baseline B under refs/opencode-sandbox/baseline/<id>.
-      // MUST be awaited — the bundle is required before createWorker/copyIn.
-      const bundle = bundlePathFor(ctx.config.stateDir, req.sessionID);
-      await runSnapshot(ctx, repoDir, req.sessionID, bundle);
-
-      // Create the worker from the TRUSTED image with policy-derived resources.
-      await ctx.adapter.createWorker({
-        name: workerName,
-        cpu: ctx.budget.perWorkerCpu,
-        memBytes: ctx.budget.perWorkerMemBytes,
-        image: ctx.config.workerImage,
-        configDir: join(ctx.config.stateDir, "workers", workerName),
-        networkMode: "deny-by-default",
-      });
-
-      // Transfer the baseline bundle into the worker repo.
-      await ctx.adapter.copyIn(workerName, bundle, `/work/${req.sessionID}.bundle`);
-
-      // §17: prepare the worker repo — init, fetch the baseline bundle, create
-      // the work branch. All argv vectors, no shell. `sync` first: msb copy's
-      // return does not guarantee the guest fs flushed the bundle (Gate 5
-      // finding: fetch read a partially-written pack -> "non-monotonic index").
-      const prep = [
-        ["sync"],
-        ["git", "init", "-q"],
-        ["git", "config", "user.name", "opencode-sandbox"],
-        ["git", "config", "user.email", "sandbox@local"],
-        ["git", "fetch", `/work/${req.sessionID}.bundle`, `${baselineRef(req.sessionID)}:refs/heads/baseline`],
-        ["git", "checkout", "-q", "-b", "work", "baseline"],
-        // Mirror the host-side baseline ref name in the worker so buildDiffOp
-        // (git diff refs/opencode-sandbox/baseline/<id> HEAD) resolves (Gate 6
-        // demo finding: the worker only had refs/heads/baseline).
-        ["git", "update-ref", baselineRef(req.sessionID), "refs/heads/baseline"],
-      ] as const;
-      for (const argv of prep) {
-        // Gate 5 finding: the guest upper fs can transiently serve a partially
-        // written pack/idx ("non-monotonic index") — bounded retry.
-        let res: Awaited<ReturnType<typeof ctx.adapter.exec>> | null = null;
-        for (let attempt = 0; attempt < 3; attempt++) {
-          res = await ctx.adapter.exec(workerName, [...argv], { cwd: "/work", timeoutMs: 120_000 });
-          if (res.status === 0) break;
-          await new Promise((r) => setTimeout(r, 400));
-        }
-        if (!res || res.status !== 0) {
-          throw new MsbError(`worker repo prep failed (${argv[1]}): ${trimErr(res?.stderr || res?.stdout || "")}`);
-        }
+    // §17: prepare the worker repo — init, fetch the baseline bundle, create
+    // the work branch. All argv vectors, no shell. `sync` first: msb copy's
+    // return does not guarantee the guest fs flushed the bundle (Gate 5
+    // finding: fetch read a partially-written pack -> "non-monotonic index").
+    const prep = [
+      ["sync"],
+      ["git", "init", "-q"],
+      ["git", "config", "user.name", "opencode-sandbox"],
+      ["git", "config", "user.email", "sandbox@local"],
+      ["git", "fetch", `/work/${sessionID}.bundle`, `${baselineRef(sessionID)}:refs/heads/baseline`],
+      ["git", "checkout", "-q", "-b", "work", "baseline"],
+      // Mirror the host-side baseline ref name in the worker so buildDiffOp
+      // (git diff refs/opencode-sandbox/baseline/<id> HEAD) resolves (Gate 6
+      // demo finding: the worker only had refs/heads/baseline).
+      ["git", "update-ref", baselineRef(sessionID), "refs/heads/baseline"],
+    ] as const;
+    for (const argv of prep) {
+      // Gate 5 finding: the guest upper fs can transiently serve a partially
+      // written pack/idx ("non-monotonic index") — bounded retry.
+      let res: Awaited<ReturnType<typeof ctx.adapter.exec>> | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        res = await ctx.adapter.exec(workerName, [...argv], { cwd: "/work", timeoutMs: 120_000 });
+        if (res.status === 0) break;
+        await new Promise((r) => setTimeout(r, 400));
       }
-
-      ctx.pool.allocations.push({ cpu: ctx.budget.perWorkerCpu, memBytes: ctx.budget.perWorkerMemBytes });
-      record = store.transition(req.sessionID, "CREATING_SANDBOX", "SANDBOX_ACTIVE", {
-        workerName,
-        workerState: "ACTIVE",
-        baselineRef: baselineRef(req.sessionID),
-        resultRef: undefined,
-        error: undefined,
-        resources: { cpu: ctx.budget.perWorkerCpu, memBytes: ctx.budget.perWorkerMemBytes },
-      });
-      return { worker: workerName, state: record.state, reused: false };
-    } catch (err) {
-      // §10: creation failure -> FAILED_CLOSED. Never fall back to host (S14).
-      // Gate 5 live finding: a partially created worker must not be left
-      // running (resource leak) — stop + remove it best-effort.
-      if (workerName) {
-        try {
-          await ctx.adapter.stop(workerName);
-          await ctx.adapter.remove(workerName);
-        } catch {
-          /* cleanup is best-effort; the session is closed regardless */
-        }
+      if (!res || res.status !== 0) {
+        throw new MsbError(`worker repo prep failed (${argv[1]}): ${trimErr(res?.stderr || res?.stdout || "")}`);
       }
-      try {
-        store.transition(req.sessionID, "CREATING_SANDBOX", "FAILED_CLOSED", {
-          error: err instanceof Error ? err.message : String(err),
-          workerState: "FAILED",
-        });
-      } catch {
-        /* state may already have moved; the original error wins */
-      }
-      if (err instanceof MsbError || err instanceof ValidationError) throw err;
-      throw err;
     }
+
+    ctx.pool.allocations.push({ cpu: ctx.budget.perWorkerCpu, memBytes: ctx.budget.perWorkerMemBytes });
+    const next = store.transition(sessionID, "CREATING_SANDBOX", "SANDBOX_ACTIVE", {
+      workerName,
+      workerState: "ACTIVE",
+      baselineRef: baselineRef(sessionID),
+      resultRef: undefined,
+      error: undefined,
+      resources: { cpu: ctx.budget.perWorkerCpu, memBytes: ctx.budget.perWorkerMemBytes },
+    });
+    return { worker: workerName, state: next.state, reused: false };
+  } catch (err) {
+    // §10: creation failure -> FAILED_CLOSED. Never fall back to host (S14).
+    // Gate 5 live finding: a partially created worker must not be left
+    // running (resource leak) — stop + remove it best-effort.
+    if (workerName) {
+      try {
+        await ctx.adapter.stop(workerName);
+        await ctx.adapter.remove(workerName);
+      } catch {
+        /* cleanup is best-effort; the session is closed regardless */
+      }
+    }
+    try {
+      store.transition(sessionID, "CREATING_SANDBOX", "FAILED_CLOSED", {
+        error: err instanceof Error ? err.message : String(err),
+        workerState: "FAILED",
+      });
+    } catch {
+      /* state may already have moved; the original error wins */
+    }
+    if (err instanceof MsbError || err instanceof ValidationError) throw err;
+    throw err;
+  }
+}
+
+/**
+ * Park a pool-exhausted ensureWorker in the FIFO queue. The request stays
+ * open on the socket until a slot frees (drain), the bounded timeout fires
+ * (queued_timed_out with the real position), or the client disconnects.
+ */
+function parkAndWait(ctx: OpContext, req: BrokerRequestEnvelope, projectID: string): Promise<unknown> {
+  const queue = ctx.queue;
+  if (!queue) {
+    throw new StateError("worker queue is not configured — cannot park request");
+  }
+  const existing = queue.find(req.sessionID);
+  if (existing) {
+    // Idempotency: the same session is already parked — share its result.
+    return existing.pending;
+  }
+  if (queue.length >= ctx.config.queueMaxLength) {
+    throw new PolicyError(`worker queue full (${ctx.config.queueMaxLength}); retry later`);
+  }
+  const timeoutMs = ctx.config.queueTimeoutMs;
+  let resolve!: (v: unknown) => void;
+  let reject!: (e: unknown) => void;
+  const pending = new Promise<unknown>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  const entry: QueuedEntry = {
+    sessionID: req.sessionID,
+    request: req,
+    projectID,
+    position: 0,
+    pending,
+    resolve,
+    reject,
   };
+  const timer = setTimeout(() => {
+    queue.remove(req.sessionID);
+    reject(
+      new QueuedTimedOutError(
+        `ensureWorker queued for session ${req.sessionID} timed out after ${timeoutMs}ms (queue position ${entry.position})`,
+      ),
+    );
+  }, timeoutMs);
+  if (typeof (timer as { unref?: () => void }).unref === "function") {
+    (timer as { unref: () => void }).unref();
+  }
+  entry.timer = timer;
+  queue.enqueue(entry);
+  return pending;
+}
+
+/**
+ * Admission that accounts for creations the drain already promised
+ * (queue.inFlight): a direct ensureWorker must not slip into a slot that a
+ * parked request is about to consume (that would oversubscribe the pool).
+ */
+function admissionFor(ctx: OpContext): Admission {
+  const inFlight = ctx.queue?.inFlight ?? 0;
+  if (inFlight === 0) return checkAdmission(ctx.pool, ctx.budget, {});
+  const virtual = ctx.pool.allocations.concat(
+    Array.from({ length: inFlight }, () => ({
+      cpu: ctx.budget.perWorkerCpu,
+      memBytes: ctx.budget.perWorkerMemBytes,
+    })),
+  );
+  return checkAdmission({ allocations: virtual }, ctx.budget, {});
+}
+
+/**
+ * Drain point (Feature 2): admit as many parked requests as the freed budget
+ * allows, FIFO order, each as its own fire-and-forget creation task. Never
+ * awaited inside releaseWorker — the drain must not block the releaser.
+ */
+export function drainQueue(ctx: OpContext): void {
+  const queue = ctx.queue;
+  if (!queue) return;
+  while (true) {
+    const entry = queue.head();
+    if (!entry) return;
+    if (!admissionFor(ctx).allowed) return; // head cannot fit yet — FIFO, leave the rest parked
+    queue.remove(entry.sessionID);
+    if (entry.timer) clearTimeout(entry.timer);
+    queue.inFlight++;
+    void runQueuedCreation(ctx, entry);
+  }
+}
+
+async function runQueuedCreation(ctx: OpContext, entry: QueuedEntry): Promise<void> {
+  try {
+    const result = await createWorkerForSession(ctx, entry.request, entry.sessionID, entry.projectID);
+    entry.resolve({ ...(result as Record<string, unknown>), queued: true, queuePosition: entry.position });
+  } catch (err) {
+    entry.reject(err);
+  } finally {
+    const queue = ctx.queue;
+    if (queue) queue.inFlight = Math.max(0, queue.inFlight - 1);
+    // The freed slot is now consumed (success) or still free (failure): admit
+    // the next parked request promptly instead of waiting for another release.
+    drainQueue(ctx);
+  }
 }
 
 function projectDirFor(ctx: OpContext, projectID: string): string {
@@ -1000,9 +1155,7 @@ export function buildDiscardResultOp(ctx: OpContext): OpHandler {
     }
     if (record.workerName && record.workerState === "ACTIVE") {
       await ctx.adapter.remove(record.workerName).catch(() => undefined);
-      ctx.pool.allocations = ctx.pool.allocations.filter(
-        (a) => a.memBytes !== (record.resources?.memBytes ?? -1) || a.cpu !== (record.resources?.cpu ?? -1),
-      );
+      removePoolAllocation(ctx, record);
     }
     const ref = record.resultRef ?? resultRef(req.sessionID);
     if (ctx.git.runnerMode === "real") {
@@ -1116,8 +1269,32 @@ export function buildHostOp(ctx: OpContext): OpHandler {
   };
 }
 
-/** Release a session's transient worker and its pool allocation (S22). */
-async function releaseWorker(ctx: OpContext, record: SessionRecord): Promise<void> {
+/**
+ * Remove EXACTLY ONE pool allocation matching the record's resources.
+ *
+ * The previous value-match filter removed EVERY allocation with matching
+ * values — in a homogeneous pool (all workers share perWorkerCpu /
+ * perWorkerMemBytes) one release silently freed the whole pool, corrupting
+ * admission accounting and (with the Feature 2 drain) oversubscribing the
+ * real pool. A session owns exactly one allocation; remove that one (S22).
+ */
+function removePoolAllocation(ctx: OpContext, record: SessionRecord): void {
+  const mem = record.resources?.memBytes ?? -1;
+  const cpu = record.resources?.cpu ?? -1;
+  const idx = ctx.pool.allocations.findIndex(
+    (a) => a.memBytes === mem && a.cpu === cpu,
+  );
+  if (idx !== -1) ctx.pool.allocations.splice(idx, 1);
+}
+
+/**
+ * Release a session's transient worker and its pool allocation (S22).
+ *
+ * This is the SINGLE choke point where allocations are freed — the queue
+ * drain lives here so every release path (apply, keep, destroy, reaper)
+ * also admits parked ensureWorker requests.
+ */
+export async function releaseWorker(ctx: OpContext, record: SessionRecord): Promise<void> {
   if (record.workerName && record.workerState !== "DESTROYED" && record.workerState !== "FAILED") {
     // Gate 6 finding: msb remove fails while a guest is still running, so
     // stop first, then remove; retry once in case removal races the stop.
@@ -1131,9 +1308,9 @@ async function releaseWorker(ctx: OpContext, record: SessionRecord): Promise<voi
       }
     }
   }
-  ctx.pool.allocations = ctx.pool.allocations.filter(
-    (a) => a.memBytes !== (record.resources?.memBytes ?? -1) || a.cpu !== (record.resources?.cpu ?? -1),
-  );
+  removePoolAllocation(ctx, record);
+  // Feature 2: a slot just freed — admit parked requests (fire-and-forget).
+  drainQueue(ctx);
 }
 
 export { formatBytes };

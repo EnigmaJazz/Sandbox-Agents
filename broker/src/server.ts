@@ -11,6 +11,10 @@
  *   fallback path from sandbox execution to host execution, ever.
  * - Per-session serialization via a promise chain so concurrent calls for
  *   one session cannot interleave state transitions.
+ * - Feature 2 (pool queue): each NDJSON line is dispatched fire-and-forget,
+ *   so a blocked (parked) ensureWorker never blocks other sessions' ops.
+ *   When a client socket closes, its parked queue entries are cancelled so
+ *   dead sessions cannot leak queue slots or spawn workers later.
  */
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -24,6 +28,8 @@ import { buildSddAttemptAcquireOp, buildSddStatusOp } from "./sdd-service.ts";
 import { Logger, durationMs, startTimer } from "./logging.ts";
 import { ValidationError } from "./validation.ts";
 import { PolicyError } from "./policy.ts";
+import { PendingQueue, QueuedTimedOutError } from "./queue.ts";
+import { startReaper, type ReaperHandle } from "./reaper.ts";
 import {
   buildApplyOp,
   buildApplyResultOp,
@@ -72,7 +78,10 @@ export class BrokerServer {
   private readonly ctx: ServerContext;
   private readonly sessionLocks = new Map<string, Promise<unknown>>();
   private readonly buffers = new WeakMap<SocketLike, Buffer>();
+  /** Sessions each socket has dispatched requests for (disconnect cleanup). */
+  private readonly sessionsBySocket = new WeakMap<SocketLike, Set<string>>();
   private listener: { stop(): void } | null = null;
+  private reaper: ReaperHandle | null = null;
 
   constructor(
     private readonly config: BrokerConfig,
@@ -105,6 +114,7 @@ export class BrokerServer {
       budget,
       resources,
       pool: { allocations: [] },
+      queue: new PendingQueue(),
       hostRead,
       sddRuntime,
       logger: this.logger,
@@ -126,8 +136,10 @@ export class BrokerServer {
           /* nothing per-connection */
         },
         data: (socket, data: Buffer) => this.onData(socket as unknown as SocketLike, data),
-        close: () => {
-          /* nothing per-connection */
+        close: (socket) => {
+          // Feature 2: drop queue entries parked by this socket's sessions so
+          // a dead client can neither hold queue slots nor get a worker later.
+          this.onSocketClose(socket as unknown as SocketLike);
         },
         error: (socket, err) => {
           this.logger.log({
@@ -143,8 +155,29 @@ export class BrokerServer {
     this.logger.log({ operation: "broker.start", result: "ok" });
   }
 
-  /** Close the socket listener (used by main.ts shutdown). */
+  /**
+   * Start the idle reaper (Feature 1). Call after start(): the sweeper
+   * releases workers whose records are untouched past reapIdleMs.
+   */
+  startReaper(): void {
+    if (this.reaper) return;
+    this.reaper = startReaper(this.ctx, {
+      intervalMs: this.config.reapIntervalMs,
+      idleMs: this.config.reapIdleMs,
+      onLog: (entry) =>
+        this.logger.log({
+          operation: "reaper",
+          sessionID: entry.sessionID || undefined,
+          result: entry.action === "error" ? "error" : "ok",
+          error: entry.action === "error" ? entry.detail : undefined,
+        }),
+    });
+  }
+
+  /** Close the socket listener and stop the reaper (used by main.ts shutdown). */
   shutdown(): void {
+    this.reaper?.stop();
+    this.reaper = null;
     try {
       this.listener?.stop();
     } catch {
@@ -184,6 +217,10 @@ export class BrokerServer {
       this.respond(socket, this.errorResponse("0", err));
       return;
     }
+    // Track the session on this socket so a close can cancel parked entries.
+    const sessions = this.sessionsBySocket.get(socket) ?? new Set<string>();
+    sessions.add(envelope.sessionID);
+    this.sessionsBySocket.set(socket, sessions);
     try {
       const result = await this.withSessionLock(envelope.sessionID, () =>
         this.dispatch(envelope),
@@ -208,6 +245,16 @@ export class BrokerServer {
         durationMs: durationMs(t0),
       });
     }
+  }
+
+  /** Feature 2 disconnect cleanup: cancel queue entries for this socket. */
+  private onSocketClose(socket: SocketLike): void {
+    const sessions = this.sessionsBySocket.get(socket);
+    if (!sessions) return;
+    for (const sessionID of sessions) {
+      this.ctx.queue.cancel(sessionID, "client disconnected while queued for a worker slot");
+    }
+    this.sessionsBySocket.delete(socket);
   }
 
   private parseRequest(line: string): BrokerRequestEnvelope {
@@ -304,7 +351,11 @@ export class BrokerServer {
   }
 
   private respond(socket: SocketLike, resp: BrokerResponseEnvelope): void {
-    socket.write(`${JSON.stringify(resp)}\n`);
+    try {
+      socket.write(`${JSON.stringify(resp)}\n`);
+    } catch {
+      /* socket already closed (e.g. client disconnected while queued) */
+    }
   }
 
   private errorResponse(id: string, err: unknown): BrokerResponseEnvelope {
@@ -318,6 +369,10 @@ function toBrokerError(err: unknown): BrokerError {
   }
   if (err instanceof StateError) {
     return { code: "state", message: err.message };
+  }
+  if (err instanceof QueuedTimedOutError) {
+    // Must precede the PolicyError check (subclass): parked too long.
+    return { code: "queued_timed_out", message: err.message };
   }
   if (err instanceof PolicyError) {
     return { code: "policy", message: err.message };

@@ -44,7 +44,10 @@ export const LEGAL_TRANSITIONS: Record<SessionState, readonly SessionState[]> = 
   HOST_READ_ONLY: ["CREATING_SANDBOX"],
   CREATING_SANDBOX: ["SANDBOX_ACTIVE", "FAILED_CLOSED", "HOST_READ_ONLY"],
   SANDBOX_ACTIVE: ["CREATING_SANDBOX", "RESULT_READY", "FAILED_CLOSED", "RETAINED"],
-  RESULT_READY: ["APPLY_PENDING", "REJECTED", "RETAINED", "SANDBOX_ACTIVE"],
+  // RESULT_READY -> CREATING_SANDBOX: the idle reaper releases the worker of
+  // a finished-but-unapplied session; ensureWorker must be able to rebuild it
+  // on demand without losing the result (Feature 1).
+  RESULT_READY: ["APPLY_PENDING", "REJECTED", "RETAINED", "SANDBOX_ACTIVE", "CREATING_SANDBOX"],
   APPLY_PENDING: ["APPLIED", "FAILED_CLOSED", "RESULT_READY"],
   APPLIED: ["RETAINED"],
   REJECTED: [],

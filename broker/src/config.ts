@@ -103,6 +103,27 @@ export interface BrokerConfig {
   protectedPaths: string[];
   /** S17: security components agents must never modify. */
   protectedSecurityFiles: string[];
+  /**
+   * Idle reaper (Feature 1): sweep interval in ms. Every interval, workers
+   * whose records are untouched for reapIdleMs are released.
+   */
+  reapIntervalMs: number;
+  /**
+   * Idle reaper (Feature 1): release a worker whose record has been untouched
+   * for this long (ms). RESULT_READY keeps its state (result is host-side);
+   * SANDBOX_ACTIVE closes as FAILED_CLOSED "idle reaped".
+   */
+  reapIdleMs: number;
+  /**
+   * Pool queue (Feature 2): how long a pool-exhausted ensureWorker parks for
+   * a freed slot before failing with queued_timed_out (ms).
+   */
+  queueTimeoutMs: number;
+  /**
+   * Pool queue (Feature 2): maximum parked requests; beyond this, ensureWorker
+   * fails immediately with "queue full" instead of parking unboundedly.
+   */
+  queueMaxLength: number;
   resource: ResourceConfig;
   hostRead: HostReadConfig;
   sddRuntime: SddRuntimeConfig;
@@ -186,6 +207,21 @@ export const DEFAULT_HOST_READ_CONFIG: HostReadConfig = {
 
 const GiB = 1024 * 1024 * 1024;
 
+/**
+ * Fail-closed env parsing for positive-integer knobs: an unset/empty var uses
+ * the default; a present but invalid value aborts startup (never a silent
+ * fallback to a different behavior than the operator asked for).
+ */
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`invalid ${name}: ${raw} (must be a positive integer)`);
+  }
+  return parsed;
+}
+
 export function defaultConfig(overrides: BrokerConfigOverrides = {}): BrokerConfig {
   const runtimeDir =
     process.env.XDG_RUNTIME_DIR && process.env.XDG_RUNTIME_DIR.length > 0
@@ -208,6 +244,10 @@ export function defaultConfig(overrides: BrokerConfigOverrides = {}): BrokerConf
     externalCopyTargets: DEFAULT_EXTERNAL_COPY_TARGETS,
     protectedPaths: DEFAULT_PROTECTED_PATHS,
     protectedSecurityFiles: DEFAULT_PROTECTED_SECURITY_FILES,
+    reapIntervalMs: positiveIntEnv("BROKER_REAP_INTERVAL_MS", 60_000),
+    reapIdleMs: positiveIntEnv("BROKER_REAP_IDLE_MS", 3_600_000),
+    queueTimeoutMs: positiveIntEnv("BROKER_QUEUE_TIMEOUT_MS", 600_000),
+    queueMaxLength: positiveIntEnv("BROKER_QUEUE_MAX_LENGTH", 32),
     resource: {
       reserveCpuFraction: 0.25,
       reserveMemFraction: 0.25,

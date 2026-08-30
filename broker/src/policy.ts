@@ -37,7 +37,7 @@ export interface Budget {
 }
 
 export class PolicyError extends Error {
-  readonly code = "policy" as const;
+  readonly code: string = "policy";
   constructor(message: string) {
     super(message);
     this.name = "PolicyError";
@@ -104,6 +104,13 @@ export type Admission =
       reason: string;
       /** Queueing is preferred to oversubscription (§22). */
       queueHint: number;
+      /**
+       * True when the refusal is TRANSIENT pool exhaustion (aggregate caps or
+       * max workers) — the request may wait for a freed slot in the FIFO
+       * queue. False for request-level problems (invalid / above-policy)
+       * that queueing can never fix — those must fail immediately.
+       */
+      queueable: boolean;
     };
 
 export function checkAdmission(
@@ -114,13 +121,14 @@ export function checkAdmission(
   const cpu = requested.cpu ?? budget.perWorkerCpu;
   const memBytes = requested.memBytes ?? budget.perWorkerMemBytes;
   if (cpu <= 0 || memBytes <= 0) {
-    return { allowed: false, reason: "invalid resource request", queueHint: 0 };
+    return { allowed: false, reason: "invalid resource request", queueHint: 0, queueable: false };
   }
   if (cpu > budget.perWorkerCpu || memBytes > budget.perWorkerMemBytes) {
     return {
       allowed: false,
       reason: `resource request above policy (max ${budget.perWorkerCpu} vCPU / ${formatBytes(budget.perWorkerMemBytes)})`,
       queueHint: 0,
+      queueable: false,
     };
   }
   const aggCpu = pool.allocations.reduce((a, w) => a + w.cpu, 0);
@@ -130,6 +138,7 @@ export function checkAdmission(
       allowed: false,
       reason: "aggregate vCPU pool exhausted",
       queueHint: 1,
+      queueable: true,
     };
   }
   if (aggMem + memBytes > budget.maxAggregateMemBytes) {
@@ -137,6 +146,7 @@ export function checkAdmission(
       allowed: false,
       reason: "aggregate memory pool exhausted",
       queueHint: 1,
+      queueable: true,
     };
   }
   if (pool.allocations.length >= budget.maxWorkers) {
@@ -144,6 +154,7 @@ export function checkAdmission(
       allowed: false,
       reason: `maximum concurrent workers reached (${budget.maxWorkers})`,
       queueHint: pool.allocations.length - budget.maxWorkers + 1,
+      queueable: true,
     };
   }
   return { allowed: true, cpu, memBytes };

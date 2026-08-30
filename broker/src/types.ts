@@ -147,7 +147,8 @@ export interface BrokerError {
     | "divergence"
     | "not_found"
     | "internal"
-    | "protocol";
+    | "protocol"
+    | "queued_timed_out";
   message: string;
 }
 
@@ -269,6 +270,8 @@ export interface SessionRecord {
   baselineRef?: string;
   resultRef?: string;
   error?: string;
+  /** Set by the idle reaper when it released this session's worker. */
+  reapedAt?: string;
   lastOperation?: string;
   resources?: { cpu?: number; memBytes?: number };
   createdAt: string;

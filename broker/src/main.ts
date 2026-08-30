@@ -6,7 +6,8 @@
  *
  * Environment overrides: BROKER_SOCKET, BROKER_STATE_DIR, BROKER_LOG_FILE,
  * BROKER_GIT_MODE (real|planned), MSB_BINARY, MSB_WORKER_IMAGE,
- * BROKER_GENTLE_AI_BINARY.
+ * BROKER_GENTLE_AI_BINARY, BROKER_REAP_INTERVAL_MS, BROKER_REAP_IDLE_MS,
+ * BROKER_QUEUE_TIMEOUT_MS, BROKER_QUEUE_MAX_LENGTH.
  *
  * Gate 1: nothing is installed; run manually for local testing only.
  * The systemd unit (systemd-user/sandbox-broker.service) is the intended
@@ -174,6 +175,8 @@ async function main(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
   await server.start();
+  // Feature 1: idle reaper sweeps every reapIntervalMs; shutdown stops it.
+  server.startReaper();
   console.error(`sandbox broker listening on ${config.socketPath} (state: ${config.stateDir})`);
 }
 
