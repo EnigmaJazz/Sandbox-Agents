@@ -120,7 +120,12 @@ export default function routingGuardPlugin(): Plugin {
         return; // HOST_READ_ONLY: host reads are the intended mode (S3)
       }
       if (MUTATION_TOOLS.has(toolName)) {
-        throw new Error(MUTATION_BLOCK_MSG);
+        // S1/S10: block ordinary host mutation. Return a proper tool error result
+        // that preserves MUTATION_BLOCK_MSG verbatim so the model sees
+        // "Ordinary host mutation... Use sandbox_write..." instead of generic
+        // "tool execution aborted". The plugin host surfaces the `error` field
+        // as a tool failure with the verbatim message.
+        return { error: MUTATION_BLOCK_MSG } as unknown as void;
       }
     },
     "experimental.chat.system.transform": async (input, output) => {
