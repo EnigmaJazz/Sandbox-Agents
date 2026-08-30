@@ -9,7 +9,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/.local/share/opencode-sandbox-control
+WorkingDirectory=/home/james/ai-workspace/workflow_optimisation
 ExecStartPre=/usr/bin/mkdir -p %h/.local/share/opencode-sandbox-control
 ExecStart=/home/james/agent-sandbox-integration/scripts/start-secure-opencode
 Restart=on-failure

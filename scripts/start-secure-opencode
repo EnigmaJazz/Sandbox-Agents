@@ -1,80 +1,38 @@
 #!/usr/bin/env bash
-#
-# start-secure-opencode — launch the secured OpenCode server (spec §15, §23).
-#
-# NOT INSTALLED at Gate 1. Unlocked by manual gates (docs/manual-verification.md
-# Gate 2: nono profile validated; Gate 3+: broker live). This script must be
-# reviewed and run by the USER — it is the manual step, not an agent action.
-#
-# Behaviour:
-#   1. Refuses to run from a real project directory (spec §15: secure OpenCode
-#      must NOT be started with a project as CWD).
-#   2. Creates the dedicated control directory (nono expands profile grants
-#      at launch time, so the dir must exist).
-#   3. Runs: nono run --profile opencode-secure -- opencode serve --hostname 127.0.0.1 --port 4096
-#
-# Usage: scripts/start-secure-opencode [--control-dir PATH]
 set -euo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/secure-launcher.conf
 source "$SCRIPT_DIR/secure-launcher.conf"
-
 CONTROL_DIR_OVERRIDE=""
-if [[ "${1:-}" == "--control-dir" ]]; then
-  CONTROL_DIR_OVERRIDE="${2:?--control-dir requires a path}"
-fi
-if [[ -n "$CONTROL_DIR_OVERRIDE" ]]; then
-  CONTROL_DIR="$CONTROL_DIR_OVERRIDE"
-fi
-
-# --- Refuse to run from a real project directory (spec §15) -----------------
+[[ "${1:-}" == "--control-dir" ]] && CONTROL_DIR_OVERRIDE="${2:?}"
+[[ -n "$CONTROL_DIR_OVERRIDE" ]] && CONTROL_DIR="$CONTROL_DIR_OVERRIDE"
+BOOTSTRAP_WORKSPACE="/home/james/ai-workspace/workflow_optimisation"
 CWD_CANON="$(realpath -m "$PWD")"
 CONTROL_CANON="$(realpath -m "$CONTROL_DIR")"
-if [[ "$CWD_CANON" == "$CONTROL_CANON" ]]; then
-  : # allowed: running from the control dir itself
+BOOTSTRAP_CANON="$(realpath -m "$BOOTSTRAP_WORKSPACE")"
+if [[ "$CWD_CANON" == "$CONTROL_CANON" || "$CWD_CANON" == "$BOOTSTRAP_CANON" ]]; then
+  : # allowed: control dir or approved bootstrap workspace
 else
   for root in "${PROJECT_ROOTS[@]}"; do
+    [[ "$(realpath -m "$root")" == "$BOOTSTRAP_CANON" ]] && continue
     ROOT_CANON="$(realpath -m "$root")"
-    case "$CWD_CANON" in
-      "$ROOT_CANON"|"$ROOT_CANON"/*)
-        echo "refusing to start secure opencode from project dir: $PWD" >&2
-        echo "cd to the control dir first: $CONTROL_DIR" >&2
-        exit 3
-        ;;
+    case "$CWD_CANON" in "$ROOT_CANON"|"$ROOT_CANON"/*)
+      echo "refusing to start secure opencode from project dir: $PWD" >&2
+      echo "cd to the control dir first: $CONTROL_DIR" >&2
+      echo "or to the approved bootstrap workspace: $BOOTSTRAP_WORKSPACE" >&2
+      exit 3 ;;
     esac
   done
 fi
-
-# Also refuse when the CWD looks like any git checkout (defence in depth).
-if [[ -d "$CWD_CANON/.git" && "$CWD_CANON" != "$CONTROL_CANON" ]]; then
-  echo "refusing to start secure opencode from a git checkout: $PWD" >&2
-  exit 3
+if [[ -d "$CWD_CANON/.git" && "$CWD_CANON" != "$CONTROL_CANON" && "$CWD_CANON" != "$BOOTSTRAP_CANON" ]]; then
+  echo "refusing to start secure opencode from a git checkout: $PWD" >&2; exit 3
 fi
-
-# --- Tool checks (discovery report §2) --------------------------------------
-for bin in "$NONO_BIN" "$OPENCODE_BIN"; do
-  if [[ ! -x "$bin" ]]; then
-    echo "missing required binary: $bin" >&2
-    exit 4
-  fi
-done
-if [[ ! -f "$SCRIPT_DIR/../nono/profile/opencode-secure.json" ]]; then
-  echo "nono profile missing in repo; cannot continue" >&2
-  exit 4
-fi
-
-# --- Control directory ------------------------------------------------------
-mkdir -p "$CONTROL_DIR"
-chmod 700 "$CONTROL_DIR"
-
-# --- Validate the resolved profile (Gate 2 discipline) ----------------------
+for bin in "$NONO_BIN" "$OPENCODE_BIN"; do [[ -x "$bin" ]] || { echo "missing required binary: $bin" >&2; exit 4; }; done
+[[ -f "$SCRIPT_DIR/../nono/profile/opencode-secure.json" ]] || { echo "nono profile missing in repo; cannot continue" >&2; exit 4; }
+mkdir -p "$CONTROL_DIR"; chmod 700 "$CONTROL_DIR"
 echo "validating nono profile..."
 "$NONO_BIN" profile validate "$SCRIPT_DIR/../nono/profile/opencode-secure.json" >/dev/null
 "$NONO_BIN" run --dry-run --profile "$SCRIPT_DIR/../nono/profile/opencode-secure.json" -- true >/dev/null
-
-# --- Launch (spec §15, §23) --------------------------------------------------
 echo "starting secured opencode at ${OPENCODE_HOSTNAME}:${OPENCODE_PORT} (profile: ${NONO_PROFILE})"
 echo "control dir: $CONTROL_DIR"
-exec "$NONO_BIN" run --profile "$SCRIPT_DIR/../nono/profile/opencode-secure.json" \
-  -- "$OPENCODE_BIN" serve --hostname "$OPENCODE_HOSTNAME" --port "$OPENCODE_PORT"
+echo "bootstrap workspace: $BOOTSTRAP_WORKSPACE (cwd: $PWD)"
+exec "$NONO_BIN" run --profile "$SCRIPT_DIR/../nono/profile/opencode-secure.json" -- "$OPENCODE_BIN" serve --hostname "$OPENCODE_HOSTNAME" --port "$OPENCODE_PORT"

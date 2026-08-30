@@ -1,16 +1,22 @@
 {
   "meta": {
     "name": "opencode-secure",
-    "version": "0.1.1",
-    "description": "Secured host OpenCode process for the agentic sandbox integration (SYSTEM_PROMPT.md . Control dir writable, project roots read-only, credential stores only what OpenCode itself needs, everything else denied. NOT INSTALLED at Gate 1 — see nono/README.md.",
+    "version": "0.1.2",
+    "description": "Secured host OpenCode process for the agentic sandbox integration (SYSTEM_PROMPT.md . Control dir writable, project roots read-only, credential stores only what OpenCode itself needs, everything else denied. NOT INSTALLED at Gate 1 \u2014 see nono/README.md.",
     "author": "agentic-sandbox-integration"
   },
   "extends": "default",
   "groups": {
-    "include": []
+    "include": [
+      "git_config",
+      "node_runtime",
+      "python_runtime",
+      "bun_runtime",
+      "opencode_linux"
+    ]
   },
   "workdir": {
-    "access": "none"
+    "access": "read"
   },
   "filesystem": {
     "allow": [
@@ -21,9 +27,22 @@
       "$HOME/.cache/opencode",
       "$HOME/.config/opencode",
       "$HOME/.local/share/cortexkit",
-      "$HOME/.config/cortexkit",
+      "$HOME/.confiG/cortexkit",
       "$HOME/.gentle-ai",
-      "$TMPDIR"
+      "$TMPDIR",
+      "$HOME/.cache/workflow-health-check",
+      "$HOME/ai-workspace/workflow_optimisation/.atl",
+      "$HOME/.Config/openchamber/chats/.auto-update-history.json",
+      "$HOME/.config/openchamber/chats/**/.auto-update-history.json",
+      "$HOME/agent-sandbox-integration/.atl",
+      "/mnt/ai_storage/kinver-hub/proxy/.atl",
+      "/home/james/peak-redir/.atl",
+      "/home/james/opencode-workspace/.atl",
+      "/home/james/ai-workspace/tasker/tesla/.atl",
+      "/home/james/weight_loss/.atl",
+      "/home/james/nono-opencode-test/.atl",
+      "/home/james/omni-router-setup/.atl",
+      "/home/james/mem-opt/.atl"
     ],
     "allow_file": [
       "$HOME/.auto-update-history.json",
@@ -31,7 +50,8 @@
       "/mnt/ai_storage/kinver-hub/.auto-update-history.json",
       "$HOME/ai-workspace/.auto-update-history.json",
       "$HOME/ai-workspace/tasker/.auto-update-history.json",
-      "/home/james/.auto-update-history.json"
+      "/home/james/.auto-update-history.json",
+      "/home/james/ai-workspace/.auto-update-history.json"
     ],
     "read": [
       "$HOME/agent-sandbox-integration",
@@ -62,19 +82,15 @@
       "opencode.ai",
       "models.opencode.ai",
       "openrouter.ai",
-      "api.deepseek.com"
+      "api.deepseek.com",
+      "mcp.context7.com",
+      "context7.com",
+      "registry.npmjs.org",
+      "registry.yarnpkg.com"
     ],
-    "open_port": [
-      4096,
-      13000,
-      8788
-    ],
-    "listen_port": [
-      4096
-    ],
-    "no_proxy": [
-      "localhost"
-    ]
+    "open_port": [4096, 13000, 8788],
+    "listen_port": [4096],
+    "no_proxy": ["localhost"]
   },
   "security": {
     "signal_mode": "isolated",
