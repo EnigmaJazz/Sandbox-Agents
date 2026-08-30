@@ -284,7 +284,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   copyInInfo: ["hostSource", "workerPath"],
   copyIn: ["hostSource", "workerPath", "confirm"],
   policy: [],
-  registerProject: ["path"],
+  registerProject: ["path", "dryRun", "createRemote", "makePublic"],
 };
 
 export function assertPayloadKeys(operation: string, payload: unknown): void {

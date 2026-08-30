@@ -463,10 +463,10 @@ export default function sandboxToolsPlugin() {
 
       host_register_project: tool({
         description: "Register a new project with the agentic sandbox system (host-side, creates .atl, updates profile/broker/launcher). Path must be absolute.",
-        args: { path: pathArg },
+        args: { path: pathArg, dryRun: z.boolean().optional(), createRemote: z.boolean().optional(), makePublic: z.boolean().optional() },
         execute: async (args, ctx) => {
           const c = await client();
-          const result = await c.request("registerProject", ctx.sessionID, { path: args.path }, ctx.agent);
+          const result = await c.request("registerProject", ctx.sessionID, { path: args.path, dryRun: !!args.dryRun, createRemote: !!args.createRemote, makePublic: !!args.makePublic }, ctx.agent);
           return JSON.stringify(result, null, 2);
         },
       }),

@@ -261,6 +261,9 @@ export interface HostDockerLogsPayload {
 
 export interface RegisterProjectPayload {
   path: string;
+  dryRun?: boolean;
+  createRemote?: boolean;
+  makePublic?: boolean;
 }
 
 // ---------------------------------------------------------------------------

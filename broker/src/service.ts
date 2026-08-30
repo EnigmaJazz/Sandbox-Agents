@@ -1335,7 +1335,7 @@ export async function releaseWorker(ctx: OpContext, record: SessionRecord): Prom
 export function buildRegisterProjectOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const rawPayload = (req.payload ?? {}) as Record<string, unknown>;
-    const allowedKeys = ["path"];
+    const allowedKeys = ["path", "dryRun", "createRemote", "makePublic"];
     for (const k of Object.keys(rawPayload)) {
       if (!allowedKeys.includes(k)) {
         throw new ValidationError(`unexpected field '${k}' in registerProject payload`);
@@ -1348,8 +1348,25 @@ export function buildRegisterProjectOp(ctx: OpContext): OpHandler {
     if (p.includes("\u0000")) {
       throw new ValidationError("path contains NUL");
     }
+    if (rawPayload.dryRun !== undefined && typeof rawPayload.dryRun !== "boolean") {
+      throw new ValidationError("dryRun must be a boolean");
+    }
+    if (rawPayload.createRemote !== undefined && typeof rawPayload.createRemote !== "boolean") {
+      throw new ValidationError("createRemote must be a boolean");
+    }
+    if (rawPayload.makePublic !== undefined && typeof rawPayload.makePublic !== "boolean") {
+      throw new ValidationError("makePublic must be a boolean");
+    }
+    if (rawPayload.makePublic && !rawPayload.createRemote) {
+      throw new ValidationError("--public requires --create-remote");
+    }
     const repoRoot = resolve(join(import.meta.dir, "../.."));
-    const result = await ctx.git.spawn(["bun", "scripts/register-project.ts", p], {
+    const argv: string[] = ["bun", "scripts/register-project.ts"];
+    if (rawPayload.dryRun) argv.push("--dry-run");
+    if (rawPayload.createRemote) argv.push("--create-remote");
+    if (rawPayload.makePublic) argv.push("--public");
+    argv.push(p);
+    const result = await ctx.git.spawn(argv, {
       cwd: repoRoot,
       timeoutMs: 60_000,
     });
