@@ -78,6 +78,7 @@ export class BrokerServer {
   private readonly logger: Logger;
   private readonly ctx: ServerContext;
   private readonly sessionLocks = new Map<string, Promise<unknown>>();
+  private readonly activeLocks = new Map<string, number>();
   private readonly buffers = new WeakMap<SocketLike, Buffer>();
   /** Sessions each socket has dispatched requests for (disconnect cleanup). */
   private readonly sessionsBySocket = new WeakMap<SocketLike, Set<string>>();
@@ -117,6 +118,7 @@ export class BrokerServer {
       pool: { allocations: [] },
       queue: new PendingQueue(),
       sessionLocks: this.sessionLocks,
+      activeLocks: this.activeLocks,
       hostRead,
       sddRuntime,
       logger: this.logger,
@@ -363,10 +365,11 @@ export class BrokerServer {
   }
 
   private withSessionLock<T>(sessionID: string, fn: () => Promise<T>): Promise<T> {
+    this.activeLocks.set(sessionID, (this.activeLocks.get(sessionID) ?? 0) + 1);
     const prev = this.sessionLocks.get(sessionID) ?? Promise.resolve();
     const next = prev.then(fn, fn);
     this.sessionLocks.set(sessionID, next.then(() => undefined, () => undefined));
-    return next;
+    return next.finally(() => { const n = (this.activeLocks.get(sessionID) ?? 1) - 1; if (n <= 0) this.activeLocks.delete(sessionID); else this.activeLocks.set(sessionID, n); });
   }
 
   private respond(socket: SocketLike, resp: BrokerResponseEnvelope): void {

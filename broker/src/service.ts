@@ -91,6 +91,7 @@ export interface OpContext {
    */
   queue?: PendingQueue;
   sessionLocks?: Map<string, Promise<unknown>>;
+  activeLocks?: Map<string, number>;
   hostRead: HostReadExecutor;
   logger: Logger;
   git: {

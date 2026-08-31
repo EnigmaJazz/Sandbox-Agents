@@ -86,7 +86,7 @@ export async function sweepIdle(
       // Skip truly-not-idle: parked in queue, waiting for permission, or exec in-flight
       if (ctx.queue?.find(record.sessionID)) continue;
       if (record.state === "APPLY_PENDING") continue;
-      if (ctx.sessionLocks?.has(record.sessionID)) continue;
+      if ((ctx.activeLocks?.get(record.sessionID) ?? 0) > 0) continue;
       // No worker -> nothing to release (includes sessions parked in the pool
       // queue: they never transitioned past HOST_READ_ONLY). DESTROYED/FAILED
       // workers were already released.
@@ -154,7 +154,7 @@ export async function sweepUnfinished(
       // Skip truly-not-idle: parked, waiting for permission, or exec in-flight
       if (ctx.queue?.find(record.sessionID)) continue;
       if (record.state === "APPLY_PENDING") continue;
-      if (ctx.sessionLocks?.has(record.sessionID)) continue;
+      if ((ctx.activeLocks?.get(record.sessionID) ?? 0) > 0) continue;
       if (record.state !== "SANDBOX_ACTIVE") continue;
       if (!record.workerName) continue;
       if (record.workerState !== "ACTIVE") continue;
