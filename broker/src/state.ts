@@ -132,19 +132,32 @@ export class SessionStore {
     }
   }
 
-  /** Create or return an existing record for a session. */
-  touch(sessionID: string, patch: Partial<SessionRecord> = {}): SessionRecord {
+  /** Create or return an existing record for a session.
+   *  updatedAt is only bumped for meaningful ops (exec, writeFile, etc.)
+   *  to keep idle age reflecting real activity; workerStatus/policy probes
+   *  must not keep a dead session alive.
+   */
+  touch(sessionID: string, patch: Partial<SessionRecord> = {}, operation?: string): SessionRecord {
     const existing = this.get(sessionID);
     const nowIso = this.now().toISOString();
-    const record: SessionRecord = existing
-      ? { ...existing, ...patch, updatedAt: nowIso }
-      : {
-          sessionID,
-          state: "HOST_READ_ONLY",
-          createdAt: nowIso,
-          updatedAt: nowIso,
-          ...patch,
-        };
+    const isMeaningful = operation === undefined || isMeaningfulTouchOp(operation);
+    if (!existing) {
+      const record: SessionRecord = {
+        sessionID,
+        state: "HOST_READ_ONLY",
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        ...patch,
+      };
+      this.persist(record);
+      return record;
+    }
+    const updatedAt = isMeaningful ? nowIso : existing.updatedAt;
+    // When not meaningful, don't allow patch to override updatedAt accidentally
+    const { updatedAt: _ignored, ...restPatch } = patch as Record<string, unknown>;
+    const record: SessionRecord = isMeaningful
+      ? { ...existing, ...patch, updatedAt }
+      : { ...existing, ...(restPatch as Partial<SessionRecord>), updatedAt };
     this.persist(record);
     return record;
   }
@@ -201,6 +214,28 @@ function fdSync(fd: number): void {
   } catch {
     /* best effort */
   }
+}
+
+const MEANINGFUL_TOUCH_OPS = new Set<string>([
+  "writeFile",
+  "exec",
+  "applyPatch",
+  "prepareResult",
+  "ensureWorker",
+  "copyIn",
+  "copyOut",
+  "copyInInfo",
+  "copyOutInfo",
+  "diff",
+  "grep",
+  "listDir",
+  "list",
+]);
+
+function isMeaningfulTouchOp(op: string): boolean {
+  if (MEANINGFUL_TOUCH_OPS.has(op)) return true;
+  if (op.startsWith("copy")) return true;
+  return false;
 }
 
 function isSessionRecord(v: unknown): v is SessionRecord {

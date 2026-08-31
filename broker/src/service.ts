@@ -90,6 +90,7 @@ export interface OpContext {
    * queue may omit it (drain/park guard on absence).
    */
   queue?: PendingQueue;
+  sessionLocks?: Map<string, Promise<unknown>>;
   hostRead: HostReadExecutor;
   logger: Logger;
   git: {
@@ -162,7 +163,8 @@ export function buildEnsureWorkerOp(ctx: OpContext): OpHandler {
     const record = ctx.store.touch(req.sessionID, {
       projectID,
       agent: req.agent,
-    });
+      lastOperation: "ensureWorker",
+    }, "ensureWorker");
 
     // Fast paths. State gates run BEFORE admission so FAILED_CLOSED and
     // mid-creation sessions never park in the pool queue.

@@ -116,6 +116,7 @@ export class BrokerServer {
       resources,
       pool: { allocations: [] },
       queue: new PendingQueue(),
+      sessionLocks: this.sessionLocks,
       hostRead,
       sddRuntime,
       logger: this.logger,
@@ -225,6 +226,9 @@ export class BrokerServer {
       const result = await this.withSessionLock(envelope.sessionID, () =>
         this.dispatch(envelope),
       );
+      // Touch for meaningful ops only (state.ts filters workerStatus/policy)
+      try { this.ctx.store.touch(envelope.sessionID, { lastOperation: envelope.operation }, envelope.operation); } catch {}
+
       this.respond(socket, { version: 1, id: envelope.id, ok: true, result });
       this.logger.log({
         sessionID: envelope.sessionID,
