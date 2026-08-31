@@ -169,6 +169,11 @@ export async function sweepUnfinished(
         const status = await ctx.adapter.exec(record.workerName, ["git", "status", "--porcelain"], {
           cwd: "/work",
           timeoutMs: 30_000,
+          env: {
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "safe.directory",
+            GIT_CONFIG_VALUE_0: "/work",
+          },
         });
         if (status.status === 0) {
           hasChanges = status.stdout.trim().length > 0;
