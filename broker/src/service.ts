@@ -1165,7 +1165,15 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
       ":(exclude).broker-tmp",
       ":(exclude)*.bundle",
     ],
-    { cwd: "/work", timeoutMs: 60_000 },
+    {
+      cwd: "/work",
+      timeoutMs: 60_000,
+      env: {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "safe.directory",
+        GIT_CONFIG_VALUE_0: "/work",
+      },
+    },
   );
   if (add.status !== 0) {
     throw new MsbError(`result staging failed: ${trimErr(add.stderr)}`);
@@ -1177,28 +1185,55 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
     {
       cwd: "/work",
       timeoutMs: 60_000,
+      env: {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "safe.directory",
+        GIT_CONFIG_VALUE_0: "/work",
+      },
     },
   );
   if (staged.status !== 0) {
     const commit = await ctx.adapter.exec(
       worker,
       ["git", "commit", "-q", "-m", `opencode-sandbox result for ${sessionID}`],
-      { cwd: "/work", timeoutMs: 60_000 },
+      {
+      cwd: "/work",
+      timeoutMs: 60_000,
+      env: {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "safe.directory",
+        GIT_CONFIG_VALUE_0: "/work",
+      },
+    },
     );
     if (commit.status !== 0) {
       throw new MsbError(`result commit failed: ${trimErr(commit.stderr)}`);
     }
   }
-  await ctx.adapter.exec(worker, ["git", "update-ref", ref, "HEAD"], {
-    cwd: "/work",
-    timeoutMs: 60_000,
-  });
+  await ctx.adapter.exec(
+    worker,
+    ["git", "update-ref", ref, "HEAD"],
+    {
+      cwd: "/work",
+      timeoutMs: 60_000,
+      env: {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "safe.directory",
+        GIT_CONFIG_VALUE_0: "/work",
+      },
+    },
+  );
   await ctx.adapter.exec(
     worker,
     ["git", "bundle", "create", workerBundle, ref],
     {
       cwd: "/work",
       timeoutMs: 120_000,
+      env: {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "safe.directory",
+        GIT_CONFIG_VALUE_0: "/work",
+      },
     },
   );
   await ctx.adapter.copyOut(worker, workerBundle, hostBundle);
