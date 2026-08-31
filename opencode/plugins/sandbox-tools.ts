@@ -55,7 +55,20 @@ function client(): Promise<BrokerClient> {
 /** Map an opencode session to a worker; reuses an existing one (§13, §28). */
 async function ensureWorker(sessionID: string, directory: string | undefined): Promise<unknown> {
   const c = await client();
-  return c.request("ensureWorker", sessionID, { projectDir: directory ?? process.cwd() });
+  const first = (await c.request("ensureWorker", sessionID, { projectDir: directory ?? process.cwd() })) as any;
+  if (first && first.queued) {
+    // pool full, queued position N — do NOT treat as success, await real worker
+    let current = first;
+    while (current && current.queued) {
+      // broker-client already logs progress.queued; this handles the fallback immediate queued:true
+      await new Promise((r) => setTimeout(r, 300));
+      const next = (await c.request("ensureWorker", sessionID, { projectDir: directory ?? process.cwd() })) as any;
+      if (!next || !next.queued) return next;
+      current = next;
+    }
+    return current;
+  }
+  return first;
 }
 
 function notActiveError(): Error {

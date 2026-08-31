@@ -103,6 +103,7 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
               } catch {
                 continue; // ignore malformed frames; keep the socket alive
               }
+              // queued hold: log and keep pending open, waiting for real worker result with same id
               if ((resp as any).progress?.queued) { console.log(`pool full, queued position ${(resp as any).progress.position}`); continue; }
               const p = pending.get(resp.id);
               if (p) {
