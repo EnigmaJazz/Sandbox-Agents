@@ -184,8 +184,11 @@ export async function sweepUnfinished(
       }
       if (!hasChanges) continue;
       const ref = await runPrepare(ctx, record.sessionID);
+      await releaseWorker(ctx, record);
       ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", {
         resultRef: ref,
+        workerName: undefined,
+        workerState: "DESTROYED",
       });
       onLog?.({ sessionID: record.sessionID, action: "auto_finished", detail: ref });
       finished++;
