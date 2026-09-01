@@ -1775,6 +1775,7 @@ export async function releaseWorker(
         await new Promise((r) => setTimeout(r, 1500));
       }
     }
+    await (ctx.adapter as unknown as { removeConfigDir?: (name: string) => Promise<void> }).removeConfigDir?.(record.workerName)?.catch(() => undefined);
   }
   removePoolAllocation(ctx, record);
   // Feature 2: a slot just freed — admit parked requests (fire-and-forget).

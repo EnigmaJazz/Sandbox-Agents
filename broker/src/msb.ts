@@ -12,7 +12,7 @@
  */
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import type { BrokerConfig } from "./config.ts";
 import type { WorkerState } from "./types.ts";
 import { ValidationError } from "./validation.ts";
@@ -354,6 +354,11 @@ export class MsbAdapter {
     if (res.status !== 0 && !res.timedOut) {
       throw new MsbError(`msb remove failed (status ${res.status})`);
     }
+  }
+
+  async removeConfigDir(workerName: string): Promise<void> {
+    const dir = join(this.config.stateDir, "workers", workerName);
+    rmSync(dir, { recursive: true, force: true });
   }
 
   async list(): Promise<string[]> {
