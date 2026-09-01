@@ -142,8 +142,8 @@ function recordOr404(store: SessionStore, sessionID: string): SessionRecord {
 // ensureWorker — lazy creation (§4, §11, §13) + pool queue (Feature 2)
 // ---------------------------------------------------------------------------
 
-export function buildEnsureWorkerOp(ctx: OpContext): OpHandler {
-  return async (req) => {
+export function buildEnsureWorkerOp(ctx: OpContext): (req: BrokerRequestEnvelope, sendProgress?: (position: number) => void) => Promise<unknown> {
+  return async (req, sendProgress) => {
     // Orchestrator read-only: refuse before any touch/admission side effect (R2).
     const existing = ctx.store.get(req.sessionID);
     const trusted = existing?.agent ?? req.agent;
@@ -212,7 +212,7 @@ export function buildEnsureWorkerOp(ctx: OpContext): OpHandler {
           `${admission.reason}${admission.queueHint > 0 ? ` (queue position ~${admission.queueHint})` : ""}`,
         );
       }
-      return parkAndWait(ctx, req, projectID);
+      return parkAndWait(ctx, req, projectID, sendProgress);
     }
 
     return createWorkerForSession(ctx, req, req.sessionID, projectID);
@@ -394,6 +394,7 @@ function parkAndWait(
   ctx: OpContext,
   req: BrokerRequestEnvelope,
   projectID: string,
+  sendProgress?: (position: number) => void,
 ): Promise<unknown> {
   const queue = ctx.queue;
   if (!queue) {
@@ -402,8 +403,10 @@ function parkAndWait(
     );
   }
   const existing = queue.find(req.sessionID);
-  if (existing)
-    return Promise.resolve({ queued: true, position: existing.position });
+  if (existing) {
+    sendProgress?.(existing.position);
+    return existing.pending;
+  }
   if (queue.length >= ctx.config.queueMaxLength) {
     throw new PolicyError(
       `worker queue full (${ctx.config.queueMaxLength}); retry later`,
@@ -439,7 +442,8 @@ function parkAndWait(
   }
   entry.timer = timer;
   queue.enqueue(entry);
-  return Promise.resolve({ queued: true, position: entry.position });
+  sendProgress?.(entry.position);
+  return pending;
 }
 
 /**

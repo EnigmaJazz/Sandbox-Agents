@@ -138,42 +138,48 @@ function victimRecord(name: string): SessionRecord {
   };
 }
 
-// first test — was await pending → worker, now immediate queued + tick for drain
+// pool full → ensureWorker parks the request (pending) and resolves only after drain → real worker
 test("pool full → ensureWorker parks; releaseWorker drains → worker created", async () => {
   const h = makeHarness();
-  const queued = (await h.ensureWorker("s1")) as any;
-  expect(queued.queued).toBe(true);
-  expect(queued.position).toBe(1);
+  const parked = h.ensureWorker("s1");
+  await new Promise((r) => setTimeout(r, 10));
   expect(h.ctx.queue.length).toBe(1);
+  expect(h.ctx.queue.head()?.position).toBe(1);
   await releaseWorker(h.ctx, victimRecord("victim"));
-  await new Promise((r) => setTimeout(r, 10)); // drain is fire-and-forget
+  const result = (await parked) as any;
+  expect(result.worker).toBe("worker-s1");
+  expect(result.queued).toBe(true);
+  expect(result.queuePosition).toBe(1);
   expect(h.created).toEqual(["worker-s1"]);
   expect(h.ctx.queue.length).toBe(0);
 });
 
-// FIFO — same idea, check queue length not pending
+// FIFO: parked sessions are admitted in queue order
 test("FIFO: parked sessions are admitted in queue order", async () => {
   const h = makeHarness();
-  const qa = (await h.ensureWorker("a")) as any;
-  const qb = (await h.ensureWorker("b")) as any;
-  expect(qa.position).toBe(1);
-  expect(qb.position).toBe(2);
-  expect(h.ctx.queue.length).toBe(2);
-  await releaseWorker(h.ctx, victimRecord("x"));
+  const pa = h.ensureWorker("a");
+  const pb = h.ensureWorker("b");
   await new Promise((r) => setTimeout(r, 10));
+  expect(h.ctx.queue.length).toBe(2);
+  expect(h.ctx.queue.find("a")?.position).toBe(1);
+  expect(h.ctx.queue.find("b")?.position).toBe(2);
+  await releaseWorker(h.ctx, victimRecord("x"));
+  const ra = (await pa) as any;
+  expect(ra.worker).toBe("worker-a");
   expect(h.created).toEqual(["worker-a"]);
   await releaseWorker(h.ctx, victimRecord("y"));
-  await new Promise((r) => setTimeout(r, 10));
+  const rb = (await pb) as any;
+  expect(rb.worker).toBe("worker-b");
   expect(h.created).toEqual(["worker-a", "worker-b"]);
 });
 
-// timeout — queued entry times out via timer, not pending reject
+// timeout — parked pending rejects with queued_timed_out after queueTimeoutMs
 test("timeout rejects with queued_timed_out and removes the entry", async () => {
   const h = makeHarness({ queueTimeoutMs: 50 });
-  const queued = (await h.ensureWorker("s1")) as any;
-  expect(queued.queued).toBe(true);
+  const parked = h.ensureWorker("s1");
+  await new Promise((r) => setTimeout(r, 10));
   expect(h.ctx.queue.length).toBe(1);
-  await new Promise((r) => setTimeout(r, 70));
+  await expect(parked).rejects.toThrow(/timed out/);
   expect(h.ctx.queue.length).toBe(0);
 });
 
@@ -188,36 +194,51 @@ test("non-queueable refusals (invalid request) still throw immediately", async (
   expect(h.ctx.queue.length).toBe(0);
 });
 
-// double-park — returns same position
+// double-park — same session shares the SAME pending promise
 test("same session double-park shares a single queue entry", async () => {
   const h = makeHarness();
-  const p1 = (await h.ensureWorker("dup")) as any;
-  const p2 = (await h.ensureWorker("dup")) as any;
-  expect(p1.position).toBe(1);
-  expect(p2.position).toBe(1);
+  const p1 = h.ensureWorker("dup");
+  await new Promise((r) => setTimeout(r, 5));
+  const p2 = h.ensureWorker("dup");
+  await new Promise((r) => setTimeout(r, 5));
   expect(h.ctx.queue.length).toBe(1);
+  // Both calls share the same underlying pending promise (async wrapper creates distinct outer promises that resolve identically)
+  const entry = h.ctx.queue.find("dup")!;
+  expect(entry.pending).toBeDefined();
   await releaseWorker(h.ctx, victimRecord("x"));
-  await new Promise((r) => setTimeout(r, 10));
+  const [r1, r2] = await Promise.all([p1, p2]);
+  expect(r1).toEqual(r2);
+  expect((r1 as any).worker).toBe("worker-dup");
   expect(h.created).toEqual(["worker-dup"]);
+  expect(h.ctx.queue.length).toBe(0);
 });
 
 test("queue cap: beyond queueMaxLength ensureWorker fails immediately", async () => {
   const h = makeHarness({ queueMaxLength: 2 });
-  h.ensureWorker("q1");
-  h.ensureWorker("q2");
+  const p1 = h.ensureWorker("q1");
+  const p2 = h.ensureWorker("q2");
+  p1.catch(() => {});
+  p2.catch(() => {});
+  await new Promise((r) => setTimeout(r, 10));
   expect(h.ctx.queue.length).toBe(2);
 
   await expect(h.ensureWorker("q3")).rejects.toThrow(/queue full/);
   expect(h.ctx.queue.length).toBe(2);
+  // cleanup parked entries to avoid leaking timers into other tests
+  h.ctx.queue.cancel("q1", "test cleanup");
+  h.ctx.queue.cancel("q2", "test cleanup");
 });
 
-// disconnect — cancel removes it
+// disconnect — cancel removes it and rejects pending
 test("disconnect cleanup removes the parked entry and rejects it", async () => {
   const h = makeHarness();
-  await h.ensureWorker("d1");
+  const parked = h.ensureWorker("d1");
+  parked.catch(() => {});
+  await new Promise((r) => setTimeout(r, 10));
   expect(h.ctx.queue.length).toBe(1);
   h.ctx.queue.cancel("d1", "client disconnected");
   expect(h.ctx.queue.length).toBe(0);
+  await expect(parked).rejects.toThrow(/client disconnected/);
 });
 
 test("server socket close cancels queued entries for that socket's sessions", async () => {

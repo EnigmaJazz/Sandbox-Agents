@@ -225,8 +225,11 @@ export class BrokerServer {
     sessions.add(envelope.sessionID);
     this.sessionsBySocket.set(socket, sessions);
     try {
+      const sendProgress = (position: number) => {
+        this.respond(socket, { version: 1, id: envelope.id, progress: { queued: true, position } } as unknown as BrokerResponseEnvelope);
+      };
       const result = await this.withSessionLock(envelope.sessionID, () =>
-        this.dispatch(envelope),
+        this.dispatch(envelope, sendProgress),
       );
       // Touch for meaningful ops only (state.ts filters workerStatus/policy)
       try { this.ctx.store.touch(envelope.sessionID, { lastOperation: envelope.operation }, envelope.operation); } catch {}
@@ -310,11 +313,11 @@ export class BrokerServer {
   }
 
   /** Fail-closed dispatch: unknown operations and any error reject. */
-  private async dispatch(req: BrokerRequestEnvelope): Promise<unknown> {
+  private async dispatch(req: BrokerRequestEnvelope, sendProgress?: (position: number) => void): Promise<unknown> {
     const op = req.operation as Operation;
     switch (op) {
       case "ensureWorker":
-        return buildEnsureWorkerOp(this.ctx)(req);
+        return buildEnsureWorkerOp(this.ctx)(req, sendProgress);
       case "workerStatus":
         return buildWorkerStatusOp(this.ctx)(req);
       case "exec":
