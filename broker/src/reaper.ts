@@ -166,7 +166,7 @@ export async function sweepUnfinished(
       // If no changes, release and fail closed (nothing to export).
       let hasChanges = true;
       try {
-        const status = await ctx.adapter.exec(record.workerName, ["git", "status", "--porcelain"], {
+        const status = await ctx.adapter.exec(record.workerName, ["git", "status", "--porcelain", "--", ".", ":(exclude).broker-tmp", ":(exclude)*.bundle"], {
           cwd: "/work",
           timeoutMs: 30_000,
           env: {
