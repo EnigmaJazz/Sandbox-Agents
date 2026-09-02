@@ -61,6 +61,11 @@ export interface BrokerClient {
   close(): void;
 }
 
+const OPERATION_TIMEOUT_MS: Record<string, number> = {
+  exec: 130_000,
+  ensureWorker: 120_000,
+};
+
 /**
  * Create a client. Connecting is lazy but explicit: this throws synchronously
  * if the socket does not exist (fail closed). The client RECONNECTS on demand:
@@ -160,10 +165,11 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
       }
       const id = randomUUID();
       return new Promise<unknown>((resolve, reject) => {
+        const opTimeout = OPERATION_TIMEOUT_MS[operation] ?? timeoutMs;
         const timer = setTimeout(() => {
           pending.delete(id);
           reject(new BrokerClientError(`broker request '${operation}' timed out`, "timeout"));
-        }, timeoutMs);
+        }, opTimeout);
         pending.set(id, {
           resolve,
           reject,
