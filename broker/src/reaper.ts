@@ -163,7 +163,7 @@ export async function sweepUnfinished(
       const age = now - Date.parse(record.updatedAt);
       if (!(age > idleMs)) continue;
       // Has unstaged changes check: query worker git status --porcelain.
-      // If no changes, skip auto-finish (nothing to export).
+      // If no changes, release and fail closed (nothing to export).
       let hasChanges = true;
       try {
         const status = await ctx.adapter.exec(record.workerName, ["git", "status", "--porcelain"], {
@@ -177,12 +177,22 @@ export async function sweepUnfinished(
         });
         if (status.status === 0) {
           hasChanges = status.stdout.trim().length > 0;
-          if (!hasChanges) continue;
         }
       } catch {
         hasChanges = true;
       }
-      if (!hasChanges) continue;
+      if (!hasChanges) {
+        await releaseWorker(ctx, record);
+        ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "FAILED_CLOSED", {
+          workerName: undefined,
+          workerState: "DESTROYED",
+          error: "idle clean worker released",
+          reapedAt: new Date(now).toISOString(),
+        });
+        onLog?.({ sessionID: record.sessionID, action: "reaped_active", detail: "idle clean worker released" });
+        finished++;
+        continue;
+      }
       const ref = await runPrepare(ctx, record.sessionID);
       await releaseWorker(ctx, record);
       ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", {
