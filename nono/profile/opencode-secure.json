@@ -51,7 +51,8 @@
       "$HOME/ai-workspace/.auto-update-history.json",
       "$HOME/ai-workspace/tasker/.auto-update-history.json",
       "/home/james/.auto-update-history.json",
-      "/home/james/ai-workspace/.auto-update-history.json"
+      "/home/james/ai-workspace/.auto-update-history.json",
+      "/home/james/.config/openchamber/.auto-update-history.json"
     ],
     "read": [
       "$HOME/agent-sandbox-integration",
