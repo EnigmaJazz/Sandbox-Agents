@@ -1,0 +1,207 @@
+// ──────────────────────────────────────────────────────────────────────────
+// reviewer-relay-agents.jsonc — dedicated reviewer relay agents.
+//
+// NOT INSTALLED. This is a FRAGMENT: MANUAL merge into the user's opencode.json
+// after reviewing the diff. It must never be applied or overwritten
+// automatically (S17: `opencode/config-fragments/**` is a protected path).
+//
+// Change: reviewer-relay-transport. Install the reviewer-relay-transport plugin
+// with this fragment, restart secured OpenCode, then run ONE reviewer Task to
+// complete the manual gate. Agents never certify that gate.
+//
+// Why new names: the installed transport hooks
+// {review-risk, review-resilience, review-readability, review-reliability,
+//  review-refuter, review-validator}. These `asi-review-*` names are strictly
+// disjoint, so the installed transport never sees them and only the in-repo
+// relay handles them.
+//
+// Each agent is hidden, subagent-only, and tool-less: the relay replaces the
+// child session's system prompt with a transport boundary and injects the
+// provider-materialized user prompt, so the agent prompt here carries none of
+// the provider review contract, evidence, or result-schema semantics. Models
+// mirror the installed reviewer counterparts.
+// ──────────────────────────────────────────────────────────────────────────
+{
+  "agent": {
+    "asi-review-risk": {
+      "description": "Relay reviewer (R1 risk lens). Provider-materialized prompt only.",
+      "hidden": true,
+      "mode": "subagent",
+      "model": "openai/gpt-5.6-sol",
+      "variant": "high",
+      "prompt": "Follow only the provider-materialized review prompt. Do not inspect the live worktree, delegate, or edit anything.",
+      "tools": { "*": false, "bash": false, "edit": false, "read": false, "task": false, "write": false },
+      "permission": {
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "webfetch": "deny",
+        "task": { "*": "deny" },
+        "ctx_memory": "deny",
+        "sandbox_bash": "deny",
+        "sandbox_edit": "deny",
+        "sandbox_write": "deny",
+        "sandbox_apply_patch": "deny",
+        "sandbox_apply": "deny",
+        "sandbox_copy_in": "deny",
+        "sandbox_copy_out": "deny",
+        "sandbox_discard": "deny",
+        "sandbox_finish": "deny",
+        "sandbox_read": "deny",
+        "sandbox_list": "deny",
+        "sandbox_grep": "deny",
+        "sandbox_diff": "deny"
+      }
+    },
+    "asi-review-resilience": {
+      "description": "Relay reviewer (R4 resilience lens). Provider-materialized prompt only.",
+      "hidden": true,
+      "mode": "subagent",
+      "model": "openai/gpt-5.6-luna",
+      "variant": "high",
+      "prompt": "Follow only the provider-materialized review prompt. Do not inspect the live worktree, delegate, or edit anything.",
+      "tools": { "*": false, "bash": false, "edit": false, "read": false, "task": false, "write": false },
+      "permission": {
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "webfetch": "deny",
+        "task": { "*": "deny" },
+        "ctx_memory": "deny",
+        "sandbox_bash": "deny",
+        "sandbox_edit": "deny",
+        "sandbox_write": "deny",
+        "sandbox_apply_patch": "deny",
+        "sandbox_apply": "deny",
+        "sandbox_copy_in": "deny",
+        "sandbox_copy_out": "deny",
+        "sandbox_discard": "deny",
+        "sandbox_finish": "deny",
+        "sandbox_read": "deny",
+        "sandbox_list": "deny",
+        "sandbox_grep": "deny",
+        "sandbox_diff": "deny"
+      }
+    },
+    "asi-review-readability": {
+      "description": "Relay reviewer (R2 readability lens). Provider-materialized prompt only.",
+      "hidden": true,
+      "mode": "subagent",
+      "model": "openai/gpt-5.6-luna",
+      "variant": "",
+      "prompt": "Follow only the provider-materialized review prompt. Do not inspect the live worktree, delegate, or edit anything.",
+      "tools": { "*": false, "bash": false, "edit": false, "read": false, "task": false, "write": false },
+      "permission": {
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "webfetch": "deny",
+        "task": { "*": "deny" },
+        "ctx_memory": "deny",
+        "sandbox_bash": "deny",
+        "sandbox_edit": "deny",
+        "sandbox_write": "deny",
+        "sandbox_apply_patch": "deny",
+        "sandbox_apply": "deny",
+        "sandbox_copy_in": "deny",
+        "sandbox_copy_out": "deny",
+        "sandbox_discard": "deny",
+        "sandbox_finish": "deny",
+        "sandbox_read": "deny",
+        "sandbox_list": "deny",
+        "sandbox_grep": "deny",
+        "sandbox_diff": "deny"
+      }
+    },
+    "asi-review-reliability": {
+      "description": "Relay reviewer (R3 reliability lens). Provider-materialized prompt only.",
+      "hidden": true,
+      "mode": "subagent",
+      "model": "opencode-go/glm-5.3-flash",
+      "variant": "high",
+      "prompt": "Follow only the provider-materialized review prompt. Do not inspect the live worktree, delegate, or edit anything.",
+      "tools": { "*": false, "bash": false, "edit": false, "read": false, "task": false, "write": false },
+      "permission": {
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "webfetch": "deny",
+        "task": { "*": "deny" },
+        "ctx_memory": "deny",
+        "sandbox_bash": "deny",
+        "sandbox_edit": "deny",
+        "sandbox_write": "deny",
+        "sandbox_apply_patch": "deny",
+        "sandbox_apply": "deny",
+        "sandbox_copy_in": "deny",
+        "sandbox_copy_out": "deny",
+        "sandbox_discard": "deny",
+        "sandbox_finish": "deny",
+        "sandbox_read": "deny",
+        "sandbox_list": "deny",
+        "sandbox_grep": "deny",
+        "sandbox_diff": "deny"
+      }
+    },
+    "asi-review-refuter": {
+      "description": "Relay refuter. Provider-materialized prompt only.",
+      "hidden": true,
+      "mode": "subagent",
+      "model": "opencode-go/qwen3.7-plus",
+      "variant": "high",
+      "prompt": "Follow only the provider-materialized refutation prompt. Do not add findings, modify anything, or delegate.",
+      "tools": { "*": false, "bash": false, "edit": false, "read": false, "task": false, "write": false },
+      "permission": {
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "webfetch": "deny",
+        "task": { "*": "deny" },
+        "ctx_memory": "deny",
+        "sandbox_bash": "deny",
+        "sandbox_edit": "deny",
+        "sandbox_write": "deny",
+        "sandbox_apply_patch": "deny",
+        "sandbox_apply": "deny",
+        "sandbox_copy_in": "deny",
+        "sandbox_copy_out": "deny",
+        "sandbox_discard": "deny",
+        "sandbox_finish": "deny",
+        "sandbox_read": "deny",
+        "sandbox_list": "deny",
+        "sandbox_grep": "deny",
+        "sandbox_diff": "deny"
+      }
+    },
+    "asi-review-validator": {
+      "description": "Relay targeted validator. Provider-materialized prompt only.",
+      "hidden": true,
+      "mode": "subagent",
+      "model": "opencode-go/glm-5.3-flash",
+      "variant": "max",
+      "prompt": "Follow only the provider-materialized validation prompt. Do not edit files or delegate.",
+      "tools": { "*": false, "bash": false, "edit": false, "read": false, "task": false, "write": false },
+      "permission": {
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "webfetch": "deny",
+        "task": { "*": "deny" },
+        "ctx_memory": "deny",
+        "sandbox_bash": "deny",
+        "sandbox_edit": "deny",
+        "sandbox_write": "deny",
+        "sandbox_apply_patch": "deny",
+        "sandbox_apply": "deny",
+        "sandbox_copy_in": "deny",
+        "sandbox_copy_out": "deny",
+        "sandbox_discard": "deny",
+        "sandbox_finish": "deny",
+        "sandbox_read": "deny",
+        "sandbox_list": "deny",
+        "sandbox_grep": "deny",
+        "sandbox_diff": "deny"
+      }
+    }
+  }
+}
