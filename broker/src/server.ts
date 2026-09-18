@@ -53,6 +53,7 @@ import { drainQueue } from "./service.ts";
 import {
   buildApplyOp,
   buildApplyResultOp,
+  buildBindSessionAgentOp,
   buildCopyInInfoOp,
   buildCopyInOp,
   buildCopyOutInfoOp,
@@ -401,6 +402,8 @@ export class BrokerServer {
         return buildPolicyOp(this.ctx)(req);
       case "planDocAppend":
         return buildPlanDocAppendOp(this.ctx)(req);
+      case "bindSessionAgent":
+        return buildBindSessionAgentOp(this.ctx)(req);
       case "reviewStart":
         return buildReviewStartOp(this.ctx)(req);
       case "reviewCaptureResult":

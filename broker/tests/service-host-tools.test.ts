@@ -42,6 +42,7 @@ import {
 import { HOST_MUTATION_OPERATIONS, HOST_READ_OPERATIONS, ValidationError } from "../src/validation.ts";
 import type { BrokerRequestEnvelope, SessionRecord } from "../src/types.ts";
 
+// Host mutations require a broker-bound session record carrying this agent.
 const ORCHESTRATOR = "gentle-orchestrator";
 
 interface RuntimeCall {
@@ -87,12 +88,12 @@ function makeCtx(options: { recordAgent?: string; readOnlyAgents?: string[] } = 
     readOnlyAgents: options.readOnlyAgents ?? [ORCHESTRATOR],
   });
   const record: SessionRecord | undefined =
-    options.recordAgent === undefined
+    (options as { noRecord?: boolean }).noRecord === true
       ? undefined
       : {
           sessionID: "session-1",
           state: "HOST_READ_ONLY",
-          agent: options.recordAgent,
+          agent: options.recordAgent ?? ORCHESTRATOR,
           createdAt: "2026-01-01T00:00:00.000Z",
           updatedAt: "2026-01-01T00:00:00.000Z",
         };
@@ -190,15 +191,21 @@ describe("host tool authorization", () => {
     expect(authorizeHostDispatch(ctx, "reviewAssess", "session-1", undefined)).toBe("read");
   });
 
-  test("mutations require a trusted orchestrator identity", () => {
+  test("mutations require a broker-bound trusted session record", () => {
     const ctx = makeCtx();
     expect(authorizeHostDispatch(ctx, "sddAttemptGrant", "session-1", ORCHESTRATOR)).toBe(
       "mutation",
     );
-    expect(() => authorizeHostDispatch(ctx, "sddAttemptGrant", "session-1", "general")).toThrow(
+    // The envelope `agent` claim alone never authorizes: an unknown session
+    // (no record) fails closed even when it claims the orchestrator.
+    const unknown = makeCtx({ noRecord: true });
+    expect(() => authorizeHostDispatch(unknown, "sddAttemptGrant", "session-1", ORCHESTRATOR)).toThrow(
       PolicyError,
     );
-    expect(() => authorizeHostDispatch(ctx, "sddArchiveCompose", "session-1", undefined)).toThrow(
+    expect(() => authorizeHostDispatch(unknown, "sddArchiveCompose", "session-1", ORCHESTRATOR)).toThrow(
+      PolicyError,
+    );
+    expect(() => authorizeHostDispatch(unknown, "sddArchiveCompose", "session-1", undefined)).toThrow(
       PolicyError,
     );
   });
@@ -230,7 +237,7 @@ describe("host tool authorization", () => {
   test("every mutation is refused for a non-orchestrator agent", async () => {
     for (const [operation, payload] of MUTATION_REQUESTS) {
       expect(HOST_MUTATION_OPERATIONS).toContain(operation);
-      const ctx = makeCtx();
+      const ctx = makeCtx({ recordAgent: "general" });
       const handler = HANDLERS[operation]!(ctx);
       await expect(handler(request(operation, payload, "general"))).rejects.toThrow(PolicyError);
       expect((ctx.sddRuntime as unknown as { calls: RuntimeCall[] }).calls.length).toBe(0);
@@ -238,8 +245,11 @@ describe("host tool authorization", () => {
   });
 });
 describe("host project registration handler", () => {
-  function makeRegisterCtx(spawn: SddOpContext["git"]["spawn"]): SddOpContext {
-    const ctx = makeCtx();
+  function makeRegisterCtx(
+    spawn: SddOpContext["git"]["spawn"],
+    options: { recordAgent?: string; noRecord?: boolean } = {},
+  ): SddOpContext {
+    const ctx = makeCtx(options);
     (ctx as unknown as { git: { spawn: SddOpContext["git"]["spawn"] } }).git.spawn = spawn;
     return ctx;
   }
@@ -314,7 +324,7 @@ describe("host project registration handler", () => {
 
   test("registerProject is orchestrator-only and never spawns for another agent", async () => {
     const { calls, spawn } = recordingSpawn({ status: 0, stdout: "", stderr: "" });
-    const ctx = makeRegisterCtx(spawn);
+    const ctx = makeRegisterCtx(spawn, { recordAgent: "general" });
     await expect(
       buildRegisterProjectOp(ctx)(request("registerProject", { path: process.cwd() }, "general")),
     ).rejects.toThrow(PolicyError);
@@ -898,14 +908,15 @@ describe("host review lifecycle routing", () => {
   });
 
   test("review recover rejects undeclared keys and non-orchestrator callers", async () => {
-    const ctx = makeCtx();
+    const trusted = makeCtx();
+    const foreign = makeCtx({ recordAgent: "general" });
     await expect(
-      buildReviewRecoverOp(ctx)(
+      buildReviewRecoverOp(trusted)(
         request("reviewRecover", { projectDir: "/repo", cwd: "/tmp" }, ORCHESTRATOR),
       ),
     ).rejects.toThrow(ValidationError);
     await expect(
-      buildReviewRecoverOp(ctx)(
+      buildReviewRecoverOp(foreign)(
         request("reviewRecover", { projectDir: "/repo", disposition: "scope_changed" }, "general"),
       ),
     ).rejects.toThrow(PolicyError);

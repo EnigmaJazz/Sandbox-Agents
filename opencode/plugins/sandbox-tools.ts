@@ -25,9 +25,9 @@
  * opencode 1.18.x plugin API (typings at ~/.opencode/node_modules/@opencode-ai/plugin).
  */
 import { createHash } from "node:crypto";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { tool } from "@opencode-ai/plugin";
 import { z } from "zod";
 import {
@@ -35,6 +35,10 @@ import {
   brokerSocketPath,
   type BrokerClient,
 } from "./lib/broker-client.ts";
+import {
+  BIND_SESSION_AGENT_OPERATION,
+  hostSessionBinding,
+} from "./lib/session-agent-binding.ts";
 import {
   buildGhIssueCreateAsk,
   buildGitCommitAsk,
@@ -379,15 +383,48 @@ export default function sandboxToolsPlugin() {
           }
           const diff = await c.request("diff", ctx.sessionID, { mode: "active" }, ctx.agent);
           const summary = (diff as { stat?: string }).stat ?? "";
-          const diffRes = diff as { stat?: string; diff?: string; compare?: string };
+          const diffRes = diff as {
+            stat?: string;
+            diff?: string;
+            compare?: string;
+            applyPreview?: {
+              files: number;
+              addedLines: number;
+              removedLines: number;
+              totalLines: number;
+              preview: string;
+              previewTruncated: boolean;
+            };
+          };
           const rawPreview = ((diffRes.compare ?? "").trim() ? diffRes.compare : diffRes.diff) ?? "";
           const previewFile = join(tmpdir(), `sandbox-apply-${ctx.sessionID}.diff`);
           writeFileSync(previewFile, coloriseDiff(rawPreview), { mode: 0o600 });
+          // The approval boundary must never depend on the unbounded raw diff:
+          // embed the broker's bounded preview plus exact counts, and fall back
+          // to a no-preview bounded shape if an older broker omits it.
+          const bounded = diffRes.applyPreview;
+          const metadata = bounded
+            ? {
+                summary,
+                files: bounded.files,
+                addedLines: bounded.addedLines,
+                removedLines: bounded.removedLines,
+                totalLines: bounded.totalLines,
+                previewTruncated: bounded.previewTruncated,
+                preview: bounded.preview,
+                previewFile,
+              }
+            : {
+                summary,
+                totalLines: rawPreview.split("\n").length,
+                previewTruncated: true,
+                previewFile,
+              };
           await ctx.ask({
             permission: "sandbox_apply",
             patterns: ["*"],
             always: [],
-            metadata: { summary, totalLines: rawPreview.split("\n").length, previewFile, diff: rawPreview },
+            metadata,
           });
           return formatResult("applyResult", await c.request("applyResult", ctx.sessionID, { confirm: "APPLY" }, ctx.agent));
         },
@@ -519,10 +556,14 @@ export default function sandboxToolsPlugin() {
         description:
           "Run the read-only review risk assessment (no approval). baseRef selects an " +
           "immutable base-to-HEAD candidate; committedOnly acknowledges a committed-only " +
-          "scope. Returns JSON.",
+          "scope; untrackedScope/expectedUntrackedInventory/intendedUntracked forward the " +
+          "provider's explicit untracked declaration verbatim. Returns JSON.",
         args: {
           baseRef: reviewBaseRefArg.optional(),
           committedOnly: z.boolean().optional(),
+          untrackedScope: z.enum(["exclude", "select"]).optional(),
+          expectedUntrackedInventory: untrackedInventoryArg.optional(),
+          intendedUntracked: z.array(z.string().min(1).max(4096)).max(256).optional(),
         },
         execute: async (args, ctx) => {
           const c = await client();
@@ -531,6 +572,15 @@ export default function sandboxToolsPlugin() {
             ...(args.baseRef !== undefined ? { baseRef: args.baseRef } : {}),
             ...(args.committedOnly !== undefined
               ? { committedOnly: args.committedOnly }
+              : {}),
+            ...(args.untrackedScope !== undefined
+              ? { untrackedScope: args.untrackedScope }
+              : {}),
+            ...(args.expectedUntrackedInventory !== undefined
+              ? { expectedUntrackedInventory: args.expectedUntrackedInventory }
+              : {}),
+            ...(args.intendedUntracked !== undefined
+              ? { intendedUntracked: args.intendedUntracked }
               : {}),
           }, ctx.agent);
           return JSON.stringify(result, null, 2);
@@ -1050,6 +1100,22 @@ export default function sandboxToolsPlugin() {
         },
       }),
     },
+    "chat.params": async (input: unknown) => {
+      // Host-authoritative session->agent binding: only a host-resolved
+      // orchestrator identity is recorded, and only via this plugin hook (the
+      // operation is never a host_* / sandbox_* tool). Best-effort failure
+      // leaves host mutations failing closed rather than blocking the chat.
+      const binding = hostSessionBinding(input, READ_ONLY_AGENTS);
+      if (!binding) return;
+      try {
+        const c = await client();
+        await c.request(BIND_SESSION_AGENT_OPERATION, binding.sessionID, {
+          agent: binding.agent,
+        });
+      } catch {
+        /* unbound sessions cannot run host mutations (fail closed) */
+      }
+    },
   };
 }
 
@@ -1068,6 +1134,12 @@ const reviewActorArg = z.string().min(1).max(128);
 const reviewBaseRefArg = z.string().min(1).max(1024);
 const reviewCorrectionLinesArg = z.number().int().positive();
 
+/** Is `child` equal to or beneath `parent`? Mirrors broker validation.isWithin. */
+function isWithinPath(parent: string, child: string): boolean {
+  if (child === parent) return true;
+  return child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
+}
+
 /** Best-effort host-side size/digest preview for a review-capture input file. */
 function describeReviewInput(
   projectDir: string,
@@ -1075,10 +1147,17 @@ function describeReviewInput(
 ): { inputBytes?: number; inputDigest?: string } {
   if (input === undefined || input === "-") return {};
   try {
-    const stat = statSync(join(projectDir, input));
+    // Canonicalize before reading: the project-relative resolver is lexical
+    // only, so a symlink inside the project could still resolve outside it.
+    const root = realpathSync(projectDir);
+    const candidate = resolve(root, input);
+    if (!isWithinPath(root, candidate)) return {};
+    const real = realpathSync(candidate);
+    if (!isWithinPath(root, real)) return {};
+    const stat = statSync(real);
     if (!stat.isFile()) return {};
     const digest = createHash("sha256")
-      .update(readFileSync(join(projectDir, input)))
+      .update(readFileSync(real))
       .digest("hex")
       .slice(0, 16);
     return { inputBytes: stat.size, inputDigest: digest };

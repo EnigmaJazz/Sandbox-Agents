@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { SpawnFn } from "../src/msb.ts";
@@ -953,6 +953,39 @@ describe("host-side review capture-result staging", () => {
       expect(spawned).toBe(0);
     } finally {
       rmSync(root, { recursive: true, force: true });
+      rmSync(inputDir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects an in-project symlink that resolves outside the approved root", async () => {
+    const { root, inputDir } = tempDirs();
+    const outsideDir = mkdtempSync(join(tmpdir(), "review-outside-"));
+    try {
+      writeFileSync(join(outsideDir, "secret.json"), '{"secret":true}');
+      try {
+        symlinkSync(join(outsideDir, "secret.json"), join(root, "link.json"));
+      } catch {
+        return; // symlinks unsupported on this filesystem
+      }
+      let spawned = 0;
+      const spawn: SpawnFn = async () => {
+        spawned += 1;
+        return { status: 0, stdout: JSON.stringify({ ok: true }), stderr: "", timedOut: false };
+      };
+      const executor = new SddRuntimeExecutor({
+        binary: "gentle-ai",
+        projects: [{ id: "tmp", path: root }],
+        spawn,
+        reviewInputDir: inputDir,
+      });
+      await expect(
+        executor.reviewCaptureResult({ projectDir: root, input: "link.json" }),
+      ).rejects.toThrow(ValidationError);
+      expect(spawned).toBe(0);
+      expect(readdirSync(inputDir)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outsideDir, { recursive: true, force: true });
       rmSync(inputDir, { recursive: true, force: true });
     }
   });

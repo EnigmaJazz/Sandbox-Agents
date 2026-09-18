@@ -94,7 +94,13 @@ export function buildReviewAssessOp(ctx: SddOpContext) {
     authorizeHostDispatch(ctx, "reviewAssess", req.sessionID, req.agent);
     return ctx.sddRuntime.reviewAssess({
       projectDir: requireProjectDir(payload),
-      ...reviewOptional(payload, ["baseRef", "committedOnly"]),
+      ...reviewOptional(payload, [
+        "baseRef",
+        "committedOnly",
+        "untrackedScope",
+        "expectedUntrackedInventory",
+        "intendedUntracked",
+      ]),
     });
   };
 }

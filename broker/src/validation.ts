@@ -850,7 +850,14 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   sddContinue: ["projectDir", "change"],
   sddArchiveCompose: ["projectDir", "canonical", "delta", "output"],
   sddTaskResult: ["projectDir", "phase", "input"],
-  reviewAssess: ["projectDir", "baseRef", "committedOnly"],
+  reviewAssess: [
+    "projectDir",
+    "baseRef",
+    "committedOnly",
+    "untrackedScope",
+    "expectedUntrackedInventory",
+    "intendedUntracked",
+  ],
   reviewModeStatus: ["projectDir"],
   reviewStatus: [
     "projectDir",
@@ -881,6 +888,10 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
     "reason",
   ],
   planDocAppend: ["projectDir", "doc", "content", "heading"],
+  // Host-authoritative session→agent binding: the host plugin supplies exactly
+  // the host-resolved agent. No other key is accepted; this is never a model
+  // tool, so `hostToolAccess` deliberately does not classify it.
+  bindSessionAgent: ["agent"],
   reviewStart: [
     "projectDir", "agent", "contract", "target", "projection", "focus",
     "untrackedScope", "expectedUntrackedInventory", "intendedUntracked",

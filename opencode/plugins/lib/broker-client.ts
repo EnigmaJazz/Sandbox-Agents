@@ -63,6 +63,7 @@ export interface BrokerClient {
 
 export const OPERATION_TIMEOUT_MS: Record<string, number> = {
   exec: 130_000,
+  bindSessionAgent: 10_000,
   ensureWorker: 120_000,
   gitCommit: 130_000,
   gitPush: 130_000,

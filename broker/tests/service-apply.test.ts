@@ -94,8 +94,16 @@ describe("broker apply raw-diff safety checks", () => {
     const calls: string[][] = [];
     const largePatch = Array.from({ length: 1000 }, (_, i) => `+line ${i}`).join("\n") + "\n";
     const ctx = makeApplyContext("", calls, largePatch);
-    const result = await buildApplyResultOp(ctx)(applyRequest);
+    const result = (await buildApplyResultOp(ctx)(applyRequest)) as {
+      applied?: boolean;
+      applyPreview?: { previewTruncated?: boolean; preview?: string; totalLines?: number };
+    };
     expect(result).toMatchObject({ applied: true });
     expect(calls.some((argv) => argv.includes("apply"))).toBe(true);
+    // The approval metadata must be bounded even when the applied delta is not:
+    // exact counts, a truncation marker, and a capped preview.
+    expect(result.applyPreview?.previewTruncated).toBe(true);
+    expect(result.applyPreview?.totalLines).toBe(1001);
+    expect(result.applyPreview?.preview?.split("\n").length).toBe(401);
   });
 });

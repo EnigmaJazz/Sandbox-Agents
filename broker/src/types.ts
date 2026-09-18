@@ -61,6 +61,9 @@ export type Operation =
   | "reviewLensContext"
   | "sddAttemptGrant"
   | "planDocAppend"
+  // Host-authoritative session→agent binding (plugin-only; never exposed as a
+  // `host_*` or `sandbox_*` tool).
+  | "bindSessionAgent"
   // Host review lifecycle: fixed argv, orchestrator-only (§31).
   | "reviewStart"
   | "reviewCaptureResult"
@@ -123,6 +126,7 @@ export const OPERATIONS: readonly Operation[] = [
   "reviewLensContext",
   "sddAttemptGrant",
   "planDocAppend",
+  "bindSessionAgent",
   "reviewStart",
   "reviewCaptureResult",
   "reviewCaptureUnachievable",
@@ -386,6 +390,9 @@ export interface ReviewAssessPayload {
   projectDir: string;
   baseRef?: string;
   committedOnly?: boolean;
+  untrackedScope?: "exclude" | "select";
+  expectedUntrackedInventory?: string;
+  intendedUntracked?: string[];
 }
 
 export interface ReviewModeStatusPayload {

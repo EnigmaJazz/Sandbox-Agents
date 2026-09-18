@@ -234,6 +234,19 @@ describe("gitCommit without an explicit identifier", () => {
     ]);
   });
 
+  test("refuses a caller whose own applied result is bound to another project", async () => {
+    const { calls, spawn } = spawnStub([
+      [NAME_ONLY, { status: 0, stdout: "a.ts\u0000", stderr: "" }],
+    ]);
+    const ctx = makeCtx(spawn, {
+      "session-1": appliedResultRecord("session-1", { agent: ORCHESTRATOR, projectID: "other" }),
+    });
+    await expect(
+      buildGitCommitOp(ctx)(request({ projectDir: projectRoot, message: "m" })),
+    ).rejects.toThrow(/not bound to this project/);
+    expect(calls.some((c) => c[1] === "commit")).toBe(false);
+  });
+
   test("still refuses a caller with no applied result", async () => {
     const { calls, spawn } = spawnStub([]);
     const ctx = makeCtx(spawn, { "session-1": orchestratorRecord });

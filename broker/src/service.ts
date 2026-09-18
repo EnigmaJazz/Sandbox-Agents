@@ -141,18 +141,18 @@ function payloadOf(req: BrokerRequestEnvelope): Payload {
  * Host-tool authorization (defence in depth; the plugin mirrors this for UX
  * only). Reads are open to every agent; mutations require the broker-derived
  * trusted agent to be an orchestrator identity (config `readOnlyAgents`). The
- * envelope `agent` is only a fallback when no session record exists yet — the
- * same trusted-session→agent resolution `ensureWorker` uses.
+ * envelope `agent` is caller-controlled and never authorizes: only the broker
+ * session record's agent is trusted, so an unknown session fails closed.
  */
 export function authorizeHostDispatch(
   ctx: Pick<OpContext, "store"> & { config: { readOnlyAgents?: readonly string[] } },
   operation: string,
   sessionID: string,
-  reqAgent?: string,
+  _reqAgent?: string,
 ): HostToolAccess {
   const policy = new HostToolPolicy(ctx.config.readOnlyAgents ?? []);
   const existing = ctx.store.get(sessionID);
-  const trusted = existing?.agent ?? reqAgent;
+  const trusted = existing?.agent;
   const decision = policy.decide(operation, trusted);
   if (!decision.allowed) {
     throw new PolicyError(
@@ -160,6 +160,74 @@ export function authorizeHostDispatch(
     );
   }
   return decision.access;
+}
+
+/**
+ * Orchestrator identities the host plugin may bind: exactly the broker's
+ * `readOnlyAgents` allowlist. A model-supplied or unknown agent is refused, so
+ * the binding can only ever record a host-authoritative orchestrator identity.
+ */
+function assertBindableAgent(
+  config: { readOnlyAgents?: readonly string[] },
+  agent: unknown,
+): string {
+  if (typeof agent !== "string" || agent.length === 0) {
+    throw new ValidationError("bindSessionAgent requires a non-empty agent");
+  }
+  if (agent.length > 128) {
+    throw new ValidationError("bindSessionAgent agent exceeds 128 bytes");
+  }
+  const allow = config.readOnlyAgents ?? [];
+  if (!allow.includes(agent)) {
+    throw new PolicyError(
+      `session agent binding refused: "${agent}" is not a host-authoritative orchestrator identity`,
+    );
+  }
+  return agent;
+}
+
+/**
+ * Host-authoritative session->agent binding (defence in depth for the
+ * record-only `authorizeHostDispatch`).
+ *
+ * The OpenCode host plugin's `chat.params` hook calls this operation with the
+ * host-resolved `{ sessionID, agent }` before the LLM turn that may emit tool
+ * calls. The operation is NOT exposed as a `host_*`/`sandbox_*` tool and is not
+ * classified as a host read or mutation, so a model (including a sandbox-worker
+ * model, whose only broker reach is the sandbox tool surface) cannot invoke it;
+ * `ensureWorker` - the only model-reachable path that writes `record.agent` -
+ * refuses orchestrator identities before any side effect. The bound agent must
+ * be in the orchestrator allowlist, and the first host-authoritative binding
+ * wins: an existing binding for a different agent is refused, never
+ * overwritten, so a model-reachable writer can never be the first writer of an
+ * orchestrator identity.
+ */
+export function bindSessionAgent(
+  ctx: Pick<OpContext, "store"> & { config: { readOnlyAgents?: readonly string[] } },
+  sessionID: string,
+  payload: unknown,
+): SessionRecord {
+  assertPayloadKeys("bindSessionAgent", payload);
+  const agent = assertBindableAgent(
+    ctx.config,
+    (payload as { agent?: unknown } | undefined)?.agent,
+  );
+  const existing = ctx.store.get(sessionID);
+  if (existing?.agent !== undefined && existing.agent !== agent) {
+    throw new PolicyError(
+      `session ${sessionID} is already bound to "${existing.agent}"; the first host-authoritative binding wins`,
+    );
+  }
+  return ctx.store.touch(
+    sessionID,
+    { agent, lastOperation: "bindSessionAgent" },
+    "bindSessionAgent",
+  );
+}
+
+/** Plugin-only handler: records the host-resolved agent on the session record. */
+export function buildBindSessionAgentOp(ctx: OpContext): OpHandler {
+  return async (req) => bindSessionAgent(ctx, req.sessionID, req.payload);
 }
 
 /** Worker ops require an ACTIVE worker; state/workerState are authoritative (§10). */
@@ -1081,6 +1149,43 @@ export function buildGrepOp(ctx: OpContext): OpHandler {
   };
 }
 
+/** Bounded line cap for the apply-approval preview text. */
+export const APPLY_PREVIEW_MAX_LINES = 400;
+
+export interface ApplyPreview {
+  files: number;
+  addedLines: number;
+  removedLines: number;
+  totalLines: number;
+  preview: string;
+  previewTruncated: boolean;
+}
+
+/**
+ * Bounded, reviewable summary of a unified diff for the apply-approval
+ * boundary. Exact file/added/removed counts are always returned; only the
+ * preview text is capped, with an explicit truncation marker so approval is
+ * never made against a UI-truncated unbounded payload.
+ */
+export function buildApplyPreview(diff: string): ApplyPreview {
+  const lines = diff.length === 0 ? [] : diff.split("\n");
+  let files = 0;
+  let addedLines = 0;
+  let removedLines = 0;
+  for (const line of lines) {
+    if (line.startsWith("diff --git ")) files += 1;
+    else if (line.startsWith("+") && !line.startsWith("+++")) addedLines += 1;
+    else if (line.startsWith("-") && !line.startsWith("---")) removedLines += 1;
+  }
+  const totalLines = lines.length;
+  const previewTruncated = totalLines > APPLY_PREVIEW_MAX_LINES;
+  const shown = previewTruncated ? lines.slice(0, APPLY_PREVIEW_MAX_LINES) : lines;
+  const preview = previewTruncated
+    ? `${shown.join("\n")}\n(... preview truncated: showing ${APPLY_PREVIEW_MAX_LINES} of ${totalLines} lines; see previewFile for the full diff)`
+    : shown.join("\n");
+  return { files, addedLines, removedLines, totalLines, preview, previewTruncated };
+}
+
 export function buildDiffOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const payload = payloadOf(req) as { mode?: unknown };
@@ -1161,6 +1266,7 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
       stat: stat.stdout,
       diff: diff.stdout,
       compare,
+      applyPreview: buildApplyPreview(compare.trim().length > 0 ? compare : diff.stdout),
       changedPaths: parsedChangedPaths.paths,
       changedPathsComplete:
         changedPathResult.status === 0 && parsedChangedPaths.complete,
@@ -1453,7 +1559,12 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     // the transient worker and its pool allocation now instead of leaking
     // them until an explicit stop/cleanup (pool exhaustion after demos).
     await releaseWorker(ctx, record);
-    return { state: record.state, applied: true, resultRef: resultRefName };
+    return {
+      state: record.state,
+      applied: true,
+      resultRef: resultRefName,
+      applyPreview: buildApplyPreview(patch.stdout),
+    };
   };
 }
 
@@ -1838,6 +1949,11 @@ function resolveCommitResult(
     const record = recordOr404(ctx.store, callerSessionID);
     if (record.state !== "APPLIED" || !record.resultRef) {
       throw new StateError("cannot commit: no applied B→C result for this session");
+    }
+    if (record.projectID !== projectID) {
+      throw new StateError(
+        "cannot commit: this session's applied result is not bound to this project",
+      );
     }
     return {
       baseline: record.baselineRef ?? baselineRef(record.sessionID),

@@ -34,7 +34,7 @@ do_it() { # fn applies only with --apply
 
 # --- 1. plugins --------------------------------------------------------------
 log "plugins"
-for f in sandbox-tools.ts routing-guard.ts lib/broker-client.ts; do
+for f in sandbox-tools.ts routing-guard.ts lib/broker-client.ts lib/reviewer-relay-core.ts lib/session-agent-binding.ts reviewer-relay-transport.ts lib/host-tool-approval.ts; do
   DEST="$HOME/.config/opencode/plugins/$f"
   if [[ -f "$DEST" ]] && cmp -s "$REPO_ROOT/opencode/plugins/$f" "$DEST"; then
     log "remove installed plugin $DEST (matches repo copy)"

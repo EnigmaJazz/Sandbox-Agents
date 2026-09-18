@@ -50,6 +50,7 @@ import {
   assertProjectRelativePath,
   assertSddContract,
   assertSddIdentifier,
+  isWithin,
   resolveProjectID,
   resolveProjectRelativePath,
   ValidationError,
@@ -109,6 +110,9 @@ export interface ReviewAssessArgvInput {
   projectRoot: string;
   baseRef?: string;
   committedOnly?: boolean;
+  untrackedScope?: "exclude" | "select";
+  expectedUntrackedInventory?: string;
+  intendedUntracked?: string[];
 }
 
 export interface ReviewModeStatusArgvInput {
@@ -303,7 +307,15 @@ export function buildSddTaskResultArgv(input: SddTaskResultArgvInput): string[] 
  */
 export function buildReviewAssessArgv(input: ReviewAssessArgvInput): string[] {
   assertRecord(input, "review assess input");
-  assertExactKeys(input, ["binary", "projectRoot", "baseRef", "committedOnly"]);
+  assertExactKeys(input, [
+    "binary",
+    "projectRoot",
+    "baseRef",
+    "committedOnly",
+    "untrackedScope",
+    "expectedUntrackedInventory",
+    "intendedUntracked",
+  ]);
   assertBinary(input.binary);
   assertProjectRootInput(input.projectRoot);
   const argv = [input.binary, "review", "assess", "--cwd", input.projectRoot];
@@ -314,6 +326,20 @@ export function buildReviewAssessArgv(input: ReviewAssessArgvInput): string[] {
   if (input.committedOnly !== undefined) {
     assertOptionalBoolean(input.committedOnly, "committedOnly");
     if (input.committedOnly) argv.push("--committed-only");
+  }
+  if (input.untrackedScope !== undefined) {
+    assertUntrackedScope(input.untrackedScope);
+    argv.push(`--untracked-scope=${input.untrackedScope}`);
+  }
+  if (input.expectedUntrackedInventory !== undefined) {
+    assertExpectedUntrackedInventory(input.expectedUntrackedInventory);
+    argv.push(`--expected-untracked-inventory=${input.expectedUntrackedInventory}`);
+  }
+  if (input.intendedUntracked !== undefined) {
+    assertIntendedUntracked(input.intendedUntracked);
+    for (const path of input.intendedUntracked) {
+      argv.push(`--intended-untracked=${path}`);
+    }
   }
   argv.push("--json");
   return argv;
@@ -598,6 +624,9 @@ export class SddRuntimeExecutor {
     projectDir: unknown;
     baseRef?: unknown;
     committedOnly?: unknown;
+    untrackedScope?: unknown;
+    expectedUntrackedInventory?: unknown;
+    intendedUntracked?: unknown;
   }): Promise<SddRuntimeResult> {
     const projectRoot = this.resolveProjectRoot(payload.projectDir);
     return this.run(
@@ -607,6 +636,15 @@ export class SddRuntimeExecutor {
         ...(payload.baseRef !== undefined ? { baseRef: payload.baseRef as string } : {}),
         ...(payload.committedOnly !== undefined
           ? { committedOnly: payload.committedOnly as boolean }
+          : {}),
+        ...(payload.untrackedScope !== undefined
+          ? { untrackedScope: payload.untrackedScope as "exclude" | "select" }
+          : {}),
+        ...(payload.expectedUntrackedInventory !== undefined
+          ? { expectedUntrackedInventory: payload.expectedUntrackedInventory as string }
+          : {}),
+        ...(payload.intendedUntracked !== undefined
+          ? { intendedUntracked: payload.intendedUntracked as string[] }
           : {}),
       }),
       projectRoot,
@@ -1291,9 +1329,23 @@ export function cleanupStaleReviewInputs(dir: string): number {
  */
 function stageReviewInputFile(inputDir: string, projectRoot: string, relative: string): string {
   const resolved = resolveProjectRelativePath(projectRoot, relative, "input");
+  // The lexical resolver above only checks the pathname; a symlink inside the
+  // project can still resolve outside it, so canonicalize and re-check
+  // containment before any stat or read follows the link.
+  let realRoot: string;
+  let real: string;
+  try {
+    realRoot = realpathSync(projectRoot);
+    real = realpathSync(resolved);
+  } catch {
+    throw new ValidationError("review input does not resolve to a file on the host");
+  }
+  if (!isWithin(realRoot, real)) {
+    throw new ValidationError("review input escapes the approved project root");
+  }
   let stat;
   try {
-    stat = statSync(resolved);
+    stat = statSync(real);
   } catch {
     throw new ValidationError("review input does not resolve to a file on the host");
   }
@@ -1303,7 +1355,7 @@ function stageReviewInputFile(inputDir: string, projectRoot: string, relative: s
   if (stat.size > REVIEW_INPUT_MAX_BYTES) {
     throw new ValidationError(`review input exceeds ${REVIEW_INPUT_MAX_BYTES} bytes`);
   }
-  return writeStagedReviewInput(inputDir, readFileSync(resolved));
+  return writeStagedReviewInput(inputDir, readFileSync(real));
 }
 
 /**

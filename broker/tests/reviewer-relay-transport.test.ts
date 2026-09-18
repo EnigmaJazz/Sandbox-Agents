@@ -9,7 +9,15 @@
  * agent fragment plus Task-name mapping.
  */
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -43,7 +51,8 @@ import {
   type TransportHandlers,
   type TransportSpawn,
   type TransportSpawnSpec,
-} from "../../opencode/plugins/reviewer-relay-transport.ts";
+} from "../../opencode/plugins/lib/reviewer-relay-core.ts";
+import * as reviewerRelayPlugin from "../../opencode/plugins/reviewer-relay-transport.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -68,6 +77,19 @@ const projectPath = (path: string) => ({ id: path.split("/").pop() ?? "project",
 /** The fixed environment the relay is allowed to forward to the child. */
 const ENV = { HOME: "/home/reviewer", XDG_RUNTIME_DIR: "/run/user/1000", LANG: "C" };
 
+/**
+ * Known git install directories, mirroring buildTransportEnv's ordered probe.
+ * The first one that actually contains a git binary on this host is what the
+ * relay prepends to the child PATH.
+ */
+const PROBE_DIRECTORIES = [
+  "/home/linuxbrew/.linuxbrew/bin",
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+] as const;
+const HOST_GIT_DIRECTORY = PROBE_DIRECTORIES.find((directory) => existsSync(`${directory}/git`));
+
 /** A binding-only Task prompt: the small provider-issued line the Task carries. */
 const BINDING_PROMPT =
   'GENTLE_AI_REVIEW_BINDING {"repository_context":"rctx2_example","target":"T","lineage":"L"}';
@@ -89,6 +111,16 @@ async function refusalOf(run: () => unknown): Promise<{ code: string; message: s
     };
   }
   throw new Error("expected a typed refusal but the call resolved");
+}
+
+/**
+ * Read the typed refusal a hook delivers as a tool-error result. The refusal
+ * must be returned, not thrown: this host turns a throw from a hook into a
+ * generic abort, which drops the typed text before the model can see it.
+ */
+function deliveredError(result: unknown): string {
+  const value = result as { error?: unknown } | undefined;
+  return typeof value?.error === "string" ? value.error : "";
 }
 
 interface FrameRecord {
@@ -508,6 +540,45 @@ describe("reviewer relay provider framing", () => {
     expect(() => validateMaterializedPrompt(`${CONTEXT_START}\n${CONTEXT_END}`)).not.toThrow();
   });
 
+  test("accepts the provider-materialized prompt with trailing whitespace after the final CONTEXT_END", () => {
+    const providerPrompt = `${CONTEXT_START}\nreview body\n${CONTEXT_END}`;
+    const prompt = `GENTLE_AI_REVIEW_PROVIDER_MATERIALIZATION ${JSON.stringify({ task_prompt: "review this" })}\n${providerPrompt}\n`;
+    expect(validateMaterializedPrompt(prompt)).toBe(prompt);
+  });
+
+  test("accepts trailing whitespace of any kind after the final CONTEXT_END", () => {
+    const prompt = `${CONTEXT_START}\nreview body\n${CONTEXT_END} \t\r\n`;
+    expect(validateMaterializedPrompt(prompt)).toBe(prompt);
+  });
+
+  test("refuses non-whitespace content after the last CONTEXT_END", () => {
+    expect(() => validateMaterializedPrompt(`${CONTEXT_START}\nreview body\n${CONTEXT_END}\ntrailing text`)).toThrow(
+      "reviewer_relay_frame_refused",
+    );
+    expect(() => validateMaterializedPrompt(`${CONTEXT_START}\nreview body\n${CONTEXT_END}${CONTEXT_START}`)).toThrow(
+      "reviewer_relay_frame_refused",
+    );
+  });
+
+  test("refuses a materialized prompt that only mentions the markers in lens-prompt prose", () => {
+    // The provider's lens prompt carries the bare markers as prose, so a
+    // bare-token match must not satisfy the framing check: this prompt has no
+    // real, line-anchored block start.
+    const lensProse =
+      "The task begins with GENTLE_AI_REVIEW_BINDING and its exact one-line JSON. " +
+      "Immediately after it, the OpenCode host process supplies one block from " +
+      "GENTLE_AI_REVIEW_CONTEXT through GENTLE_AI_REVIEW_CONTEXT_END";
+    expect(() => validateMaterializedPrompt(lensProse)).toThrow("reviewer_relay_frame_refused");
+  });
+
+  test("refuses a prompt whose only start marker is a mid-line prose mention", () => {
+    // A real END marker is not enough when the start token appears only
+    // mid-line inside prose.
+    expect(() =>
+      validateMaterializedPrompt(`prose mentions ${CONTEXT_START} here\n${CONTEXT_END}`),
+    ).toThrow("reviewer_relay_frame_refused");
+  });
+
   test("refuses an unexpected operation frame", async () => {
     const recorder = recordingSpawn();
     const relay = startRelay({
@@ -640,9 +711,12 @@ describe("reviewer relay spawn discipline", () => {
     expect(recorder.specs[0]!.command).toBe(TRANSPORT_BINARY);
     expect(recorder.specs[0]!.argv).toEqual(TRANSPORT_ARGV);
     expect(recorder.specs[0]!.cwd).toBe(canonicalRepo);
-    expect(recorder.specs[0]!.env).toEqual(ENV);
-    expect(Object.keys(recorder.specs[0]!.env)).not.toContain("PATH");
-    expect(Object.keys(recorder.specs[0]!.env)).not.toContain("OPENAI_API_KEY");
+    const spawnedEnv = recorder.specs[0]!.env;
+    expect(spawnedEnv).toMatchObject(ENV);
+    // PATH is allowed through and the resolving git directory is prepended;
+    // secret-shaped keys are still stripped.
+    expect(spawnedEnv.PATH!.split(":")[0]).toBe(HOST_GIT_DIRECTORY);
+    expect(Object.keys(spawnedEnv)).not.toContain("OPENAI_API_KEY");
   });
 
   test("refuses a relative, symlinked, or control-bearing cwd before spawning", async () => {
@@ -663,21 +737,20 @@ describe("reviewer relay spawn discipline", () => {
   });
 
   test("environment is allowlist-only and HOME is required", () => {
-    expect(
-      buildTransportEnv({
-        HOME: "/home/reviewer",
-        XDG_CONFIG_HOME: "/home/reviewer/.config",
-        XDG_DATA_HOME: "/home/reviewer/.local/share",
-        XDG_STATE_HOME: "/home/reviewer/.local/state",
-        XDG_CACHE_HOME: "/home/reviewer/.cache",
-        XDG_RUNTIME_DIR: "/run/user/1000",
-        LANG: "C",
-        LC_ALL: "C.UTF-8",
-        PATH: "/usr/bin",
-        SHELL: "/bin/bash",
-        GENTLE_AI_TOKEN: "not-a-real-secret",
-      }),
-    ).toEqual({
+    const env = buildTransportEnv({
+      HOME: "/home/reviewer",
+      XDG_CONFIG_HOME: "/home/reviewer/.config",
+      XDG_DATA_HOME: "/home/reviewer/.local/share",
+      XDG_STATE_HOME: "/home/reviewer/.local/state",
+      XDG_CACHE_HOME: "/home/reviewer/.cache",
+      XDG_RUNTIME_DIR: "/run/user/1000",
+      LANG: "C",
+      LC_ALL: "C.UTF-8",
+      PATH: "/usr/bin",
+      SHELL: "/bin/bash",
+      GENTLE_AI_TOKEN: "not-a-real-secret",
+    });
+    expect(env).toMatchObject({
       HOME: "/home/reviewer",
       XDG_CONFIG_HOME: "/home/reviewer/.config",
       XDG_DATA_HOME: "/home/reviewer/.local/share",
@@ -687,8 +760,32 @@ describe("reviewer relay spawn discipline", () => {
       LANG: "C",
       LC_ALL: "C.UTF-8",
     });
+    // PATH is the one non-secret addition, so it is carried through; the
+    // credential-shaped SHELL/TOKEN values are still stripped.
+    expect(env.PATH).toBeDefined();
+    expect(env.PATH!.split(":")).toContain("/usr/bin");
+    expect(env.SHELL).toBeUndefined();
+    expect(env.GENTLE_AI_TOKEN).toBeUndefined();
     expect(() => buildTransportEnv({ PATH: "/usr/bin" })).toThrow("reviewer_relay_environment_refused");
     expect(() => buildTransportEnv({ HOME: "" })).toThrow("reviewer_relay_environment_refused");
+  });
+
+  test("the constructed environment carries a PATH that resolves git", () => {
+    // The child's first act is a Git subprocess, so the constructed env must
+    // always carry a PATH whose first entry can actually resolve git.
+    expect(HOST_GIT_DIRECTORY).toBeDefined();
+
+    // An inherited PATH is preserved, with the resolving directory prepended
+    // exactly once even when it is already present.
+    const inherited = buildTransportEnv({ HOME: "/home/x", PATH: "/custom/bin:/usr/bin" });
+    const segments = inherited.PATH!.split(":");
+    expect(segments[0]).toBe(HOST_GIT_DIRECTORY);
+    expect(segments).toContain("/custom/bin");
+    expect(segments.filter((segment) => segment === HOST_GIT_DIRECTORY)).toHaveLength(1);
+
+    // Without an inherited PATH, the resolving directory is still provided.
+    const bare = buildTransportEnv({ HOME: "/home/x" });
+    expect(bare.PATH!.split(":")[0]).toBe(HOST_GIT_DIRECTORY);
   });
 
   test("the deadline is finite and supports multi-minute reviewer calls", async () => {
@@ -1046,7 +1143,9 @@ describe("reviewer relay hook scope", () => {
     expect(harness.specs[0]!.cwd).toBe(canonicalRepo);
     expect(harness.specs[0]!.command).toBe(TRANSPORT_BINARY);
     expect(harness.specs[0]!.argv).toEqual(TRANSPORT_ARGV);
-    expect(harness.specs[0]!.env).toEqual(ENV);
+    const spawnedEnv = harness.specs[0]!.env;
+    expect(spawnedEnv).toMatchObject(ENV);
+    expect(spawnedEnv.PATH!.split(":")[0]).toBe(HOST_GIT_DIRECTORY);
 
     const startFrame = harness.children[0]!.frames[0]!;
     expect(startFrame.operation).toBe("start");
@@ -1066,20 +1165,108 @@ describe("reviewer relay hook scope", () => {
     expect(harness.children[0]!.killed).toBe(true);
   });
 
-  test("a root refusal happens before spawn and is projected into the Task", async () => {
+  test("a structured Task result yields the reviewer text in the completion frame", async () => {
+    const harness = relayHarness();
+    const input = taskInput("s-structured", "c1");
+    await harness.hooks["tool.execute.before"](input, {
+      args: { subagent_type: "asi-review-reliability", prompt: BINDING_PROMPT },
+    });
+
+    const reviewerText = '{"verdict":"pass"}';
+    const after = {
+      args: { subagent_type: "asi-review-reliability" },
+      output: { title: "Task", output: reviewerText, metadata: { sessionId: "child" } },
+    };
+    await harness.hooks["tool.execute.after"](input, after);
+
+    const completion = JSON.parse(harness.children[0]!.ended[0]!) as FrameRecord;
+    expect(completion.operation).toBe("complete");
+    expect(completion.nonce).toBe("nonce-1");
+    expect(completion.output).toBe(reviewerText);
+    expect(completion.error).toBeUndefined();
+    expect(after.output).toBe('{"admitted":true}');
+  });
+
+  test("a message-part Task result yields its text in the completion frame", async () => {
+    const harness = relayHarness();
+    const input = taskInput("s-part", "c1");
+    await harness.hooks["tool.execute.before"](input, {
+      args: { subagent_type: "asi-review-risk", prompt: BINDING_PROMPT },
+    });
+    const reviewerText = '{"verdict":"pass"}';
+    const after = {
+      args: { subagent_type: "asi-review-risk" },
+      output: { type: "text", text: reviewerText },
+    };
+    await harness.hooks["tool.execute.after"](input, after);
+    const completion = JSON.parse(harness.children[0]!.ended[0]!) as FrameRecord;
+    expect(completion.output).toBe(reviewerText);
+    expect(completion.error).toBeUndefined();
+    expect(after.output).toBe('{"admitted":true}');
+  });
+
+  test("a Task result without text keeps the fail-closed unavailability error", async () => {
+    const harness = relayHarness();
+    const input = taskInput("s-notext", "c1");
+    await harness.hooks["tool.execute.before"](input, {
+      args: { subagent_type: "asi-review-validator", prompt: BINDING_PROMPT },
+    });
+    const after = {
+      args: { subagent_type: "asi-review-validator" },
+      output: { title: "Task", metadata: {} },
+    };
+    await harness.hooks["tool.execute.after"](input, after);
+    const completion = JSON.parse(harness.children[0]!.ended[0]!) as FrameRecord;
+    expect(completion.output).toBeUndefined();
+    expect(completion.error).toBe("opencode_task_host_output_unavailable");
+    expect(after.output).toBe('{"admitted":true}');
+  });
+
+  test("the completion diagnostic does not change the extracted completion text", async () => {
+    const cases: Array<{ key: string; output: unknown; expected?: string }> = [
+      {
+        key: "s-diag-record",
+        output: { title: "Task", output: '{"verdict":"pass"}', metadata: {} },
+        expected: '{"verdict":"pass"}',
+      },
+      { key: "s-diag-string", output: '{"verdict":"pass"}', expected: '{"verdict":"pass"}' },
+      { key: "s-diag-empty", output: { title: "Task", metadata: {} } },
+    ];
+    for (const testCase of cases) {
+      const harness = relayHarness();
+      const input = taskInput(testCase.key, "c1");
+      await harness.hooks["tool.execute.before"](input, {
+        args: { subagent_type: "asi-review-risk", prompt: BINDING_PROMPT },
+      });
+      const after = { args: { subagent_type: "asi-review-risk" }, output: testCase.output };
+      await harness.hooks["tool.execute.after"](input, after);
+      const completion = JSON.parse(harness.children[0]!.ended[0]!) as FrameRecord;
+      if (testCase.expected !== undefined) {
+        expect(completion.output).toBe(testCase.expected);
+        expect(completion.error).toBeUndefined();
+      } else {
+        expect(completion.output).toBeUndefined();
+        expect(completion.error).toBe("opencode_task_host_output_unavailable");
+      }
+      expect(after.output).toBe('{"admitted":true}');
+    }
+  });
+
+  test("a root refusal is delivered to the caller before spawn, not lost to a throw", async () => {
     const harness = relayHarness({ sessionDirectory: canonicalOther });
     const before = { args: { subagent_type: "asi-review-risk", prompt: BINDING_PROMPT } };
-    const refusal = await refusalOf(() => harness.hooks["tool.execute.before"](taskInput("s-root", "c1"), before));
-    expect(refusal.code).toBe("reviewer_relay_root_refused");
+    // The refusal must resolve as a tool-error result. A throw would be
+    // converted by the host into a generic "tool execution aborted", which
+    // drops the typed refusal before the model can see it.
+    const refusal = await harness.hooks["tool.execute.before"](taskInput("s-root", "c1"), before);
+    expect(deliveredError(refusal)).toContain("reviewer_relay_root_refused");
     expect(harness.specs).toHaveLength(0);
     expect(String(before.args.prompt)).toContain(REFUSAL_ENVELOPE);
     expect(String(before.args.prompt)).not.toContain(BINDING_PROMPT);
 
     const after = { args: { subagent_type: "asi-review-risk" }, output: "unbound reviewer prose" };
-    const completionRefusal = await refusalOf(() =>
-      harness.hooks["tool.execute.after"](taskInput("s-root", "c1"), after),
-    );
-    expect(completionRefusal.code).toBe("reviewer_relay_task_refused");
+    const completionRefusal = await harness.hooks["tool.execute.after"](taskInput("s-root", "c1"), after);
+    expect(deliveredError(completionRefusal)).toContain("reviewer_relay_task_refused");
     expect(String(after.output)).toContain(REFUSAL_ENVELOPE);
     expect(String(after.output)).not.toContain("unbound reviewer prose");
   });
@@ -1109,12 +1296,10 @@ describe("reviewer relay hook scope", () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(specs).toHaveLength(MAX_CONCURRENT_RELAYS);
 
-    const fifth = await refusalOf(() =>
-      hooks["tool.execute.before"](taskInput("s-cap", "c4"), {
-        args: { subagent_type: "asi-review-risk", prompt: BINDING_PROMPT },
-      }),
-    );
-    expect(fifth.code).toBe("reviewer_relay_concurrency_refused");
+    const fifth = await hooks["tool.execute.before"](taskInput("s-cap", "c4"), {
+      args: { subagent_type: "asi-review-risk", prompt: BINDING_PROMPT },
+    });
+    expect(deliveredError(fifth)).toContain("reviewer_relay_concurrency_refused");
     expect(specs).toHaveLength(MAX_CONCURRENT_RELAYS);
 
     await hooks.dispose();
@@ -1185,14 +1370,21 @@ describe("reviewer relay hook scope", () => {
     expect(titledSystem.system).toEqual(["inherited instructions"]);
   });
 
-  test("a completion without a live before hook refuses loudly", async () => {
+  test("a completion without a live before hook delivers a typed refusal, not raw prose", async () => {
     const harness = relayHarness();
     const after = { args: { subagent_type: "asi-review-validator" }, output: "orphan prose" };
-    const refusal = await refusalOf(() =>
-      harness.hooks["tool.execute.after"](taskInput("s-orphan", "c1"), after),
-    );
-    expect(refusal.code).toBe("reviewer_relay_task_refused");
-    expect(after.output).toBe("orphan prose");
+    const refusal = await harness.hooks["tool.execute.after"](taskInput("s-orphan", "c1"), after);
+    expect(deliveredError(refusal)).toContain("reviewer_relay_task_refused");
+    expect(String(after.output)).toContain(REFUSAL_ENVELOPE);
+    expect(String(after.output)).not.toContain("orphan prose");
+  });
+
+  test("a Task with no injectable prompt delivers the typed refusal", async () => {
+    const harness = relayHarness();
+    const before = { args: { subagent_type: "asi-review-risk", prompt: 42 } };
+    const refusal = await harness.hooks["tool.execute.before"](taskInput("s-noprompt", "c1"), before);
+    expect(deliveredError(refusal)).toContain("reviewer_relay_task_refused");
+    expect(harness.specs).toHaveLength(0);
   });
 });
 
@@ -1297,5 +1489,27 @@ describe("reviewer relay Task-name mapping", () => {
     expect(sandboxToolsSource).not.toContain("asi-review-");
     expect(hostToolsDesign).toContain("Amendment (reviewer-relay-transport)");
     expect(hostToolsDesign).toContain("diagnostic");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: the plugin module must export only the plugin function
+// ---------------------------------------------------------------------------
+
+describe("reviewer relay plugin export surface", () => {
+  test("exports only the plugin function and its default", () => {
+    const exported = Object.entries(reviewerRelayPlugin);
+    expect(exported).toHaveLength(2);
+    expect(exported.map(([name]) => name).sort()).toEqual([
+      "ReviewerRelayTransportPlugin",
+      "default",
+    ]);
+    const plugin = reviewerRelayPlugin.ReviewerRelayTransportPlugin;
+    expect(typeof plugin).toBe("function");
+    for (const [, value] of exported) {
+      expect(typeof value).toBe("function");
+      expect(value).toBe(plugin);
+    }
+    expect(reviewerRelayPlugin.default).toBe(plugin);
   });
 });
