@@ -23,8 +23,27 @@ import { computeBudget, discoverHostResources } from "./policy.ts";
 import { SessionStore, StateError } from "./state.ts";
 import { MsbAdapter, MsbError, spawnArgv, type SpawnFn } from "./msb.ts";
 import { HostReadExecutor, buildHostReadOps } from "./hostread.ts";
-import { SddRuntimeExecutor } from "./sdd-runtime.ts";
-import { buildSddAttemptAcquireOp, buildSddStatusOp } from "./sdd-service.ts";
+import { REVIEW_INPUT_DIR_NAME, SddRuntimeExecutor } from "./sdd-runtime.ts";
+import {
+  buildReviewAcknowledgeApprovedOp,
+  buildReviewAssessOp,
+  buildReviewCaptureCorrectionPlanOp,
+  buildReviewCaptureRefuterOp,
+  buildReviewCaptureResultOp,
+  buildReviewCaptureUnachievableOp,
+  buildReviewCaptureValidationOp,
+  buildReviewLensContextOp,
+  buildReviewModeStatusOp,
+  buildReviewRecoverOp,
+  buildReviewStartOp,
+  buildReviewStatusOp,
+  buildReviewValidateOp,
+  buildSddArchiveComposeOp,
+  buildSddAttemptGrantOp,
+  buildSddContinueOp,
+  buildSddStatusOp,
+  buildSddTaskResultOp,
+} from "./sdd-service.ts";
 import { Logger, durationMs, startTimer } from "./logging.ts";
 import { ValidationError } from "./validation.ts";
 import { PolicyError } from "./policy.ts";
@@ -44,14 +63,19 @@ import {
   buildEnsureWorkerOp,
   buildExecOp,
   buildGrepOp,
+  buildGhIssueCreateOp,
+  buildGitCommitOp,
+  buildGitPushOp,
   buildHostOp,
   buildKeepResultOp,
   buildListDirOp,
   buildListWorkersOp,
   buildMetricsOp,
   buildPolicyOp,
+  buildPlanDocAppendOp,
   buildPrepareResultOp,
   buildReadFileOp,
+  buildRegisterProjectOp,
   buildWorkerStatusOp,
   buildWriteFileOp,
   type OpContext,
@@ -107,6 +131,7 @@ export class BrokerServer {
       binary: config.sddRuntime.binary,
       projects: config.projects,
       outputMaxBytes: config.sddRuntime.outputMaxBytes,
+      reviewInputDir: join(config.stateDir, REVIEW_INPUT_DIR_NAME),
       spawn,
     });
     this.ctx = {
@@ -350,10 +375,50 @@ export class BrokerServer {
         return buildMetricsOp(this.ctx)(req);
       case "sddStatus":
         return buildSddStatusOp(this.ctx)(req);
-      case "sddAttemptAcquire":
-        return buildSddAttemptAcquireOp(this.ctx)(req);
+      case "sddContinue":
+        return buildSddContinueOp(this.ctx)(req);
+      case "sddAttemptGrant":
+        return buildSddAttemptGrantOp(this.ctx)(req);
+      case "sddArchiveCompose":
+        return buildSddArchiveComposeOp(this.ctx)(req);
+      case "sddTaskResult":
+        return buildSddTaskResultOp(this.ctx)(req);
+      case "reviewAssess":
+        return buildReviewAssessOp(this.ctx)(req);
+      case "reviewModeStatus":
+        return buildReviewModeStatusOp(this.ctx)(req);
+      case "reviewStatus":
+        return buildReviewStatusOp(this.ctx)(req);
+      case "reviewLensContext":
+        return buildReviewLensContextOp(this.ctx)(req);
+      case "gitCommit":
+        return buildGitCommitOp(this.ctx)(req);
+      case "gitPush":
+        return buildGitPushOp(this.ctx)(req);
+      case "ghIssueCreate":
+        return buildGhIssueCreateOp(this.ctx)(req);
       case "policy":
         return buildPolicyOp(this.ctx)(req);
+      case "planDocAppend":
+        return buildPlanDocAppendOp(this.ctx)(req);
+      case "reviewStart":
+        return buildReviewStartOp(this.ctx)(req);
+      case "reviewCaptureResult":
+        return buildReviewCaptureResultOp(this.ctx)(req);
+      case "reviewCaptureUnachievable":
+        return buildReviewCaptureUnachievableOp(this.ctx)(req);
+      case "reviewAcknowledgeApproved":
+        return buildReviewAcknowledgeApprovedOp(this.ctx)(req);
+      case "reviewCaptureCorrectionPlan":
+        return buildReviewCaptureCorrectionPlanOp(this.ctx)(req);
+      case "reviewCaptureRefuter":
+        return buildReviewCaptureRefuterOp(this.ctx)(req);
+      case "reviewCaptureValidation":
+        return buildReviewCaptureValidationOp(this.ctx)(req);
+      case "reviewValidate":
+        return buildReviewValidateOp(this.ctx)(req);
+      case "reviewRecover":
+        return buildReviewRecoverOp(this.ctx)(req);
       case "copyOutInfo":
         return buildCopyOutInfoOp(this.ctx)(req);
       case "copyOut":
@@ -362,6 +427,8 @@ export class BrokerServer {
         return buildCopyInInfoOp(this.ctx)(req);
       case "copyIn":
         return buildCopyInOp(this.ctx)(req);
+      case "registerProject":
+        return buildRegisterProjectOp(this.ctx)(req);
       default:
         return buildHostOp(this.ctx)(req);
     }

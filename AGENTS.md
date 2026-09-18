@@ -26,6 +26,39 @@ rejected at apply time and require explicit manual review:
 - `scripts/**`, `tests/security/**`, `tests/acceptance/**`
 - `docs/threat-model.md`
 
+## Reviewer relay transport (lens → Task name)
+
+Native 4R review runs through the in-repo reviewer relay transport
+(`opencode/plugins/reviewer-relay-transport.ts`) plus the reviewed agent
+fragment (`opencode/config-fragments/reviewer-relay-agents.jsonc`). Both are
+S17 paths: the USER reviews the diff and installs the exact bytes by hand.
+
+A reviewer Task MUST target the `asi-review-*` subagent name for its lens:
+
+| Lens | Task `subagent_type` |
+|---|---|
+| `review-risk` | `asi-review-risk` |
+| `review-resilience` | `asi-review-resilience` |
+| `review-readability` | `asi-review-readability` |
+| `review-reliability` | `asi-review-reliability` |
+| `review-refuter` | `asi-review-refuter` |
+| `review-validator` | `asi-review-validator` |
+
+The installed `REVIEW_AGENTS` names (`review-risk`, `review-resilience`,
+`review-readability`, `review-reliability`, `review-refuter`,
+`review-validator`) belong to the installed transport. The `asi-review-*` set is
+strictly disjoint from it, so each Task is handled by exactly one transport.
+
+Provider-issued review fields are unchanged. Lens values stay
+`review-risk|review-resilience|review-readability|review-reliability` inside
+provider continuations, and every capture argument — target, lineage, expected
+revision, repository context, subject hash, lens, order, and the
+provider-returned `materialize`/`execute` flags — remains provider-issued and is
+forwarded byte-for-byte. The relay substitutes only the Task `subagent_type`; it
+never synthesizes or rewrites a provider token, lineage value, or authority.
+`reviewLensContext` / `host_review_lens_context` stays a read/diagnostic
+primitive and is not the reviewer transport.
+
 ## Working style
 
 - English for all artifacts (code, docs, comments).

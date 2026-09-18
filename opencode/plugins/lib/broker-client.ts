@@ -61,9 +61,24 @@ export interface BrokerClient {
   close(): void;
 }
 
-const OPERATION_TIMEOUT_MS: Record<string, number> = {
+export const OPERATION_TIMEOUT_MS: Record<string, number> = {
   exec: 130_000,
   ensureWorker: 120_000,
+  gitCommit: 130_000,
+  gitPush: 130_000,
+  ghIssueCreate: 130_000,
+  planDocAppend: 30_000,
+  sddAttemptGrant: 130_000,
+  reviewLensContext: 130_000,
+  reviewStart: 130_000,
+  reviewCaptureResult: 130_000,
+  reviewCaptureUnachievable: 130_000,
+  reviewAcknowledgeApproved: 130_000,
+  reviewCaptureCorrectionPlan: 130_000,
+  reviewCaptureRefuter: 130_000,
+  reviewCaptureValidation: 130_000,
+  reviewValidate: 130_000,
+  reviewRecover: 130_000,
 };
 
 /**
@@ -78,6 +93,7 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
   let socket: ReturnType<typeof Bun.connect> | null = null;
   let closed = false;
   let connecting: Promise<void> | null = null;
+  let rx = "";
 
   const failPending = (err: Error) => {
     for (const p of pending.values()) {
@@ -95,12 +111,17 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
         unix: opts.socketPath,
         socket: {
           open() {
-            /* connected */
+            /* connected; reset the receive accumulator */
+            rx = "";
           },
           data(sock, data: Buffer) {
-            // NDJSON framing: complete lines only.
-            const text = data.toString("utf8");
-            for (const line of text.split("\n")) {
+            // NDJSON framing: a response line may arrive split across socket
+            // reads (large bodies), so accumulate and emit only complete lines.
+            rx += data.toString("utf8");
+            let nl: number;
+            while ((nl = rx.indexOf("\n")) !== -1) {
+              const line = rx.slice(0, nl);
+              rx = rx.slice(nl + 1);
               if (line.trim().length === 0) continue;
               let resp: BrokerResponse;
               try {
@@ -126,11 +147,13 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
           close() {
             closed = true;
             socket = null;
+            rx = "";
             failPending(new BrokerClientError("broker socket closed", "unavailable"));
           },
           error(_sock, err) {
             closed = true;
             socket = null;
+            rx = "";
             failPending(
               new BrokerClientError(
                 `broker connection error: ${String(err?.message ?? err)}`,

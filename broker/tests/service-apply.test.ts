@@ -3,7 +3,7 @@ import { defaultConfig } from "../src/config.ts";
 import { buildApplyResultOp, type OpContext } from "../src/service.ts";
 import type { BrokerRequestEnvelope, SessionRecord, SessionState } from "../src/types.ts";
 
-function makeApplyContext(rawDiff: string, calls: string[][]): OpContext {
+function makeApplyContext(rawDiff: string, calls: string[][], patchStdout = ""): OpContext {
   let record: SessionRecord = {
     sessionID: "apply-session",
     projectID: "repo",
@@ -51,6 +51,7 @@ function makeApplyContext(rawDiff: string, calls: string[][]): OpContext {
         if (argv.includes("ls-tree")) return ok("100644 blob base\topenspec/link\n");
         if (argv.includes("--name-only")) return ok("openspec/link\u0000");
         if (argv.includes("--raw")) return ok(rawDiff);
+        if (argv.includes("diff")) return ok(patchStdout);
         return ok();
       },
     },
@@ -87,5 +88,14 @@ describe("broker apply raw-diff safety checks", () => {
 
     await expect(buildApplyResultOp(ctx)(applyRequest)).rejects.toThrow(/raw metadata malformed/);
     expect(calls.some((argv) => argv.includes("apply"))).toBe(false);
+  });
+
+  test("applies deltas larger than the configured review cap without rejection", async () => {
+    const calls: string[][] = [];
+    const largePatch = Array.from({ length: 1000 }, (_, i) => `+line ${i}`).join("\n") + "\n";
+    const ctx = makeApplyContext("", calls, largePatch);
+    const result = await buildApplyResultOp(ctx)(applyRequest);
+    expect(result).toMatchObject({ applied: true });
+    expect(calls.some((argv) => argv.includes("apply"))).toBe(true);
   });
 });

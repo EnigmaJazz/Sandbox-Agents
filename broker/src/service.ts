@@ -19,6 +19,7 @@ import {
   renameSync,
   statSync,
   readFileSync,
+  realpathSync,
   type Stats,
 } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
@@ -37,19 +38,29 @@ import {
   assertGrepQuery,
   assertPayloadKeys,
   assertPositiveInt,
+  assertRegisterableProjectPath,
+  assertRefComponent,
   assertSandboxPath,
+  HostToolPolicy,
   resolveProjectID,
   ValidationError,
+  type HostToolAccess,
 } from "./validation.ts";
 import {
   baselineRef,
   resultRef,
+  RESULT_REF_PREFIX,
   buildCheckArgv,
   bundlePathFor,
   patchPathFor,
   buildChangedPathsArgv,
   parseNulDelimitedPaths,
   checkProtectedPaths,
+  buildGitCommitArgv,
+  buildGitPushArgv,
+  buildGhIssueCreateArgv,
+  capAndRedact,
+  GIT_OUTPUT_MAX_BYTES,
   classifyRawDiff,
   computeDivergence,
   parseLsFilesLines,
@@ -68,6 +79,22 @@ import {
   QueuedTimedOutError,
   type QueuedEntry,
 } from "./queue.ts";
+import {
+  closeSync,
+  constants,
+  fsyncSync,
+  lstatSync,
+  openSync,
+  unlinkSync,
+} from "node:fs";
+import { dirname } from "node:path";
+import {
+  assertPlanDocHeading,
+  assertPlanDocName,
+  isWithin,
+  normalizePlanDocContent,
+  PLAN_DOC_TARGETS,
+} from "./validation.ts";
 import type {
   BrokerRequestEnvelope,
   SessionRecord,
@@ -108,6 +135,31 @@ type Payload = Record<string, unknown> | undefined;
 function payloadOf(req: BrokerRequestEnvelope): Payload {
   assertPayloadKeys(req.operation, req.payload);
   return (req.payload ?? {}) as Payload;
+}
+
+/**
+ * Host-tool authorization (defence in depth; the plugin mirrors this for UX
+ * only). Reads are open to every agent; mutations require the broker-derived
+ * trusted agent to be an orchestrator identity (config `readOnlyAgents`). The
+ * envelope `agent` is only a fallback when no session record exists yet — the
+ * same trusted-session→agent resolution `ensureWorker` uses.
+ */
+export function authorizeHostDispatch(
+  ctx: Pick<OpContext, "store"> & { config: { readOnlyAgents?: readonly string[] } },
+  operation: string,
+  sessionID: string,
+  reqAgent?: string,
+): HostToolAccess {
+  const policy = new HostToolPolicy(ctx.config.readOnlyAgents ?? []);
+  const existing = ctx.store.get(sessionID);
+  const trusted = existing?.agent ?? reqAgent;
+  const decision = policy.decide(operation, trusted);
+  if (!decision.allowed) {
+    throw new PolicyError(
+      `host ${decision.access} tool "${operation}" is orchestrator-only (${decision.reasonCode})`,
+    );
+  }
+  return decision.access;
 }
 
 /** Worker ops require an ACTIVE worker; state/workerState are authoritative (§10). */
@@ -1364,17 +1416,6 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
       });
       throw new StateError("diff generation failed; result retained");
     }
-    // Gate 6: the approval prompt preview caps at maxApplyDiffLines — never
-    // ask the human to approve a delta larger than the preview can show.
-    const patchLines = patch.stdout.split("\n").length;
-    if (patchLines > ctx.config.resource.maxApplyDiffLines) {
-      ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
-        error: `apply delta too large to review (${patchLines} > ${ctx.config.resource.maxApplyDiffLines} lines)`,
-      });
-      throw new StateError(
-        `apply delta exceeds the reviewable preview limit (${patchLines} lines > ${ctx.config.resource.maxApplyDiffLines}); split the change into smaller applies and retry`,
-      );
-    }
     mkdirSync(join(ctx.config.stateDir, "patches"), {
       recursive: true,
       mode: 0o700,
@@ -1720,6 +1761,271 @@ export function buildPolicyOp(ctx: OpContext): OpHandler {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Host git/GH mutations (fixed argv; orchestrator-only; §31)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve an approved project directory to its canonical root with realpath
+ * equality (the same BROKER_PROJECTS boundary the SDD runtime uses).
+ */
+function resolveCanonicalProjectRoot(
+  ctx: OpContext,
+  projectDir: unknown,
+): { projectID: string; projectRoot: string } {
+  const projectID = resolveProjectID(projectDir, ctx.config.projects);
+  const project = ctx.config.projects.find((p) => p.id === projectID);
+  if (!project) throw new ValidationError("project is not in the trusted allowlist");
+  let canonicalRoot: string;
+  let canonicalRequested: string;
+  try {
+    canonicalRoot = realpathSync(project.path);
+    canonicalRequested = realpathSync(projectDir as string);
+  } catch {
+    throw new ValidationError("project root does not resolve on the host");
+  }
+  if (canonicalRequested !== canonicalRoot) {
+    throw new ValidationError("host tool requires the exact approved project root");
+  }
+  return { projectID, projectRoot: canonicalRoot };
+}
+
+interface HostStepResult {
+  argv: string[];
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+/** Spawn one host git/gh step with the shared 512-KiB output cap. */
+async function runHostStep(
+  ctx: OpContext,
+  argv: string[],
+  cwd: string,
+  timeoutMs = 120_000,
+): Promise<HostStepResult> {
+  const result = await ctx.git.spawn(argv, {
+    cwd,
+    timeoutMs,
+    maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
+  });
+  return {
+    argv,
+    status: result.status,
+    stdout: capAndRedact(result.stdout),
+    stderr: capAndRedact(result.stderr),
+  };
+}
+
+/**
+ * Resolve the applied B→C result to commit.
+ *
+ * With no `sandboxSessionID`, this is the caller's own session (unchanged
+ * behaviour). With an explicit identifier it is THAT sandbox session's
+ * persisted APPLIED result. The identifier is a session id (validated as a
+ * git ref component), never an arbitrary commit/tree/branch/path: the broker
+ * derives the refs from its own persisted record, requires the record to be in
+ * the sandbox result namespace and bound to the same project as the commit
+ * target, and fails closed on anything else.
+ */
+function resolveCommitResult(
+  ctx: OpContext,
+  callerSessionID: string,
+  projectID: string,
+  sandboxSessionID: unknown,
+): { baseline: string; result: string } {
+  if (sandboxSessionID === undefined) {
+    const record = recordOr404(ctx.store, callerSessionID);
+    if (record.state !== "APPLIED" || !record.resultRef) {
+      throw new StateError("cannot commit: no applied B→C result for this session");
+    }
+    return {
+      baseline: record.baselineRef ?? baselineRef(record.sessionID),
+      result: record.resultRef,
+    };
+  }
+  if (typeof sandboxSessionID !== "string") {
+    throw new ValidationError("sandboxSessionID must be a string");
+  }
+  // A session id is also a git ref component and a state-file name: reject
+  // anything that could traverse or name an outside ref before any lookup.
+  assertRefComponent(sandboxSessionID);
+  const record = recordOr404(ctx.store, sandboxSessionID);
+  if (record.state !== "APPLIED" || !record.resultRef) {
+    throw new StateError(
+      `cannot commit: sandbox session ${sandboxSessionID} has no applied B→C result`,
+    );
+  }
+  if (record.projectID !== projectID) {
+    throw new StateError(
+      `cannot commit: sandbox session ${sandboxSessionID} is not bound to this project`,
+    );
+  }
+  if (!record.resultRef.startsWith(`${RESULT_REF_PREFIX}/`)) {
+    throw new StateError(
+      `cannot commit: sandbox session ${sandboxSessionID} result ref is outside the sandbox result namespace`,
+    );
+  }
+  return {
+    baseline: record.baselineRef ?? baselineRef(sandboxSessionID),
+    result: record.resultRef,
+  };
+}
+
+/**
+ * Ref-scoped commit: derive exactly the resolved result's persisted B→C paths,
+ * reject protected paths (S17) and an empty result, then stage/commit ONLY
+ * those paths. Never `git add -A`; unrelated staged work is never swept.
+ *
+ * The result is the caller's own applied result unless `sandboxSessionID`
+ * names the (delegated) session whose result should be committed instead.
+ */
+export function buildGitCommitOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as {
+      projectDir?: unknown;
+      message?: unknown;
+      sandboxSessionID?: unknown;
+    };
+    authorizeHostDispatch(ctx, "gitCommit", req.sessionID, req.agent);
+    const { projectID, projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const { baseline, result } = resolveCommitResult(
+      ctx,
+      req.sessionID,
+      projectID,
+      payload.sandboxSessionID,
+    );
+    const changed = await changedPathsBetween(ctx, projectID, baseline, result);
+    if (changed.length === 0) {
+      throw new StateError("refusing to commit: the B→C result is empty");
+    }
+    const rejected = checkProtectedPaths(changed, [
+      ...ctx.config.protectedPaths,
+      ...ctx.config.protectedSecurityFiles,
+    ]);
+    if (rejected.length > 0) {
+      throw new StateError(
+        `refusing to commit protected paths (S17): ${rejected.join(", ")}`,
+      );
+    }
+    const steps = buildGitCommitArgv({
+      paths: changed,
+      message: payload.message as string,
+    });
+    const results: HostStepResult[] = [];
+    for (const argv of steps) {
+      const step = await runHostStep(ctx, argv, projectRoot);
+      results.push(step);
+      if (step.status !== 0) {
+        throw new MsbError(`git commit failed (${argv[1]}): ${step.stderr}`);
+      }
+    }
+    return { committed: true, paths: changed, steps: results };
+  };
+}
+
+/**
+ * Guarded push: the broker resolves branch/upstream/ahead itself and refuses
+ * every unsafe condition BEFORE spawning the push.
+ */
+export function buildGitPushOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as {
+      projectDir?: unknown;
+      remote?: unknown;
+      setUpstream?: unknown;
+      allowProtectedBranch?: unknown;
+    };
+    authorizeHostDispatch(ctx, "gitPush", req.sessionID, req.agent);
+    const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const remote = payload.remote === undefined ? "origin" : payload.remote;
+    if (typeof remote !== "string") {
+      throw new ValidationError("remote must be a string");
+    }
+    if (payload.setUpstream !== undefined && typeof payload.setUpstream !== "boolean") {
+      throw new ValidationError("setUpstream must be a boolean");
+    }
+    if (
+      payload.allowProtectedBranch !== undefined &&
+      typeof payload.allowProtectedBranch !== "boolean"
+    ) {
+      throw new ValidationError("allowProtectedBranch must be a boolean");
+    }
+    const head = await runHostStep(
+      ctx,
+      ["git", "symbolic-ref", "--short", "-q", "HEAD"],
+      projectRoot,
+      60_000,
+    );
+    const branch = head.status === 0 ? head.stdout.trim() : null;
+    let upstream: string | null = null;
+    if (branch !== null) {
+      const up = await runHostStep(
+        ctx,
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        projectRoot,
+        60_000,
+      );
+      upstream = up.status === 0 ? up.stdout.trim() : null;
+    }
+    let ahead = 0;
+    if (branch !== null) {
+      const count = await runHostStep(
+        ctx,
+        ["git", "rev-list", "--count", upstream !== null ? `${upstream}..HEAD` : "HEAD"],
+        projectRoot,
+        60_000,
+      );
+      if (count.status === 0) ahead = Number.parseInt(count.stdout.trim(), 10) || 0;
+    }
+    const argv = buildGitPushArgv({
+      branch,
+      upstream,
+      ahead,
+      remote,
+      setUpstream: payload.setUpstream === true,
+      allowProtectedBranch: payload.allowProtectedBranch === true,
+    });
+    const pushed = await runHostStep(ctx, argv, projectRoot);
+    return {
+      pushed: pushed.status === 0,
+      branch,
+      remote,
+      upstream,
+      ahead,
+      stdout: pushed.stdout,
+      stderr: pushed.stderr,
+      status: pushed.status,
+    };
+  };
+}
+
+/** Fixed-argv GitHub issue creation; values validated by the builder. */
+export function buildGhIssueCreateOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as {
+      projectDir?: unknown;
+      repo?: unknown;
+      title?: unknown;
+      body?: unknown;
+    };
+    authorizeHostDispatch(ctx, "ghIssueCreate", req.sessionID, req.agent);
+    const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const argv = buildGhIssueCreateArgv({
+      repo: payload.repo as string,
+      title: payload.title as string,
+      body: payload.body as string,
+    });
+    const result = await runHostStep(ctx, argv, projectRoot);
+    return {
+      created: result.status === 0,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      status: result.status,
+    };
+  };
+}
+
 export function buildHostOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const op = req.operation as Operation;
@@ -1788,49 +2094,34 @@ export async function releaseWorker(
 
 export function buildRegisterProjectOp(ctx: OpContext): OpHandler {
   return async (req) => {
-    const rawPayload = (req.payload ?? {}) as Record<string, unknown>;
-    const allowedKeys = ["path", "dryRun", "createRemote", "makePublic"];
-    for (const k of Object.keys(rawPayload)) {
-      if (!allowedKeys.includes(k)) {
-        throw new ValidationError(
-          `unexpected field '${k}' in registerProject payload`,
-        );
-      }
-    }
-    const p = rawPayload.path;
-    if (typeof p !== "string" || p.length === 0 || !isAbsolute(p)) {
-      throw new ValidationError("path must be an absolute string");
-    }
-    if (p.includes("\u0000")) {
-      throw new ValidationError("path contains NUL");
-    }
-    if (
-      rawPayload.dryRun !== undefined &&
-      typeof rawPayload.dryRun !== "boolean"
-    ) {
+    const payload = payloadOf(req) as {
+      path?: unknown;
+      dryRun?: unknown;
+      createRemote?: unknown;
+      makePublic?: unknown;
+    };
+    authorizeHostDispatch(ctx, "registerProject", req.sessionID, req.agent);
+    // Forward the canonical resolved path: the registration script writes this
+    // exact value into the sourced launcher conf, never the caller's alias.
+    const target = assertRegisterableProjectPath(payload.path);
+    if (payload.dryRun !== undefined && typeof payload.dryRun !== "boolean") {
       throw new ValidationError("dryRun must be a boolean");
     }
-    if (
-      rawPayload.createRemote !== undefined &&
-      typeof rawPayload.createRemote !== "boolean"
-    ) {
+    if (payload.createRemote !== undefined && typeof payload.createRemote !== "boolean") {
       throw new ValidationError("createRemote must be a boolean");
     }
-    if (
-      rawPayload.makePublic !== undefined &&
-      typeof rawPayload.makePublic !== "boolean"
-    ) {
+    if (payload.makePublic !== undefined && typeof payload.makePublic !== "boolean") {
       throw new ValidationError("makePublic must be a boolean");
     }
-    if (rawPayload.makePublic && !rawPayload.createRemote) {
+    if (payload.makePublic === true && payload.createRemote !== true) {
       throw new ValidationError("--public requires --create-remote");
     }
     const repoRoot = resolve(join(import.meta.dir, "../.."));
     const argv: string[] = ["bun", "scripts/register-project.ts"];
-    if (rawPayload.dryRun) argv.push("--dry-run");
-    if (rawPayload.createRemote) argv.push("--create-remote");
-    if (rawPayload.makePublic) argv.push("--public");
-    argv.push(p);
+    if (payload.dryRun === true) argv.push("--dry-run");
+    if (payload.createRemote === true) argv.push("--create-remote");
+    if (payload.makePublic === true) argv.push("--public");
+    argv.push(target);
     const result = await ctx.git.spawn(argv, {
       cwd: repoRoot,
       timeoutMs: 60_000,
@@ -1848,6 +2139,234 @@ export function buildRegisterProjectOp(ctx: OpContext): OpHandler {
     };
   };
 }
+
+// ---------------------------------------------------------------------------
+// Plan-document mutation (append-only, atomic, orchestrator-only; §31)
+// ---------------------------------------------------------------------------
+
+const PLAN_DOC_TEMP_PREFIX = ".plan-doc-";
+const PLAN_DOC_ATX_HEADING_RE = /^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/;
+
+interface PlanDocHeading {
+  index: number;
+  level: number;
+  text: string;
+  offset: number;
+}
+
+/** Serialize appends by canonical destination (mirrors the session lock chain). */
+const planDocLocks = new Map<string, Promise<unknown>>();
+
+async function withPlanDocLock<T>(key: string, fn: () => Promise<T> | T): Promise<T> {
+  const previous = planDocLocks.get(key) ?? Promise.resolve();
+  const next = previous.then(fn, fn);
+  planDocLocks.set(key, next.then(() => undefined, () => undefined));
+  return next;
+}
+
+function scanPlanDocHeadings(existing: string): PlanDocHeading[] {
+  const headings: PlanDocHeading[] = [];
+  const lines = existing.split("\n");
+  let offset = 0;
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    const match = PLAN_DOC_ATX_HEADING_RE.exec(line);
+    if (match) {
+      headings.push({ index, level: match[1]!.length, text: match[2]!.trim(), offset });
+    }
+    offset += line.length + 1;
+  }
+  return headings;
+}
+
+/**
+ * Insert `content` at EOF, or — with `heading` — immediately before the next
+ * heading of equal or higher level. Existing bytes are preserved verbatim and
+ * ordered; only separators and the new block are added. A missing or ambiguous
+ * heading fails closed.
+ */
+export function computePlanDocAppend(existing: string, content: string, heading?: string): string {
+  let insertionIndex = existing.length;
+  if (heading !== undefined) {
+    insertionIndex = planDocSectionInsertionIndex(existing, heading);
+  }
+  const before = existing.slice(0, insertionIndex);
+  const after = existing.slice(insertionIndex);
+  let insert = "";
+  if (before.length > 0 && !before.endsWith("\n")) insert += "\n";
+  insert += content + "\n";
+  if (after.length > 0 && after.startsWith("#")) insert += "\n";
+  return before + insert + after;
+}
+
+function planDocSectionInsertionIndex(existing: string, heading: string): number {
+  const wanted = heading.trim();
+  const headings = scanPlanDocHeadings(existing);
+  const matches = headings.filter((entry) => entry.text === wanted);
+  if (matches.length === 0) {
+    throw new ValidationError(`plan document heading not found: ${wanted}`);
+  }
+  if (matches.length > 1) {
+    throw new ValidationError(`plan document heading is ambiguous: ${wanted}`);
+  }
+  const match = matches[0]!;
+  const next = headings.find((entry) => entry.index > match.index && entry.level <= match.level);
+  return next ? next.offset : existing.length;
+}
+
+/** Ensure a path resolves (via realpath) beneath the canonical project root. */
+function assertBeneathProjectRoot(projectRoot: string, target: string): void {
+  let canonical: string;
+  try {
+    canonical = realpathSync(target);
+  } catch {
+    throw new ValidationError("plan document path does not resolve on the host");
+  }
+  if (!isWithin(projectRoot, canonical)) {
+    throw new ValidationError("plan document escapes the approved project root");
+  }
+}
+
+function lstatIfExists(path: string): Stats | undefined {
+  try {
+    return lstatSync(path);
+  } catch {
+    return undefined;
+  }
+}
+
+/** fsync a directory after a rename so the new name is durable (best effort). */
+function fsyncPlanDocDirectory(directory: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(directory, constants.O_RDONLY);
+    fsyncSync(fd);
+  } catch {
+    /* directory fsync is not supported on every platform */
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+}
+
+interface PlanDocWriteResult {
+  created: boolean;
+  bytes: number;
+}
+
+/**
+ * Atomic, append-only, serialized write of one plan document. Caller must hold
+ * the destination lock. Writes a sibling exclusive temp file, fsyncs it,
+ * revalidates the destination/parent, renames over the destination, and fsyncs
+ * the directory; every failure path removes the temp file.
+ */
+async function appendPlanDocAtomically(
+  projectRoot: string,
+  destination: string,
+  content: string,
+  heading: string | undefined,
+): Promise<PlanDocWriteResult> {
+  const parent = dirname(destination);
+  const existing = lstatIfExists(destination);
+  if (existing !== undefined && !existing.isFile()) {
+    throw new ValidationError("plan document destination is not a regular file");
+  }
+  if (existing === undefined) {
+    mkdirSync(parent, { recursive: true, mode: 0o755 });
+  }
+  assertBeneathProjectRoot(projectRoot, parent);
+  if (existing !== undefined) assertBeneathProjectRoot(projectRoot, destination);
+
+  const current = existing !== undefined ? readFileSync(destination, "utf8") : "";
+  const nextText = computePlanDocAppend(current, content, heading);
+
+  const tempPath = join(parent, `${PLAN_DOC_TEMP_PREFIX}${randomUUID()}.tmp`);
+  let tempWritten = false;
+  try {
+    const fd = openSync(tempPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+    try {
+      writeFileSync(fd, nextText, { encoding: "utf8" });
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    tempWritten = true;
+
+    // Revalidate immediately before rename (path/symlink drift).
+    const currentEntry = lstatIfExists(destination);
+    if (currentEntry !== undefined && !currentEntry.isFile()) {
+      throw new ValidationError("plan document destination changed to a non-regular file");
+    }
+    assertBeneathProjectRoot(projectRoot, parent);
+
+    renameSync(tempPath, destination);
+    tempWritten = false;
+    fsyncPlanDocDirectory(parent);
+    return { created: existing === undefined, bytes: Buffer.byteLength(nextText, "utf8") };
+  } finally {
+    if (tempWritten) {
+      try {
+        unlinkSync(tempPath);
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+  }
+}
+
+/**
+ * Orchestrator-only append to the allowlisted plan document. There is no
+ * caller path, cwd, binary, or argv: `doc` is an enum mapped to a compile-time
+ * constant beneath the canonical root.
+ */
+export function buildPlanDocAppendOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as {
+      projectDir?: unknown;
+      doc?: unknown;
+      content?: unknown;
+      heading?: unknown;
+    };
+    authorizeHostDispatch(ctx, "planDocAppend", req.sessionID, req.agent);
+    const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    assertPlanDocName(payload.doc);
+    const relative = PLAN_DOC_TARGETS[payload.doc];
+    const destination = resolve(projectRoot, relative);
+    if (!isWithin(projectRoot, destination)) {
+      throw new ValidationError("plan document escapes the approved project root");
+    }
+    const rejected = checkProtectedPaths([relative], [
+      ...ctx.config.protectedPaths,
+      ...ctx.config.protectedSecurityFiles,
+    ]);
+    if (rejected.length > 0) {
+      throw new ValidationError(
+        `refusing protected plan document destination (S17): ${rejected.join(", ")}`,
+      );
+    }
+    const content = normalizePlanDocContent(payload.content);
+    let heading: string | undefined;
+    if (payload.heading !== undefined) {
+      assertPlanDocHeading(payload.heading);
+      heading = payload.heading;
+    }
+    const result = await withPlanDocLock(destination, () =>
+      appendPlanDocAtomically(projectRoot, destination, content, heading),
+    );
+    return {
+      doc: payload.doc,
+      path: relative,
+      created: result.created,
+      bytes: result.bytes,
+    };
+  };
+}
+
 export const registerProjectOperationMap = {
   registerProject: buildRegisterProjectOp,
 };

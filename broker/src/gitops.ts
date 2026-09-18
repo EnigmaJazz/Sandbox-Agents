@@ -19,8 +19,19 @@
  * git execution is only wired through the broker at Gate 5+.
  */
 import { join } from "node:path";
-import { assertRefComponent, ValidationError } from "./validation.ts";
+import {
+  assertGhBody,
+  assertGhRepo,
+  assertGhTitle,
+  assertGitBranch,
+  assertGitCommitMessage,
+  assertGitPathList,
+  assertGitRemote,
+  assertRefComponent,
+  ValidationError,
+} from "./validation.ts";
 
+import { redact } from "./logging.ts";
 export const BASELINE_REF_PREFIX = "refs/opencode-sandbox/baseline";
 export const RESULT_REF_PREFIX = "refs/opencode-sandbox/result";
 
@@ -312,6 +323,109 @@ export function buildCheckArgv(patchFile: string): string[] {
 
 export function patchPathFor(stateDir: string, sessionID: string): string {
   return join(stateDir, "patches", `${sessionID}.patch`);
+}
+
+// ---------------------------------------------------------------------------
+// Host git commit / push and GitHub issue creation (fixed-argv host tools, §31)
+// ---------------------------------------------------------------------------
+
+/** Host git/gh stdout/stderr cap (512 KiB). */
+export const GIT_OUTPUT_MAX_BYTES = 512 * 1024;
+
+/** Redact secret-shaped data FIRST, then truncate to the byte cap. */
+export function capAndRedact(text: string, maxBytes = GIT_OUTPUT_MAX_BYTES): string {
+  const redacted = redact(text);
+  if (Buffer.byteLength(redacted, "utf8") <= maxBytes) return redacted;
+  return Buffer.from(redacted, "utf8").subarray(0, maxBytes).toString("utf8");
+}
+
+export interface GitCommitArgvInput {
+  paths: readonly string[];
+  message: string;
+}
+
+/**
+ * The ONLY permitted commit argv: stage exactly the B→C paths, then commit
+ * exactly those paths. Never `git add -A`, never `-a`, and never a bare
+ * `git commit` that could sweep unrelated staged work.
+ */
+export function buildGitCommitArgv(input: GitCommitArgvInput): string[][] {
+  assertGitCommitMessage(input.message);
+  assertGitPathList(input.paths);
+  const paths = [...input.paths];
+  return [
+    ["git", "add", "--", ...paths],
+    ["git", "commit", "-m", input.message, "--", ...paths],
+  ];
+}
+
+export interface GitPushArgvInput {
+  /** Broker-resolved branch; null means detached HEAD (refused). */
+  branch: string | null;
+  /** Broker-resolved upstream; null means none configured. */
+  upstream: string | null;
+  /** Broker-resolved commits ahead of the upstream (or HEAD when none). */
+  ahead: number;
+  remote: string;
+  setUpstream: boolean;
+  allowProtectedBranch: boolean;
+}
+
+/**
+ * Only `git push [--set-upstream] <remote> <branch>`. Refuses detached HEAD,
+ * a missing upstream without `setUpstream`, direct `main`/`master` without
+ * `allowProtectedBranch`, and any flag/refspec-shaped remote or branch
+ * (force, force-with-lease, delete, `+refspec`).
+ */
+export function buildGitPushArgv(input: GitPushArgvInput): string[] {
+  if (input.branch === null) {
+    throw new ValidationError("cannot push: detached HEAD");
+  }
+  assertGitBranch(input.branch);
+  assertGitRemote(input.remote);
+  if (input.upstream !== null) assertGitBranch(input.upstream);
+  if (!input.setUpstream && input.upstream === null) {
+    throw new ValidationError("cannot push: no upstream without setUpstream");
+  }
+  if (
+    (input.branch === "main" || input.branch === "master") &&
+    !input.allowProtectedBranch
+  ) {
+    throw new ValidationError(
+      `refusing direct push to protected branch '${input.branch}' without allowProtectedBranch`,
+    );
+  }
+  if (!Number.isInteger(input.ahead) || input.ahead < 0) {
+    throw new ValidationError("ahead count must be a non-negative integer");
+  }
+  const argv = ["git", "push"];
+  if (input.setUpstream) argv.push("--set-upstream");
+  argv.push(input.remote, input.branch);
+  return argv;
+}
+
+export interface GhIssueCreateArgvInput {
+  repo: string;
+  title: string;
+  body: string;
+}
+
+/** Only `gh issue create --repo <repo> --title <title> --body <body>`. */
+export function buildGhIssueCreateArgv(input: GhIssueCreateArgvInput): string[] {
+  assertGhRepo(input.repo);
+  assertGhTitle(input.title);
+  assertGhBody(input.body);
+  return [
+    "gh",
+    "issue",
+    "create",
+    "--repo",
+    input.repo,
+    "--title",
+    input.title,
+    "--body",
+    input.body,
+  ];
 }
 
 export function bundlePathFor(stateDir: string, sessionID: string): string {

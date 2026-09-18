@@ -52,7 +52,29 @@ export type Operation =
   | "metrics"
   // Host-side SDD runtime: fixed argv and trusted project roots only.
   | "sddStatus"
-  | "sddAttemptAcquire"
+  | "sddContinue"
+  | "sddArchiveCompose"
+  | "sddTaskResult"
+  | "reviewAssess"
+  | "reviewModeStatus"
+  | "reviewStatus"
+  | "reviewLensContext"
+  | "sddAttemptGrant"
+  | "planDocAppend"
+  // Host review lifecycle: fixed argv, orchestrator-only (§31).
+  | "reviewStart"
+  | "reviewCaptureResult"
+  | "reviewCaptureUnachievable"
+  | "reviewAcknowledgeApproved"
+  | "reviewCaptureCorrectionPlan"
+  | "reviewCaptureRefuter"
+  | "reviewCaptureValidation"
+  | "reviewValidate"
+  | "reviewRecover"
+  // Host git/GH mutations: fixed argv, orchestrator-only (§31).
+  | "gitCommit"
+  | "gitPush"
+  | "ghIssueCreate"
   // §8 structured read-only host API (never mutation)
   | "hostSystemSummary"
   | "hostMemory"
@@ -92,7 +114,24 @@ export const OPERATIONS: readonly Operation[] = [
   "listWorkers",
   "metrics",
   "sddStatus",
-  "sddAttemptAcquire",
+  "sddContinue",
+  "sddArchiveCompose",
+  "sddTaskResult",
+  "reviewAssess",
+  "reviewModeStatus",
+  "reviewStatus",
+  "reviewLensContext",
+  "sddAttemptGrant",
+  "planDocAppend",
+  "reviewStart",
+  "reviewCaptureResult",
+  "reviewCaptureUnachievable",
+  "reviewAcknowledgeApproved",
+  "reviewCaptureCorrectionPlan",
+  "reviewCaptureRefuter",
+  "reviewCaptureValidation",
+  "reviewValidate",
+  "reviewRecover",
   "hostSystemSummary",
   "hostMemory",
   "hostDiskUsage",
@@ -174,16 +213,233 @@ export interface EnsureWorkerPayload {
 
 export interface SddStatusPayload {
   projectDir: string;
+  change?: string;
+  contract?: string;
 }
 
-export interface SddAttemptAcquirePayload {
+export interface SddContinuePayload {
+  projectDir: string;
+  change?: string;
+}
+
+/** `grant` registers canonical host roots for a caller token. */
+export interface SddAttemptGrantPayload {
   projectDir: string;
   change: string;
+  expectedRevision?: string;
+  roots: string[];
+  changeInstance: string;
   requestId: string;
-  workUnit: string;
-  evidenceGoal: string;
-  maxAttempts: number;
-  maxChangedLines: number;
+  actor: string;
+  reason: string;
+}
+
+/** Orchestrator-only, append-only plan-document mutation. */
+export interface PlanDocAppendPayload {
+  projectDir: string;
+  doc: "todo" | "plan";
+  content: string;
+  heading?: string;
+}
+
+export type ReviewProjection = "workspace" | "staged";
+export type ReviewFocus = "risk" | "resilience" | "readability" | "reliability";
+export type ReviewConsent = "relay" | "granted" | "declined";
+export type ReviewLocale = "en" | "es";
+export type ReviewGate = "post-apply" | "pre-commit" | "pre-push" | "pre-pr" | "release";
+export type ReviewDisposition = "scope_changed" | "invalidated" | "escalated";
+
+/** Provider-issued per-lens reviewer-step identifiers (read-only lens context). */
+export type ReviewLens =
+  | "review-risk"
+  | "review-resilience"
+  | "review-readability"
+  | "review-reliability";
+
+export interface ReviewStartPayload {
+  projectDir: string;
+  agent?: string;
+  contract?: string;
+  target?: string;
+  projection?: ReviewProjection;
+  focus?: ReviewFocus;
+  untrackedScope?: "exclude" | "select";
+  expectedUntrackedInventory?: string;
+  intendedUntracked?: string[];
+  baseRef?: string;
+  committedOnly?: boolean;
+  workspaceOverlay?: boolean;
+  lineage?: string;
+  consent?: ReviewConsent;
+  locale?: ReviewLocale;
+  policy?: string;
+  trace?: string;
+}
+
+export interface ReviewCaptureResultPayload {
+  projectDir: string;
+  agent?: string;
+  input?: string;
+  inputJson?: string;
+  lens?: string;
+  order?: number;
+  target?: string;
+  lineage?: string;
+  expectedRevision?: string;
+  repositoryContext?: string;
+  subjectHash?: string;
+  materialize?: boolean;
+  preflight?: boolean;
+}
+
+export interface ReviewCaptureUnachievablePayload {
+  projectDir: string;
+  target?: string;
+  lineage?: string;
+  expectedRevision?: string;
+  repositoryContext?: string;
+  requestHash?: string;
+  reason?: string;
+  detail?: string;
+  withdraw?: boolean;
+}
+
+export interface ReviewAcknowledgeApprovedPayload {
+  projectDir: string;
+}
+
+export interface ReviewCaptureCorrectionPlanPayload {
+  projectDir: string;
+  target?: string;
+  lineage?: string;
+  expectedRevision?: string;
+  repositoryContext?: string;
+  requestHash?: string;
+  correctionLines?: number;
+}
+
+export interface ReviewCaptureRefuterPayload {
+  projectDir: string;
+  agent?: string;
+  target?: string;
+  lineage?: string;
+  expectedRevision?: string;
+  repositoryContext?: string;
+  materialize?: boolean;
+  execute?: boolean;
+}
+
+export interface ReviewCaptureValidationPayload extends ReviewCaptureRefuterPayload {
+  requestHash?: string;
+}
+
+export interface ReviewValidatePayload {
+  projectDir: string;
+  contract?: string;
+  gate?: ReviewGate;
+  baseRef?: string;
+  lineage?: string;
+  policy?: string;
+  prePrCiAttestation?: string;
+  releaseConfiguration?: string;
+  releaseEvidenceFreshness?: string;
+  releaseGenerated?: string;
+  releaseProvenance?: string;
+  releasePublicationBoundary?: string;
+}
+
+export interface ReviewRecoverPayload {
+  projectDir: string;
+  actor?: string;
+  disposition?: ReviewDisposition;
+  expectedPredecessorRevision?: string;
+  predecessorLineage?: string;
+  successorLineage?: string;
+  reason?: string;
+  maintainerAuthorization?: string;
+  baseRef?: string;
+  committedOnly?: boolean;
+  workspaceOverlay?: boolean;
+  releaseScope?: boolean;
+  projection?: ReviewProjection;
+  untrackedScope?: "exclude" | "select";
+  expectedUntrackedInventory?: string;
+  intendedUntracked?: string[];
+  focus?: string;
+  policy?: string;
+}
+
+export interface SddArchiveComposePayload {
+  projectDir: string;
+  canonical: string;
+  delta: string;
+  output: string;
+}
+
+export interface SddTaskResultPayload {
+  projectDir: string;
+  phase: string;
+  input: string;
+}
+
+export interface ReviewAssessPayload {
+  projectDir: string;
+  baseRef?: string;
+  committedOnly?: boolean;
+}
+
+export interface ReviewModeStatusPayload {
+  projectDir: string;
+}
+
+export interface ReviewStatusPayload {
+  projectDir: string;
+  agent?: string;
+  lineage?: string;
+  repositoryContext?: string;
+  projection?: ReviewProjection;
+  baseRef?: string;
+  committedOnly?: boolean;
+  intendedUntrackedSelection?: string;
+}
+
+/** Read-only per-lens reviewer context; the broker returns a plain-text block. */
+export interface ReviewLensContextPayload {
+  projectDir: string;
+  repositoryContext: string;
+  lineage: string;
+  target: string;
+  expectedRevision: string;
+  lens: ReviewLens;
+}
+
+/** Ref-scoped host commit: exactly the session's persisted B→C paths. */
+export interface GitCommitPayload {
+  projectDir: string;
+  message: string;
+  /**
+   * Optional sandbox session id whose APPLIED result should be committed
+   * instead of the caller's own. Omitted preserves the caller's own applied
+   * result (existing behaviour). The broker resolves the refs from its own
+   * persisted record; this is never an arbitrary commit/tree/branch/path.
+   */
+  sandboxSessionID?: string;
+}
+
+/** Guarded host push: the broker resolves branch/upstream/ahead itself. */
+export interface GitPushPayload {
+  projectDir: string;
+  remote?: string;
+  setUpstream?: boolean;
+  allowProtectedBranch?: boolean;
+}
+
+/** Fixed-argv host GitHub issue creation. */
+export interface GhIssueCreatePayload {
+  projectDir: string;
+  repo: string;
+  title: string;
+  body: string;
 }
 
 export interface ExecPayload {
