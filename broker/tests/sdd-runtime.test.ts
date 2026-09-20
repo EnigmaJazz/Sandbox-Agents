@@ -107,7 +107,7 @@ describe("host-side SDD runtime argv", () => {
       buildSddArchiveComposeArgv({
         binary: "gentle-ai",
         projectRoot,
-        canonical: "openspec/specs/host-sdd-runtime-tools/spec.md",
+        canonical: "openspec/specs/host-review-tools/spec.md",
         delta: "openspec/changes/agent-host-tools/specs/host-sdd-runtime-tools/spec.md",
         output: "openspec/changes/agent-host-tools/archive-composed.md",
       }),
@@ -115,7 +115,7 @@ describe("host-side SDD runtime argv", () => {
       "gentle-ai",
       "sdd-archive-compose",
       "--canonical",
-      `${projectRoot}/openspec/specs/host-sdd-runtime-tools/spec.md`,
+      `${projectRoot}/openspec/specs/host-review-tools/spec.md`,
       "--delta",
       `${projectRoot}/openspec/changes/agent-host-tools/specs/host-sdd-runtime-tools/spec.md`,
       "--output",
@@ -584,7 +584,7 @@ describe("host-side review lifecycle argv", () => {
       focus: "risk",
       untrackedScope: "select",
       expectedUntrackedInventory: digest,
-      intendedUntracked: ["b.ts", "a.ts"],
+      intendedUntracked: ["broker/src/validation.ts", "AGENTS.md"],
       baseRef: "refs/heads/main",
       committedOnly: true,
       workspaceOverlay: true,
@@ -603,8 +603,8 @@ describe("host-side review lifecycle argv", () => {
       "--focus", "risk",
       "--untracked-scope", "select",
       "--expected-untracked-inventory", digest,
-      "--intended-untracked", "b.ts",
-      "--intended-untracked", "a.ts",
+      "--intended-untracked", "broker/src/validation.ts",
+      "--intended-untracked", "AGENTS.md",
       "--base-ref", "refs/heads/main",
       "--committed-only",
       "--workspace-overlay",
@@ -731,15 +731,30 @@ describe("host-side review lifecycle argv", () => {
     expect(() => buildReviewCaptureCorrectionPlanArgv({ ...base, correctionLines: 0 })).toThrow(ValidationError);
   });
 
-  test("review acknowledge-approved is flag-less and runs in the canonical root", async () => {
+  test("review acknowledge-approved forwards the four required provider flags", async () => {
     const calls: Array<{ argv: string[]; cwd: string | undefined }> = [];
     const spawn: SpawnFn = async (argv, options) => {
       calls.push({ argv: [...argv], cwd: options.cwd });
       return { status: 0, stdout: JSON.stringify({ approved: true }), stderr: "", timedOut: false };
     };
-    await makeExecutor(spawn).reviewAcknowledgeApproved({ projectDir: configuredProjectRoot });
+    await makeExecutor(spawn).reviewAcknowledgeApproved({
+      projectDir: configuredProjectRoot,
+      lineage: "Lineage-TOKEN",
+      target: "Target-TOKEN",
+      expectedRevision: rev,
+      token: "Approved-ACK-TOKEN",
+    });
     expect(calls).toEqual([
-      { argv: ["gentle-ai", "review", "acknowledge-approved"], cwd: projectRoot },
+      {
+        argv: [
+          "gentle-ai", "review", "acknowledge-approved",
+          "--lineage", "Lineage-TOKEN",
+          "--target", "Target-TOKEN",
+          "--expected-revision", rev,
+          "--token", "Approved-ACK-TOKEN",
+        ],
+        cwd: projectRoot,
+      },
     ]);
     expect(() => buildReviewAcknowledgeApprovedArgv({ binary: "gentle-ai", extra: 1 } as never)).toThrow(ValidationError);
   });

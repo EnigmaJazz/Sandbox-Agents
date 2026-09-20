@@ -2,7 +2,7 @@
   "meta": {
     "name": "opencode-secure",
     "version": "0.1.2",
-    "description": "Secured host OpenCode process for the agentic sandbox integration (SYSTEM_PROMPT.md . Control dir writable, project roots read-only, credential stores only what OpenCode itself needs, everything else denied. NOT INSTALLED at Gate 1 \u2014 see nono/README.md.",
+    "description": "Secured host OpenCode process for the agentic sandbox integration (SYSTEM_PROMPT.md . Control dir writable, project roots read-only, credential stores only what OpenCode itself needs, everything else denied. NOT INSTALLED at Gate 1 — see nono/README.md.",
     "author": "agentic-sandbox-integration"
   },
   "extends": "default",
@@ -32,17 +32,51 @@
       "$TMPDIR",
       "$HOME/.cache/workflow-health-check",
       "$HOME/ai-workspace/workflow_optimisation/.atl",
+      "$HOME/ai-workspace/workflow_optimisation/.codegraph",
       "$HOME/.Config/openchamber/chats/.auto-update-history.json",
       "$HOME/.config/openchamber/chats/**/.auto-update-history.json",
       "$HOME/agent-sandbox-integration/.atl",
+      "$HOME/agent-sandbox-integration/.codegraph",
       "/mnt/ai_storage/kinver-hub/proxy/.atl",
+      "/mnt/ai_storage/kinver-hub/proxy/.codegraph",
       "/home/james/peak-redir/.atl",
+      "/home/james/peak-redir/.codegraph",
       "/home/james/opencode-workspace/.atl",
+      "/home/james/opencode-workspace/.codegraph",
       "/home/james/ai-workspace/tasker/tesla/.atl",
+      "/home/james/ai-workspace/tasker/tesla/.codegraph",
       "/home/james/weight_loss/.atl",
+      "/home/james/weight_loss/.codegraph",
       "/home/james/nono-opencode-test/.atl",
+      "/home/james/nono-opencode-test/.codegraph",
       "/home/james/omni-router-setup/.atl",
-      "/home/james/mem-opt/.atl"
+      "/home/james/omni-router-setup/.codegraph",
+      "/home/james/mem-opt/.atl",
+      "/home/james/mem-opt/.codegraph",
+      "$HOME/agent-sandbox-integration/.git",
+      "$HOME/ai-workspace/workflow_optimisation/.git",
+      "$HOME/peak-redir/.git",
+      "$HOME/peak-redir/.atl",
+      "$HOME/peak-redir/.codegraph",
+      "$HOME/opencode-workspace/.git",
+      "$HOME/opencode-workspace/.atl",
+      "$HOME/opencode-workspace/.codegraph",
+      "$HOME/ai-workspace/tasker/tesla/.git",
+      "$HOME/ai-workspace/tasker/tesla/.atl",
+      "$HOME/ai-workspace/tasker/tesla/.codegraph",
+      "$HOME/weight_loss/.git",
+      "$HOME/weight_loss/.atl",
+      "$HOME/weight_loss/.codegraph",
+      "$HOME/nono-opencode-test/.git",
+      "$HOME/nono-opencode-test/.atl",
+      "$HOME/nono-opencode-test/.codegraph",
+      "$HOME/omni-router-setup/.git",
+      "$HOME/omni-router-setup/.atl",
+      "$HOME/omni-router-setup/.codegraph",
+      "$HOME/mem-opt/.git",
+      "$HOME/mem-opt/.atl",
+      "$HOME/mem-opt/.codegraph",
+      "/mnt/ai_storage/kinver-hub/proxy/.git"
     ],
     "allow_file": [
       "$HOME/.auto-update-history.json",
@@ -52,7 +86,8 @@
       "$HOME/ai-workspace/tasker/.auto-update-history.json",
       "/home/james/.auto-update-history.json",
       "/home/james/ai-workspace/.auto-update-history.json",
-      "/home/james/.config/openchamber/.auto-update-history.json"
+      "/home/james/.config/openchamber/.auto-update-history.json",
+      "/home/james/ai-workspace/tasker/.auto-update-history.json"
     ],
     "read": [
       "$HOME/agent-sandbox-integration",
@@ -64,7 +99,8 @@
       "/home/james/weight_loss",
       "/home/james/nono-opencode-test",
       "/home/james/omni-router-setup",
-      "/home/james/mem-opt"
+      "/home/james/mem-opt",
+      "/home/james/agent-sandbox-integration"
     ],
     "deny": [
       "$HOME/.ssh",
@@ -89,9 +125,17 @@
       "registry.npmjs.org",
       "registry.yarnpkg.com"
     ],
-    "open_port": [4096, 13000, 8788],
-    "listen_port": [4096],
-    "no_proxy": ["localhost"]
+    "open_port": [
+      4096,
+      13000,
+      8788
+    ],
+    "listen_port": [
+      4096
+    ],
+    "no_proxy": [
+      "localhost"
+    ]
   },
   "security": {
     "signal_mode": "isolated",
