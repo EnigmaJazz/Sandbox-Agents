@@ -61,6 +61,24 @@ export function assertLegalTransition(from: SessionState, to: SessionState): voi
   }
 }
 
+/**
+ * Terminal states for on-disk artifact retention (bundle + temp-index GC).
+ * Once a session is here no further result can be produced, so its transport
+ * artifacts may be removed after the grace period. RETAINED is included: the
+ * durable copy lives in the result ref, and a later re-ensure regenerates the
+ * bundle from the baseline. Never used to gate worker lifecycle.
+ */
+export const TERMINAL_STATES: readonly SessionState[] = [
+  "APPLIED",
+  "REJECTED",
+  "RETAINED",
+  "FAILED_CLOSED",
+];
+
+export function isTerminalState(state: SessionState): boolean {
+  return TERMINAL_STATES.includes(state);
+}
+
 const SESSIONS_DIR = "sessions";
 const TMP_DIR = "tmp";
 

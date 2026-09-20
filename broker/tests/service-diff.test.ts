@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
 import { buildDiffOp, type OpContext } from "../src/service.ts";
 import type { BrokerRequestEnvelope, SessionRecord } from "../src/types.ts";
@@ -14,6 +17,10 @@ function makeDiffContext(calls: string[][]): OpContext {
   };
 
   return {
+    config: defaultConfig({
+      stateDir: mkdtempSync(join(tmpdir(), "service-diff-")),
+      projects: [{ id: "repo", path: "/repo" }],
+    }),
     store: { get: () => record },
     adapter: {
       exec: async (_worker: string, argv: string[]) => {

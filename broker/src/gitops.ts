@@ -325,6 +325,48 @@ export function patchPathFor(stateDir: string, sessionID: string): string {
   return join(stateDir, "patches", `${sessionID}.patch`);
 }
 
+/**
+ * R4: stable, host-side apply-preview artifacts. Both live under
+ * <stateDir>/apply-preview/, outside any worktree, so git status never sees
+ * them and reviewers get the same paths for a session on every diff.
+ */
+export function applyPreviewPathFor(stateDir: string, sessionID: string): string {
+  return join(stateDir, "apply-preview", `${sessionID}.diff`);
+}
+
+export function applyPreviewAnsiPathFor(
+  stateDir: string,
+  sessionID: string,
+): string {
+  return join(stateDir, "apply-preview", `${sessionID}.ansi.diff`);
+}
+
+/**
+ * Colour-code a unified diff for human review in a terminal pager. This is the
+ * single implementation, colocated with the writer (the broker); the plugin no
+ * longer carries a divergent copy. The plain artifact is the same text with no
+ * escape sequences.
+ */
+export function coloriseDiff(diff: string): string {
+  const reset = "\u001b[0m";
+  return diff
+    .split("\n")
+    .map((line) => {
+      if (
+        line.startsWith("diff --git") ||
+        line.startsWith("---") ||
+        line.startsWith("+++")
+      ) {
+        return `\u001b[1m${line}${reset}`;
+      }
+      if (line.startsWith("@@")) return `\u001b[36m${line}${reset}`;
+      if (line.startsWith("+")) return `\u001b[32m${line}${reset}`;
+      if (line.startsWith("-")) return `\u001b[31m${line}${reset}`;
+      return line;
+    })
+    .join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Host git commit / push and GitHub issue creation (fixed-argv host tools, §31)
 // ---------------------------------------------------------------------------

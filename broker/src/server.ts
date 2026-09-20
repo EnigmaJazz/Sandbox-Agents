@@ -193,12 +193,14 @@ export class BrokerServer {
     this.reaper = startReaper(this.ctx, {
       intervalMs: this.config.reapIntervalMs,
       idleMs: this.config.reapIdleMs,
+      artifactGraceMs: this.config.artifactGraceMs,
       onLog: (entry) =>
         this.logger.log({
           operation: "reaper",
           sessionID: entry.sessionID || undefined,
           result: entry.action === "error" ? "error" : "ok",
           error: entry.action === "error" ? entry.detail : undefined,
+          detail: entry.action === "swept_artifact" ? entry.detail : undefined,
         }),
     });
   }

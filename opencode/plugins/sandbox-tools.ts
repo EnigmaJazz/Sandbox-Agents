@@ -25,9 +25,8 @@
  * opencode 1.18.x plugin API (typings at ~/.opencode/node_modules/@opencode-ai/plugin).
  */
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import { tool } from "@opencode-ai/plugin";
 import { z } from "zod";
 import {
@@ -64,23 +63,6 @@ function assertNotOrchestrator(agent: string | undefined, toolName: string): voi
   if (agent && READ_ONLY_AGENTS.includes(agent)) {
     throw new Error(`orchestrator agent "${agent}" is not allowed to use sandbox operation "${toolName}" (orchestrator-readonly)`);
   }
-}
-
-/** Colour-code a unified diff for human review in a terminal pager. */
-function coloriseDiff(diff: string): string {
-  const reset = "\x1b[0m";
-  return diff
-    .split("\n")
-    .map((line) => {
-      if (line.startsWith("diff --git") || line.startsWith("---") || line.startsWith("+++")) {
-        return `\x1b[1m${line}${reset}`;
-      }
-      if (line.startsWith("@@")) return `\x1b[36m${line}${reset}`;
-      if (line.startsWith("+")) return `\x1b[32m${line}${reset}`;
-      if (line.startsWith("-")) return `\x1b[31m${line}${reset}`;
-      return line;
-    })
-    .join("\n");
 }
 
 let clientPromise: Promise<BrokerClient> | null = null;
@@ -395,10 +377,14 @@ export default function sandboxToolsPlugin() {
               preview: string;
               previewTruncated: boolean;
             };
+            applyPreviewFiles?: { plain?: string; ansi?: string };
           };
           const rawPreview = ((diffRes.compare ?? "").trim() ? diffRes.compare : diffRes.diff) ?? "";
-          const previewFile = join(tmpdir(), `sandbox-apply-${ctx.sessionID}.diff`);
-          writeFileSync(previewFile, coloriseDiff(rawPreview), { mode: 0o600 });
+          // The broker owns both preview artifacts under its state dir (outside
+          // the worktree): previewFile is the plain, escape-free diff for
+          // editors and previewAnsiFile is the coloured copy for terminals.
+          // The plugin no longer writes a temp file.
+          const previewFiles = diffRes.applyPreviewFiles;
           // The approval boundary must never depend on the unbounded raw diff:
           // embed the broker's bounded preview plus exact counts, and fall back
           // to a no-preview bounded shape if an older broker omits it.
@@ -412,13 +398,15 @@ export default function sandboxToolsPlugin() {
                 totalLines: bounded.totalLines,
                 previewTruncated: bounded.previewTruncated,
                 preview: bounded.preview,
-                previewFile,
+                previewFile: previewFiles?.plain,
+                previewAnsiFile: previewFiles?.ansi,
               }
             : {
                 summary,
                 totalLines: rawPreview.split("\n").length,
                 previewTruncated: true,
-                previewFile,
+                previewFile: previewFiles?.plain,
+                previewAnsiFile: previewFiles?.ansi,
               };
           await ctx.ask({
             permission: "sandbox_apply",
@@ -932,13 +920,20 @@ export default function sandboxToolsPlugin() {
       host_review_acknowledge_approved: tool({
         description:
           "Acknowledge the approved review authority (orchestrator-only mutation; requires " +
-          "human approval). The candidate argv is flag-less. Returns JSON.",
-        args: {},
-        execute: async (_args, ctx) => {
-          await ctx.ask(buildReviewAcknowledgeApprovedAsk({}));
+          "human approval). The four provider-issued continuation values are forwarded " +
+          "verbatim. Returns JSON.",
+        args: {
+          lineage: reviewTokenArg,
+          target: reviewTokenArg,
+          expectedRevision: reviewShaArg,
+          token: reviewTokenArg,
+        },
+        execute: async (args, ctx) => {
+          await ctx.ask(buildReviewAcknowledgeApprovedAsk(args));
           const c = await client();
           const result = await c.request("reviewAcknowledgeApproved", ctx.sessionID, {
             projectDir: currentProjectDirectory(ctx.directory),
+            ...args,
           }, ctx.agent);
           return JSON.stringify(result, null, 2);
         },

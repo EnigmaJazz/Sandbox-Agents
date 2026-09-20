@@ -22,7 +22,7 @@ import {
   realpathSync,
   type Stats,
 } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { BrokerConfig } from "./config.ts";
 import type { SessionStore } from "./state.ts";
@@ -53,6 +53,9 @@ import {
   buildCheckArgv,
   bundlePathFor,
   patchPathFor,
+  applyPreviewPathFor,
+  applyPreviewAnsiPathFor,
+  coloriseDiff,
   buildChangedPathsArgv,
   parseNulDelimitedPaths,
   checkProtectedPaths,
@@ -73,6 +76,14 @@ import {
 } from "./copy-review.ts";
 import { MsbError } from "./msb.ts";
 import { StateError } from "./state.ts";
+import {
+  divergenceIndexPathFor,
+  durableHostRefResolves,
+  removeArtifact,
+  removalNeedsDurableRef,
+  removeSessionArtifacts,
+  shouldRemoveSessionArtifacts,
+} from "./artifacts.ts";
 import { PolicyError, checkAdmission, type Admission } from "./policy.ts";
 import {
   PendingQueue,
@@ -497,6 +508,8 @@ async function createWorkerForSession(
         error: err instanceof Error ? err.message : String(err),
         workerState: "FAILED",
       });
+      // Terminal: the transport bundle/temp index are consumed.
+      await gcSessionArtifacts(ctx, sessionID, "ensureWorker");
     } catch {
       /* state may already have moved; the original error wins */
     }
@@ -724,6 +737,65 @@ async function runSnapshot(
 
 function trimErr(s: string): string {
   return s.trim().slice(0, 500);
+}
+
+/**
+ * Best-effort removal of a session's on-disk transport artifacts (bundle,
+ * temp indexes, patch, apply previews) after the session reaches a terminal
+ * state or its result is imported. Removal is gated on durability, never on
+ * state alone: a planned-mode / not-yet-imported result may still be the only
+ * copy, so its artifacts survive until a durable host ref resolves (or the
+ * result is deliberately abandoned). `opts.durable` lets a caller that just
+ * completed a host import skip the probe. Logs the session id, artifact kind,
+ * and bytes freed (or the failure) through the broker logger; never throws, so
+ * a GC problem can never fail the operation that triggered it.
+ */
+async function gcSessionArtifacts(
+  ctx: OpContext,
+  sessionID: string,
+  operation: string,
+  opts: { durable?: boolean } = {},
+): Promise<void> {
+  try {
+    const record = ctx.store.get(sessionID);
+    if (!record) return;
+    let remove: boolean;
+    if (opts.durable === true) {
+      // The caller just completed the host import; the ref is durable.
+      remove = true;
+    } else {
+      let durable = false;
+      if (removalNeedsDurableRef(record)) {
+        durable = await durableHostRefResolves(ctx, record);
+      }
+      remove = shouldRemoveSessionArtifacts(record, durable);
+    }
+    if (!remove) return;
+    for (const r of removeSessionArtifacts(ctx.config.stateDir, sessionID)) {
+      if (r.removed) {
+        ctx.logger?.log?.({
+          sessionID,
+          operation,
+          result: "ok",
+          detail: `${r.kind} ${r.bytes} bytes`,
+        });
+      } else if (r.error) {
+        ctx.logger?.log?.({
+          sessionID,
+          operation,
+          result: "error",
+          error: `${r.kind}: ${r.error}`,
+        });
+      }
+    }
+  } catch (err) {
+    ctx.logger?.log?.({
+      sessionID,
+      operation,
+      result: "error",
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1149,7 +1221,13 @@ export function buildGrepOp(ctx: OpContext): OpHandler {
   };
 }
 
-/** Bounded line cap for the apply-approval preview text. */
+/**
+ * Bounded line cap for the in-prompt apply-approval preview TEXT. It bounds
+ * only the prompt; the complete B->C diff is always written in full to the
+ * plain apply-preview artifact (writeApplyPreviewFiles), which is what the
+ * reviewer inspects. Distinct from resource.maxApplyDiffLines, which bounds
+ * source-code sandbox_copy_out review, not applies.
+ */
 export const APPLY_PREVIEW_MAX_LINES = 400;
 
 export interface ApplyPreview {
@@ -1184,6 +1262,77 @@ export function buildApplyPreview(diff: string): ApplyPreview {
     ? `${shown.join("\n")}\n(... preview truncated: showing ${APPLY_PREVIEW_MAX_LINES} of ${totalLines} lines; see previewFile for the full diff)`
     : shown.join("\n");
   return { files, addedLines, removedLines, totalLines, preview, previewTruncated };
+}
+
+export interface ApplyPreviewFiles {
+  /** Plain, escape-free unified diff (stable path for editors). */
+  plain: string;
+  /** ANSI-coloured variant of the same diff for terminal reading. */
+  ansi: string;
+}
+
+/**
+ * Atomic host-side write: temp file in the same directory, then rename, so a
+ * reader never observes a partial artifact. 0600 file (umask-independent via
+ * chmod) mirroring the patches/<sessionID>.patch precedent.
+ */
+function writeFileAtomic(target: string, content: string): void {
+  const tmp = join(dirname(target), `.${basename(target)}.${randomUUID()}.tmp`);
+  try {
+    writeFileSync(tmp, content, { mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, target);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+/**
+ * R4: write the two apply-preview artifacts for a session under
+ * <stateDir>/apply-preview/ (outside any worktree, so never tracked). Content
+ * is written RAW, not redacted: it is the human's own pending diff and
+ * redaction would corrupt the artifact they must inspect, matching the
+ * patches/<sessionID>.patch precedent. 0700 directory, 0600 files.
+ */
+export function writeApplyPreviewFiles(
+  stateDir: string,
+  sessionID: string,
+  diff: string,
+): ApplyPreviewFiles {
+  mkdirSync(join(stateDir, "apply-preview"), { recursive: true, mode: 0o700 });
+  const plain = applyPreviewPathFor(stateDir, sessionID);
+  const ansi = applyPreviewAnsiPathFor(stateDir, sessionID);
+  writeFileAtomic(plain, diff);
+  writeFileAtomic(ansi, coloriseDiff(diff));
+  return { plain, ansi };
+}
+
+/**
+ * Fail-closed approval invariant (§19): approval must never be blind. Before an
+ * apply may proceed, the COMPLETE B->C diff must exist at the stable plain
+ * apply-preview path. This re-writes the artifacts (idempotent with
+ * buildDiffOp), then verifies the on-disk plain bytes equal the complete diff.
+ * Only a write/verify failure — the condition that actually makes approval
+ * blind — refuses; the diff's size is never a reason to refuse.
+ */
+function ensureCompleteApplyPreview(
+  stateDir: string,
+  sessionID: string,
+  completeDiff: string,
+): ApplyPreviewFiles {
+  try {
+    const files = writeApplyPreviewFiles(stateDir, sessionID, completeDiff);
+    const onDisk = readFileSync(files.plain, "utf8");
+    if (onDisk !== completeDiff) {
+      throw new Error("plain preview artifact does not match the complete B->C diff");
+    }
+    return files;
+  } catch (err) {
+    throw new StateError(
+      `apply-preview artifact unavailable: ${trimErr(err instanceof Error ? err.message : String(err))}; ` +
+        "refusing to apply without a complete preview (result retained)",
+    );
+  }
 }
 
 export function buildDiffOp(ctx: OpContext): OpHandler {
@@ -1262,11 +1411,18 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
       changedPathResult.status === 0
         ? parseNulDelimitedPaths(changedPathResult.stdout)
         : { paths: [], complete: false };
+    const applyPreviewDiff = compare.trim().length > 0 ? compare : diff.stdout;
+    const applyPreviewFiles = writeApplyPreviewFiles(
+      ctx.config.stateDir,
+      req.sessionID,
+      applyPreviewDiff,
+    );
     return {
       stat: stat.stdout,
       diff: diff.stdout,
       compare,
-      applyPreview: buildApplyPreview(compare.trim().length > 0 ? compare : diff.stdout),
+      applyPreview: buildApplyPreview(applyPreviewDiff),
+      applyPreviewFiles,
       changedPaths: parsedChangedPaths.paths,
       changedPathsComplete:
         changedPathResult.status === 0 && parsedChangedPaths.complete,
@@ -1427,6 +1583,10 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
   if (imported.status !== 0) {
     throw new MsbError(`result import failed: ${imported.stderr.trim()}`);
   }
+  // The result ref is now the durable copy on the host git side; the on-disk
+  // transport bundle + temp index are redundant. Best effort: a GC failure
+  // must never fail an already-successful import.
+  await gcSessionArtifacts(ctx, sessionID, "prepareResult", { durable: true });
   return ref;
 }
 
@@ -1456,7 +1616,7 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     );
 
     // §19.1 / S16: host must still match the baseline the worker was built from.
-    const divergence = await hostDivergence(ctx, projectID, baselineRefName);
+    const divergence = await hostDivergence(ctx, req.sessionID, projectID, baselineRefName);
     if (divergence.length > 0) {
       ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
         error: `host diverged from baseline; result retained for reconciliation (${divergence.slice(0, 10).join(", ")})`,
@@ -1527,6 +1687,23 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
       mode: 0o700,
     });
     writeFileSync(patchFile, patch.stdout, { mode: 0o600 });
+    // Approval must never be blind (§19): the complete B->C diff must be on
+    // disk at the stable plain apply-preview path before any mutation. Fail
+    // closed only when the artifact cannot be written or does not match — never
+    // on its size.
+    let applyPreviewFiles: ApplyPreviewFiles;
+    try {
+      applyPreviewFiles = ensureCompleteApplyPreview(
+        ctx.config.stateDir,
+        req.sessionID,
+        patch.stdout,
+      );
+    } catch (err) {
+      ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
     const check = await ctx.git.spawn(buildCheckArgv(patchFile), {
       cwd: project.path,
       timeoutMs: 60_000,
@@ -1559,11 +1736,14 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     // the transient worker and its pool allocation now instead of leaking
     // them until an explicit stop/cleanup (pool exhaustion after demos).
     await releaseWorker(ctx, record);
+    // APPLIED is terminal: the transport artifacts are consumed.
+    await gcSessionArtifacts(ctx, req.sessionID, "applyResult");
     return {
       state: record.state,
       applied: true,
       resultRef: resultRefName,
       applyPreview: buildApplyPreview(patch.stdout),
+      applyPreviewFiles,
     };
   };
 }
@@ -1571,41 +1751,53 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
 /** S16: compare current host tree with the baseline tree. */
 async function hostDivergence(
   ctx: OpContext,
+  sessionID: string,
   projectID: string,
   baselineRefName: string,
 ): Promise<string[]> {
   const project = ctx.config.projects.find((p) => p.id === projectID);
   if (!project) throw new StateError("no projects configured");
   const gitDir = join(project.path, ".git");
-  const tmpIndex = join(
-    ctx.config.stateDir,
-    "tmp",
-    `divergence-${randomUUID()}.index`,
-  );
-  const env = { GIT_DIR: gitDir, GIT_INDEX_FILE: tmpIndex };
-  const currentTree = await ctx.git.spawn(["git", "add", "-A", "--"], {
-    env,
-    cwd: project.path,
-    timeoutMs: 60_000,
+  // Session-scoped (not a random UUID): the divergence temp index is a
+  // transport artifact under the same state-dir retention rules.
+  const tmpIndex = divergenceIndexPathFor(ctx.config.stateDir, sessionID);
+  mkdirSync(join(ctx.config.stateDir, "tmp"), {
+    recursive: true,
+    mode: 0o700,
   });
-  if (currentTree.status !== 0) {
-    throw new StateError(
-      `cannot read host working tree: ${currentTree.stderr.trim()}`,
+  // A hard crash can leave the previous run's index behind; the first
+  // `git add -A` would then reuse it as the staging index. Unlink it so
+  // staging always starts clean; the finally below still removes it.
+  removeArtifact({ kind: "divergence_index", path: tmpIndex });
+  try {
+    const env = { GIT_DIR: gitDir, GIT_INDEX_FILE: tmpIndex };
+    const currentTree = await ctx.git.spawn(["git", "add", "-A", "--"], {
+      env,
+      cwd: project.path,
+      timeoutMs: 60_000,
+    });
+    if (currentTree.status !== 0) {
+      throw new StateError(
+        `cannot read host working tree: ${currentTree.stderr.trim()}`,
+      );
+    }
+    const lsFiles = await ctx.git.spawn(["git", "ls-files", "-s"], {
+      env,
+      cwd: project.path,
+      timeoutMs: 60_000,
+    });
+    const baseline = await ctx.git.spawn(
+      ["git", "ls-tree", "-r", baselineRefName],
+      { env, timeoutMs: 60_000 },
     );
+    return computeDivergence(
+      parseLsTreeLines(baseline.stdout.split("\n")),
+      parseLsFilesLines(lsFiles.stdout.split("\n")),
+    );
+  } finally {
+    // The temp index is scratch: never leave it behind, even on a throw.
+    removeArtifact({ kind: "divergence_index", path: tmpIndex });
   }
-  const lsFiles = await ctx.git.spawn(["git", "ls-files", "-s"], {
-    env,
-    cwd: project.path,
-    timeoutMs: 60_000,
-  });
-  const baseline = await ctx.git.spawn(
-    ["git", "ls-tree", "-r", baselineRefName],
-    { env, timeoutMs: 60_000 },
-  );
-  return computeDivergence(
-    parseLsTreeLines(baseline.stdout.split("\n")),
-    parseLsFilesLines(lsFiles.stdout.split("\n")),
-  );
 }
 
 /** §19.2: changed paths between baseline B and result C. */
@@ -1734,6 +1926,9 @@ export function buildKeepResultOp(ctx: OpContext): OpHandler {
     record = ctx.store.transition(req.sessionID, record.state, "RETAINED", {
       error: undefined,
     });
+    // RETAINED is terminal for artifact retention: the durable copy lives in
+    // the result ref; the on-disk transport bundle is redundant.
+    await gcSessionArtifacts(ctx, req.sessionID, "keepResult");
     return {
       state: record.state,
       resultRef: record.resultRef ?? resultRef(req.sessionID),
@@ -1766,6 +1961,8 @@ export function buildDiscardResultOp(ctx: OpContext): OpHandler {
       workerState: record.workerName ? "DESTROYED" : undefined,
       error: undefined,
     });
+    // REJECTED is terminal: the transport artifacts are consumed.
+    await gcSessionArtifacts(ctx, req.sessionID, "discardResult");
     return { state: "REJECTED" };
   };
 }

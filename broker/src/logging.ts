@@ -21,6 +21,7 @@ export interface LogEntry {
   durationMs?: number;
   resources?: { cpu?: number; memBytes?: number };
   error?: string;
+  detail?: string;
   argsCount?: number;
 }
 
