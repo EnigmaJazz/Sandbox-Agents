@@ -94,8 +94,20 @@ const HOST_GIT_DIRECTORY = PROBE_DIRECTORIES.find((directory) => existsSync(`${d
 const BINDING_PROMPT =
   'GENTLE_AI_REVIEW_BINDING {"repository_context":"rctx2_example","target":"T","lineage":"L"}';
 
-/** A provider-materialized block, byte-preserved through the relay. */
-const MATERIALIZED_PROMPT = `${CONTEXT_START}\r\nline\twith "quotes" and unicode \u2705\r\n  trailing  spaces  \n${CONTEXT_END}`;
+/** A provider-role binding Task prompt (refuter/validator). */
+const ROLE_TASK_PROMPT =
+  'GENTLE_AI_REVIEW_PROVIDER_TASK {"repository_context":"rctx2_example","target":"T","lineage":"L","role":"refuter"}';
+
+/** Wrap Go materialization bytes: the JSON task prompt plus the provider content. */
+function goEnvelope(taskPrompt: string, providerContent: string): string {
+  return `GENTLE_AI_REVIEW_PROVIDER_MATERIALIZATION ${JSON.stringify({ task_prompt: taskPrompt })}\n${providerContent}`;
+}
+
+/** The lens provider content block, byte-preserved through the relay. */
+const LENS_CONTENT = `${CONTEXT_START}\r\nline\twith "quotes" and unicode \u2705\r\n  trailing  spaces  \n${CONTEXT_END}`;
+
+/** A full Go envelope around the lens content. */
+const MATERIALIZED_PROMPT = goEnvelope(BINDING_PROMPT, LENS_CONTENT);
 
 const REFUSAL_ENVELOPE = "opencode_reviewer_relay_refused";
 
@@ -445,7 +457,10 @@ describe("reviewer relay provider framing", () => {
       realpath: realpathSync,
       env: ENV,
     });
-    const body = `${CONTEXT_START}\nemoji \u{1F600} plus \u2705 check\n${CONTEXT_END}`;
+    const body = goEnvelope(
+      BINDING_PROMPT,
+      `${CONTEXT_START}\nemoji \u{1F600} plus \u2705 check\n${CONTEXT_END}`,
+    );
     const frameBytes = Buffer.from(promptFrame("nonce-split", body), "utf8");
     const emojiStart = frameBytes.indexOf(Buffer.from("\u{1F600}", "utf8"));
     expect(emojiStart).toBeGreaterThan(-1);
@@ -528,36 +543,48 @@ describe("reviewer relay provider framing", () => {
       realpath: realpathSync,
       env: ENV,
     });
-    recorder.child().emitStdout(promptFrame("nonce-partial", `${CONTEXT_START}\ntruncated patch`));
+    recorder.child().emitStdout(
+      promptFrame("nonce-partial", goEnvelope(BINDING_PROMPT, `${CONTEXT_START}\ntruncated patch`)),
+    );
     const refusal = await refusalOf(() => relay.prompt);
     expect(refusal.code).toBe("reviewer_relay_frame_refused");
     expect(refusal.message).toContain(CONTEXT_END);
   });
 
   test("refuses a materialized prompt without the CONTEXT_START delimiter", () => {
-    expect(() => validateMaterializedPrompt(`body only\n${CONTEXT_END}`)).toThrow("reviewer_relay_frame_refused");
-    expect(() => validateMaterializedPrompt("")).toThrow("reviewer_relay_frame_refused");
-    expect(() => validateMaterializedPrompt(`${CONTEXT_START}\n${CONTEXT_END}`)).not.toThrow();
+    expect(() =>
+      validateMaterializedPrompt(goEnvelope(BINDING_PROMPT, `body only\n${CONTEXT_END}`), "lens"),
+    ).toThrow("reviewer_relay_frame_refused");
+    expect(() => validateMaterializedPrompt("", "lens")).toThrow("reviewer_relay_frame_refused");
+    expect(() =>
+      validateMaterializedPrompt(goEnvelope(BINDING_PROMPT, `${CONTEXT_START}\n${CONTEXT_END}`), "lens"),
+    ).not.toThrow();
   });
 
   test("accepts the provider-materialized prompt with trailing whitespace after the final CONTEXT_END", () => {
     const providerPrompt = `${CONTEXT_START}\nreview body\n${CONTEXT_END}`;
     const prompt = `GENTLE_AI_REVIEW_PROVIDER_MATERIALIZATION ${JSON.stringify({ task_prompt: "review this" })}\n${providerPrompt}\n`;
-    expect(validateMaterializedPrompt(prompt)).toBe(prompt);
+    expect(validateMaterializedPrompt(prompt, "lens")).toBe(prompt);
   });
 
   test("accepts trailing whitespace of any kind after the final CONTEXT_END", () => {
-    const prompt = `${CONTEXT_START}\nreview body\n${CONTEXT_END} \t\r\n`;
-    expect(validateMaterializedPrompt(prompt)).toBe(prompt);
+    const prompt = goEnvelope(BINDING_PROMPT, `${CONTEXT_START}\nreview body\n${CONTEXT_END} \t\r\n`);
+    expect(validateMaterializedPrompt(prompt, "lens")).toBe(prompt);
   });
 
   test("refuses non-whitespace content after the last CONTEXT_END", () => {
-    expect(() => validateMaterializedPrompt(`${CONTEXT_START}\nreview body\n${CONTEXT_END}\ntrailing text`)).toThrow(
-      "reviewer_relay_frame_refused",
-    );
-    expect(() => validateMaterializedPrompt(`${CONTEXT_START}\nreview body\n${CONTEXT_END}${CONTEXT_START}`)).toThrow(
-      "reviewer_relay_frame_refused",
-    );
+    expect(() =>
+      validateMaterializedPrompt(
+        goEnvelope(BINDING_PROMPT, `${CONTEXT_START}\nreview body\n${CONTEXT_END}\ntrailing text`),
+        "lens",
+      ),
+    ).toThrow("reviewer_relay_frame_refused");
+    expect(() =>
+      validateMaterializedPrompt(
+        goEnvelope(BINDING_PROMPT, `${CONTEXT_START}\nreview body\n${CONTEXT_END}${CONTEXT_START}`),
+        "lens",
+      ),
+    ).toThrow("reviewer_relay_frame_refused");
   });
 
   test("refuses a materialized prompt that only mentions the markers in lens-prompt prose", () => {
@@ -568,14 +595,19 @@ describe("reviewer relay provider framing", () => {
       "The task begins with GENTLE_AI_REVIEW_BINDING and its exact one-line JSON. " +
       "Immediately after it, the OpenCode host process supplies one block from " +
       "GENTLE_AI_REVIEW_CONTEXT through GENTLE_AI_REVIEW_CONTEXT_END";
-    expect(() => validateMaterializedPrompt(lensProse)).toThrow("reviewer_relay_frame_refused");
+    expect(() => validateMaterializedPrompt(goEnvelope(BINDING_PROMPT, lensProse), "lens")).toThrow(
+      "reviewer_relay_frame_refused",
+    );
   });
 
   test("refuses a prompt whose only start marker is a mid-line prose mention", () => {
     // A real END marker is not enough when the start token appears only
     // mid-line inside prose.
     expect(() =>
-      validateMaterializedPrompt(`prose mentions ${CONTEXT_START} here\n${CONTEXT_END}`),
+      validateMaterializedPrompt(
+        goEnvelope(BINDING_PROMPT, `prose mentions ${CONTEXT_START} here\n${CONTEXT_END}`),
+        "lens",
+      ),
     ).toThrow("reviewer_relay_frame_refused");
   });
 
@@ -667,6 +699,64 @@ describe("reviewer relay provider framing", () => {
     oversizedStderr.child().emitStderr("e".repeat(100));
     const stderrRefusal = await refusalOf(() => stderrRelay.prompt);
     expect(stderrRefusal.code).toBe("reviewer_relay_stderr_oversized");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Requirement: provider-role Task classification and the Go envelope
+// ---------------------------------------------------------------------------
+
+describe("reviewer relay task classification and materialization envelope", () => {
+  test("accepts a provider-role materialization without a context block and injects it", async () => {
+    const roleContent = "Refute the candidate findings in this batch. Batch: []";
+    const roleMaterialized = goEnvelope(ROLE_TASK_PROMPT, roleContent);
+    const harness = relayHarness({ promptBody: roleMaterialized });
+    const before = { args: { subagent_type: "asi-review-refuter", prompt: ROLE_TASK_PROMPT } };
+    const refusal = await harness.hooks["tool.execute.before"](taskInput("s-role", "c1"), before);
+    expect(deliveredError(refusal)).toBe("");
+    expect(harness.specs).toHaveLength(1);
+    expect(harness.children[0]!.frames[0]!.prompt).toBe(ROLE_TASK_PROMPT);
+    expect(before.args.prompt).toBe(roleMaterialized);
+    expect(before.args.prompt).not.toContain(CONTEXT_START);
+  });
+
+  test("a lens-shaped materialization still requires the context block", () => {
+    const lensMaterialized = goEnvelope(BINDING_PROMPT, `${CONTEXT_START}\nreview body\n${CONTEXT_END}`);
+    expect(validateMaterializedPrompt(lensMaterialized, "lens")).toBe(lensMaterialized);
+    const noBlock = goEnvelope(BINDING_PROMPT, "provider content without a block");
+    expect(() => validateMaterializedPrompt(noBlock, "lens")).toThrow("reviewer_relay_frame_refused");
+  });
+
+  test("refuses a materialization whose first line lacks the Go envelope header", () => {
+    const bareBlock = `${CONTEXT_START}\nreview body\n${CONTEXT_END}`;
+    const otherHeader = `TASK_BINDING ${JSON.stringify({ task_prompt: "x" })}\n${bareBlock}`;
+    expect(() => validateMaterializedPrompt(bareBlock, "lens")).toThrow("reviewer_relay_frame_refused");
+    expect(() => validateMaterializedPrompt(otherHeader, "lens")).toThrow("reviewer_relay_frame_refused");
+  });
+
+  test("refuses a malformed or extended Go envelope", () => {
+    const nonJson = "GENTLE_AI_REVIEW_PROVIDER_MATERIALIZATION not-json\nprovider content";
+    const unknownKey = `GENTLE_AI_REVIEW_PROVIDER_MATERIALIZATION ${JSON.stringify({ task_prompt: "x", note: "extra" })}\nprovider content`;
+    const wrongType = `GENTLE_AI_REVIEW_PROVIDER_MATERIALIZATION ${JSON.stringify({ task_prompt: 7 })}\nprovider content`;
+    for (const prompt of [nonJson, unknownKey, wrongType]) {
+      expect(() => validateMaterializedPrompt(prompt, "provider-role")).toThrow("reviewer_relay_frame_refused");
+    }
+  });
+
+  test("refuses a materialization with an empty task prompt or empty provider content", () => {
+    const emptyTaskPrompt = `GENTLE_AI_REVIEW_PROVIDER_MATERIALIZATION ${JSON.stringify({ task_prompt: "" })}\nprovider content`;
+    const emptyContent = `GENTLE_AI_REVIEW_PROVIDER_MATERIALIZATION ${JSON.stringify({ task_prompt: ROLE_TASK_PROMPT })}\n`;
+    expect(() => validateMaterializedPrompt(emptyTaskPrompt, "provider-role")).toThrow("reviewer_relay_frame_refused");
+    expect(() => validateMaterializedPrompt(emptyContent, "provider-role")).toThrow("reviewer_relay_frame_refused");
+  });
+
+  test("refuses a Task prompt that carries neither binding header before spawning", async () => {
+    const harness = relayHarness();
+    const before = { args: { subagent_type: "asi-review-refuter", prompt: "plain host prose" } };
+    const refusal = await harness.hooks["tool.execute.before"](taskInput("s-unbound", "c1"), before);
+    expect(deliveredError(refusal)).toContain("reviewer_relay_frame_refused");
+    expect(harness.specs).toHaveLength(0);
+    expect(String(before.args.prompt)).toContain(REFUSAL_ENVELOPE);
   });
 });
 

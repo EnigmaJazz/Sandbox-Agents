@@ -83,6 +83,16 @@ const RELAY_AGENT_SET = new Set<string>(RELAY_AGENTS);
 export const CONTEXT_START = "GENTLE_AI_REVIEW_CONTEXT";
 export const CONTEXT_END = "GENTLE_AI_REVIEW_CONTEXT_END";
 
+/** Host-authored Task binding markers that classify a relay Task. */
+export const LENS_BINDING_HEADER = "GENTLE_AI_REVIEW_BINDING";
+export const PROVIDER_ROLE_TASK_HEADER = "GENTLE_AI_REVIEW_PROVIDER_TASK";
+/** The Go-issued materialization envelope marker and its single JSON field. */
+export const PROVIDER_MATERIALIZATION_HEADER = "GENTLE_AI_REVIEW_PROVIDER_MATERIALIZATION";
+const MATERIALIZATION_TASK_PROMPT_FIELD = "task_prompt";
+
+/** The class of a relay Task, captured from the host-authored prompt. */
+export type RelayTaskClass = "lens" | "provider-role";
+
 /**
  * Nonempty transport boundary that replaces the child session's inherited
  * system instructions, so only the provider-materialized user prompt reaches
@@ -494,19 +504,79 @@ function materializedContextStart(prompt: string): number {
 }
 
 /**
- * Require a complete provider-materialized context block: it must contain the
- * start delimiter and end with the END delimiter. A truncated block has no END
- * marker, so it is refused rather than prompted as partial context.
- *
- * The provider concatenates its own prompt after the materialization header, so
- * the materialized string can carry trailing whitespace after the final END
- * delimiter; only whitespace is tolerated there, and any other trailing content
- * is refused.
+ * Classify a host-authored Task prompt by its first line. A provider-role
+ * Task (refuter/validator) carries the provider Task binding header; a lens
+ * Task carries the lens binding header. Any other first line refuses before a
+ * child is spawned, so an unbound prompt can never reach the transport.
  */
-export function validateMaterializedPrompt(prompt: unknown): string {
+export function classifyRelayTaskPrompt(prompt: unknown): RelayTaskClass {
+  if (typeof prompt !== "string" || prompt.length === 0) {
+    throw frameRefused("relay Task prompt is unavailable for classification");
+  }
+  const newline = prompt.indexOf("\n");
+  const firstLine = newline < 0 ? prompt : prompt.slice(0, newline);
+  if (firstLine.startsWith(`${LENS_BINDING_HEADER} `)) return "lens";
+  if (firstLine.startsWith(`${PROVIDER_ROLE_TASK_HEADER} `)) return "provider-role";
+  throw frameRefused("relay Task prompt has no provider-issued review binding");
+}
+
+/**
+ * Require the Go materialization envelope at the head of a provider prompt:
+ * the materialization header line, its single-field JSON, and the non-empty
+ * provider content after the first newline. A truncated or host-authored
+ * frame is never admitted as a materialization.
+ */
+function requireMaterializationEnvelope(prompt: string): void {
+  const newline = prompt.indexOf("\n");
+  if (newline < 0) {
+    throw frameRefused(`materialized prompt has no ${PROVIDER_MATERIALIZATION_HEADER} envelope`);
+  }
+  const header = prompt.slice(0, newline);
+  const content = prompt.slice(newline + 1);
+  if (!header.startsWith(`${PROVIDER_MATERIALIZATION_HEADER} `)) {
+    throw frameRefused(`materialized prompt has no ${PROVIDER_MATERIALIZATION_HEADER} envelope`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(header.slice(PROVIDER_MATERIALIZATION_HEADER.length + 1));
+  } catch {
+    throw frameRefused("materialized prompt envelope is not provider-issued JSON");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw frameRefused("materialized prompt envelope is not a JSON object");
+  }
+  const record = parsed as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== 1 || keys[0] !== MATERIALIZATION_TASK_PROMPT_FIELD) {
+    throw frameRefused("materialized prompt envelope has an unexpected shape");
+  }
+  const taskPrompt = record[MATERIALIZATION_TASK_PROMPT_FIELD];
+  if (typeof taskPrompt !== "string" || taskPrompt.length === 0) {
+    throw frameRefused("materialized prompt envelope carries no task prompt");
+  }
+  if (content.length === 0) {
+    throw frameRefused("materialized prompt envelope carries no provider content");
+  }
+}
+
+/**
+ * Validate a provider-materialized prompt for its Task class.
+ *
+ * Every relay Task must carry the Go materialization envelope. A lens Task
+ * additionally requires a complete provider context block: it must contain the
+ * start delimiter and end with the END delimiter, and only whitespace may
+ * follow the final END. A provider-role Task (refuter/validator) carries only
+ * its batch instruction and is admitted without a block.
+ */
+export function validateMaterializedPrompt(
+  prompt: unknown,
+  taskClass: RelayTaskClass,
+): string {
   if (typeof prompt !== "string" || prompt.length === 0) {
     throw frameRefused("prompt frame carries no materialized prompt");
   }
+  requireMaterializationEnvelope(prompt);
+  if (taskClass === "provider-role") return prompt;
   if (materializedContextStart(prompt) < 0) {
     throw frameRefused(`materialized prompt has no ${CONTEXT_START} block`);
   }
@@ -665,6 +735,7 @@ export interface Relay {
 export interface RelayStartOptions {
   cwd: unknown;
   prompt: string;
+  taskClass?: RelayTaskClass;
   env?: Record<string, string | undefined>;
   spawn?: TransportSpawn;
   realpath?: (path: string) => string;
@@ -690,6 +761,10 @@ export function startRelay(options: RelayStartOptions): Relay {
   const deadlineMs = options.deadlineMs ?? RELAY_DEADLINE_MS;
   const stdoutLimit = options.stdoutFrameLimitBytes ?? STDOUT_FRAME_LIMIT_BYTES;
   const stderrLimit = options.stderrLimitBytes ?? STDERR_LIMIT_BYTES;
+
+  // Classify from the host-authored prompt when the caller did not already
+  // capture it, so a direct relay start validates against the correct class.
+  const taskClass = options.taskClass ?? classifyRelayTaskPrompt(options.prompt);
 
   // Refusals before spawn: root, then abort, then environment.
   const cwd = requireCanonicalAbsoluteRoot(options.cwd, realpath);
@@ -772,7 +847,7 @@ export function startRelay(options: RelayStartOptions): Relay {
         }
         let materialized: string;
         try {
-          materialized = validateMaterializedPrompt(frame.prompt);
+          materialized = validateMaterializedPrompt(frame.prompt, taskClass);
         } catch (cause) {
           fail(cause);
           return;
@@ -1115,6 +1190,15 @@ export interface ReviewerRelayConfig {
 }
 
 /**
+ * Opt-in verbose tracing for live relay debugging. Off by default: the relay
+ * logs only relay-relevant events, and still only types, lengths, and counts.
+ * Set GENTLE_AI_RELAY_DEBUG=1 to restore the per-call traces.
+ */
+function relayDebugEnabled(): boolean {
+  return process.env.GENTLE_AI_RELAY_DEBUG === "1";
+}
+
+/**
  * Wire the relay into the OpenCode Task lifecycle.
  *
  * `tool.execute.before` resolves the Task session's allowlisted canonical root,
@@ -1148,6 +1232,9 @@ export function createReviewerRelayHooks(config: ReviewerRelayConfig): ReviewerR
   // the before hook's thrown refusal and launched the Task anyway.
   const refused = new Map<string, string>();
 
+  // Verbose per-call tracing is explicit opt-in; the default stays quiet.
+  const debug = relayDebugEnabled();
+
   const directory = config.directory ?? "";
   const worktree = config.worktree ?? "";
   // PluginInput directories follow the request, so they cannot identify the
@@ -1179,10 +1266,11 @@ export function createReviewerRelayHooks(config: ReviewerRelayConfig): ReviewerR
     cache: config.rootCache,
   });
 
-  const startRelayFor = (cwd: string, prompt: string): Relay =>
+  const startRelayFor = (cwd: string, prompt: string, taskClass: RelayTaskClass): Relay =>
     startRelay({
       cwd,
       prompt,
+      taskClass,
       ...(spawnFn ? { spawn: spawnFn } : {}),
       ...(config.env ? { env: config.env } : {}),
       realpath,
@@ -1322,12 +1410,14 @@ export function createReviewerRelayHooks(config: ReviewerRelayConfig): ReviewerR
         output.system.splice(0, output.system.length, TRANSPORT_ISOLATION_SYSTEM);
         replaced = true;
       }
-      console.warn(
-        `[reviewer-relay] experimental.chat.system.transform: session=${shortSessionID(sessionID)}` +
-          ` tracked=${tracked}` +
-          ` materializedBound=${materialized !== undefined}` +
-          ` systemReplaced=${replaced}`,
-      );
+      if (debug || tracked || materialized !== undefined) {
+        console.warn(
+          `[reviewer-relay] experimental.chat.system.transform: session=${shortSessionID(sessionID)}` +
+            ` tracked=${tracked}` +
+            ` materializedBound=${materialized !== undefined}` +
+            ` systemReplaced=${replaced}`,
+        );
+      }
     },
     "experimental.chat.messages.transform": async (input, output) => {
       const messages = Array.isArray(output.messages) ? output.messages : [];
@@ -1367,24 +1457,28 @@ export function createReviewerRelayHooks(config: ReviewerRelayConfig): ReviewerR
           textPartCount += 1;
         }
       }
-      console.warn(
-        `[reviewer-relay] experimental.chat.messages.transform: session=${shortSessionID(sessionID)}` +
-          ` materializedBound=${materialized !== undefined}` +
-          ` userMessageFound=${target !== undefined}` +
-          ` textPartCount=${textPartCount}` +
-          ` messageReplaced=${messageReplaced}` +
-          (materialized !== undefined ? ` promptLength=${materialized.length}` : ""),
-      );
+      if (debug || materialized !== undefined) {
+        console.warn(
+          `[reviewer-relay] experimental.chat.messages.transform: session=${shortSessionID(sessionID)}` +
+            ` materializedBound=${materialized !== undefined}` +
+            ` userMessageFound=${target !== undefined}` +
+            ` textPartCount=${textPartCount}` +
+            ` messageReplaced=${messageReplaced}` +
+            (materialized !== undefined ? ` promptLength=${materialized.length}` : ""),
+        );
+      }
     },
     "tool.execute.before": async (input, output) => {
-      console.warn(`[reviewer-relay] tool.execute.before: tool=${input.tool}`);
+      if (debug) console.warn(`[reviewer-relay] tool.execute.before: tool=${input.tool}`);
       if (input.tool !== "task") return;
       const subagentType = output.args?.subagent_type;
       const relayAgent = isRelayAgent(subagentType);
       const observed = typeof subagentType === "string" ? subagentType : "<missing>";
-      console.warn(
-        `[reviewer-relay] tool.execute.before: subagent_type=${observed} relayAgent=${relayAgent}`,
-      );
+      if (debug || relayAgent) {
+        console.warn(
+          `[reviewer-relay] tool.execute.before: subagent_type=${observed} relayAgent=${relayAgent}`,
+        );
+      }
       if (!relayAgent) return;
       if (typeof output.args?.prompt !== "string") {
         return toolRefusalResult(
@@ -1409,6 +1503,14 @@ export function createReviewerRelayHooks(config: ReviewerRelayConfig): ReviewerR
         return toolRefusalResult(refusal);
       }
       const bindingPrompt = output.args.prompt;
+      let taskClass: RelayTaskClass;
+      try {
+        taskClass = classifyRelayTaskPrompt(bindingPrompt);
+      } catch (cause) {
+        const refusal = refusalOr(cause, frameRefused);
+        refuseTaskBoundary(output, key, refusal);
+        return toolRefusalResult(refusal);
+      }
       let root: string;
       try {
         root = await resolveSessionRoot(input.sessionID);
@@ -1421,7 +1523,7 @@ export function createReviewerRelayHooks(config: ReviewerRelayConfig): ReviewerR
       }
       let relay: Relay;
       try {
-        relay = startRelayFor(root, bindingPrompt);
+        relay = startRelayFor(root, bindingPrompt, taskClass);
       } catch (cause) {
         const refusal = refusalOr(cause, spawnFailed);
         refuseTaskBoundary(output, key, refusal);
@@ -1440,6 +1542,7 @@ export function createReviewerRelayHooks(config: ReviewerRelayConfig): ReviewerR
         const blockStart = materializedContextStart(materialized);
         console.warn(
           `[reviewer-relay] tool.execute.before: materialized prompt length=${materialized.length}` +
+            ` taskClass=${taskClass}` +
             ` blockFound=${blockStart >= 0}` +
             (blockStart >= 0 ? ` blockStart=${blockStart}` : ""),
         );
