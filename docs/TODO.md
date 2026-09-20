@@ -1,6 +1,13 @@
 # TODO — agent-sandbox-integration
 
-Last updated: 2026-09-05
+Last updated: 2026-09-11
+
+## In flight — agent-host-tools (2026-09-11)
+
+- Landed on host, UNCOMMITTED: (a) apply-preview prereq — removed applyResult line cap (broker/src/service.ts) + colour-coded `sandbox_apply` preview file (opencode/plugins/sandbox-tools.ts); (b) slice 1 — P0 SDD runtime host tools + authorization (194 tests). OpenSpec artifacts under `openspec/changes/agent-host-tools/`; Magic Context records 922–928 + resume memory 930.
+- Pending: slice 2 (git/gh: gitCommit/gitPush/ghIssueCreate), slice 3 (registerProject dispatch + docs/threat-model), then verify + archive.
+- Carry-forward (acceptance): restore full `BROKER_PROTECTED_SECURITY_FILES` + remove `BROKER_REAP_INTERVAL_MS`; reinstall plugin + restart secure OpenCode; commit landed slices as work units (hunk-split); fix `runPrepare` forcing refspec; S17 manual review.
+- Blocker: SDD dispatch latched for the current session — continue in a NEW session.
 
 ## Completed
 
@@ -28,6 +35,7 @@ Last updated: 2026-09-05
 20. Broker retained-result resume gap (RETAINED results are dead-ends)
 22. OpenChamber E2E verification on nono 0.73 (all providers respond)
 23. SDD runtime: verify BROKER_GENTLE_AI_BINARY in broker env + sdd-runtime tests on host
+27. register-project: create + grant `<project>/.codegraph` in the nono profile for new projects (mirror the existing `.atl` helper) so CodeGraph can write its index inside secure OpenCode. The grant must be paired with directory creation: nono binds grants to existing paths at sandbox start and cannot create `.codegraph` itself.
 
 ## In-progress / parked
 
@@ -39,3 +47,19 @@ Last updated: 2026-09-05
 24. sandbox_diff always shows 0 — buildRetainedDiff returns compare:'' while active-mode diff computes .new reference comparisons
 25. sandbox_apply not giving the correct S17 failure message
 26. runPrepare .broker-tmp mkdir + git bundle create status check (bites sandbox_bash-only writers)
+## Sandbox result-ref inspector (host tool)
+
+**Problem:** the orchestrator cannot inspect the content of a sandbox result ref
+(`refs/opencode-sandbox/result/<sessionID>`). On 2026-09-20 a result import was rejected
+non-fast-forward because a pre-reset export already held that session's ref, and confirming
+whether the blocking ref contained the same work required the user to run `git show` and
+`git diff` by hand.
+
+**Proposed:** a read-only host operation (e.g. `host_sandbox_result`) that, for a session ID,
+returns the ref's commit identity and timestamp, the changed-path list with per-file
+added/removed counts, and the patch or a bounded excerpt. Fixed argv, no worker activation,
+bounded output, S17-aware, read-only. A comparison mode (baseline vs result, or any two refs)
+would cover the blocking-ref case directly.
+
+**Acceptance:** the orchestrator can determine whether a blocking result ref matches the
+intended change without any host shell, and can diff two refs itself.

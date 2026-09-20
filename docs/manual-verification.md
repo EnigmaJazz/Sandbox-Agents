@@ -245,3 +245,31 @@ Checklist:
 - [ ] All high/critical findings resolved
 - [ ] `SANDBOX_GATED_TESTS=all bun test tests/` green
 - [ ] Success condition from §33 demonstrated end-to-end with a human
+
+## Gate 11 — Reviewer relay transport (S17, MANUAL — user completes)
+
+Status: **prepared, not installed.** Agents produced the reviewed package and
+ran the unit and build gates below; the USER performs every install step. Per
+AGENTS.md constraint 3, agents never self-certify a manual gate.
+
+```sh
+cd /home/james/agent-sandbox-integration
+git status                                  # only repo-local changes
+cd broker && bun test                       # unit tests must pass
+bun build src/main.ts                       # must compile
+```
+
+```sh
+# Install (USER, after reviewing the S17 diff):
+#   1. copy opencode/plugins/reviewer-relay-transport.ts
+#        -> ~/.config/opencode/plugins/reviewer-relay-transport.ts
+#   2. merge the "agent" block from
+#        opencode/config-fragments/reviewer-relay-agents.jsonc
+#      into ~/.config/opencode/opencode.json
+#   3. restart secured OpenCode
+#   4. run ONE reviewer Task targeting asi-review-risk and confirm it completes
+```
+
+Rollback: remove the installed plugin file and the six `asi-review-*` agent
+entries, then restart. The previous loud `binding_invalid` refusal returns; no
+persisted schema changes remain.

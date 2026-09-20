@@ -185,3 +185,17 @@ OAuth lives in the persistent host OpenCode process.
 
 - Gate 0 (Discovery complete): **ready for user review** (this report).
 - Gates 1–10: pending; each requires explicit user action/approval per SYSTEM_PROMPT.md §27.
+
+## 11. Reviewer relay transport (recorded, not applied)
+
+- Assets (S17, NOT installed): `opencode/plugins/reviewer-relay-transport.ts`
+  and `opencode/config-fragments/reviewer-relay-agents.jsonc`.
+- The relay hooks only the dedicated `asi-review-*` agent names, resolves the
+  child cwd from the Task session's broker-allowlisted repository root, and
+  spawns `/home/linuxbrew/.linuxbrew/bin/gentle-ai review opencode-transport`
+  with a fixed argv vector, `shell: false`, and an allowlist-only environment.
+- The installed transport under `~/.config/opencode/plugins/` still owns the
+  installed `review-*` reviewer names and was NOT modified.
+- Installation is manual (USER): review the diff, install the exact bytes,
+  restart secured OpenCode, then run one reviewer Task. Agents never certify
+  that gate.
