@@ -460,15 +460,22 @@ export function buildReviewCaptureUnachievableAsk(args: ReviewCaptureUnachievabl
   });
 }
 
-export interface ReviewAcknowledgeApprovedAskArgs {}
+export interface ReviewAcknowledgeApprovedAskArgs {
+  target?: string;
+  lineage?: string;
+  expectedRevision?: string;
+  token?: string;
+}
 
 /** Approval metadata for `host_review_acknowledge_approved`. */
-export function buildReviewAcknowledgeApprovedAsk(_args: ReviewAcknowledgeApprovedAskArgs = {}): HostToolAsk {
+export function buildReviewAcknowledgeApprovedAsk(args: ReviewAcknowledgeApprovedAskArgs = {}): HostToolAsk {
   return buildHostToolAsk({
     permission: "host_review_acknowledge_approved",
     operation: "reviewAcknowledgeApproved",
     summary: "Acknowledge the approved review authority",
-    details: {},
+    details: reviewAskDetails({
+      tokenDigest: reviewTokenDigest([args.target, args.lineage, args.expectedRevision, args.token]) || undefined,
+    }),
   });
 }
 

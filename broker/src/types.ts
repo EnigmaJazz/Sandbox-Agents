@@ -310,6 +310,10 @@ export interface ReviewCaptureUnachievablePayload {
 
 export interface ReviewAcknowledgeApprovedPayload {
   projectDir: string;
+  lineage: string;
+  target: string;
+  expectedRevision: string;
+  token: string;
 }
 
 export interface ReviewCaptureCorrectionPlanPayload {
