@@ -415,13 +415,48 @@ describe("host tool canonical validators", () => {
   });
 
   test("resolveProjectRelativePath binds beneath the root", () => {
-    expect(resolveProjectRelativePath("/repo", "openspec/x.md", "path")).toBe(
-      "/repo/openspec/x.md",
-    );
-    expect(resolveProjectRelativePath("/repo", "-", "path")).toBe("-");
-    expect(() => resolveProjectRelativePath("/repo", "../etc", "path")).toThrow(ValidationError);
+    const root = mkdtempSync(join(tmpdir(), "broker-resolve-"));
+    try {
+      mkdirSync(join(root, "openspec"));
+      writeFileSync(join(root, "openspec", "x.md"), "x");
+      const canonicalRoot = realpathSync(root);
+      expect(resolveProjectRelativePath(root, "openspec/x.md", "path")).toBe(
+        join(canonicalRoot, "openspec", "x.md"),
+      );
+      expect(resolveProjectRelativePath(root, "-", "path")).toBe("-");
+      expect(() => resolveProjectRelativePath(root, "../etc", "path")).toThrow(ValidationError);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
+  test("resolveProjectRelativePath refuses a symlink that escapes the root", () => {
+    const dir = mkdtempSync(join(tmpdir(), "broker-resolve-link-"));
+    const root = join(dir, "root");
+    const outside = join(dir, "outside");
+    mkdirSync(root);
+    mkdirSync(outside);
+    writeFileSync(join(outside, "secret.txt"), "secret");
+    try {
+      try {
+        symlinkSync(outside, join(root, "escape"));
+      } catch {
+        return; // symlinks unsupported on this filesystem
+      }
+      expect(() => resolveProjectRelativePath(root, "escape/secret.txt", "path")).toThrow(
+        ValidationError,
+      );
+      expect(() => resolveProjectRelativePath(root, "escape/new.txt", "path")).toThrow(
+        ValidationError,
+      );
+      mkdirSync(join(root, "real"));
+      expect(resolveProjectRelativePath(root, "real/new.txt", "path")).toBe(
+        join(realpathSync(root), "real", "new.txt"),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   test("SDD identifiers, contracts, outcomes, and dispositions are allowlisted", () => {
     expect(() => assertSddIdentifier("agent-host-tools", "change")).not.toThrow();
     for (const evil of ["../escape", "-flag", "a b", ""]) {
