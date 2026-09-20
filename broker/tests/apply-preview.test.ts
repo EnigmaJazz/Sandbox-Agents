@@ -230,8 +230,11 @@ describe("sandbox_apply plugin metadata", () => {
     );
 
     expect(plugin).toContain("applyPreviewFiles");
-    expect(plugin).toContain("previewFile: previewFiles?.plain");
-    expect(plugin).toContain("previewAnsiFile: previewFiles?.ansi");
+    // The approval boundary fails closed through the guard, which still carries
+    // both broker artifact paths into the ask metadata.
+    expect(plugin).toContain("requestApplyApproval");
+    expect(plugin).toContain("previewFile: paths.previewFile");
+    expect(plugin).toContain("previewAnsiFile: paths.previewAnsiFile");
     // One implementation only: the plugin no longer colours or writes a temp file.
     expect(plugin).not.toContain("coloriseDiff");
     expect(plugin).not.toContain("tmpdir()");
