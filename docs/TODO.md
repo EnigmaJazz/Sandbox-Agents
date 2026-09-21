@@ -131,3 +131,21 @@ broke the stack was `install-user-files --apply` run from a checkout — not the
 
 **Acceptance:** a unit can be reviewed and committed from a worktree without moving the main
 tree and without opening a session in the worktree, and no host operation accepts a raw path.
+### 4. Bug — the GGA review hook conflicts with `host_git_commit`
+
+When GGA (Gentle AI) is active and the host git commit tool is used, the GGA code-review
+subagent appears to believe it is using the tool, does nothing, and the commit fails. Observed
+directly; the mechanism is unverified. First step is to reproduce with GGA enabled and capture
+three facts: whether the hook intercepts the commit call, whether the subagent is dispatched at
+all, and where the failure surfaces — the commit operation, the hook, or the subagent.
+
+### 5. Bug — the systematic `ce:review` pipeline cannot run from the orchestrator
+
+Four gaps: no non-mutating way to obtain a git range as data; no shared scratch surface between
+worker sessions; no execution surface for the bundled helpers (`ensure-ignore.mjs`,
+`validate-review.mjs`); and no artifact write surface for `review-summary.json`. Consequence:
+reviewers receive no diff and return DIFF_UNAVAILABLE, so `pre_existing` attribution — the core
+value of the review — goes unverified, and the packaged pipeline never runs at all.
+
+The full brief, the four proposed fixed host tools, their non-negotiable boundaries, the
+acceptance criteria and the regression risks are recorded in `docs/PLAN.md`.
