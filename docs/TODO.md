@@ -98,3 +98,36 @@ Questions to settle at design time: how a request identifies its target project 
 requester; how evidence and reproduction steps travel with it; how approval-at-request is
 recorded, bounded and distinguished from apply-time approval; and how requests that touch
 S17/protected paths interact with the existing manual-review boundary.
+## Planned — worktree review and commit without a per-worktree session
+
+**Problem:** the review and git host operations bind to the session's project and accept no
+cwd, so reviewing a git worktree requires a session whose project *is* that worktree. That
+constraint is what makes per-slice review awkward, and it is why tonight's checkouts were
+dangerous: the tree the broker installs from was also the tree under review. What actually
+broke the stack was `install-user-files --apply` run from a checkout — not the checkout.
+
+**Planned shape**
+
+1. **Project selector on the host operations.** Add an optional, allowlisted `projectId` to
+   `host_review_status|assess|start|capture_*|acknowledge_approved` and `host_git_commit`,
+   resolved through the broker's existing `BROKER_PROJECTS` registry. An id, never a path or
+   cwd; unknown ids refused. With this, a worktree registered as a project can be reviewed and
+   committed from the main session, and the new-session requirement disappears. It is also
+   stricter than today's implicit project binding.
+2. **Worktree lifecycle operations.** Read: `host_worktree_list`. Approval-gated mutations:
+   `host_worktree_create <projectId> <ref>` and `host_worktree_remove <projectId>`. Fixed
+   argv, canonical paths, sibling placement under the home directory (never /tmp), and
+   registration through the same path `host_register_project` uses so the relay's allowlist
+   check and the broker's project lookup both succeed.
+3. **A `worktree-committer` specialist.** Takes a worktree project id plus a unit spec;
+   implements through sandbox workers bound to that project, runs that project's tests, and
+   returns a prepared result for the orchestrator to review and commit. It never calls host
+   operations itself — those stay orchestrator-only, which is also why review and commit stay
+   with the orchestrator.
+4. **Grant coverage for git metadata.** A worktree's `.git` is a file pointing at the main
+   repository's `.git/worktrees/<name>`, so the profile grant for a worktree project must also
+   cover the main repository's git metadata. Today's per-project `.git` grant does not
+   obviously do that, and this is the wrinkle most likely to bite first.
+
+**Acceptance:** a unit can be reviewed and committed from a worktree without moving the main
+tree and without opening a session in the worktree, and no host operation accepts a raw path.
