@@ -39,6 +39,9 @@ import {
   hostSessionBinding,
 } from "./lib/session-agent-binding.ts";
 import {
+  requestApplyApproval,
+} from "./lib/apply-preview-guard.ts";
+import {
   buildGhIssueCreateAsk,
   buildGitCommitAsk,
   buildPlanDocAppendAsk,
@@ -389,31 +392,43 @@ export default function sandboxToolsPlugin() {
           // embed the broker's bounded preview plus exact counts, and fall back
           // to a no-preview bounded shape if an older broker omits it.
           const bounded = diffRes.applyPreview;
-          const metadata = bounded
-            ? {
-                summary,
-                files: bounded.files,
-                addedLines: bounded.addedLines,
-                removedLines: bounded.removedLines,
-                totalLines: bounded.totalLines,
-                previewTruncated: bounded.previewTruncated,
-                preview: bounded.preview,
-                previewFile: previewFiles?.plain,
-                previewAnsiFile: previewFiles?.ansi,
-              }
-            : {
-                summary,
-                totalLines: rawPreview.split("\n").length,
-                previewTruncated: true,
-                previewFile: previewFiles?.plain,
-                previewAnsiFile: previewFiles?.ansi,
-              };
-          await ctx.ask({
-            permission: "sandbox_apply",
-            patterns: ["*"],
-            always: [],
-            metadata,
-          });
+          // Fail closed (review finding R1-blind-version-skew-apply): a
+          // truncated preview without the broker's complete plain artifact must
+          // never reach the approval prompt, where the approver could only see
+          // a prefix of the diff.
+          await requestApplyApproval(
+            {
+              previewTruncated: bounded ? bounded.previewTruncated : true,
+              applyPreviewFiles: previewFiles,
+            },
+            async (paths) => {
+              const metadata = bounded
+                ? {
+                    summary,
+                    files: bounded.files,
+                    addedLines: bounded.addedLines,
+                    removedLines: bounded.removedLines,
+                    totalLines: bounded.totalLines,
+                    previewTruncated: bounded.previewTruncated,
+                    preview: bounded.preview,
+                    previewFile: paths.previewFile,
+                    previewAnsiFile: paths.previewAnsiFile,
+                  }
+                : {
+                    summary,
+                    totalLines: rawPreview.split("\n").length,
+                    previewTruncated: true,
+                    previewFile: paths.previewFile,
+                    previewAnsiFile: paths.previewAnsiFile,
+                  };
+              await ctx.ask({
+                permission: "sandbox_apply",
+                patterns: ["*"],
+                always: [],
+                metadata,
+              });
+            },
+          );
           return formatResult("applyResult", await c.request("applyResult", ctx.sessionID, { confirm: "APPLY" }, ctx.agent));
         },
       }),

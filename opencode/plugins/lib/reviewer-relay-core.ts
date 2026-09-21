@@ -34,7 +34,7 @@
  */
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Provider transport constants
@@ -405,6 +405,17 @@ function hostGitDirectory(): string | undefined {
   return undefined;
 }
 
+/**
+ * The relay's own runtime directory: the directory of the binary executing
+ * this plugin. When the secure server runs the opencode binary it resolves to
+ * that binary's directory, so a child can resolve the same runtime the
+ * provider's eligibility probe needs. It is derived from the running process,
+ * not from ambient configuration, so it cannot drift.
+ */
+function hostRuntimeDirectory(): string {
+  return dirname(process.execPath);
+}
+
 /** Construct the allowlist-only child environment. HOME is required. */
 export function buildTransportEnv(source: Record<string, string | undefined>): Record<string, string> {
   const env: Record<string, string> = {};
@@ -415,15 +426,21 @@ export function buildTransportEnv(source: Record<string, string | undefined>): R
   if (env.HOME === undefined) {
     throw environmentRefused("the constructed transport environment requires HOME");
   }
-  // Ensure the child can resolve git even when the inherited PATH lacks the
-  // directory git lives in. Prepend the probed directory once, de-duplicating;
-  // when no known location exists, leave the inherited PATH untouched rather
-  // than inventing a value.
+  // The child resolves two runtimes from PATH: the relay's own runtime (the
+  // provider's eligibility probe resolves the OpenCode runtime from the child
+  // environment) and git (the child's first act is a Git subprocess). Prepend
+  // the runtime directory, then the probed git directory, then the remaining
+  // inherited entries in order, de-duplicating each prepended directory. PATH
+  // is not credential-shaped: it is the one non-secret addition to the
+  // allowlist.
+  const runtimeDirectory = hostRuntimeDirectory();
   const gitDirectory = hostGitDirectory();
-  if (gitDirectory !== undefined) {
-    const segments = env.PATH === undefined ? [] : env.PATH.split(":");
-    env.PATH = [gitDirectory, ...segments.filter((segment) => segment !== gitDirectory)].join(":");
-  }
+  const prepended =
+    gitDirectory === undefined || gitDirectory === runtimeDirectory
+      ? [runtimeDirectory]
+      : [runtimeDirectory, gitDirectory];
+  const segments = env.PATH === undefined ? [] : env.PATH.split(":");
+  env.PATH = [...prepended, ...segments.filter((segment) => !prepended.includes(segment))].join(":");
   return env;
 }
 

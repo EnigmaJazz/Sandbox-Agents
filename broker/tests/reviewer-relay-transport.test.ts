@@ -19,7 +19,7 @@ import {
   symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   CONTEXT_END,
   CONTEXT_START,
@@ -89,6 +89,12 @@ const PROBE_DIRECTORIES = [
   "/bin",
 ] as const;
 const HOST_GIT_DIRECTORY = PROBE_DIRECTORIES.find((directory) => existsSync(`${directory}/git`));
+
+/**
+ * The relay's own runtime directory, mirroring buildTransportEnv: the
+ * directory of the binary executing this test run (`process.execPath`).
+ */
+const RUNTIME_DIRECTORY = dirname(process.execPath);
 
 /** A binding-only Task prompt: the small provider-issued line the Task carries. */
 const BINDING_PROMPT =
@@ -803,9 +809,11 @@ describe("reviewer relay spawn discipline", () => {
     expect(recorder.specs[0]!.cwd).toBe(canonicalRepo);
     const spawnedEnv = recorder.specs[0]!.env;
     expect(spawnedEnv).toMatchObject(ENV);
-    // PATH is allowed through and the resolving git directory is prepended;
-    // secret-shaped keys are still stripped.
-    expect(spawnedEnv.PATH!.split(":")[0]).toBe(HOST_GIT_DIRECTORY);
+    // PATH is allowed through; the relay runtime directory is prepended first,
+    // then the resolving git directory; secret-shaped keys are still stripped.
+    const spawnedSegments = spawnedEnv.PATH!.split(":");
+    expect(spawnedSegments[0]).toBe(RUNTIME_DIRECTORY);
+    expect(spawnedSegments).toContain(HOST_GIT_DIRECTORY);
     expect(Object.keys(spawnedEnv)).not.toContain("OPENAI_API_KEY");
   });
 
@@ -861,21 +869,56 @@ describe("reviewer relay spawn discipline", () => {
   });
 
   test("the constructed environment carries a PATH that resolves git", () => {
-    // The child's first act is a Git subprocess, so the constructed env must
-    // always carry a PATH whose first entry can actually resolve git.
+    // The child resolves the relay's own runtime and git from PATH, so the
+    // constructed env must carry both directories in order.
     expect(HOST_GIT_DIRECTORY).toBeDefined();
 
-    // An inherited PATH is preserved, with the resolving directory prepended
-    // exactly once even when it is already present.
+    // An inherited PATH is preserved, with the runtime and resolving
+    // directories prepended exactly once even when already present.
     const inherited = buildTransportEnv({ HOME: "/home/x", PATH: "/custom/bin:/usr/bin" });
     const segments = inherited.PATH!.split(":");
-    expect(segments[0]).toBe(HOST_GIT_DIRECTORY);
+    expect(segments[0]).toBe(RUNTIME_DIRECTORY);
+    expect(segments[1]).toBe(HOST_GIT_DIRECTORY);
     expect(segments).toContain("/custom/bin");
+    expect(segments.filter((segment) => segment === RUNTIME_DIRECTORY)).toHaveLength(1);
     expect(segments.filter((segment) => segment === HOST_GIT_DIRECTORY)).toHaveLength(1);
 
-    // Without an inherited PATH, the resolving directory is still provided.
+    // Without an inherited PATH, both directories are still provided.
     const bare = buildTransportEnv({ HOME: "/home/x" });
-    expect(bare.PATH!.split(":")[0]).toBe(HOST_GIT_DIRECTORY);
+    const bareSegments = bare.PATH!.split(":");
+    expect(bareSegments[0]).toBe(RUNTIME_DIRECTORY);
+    expect(bareSegments[1]).toBe(HOST_GIT_DIRECTORY);
+  });
+
+  test("prepends the relay runtime directory when the ambient PATH omits it", () => {
+    // A systemd user service starts with a default PATH that need not include
+    // the directory holding the running runtime, so the constructed child PATH
+    // must lead with the relay's own runtime directory regardless of what the
+    // parent inherited.
+    expect(RUNTIME_DIRECTORY).not.toBe(HOST_GIT_DIRECTORY);
+
+    const ambient = "/usr/bin:/opt/other/bin:/custom/bin";
+    const built = buildTransportEnv({ HOME: "/home/x", PATH: ambient });
+    const segments = built.PATH!.split(":");
+    // The runtime directory leads, with the git directory immediately after it.
+    expect(segments[0]).toBe(RUNTIME_DIRECTORY);
+    expect(segments[1]).toBe(HOST_GIT_DIRECTORY);
+    // The remaining inherited order is preserved.
+    expect(segments.slice(2)).toEqual(["/opt/other/bin", "/custom/bin"]);
+    expect(segments.filter((segment) => segment === RUNTIME_DIRECTORY)).toHaveLength(1);
+    expect(segments.filter((segment) => segment === HOST_GIT_DIRECTORY)).toHaveLength(1);
+
+    // When the ambient PATH already carries the runtime directory it is
+    // promoted to the front exactly once, never duplicated.
+    const alreadyInherited = buildTransportEnv({
+      HOME: "/home/x",
+      PATH: `${RUNTIME_DIRECTORY}:/custom/bin:${HOST_GIT_DIRECTORY}`,
+    });
+    const inheritedSegments = alreadyInherited.PATH!.split(":");
+    expect(inheritedSegments[0]).toBe(RUNTIME_DIRECTORY);
+    expect(inheritedSegments[1]).toBe(HOST_GIT_DIRECTORY);
+    expect(inheritedSegments.filter((segment) => segment === RUNTIME_DIRECTORY)).toHaveLength(1);
+    expect(inheritedSegments).toContain("/custom/bin");
   });
 
   test("the deadline is finite and supports multi-minute reviewer calls", async () => {
@@ -1235,7 +1278,9 @@ describe("reviewer relay hook scope", () => {
     expect(harness.specs[0]!.argv).toEqual(TRANSPORT_ARGV);
     const spawnedEnv = harness.specs[0]!.env;
     expect(spawnedEnv).toMatchObject(ENV);
-    expect(spawnedEnv.PATH!.split(":")[0]).toBe(HOST_GIT_DIRECTORY);
+    const spawnedSegments = spawnedEnv.PATH!.split(":");
+    expect(spawnedSegments[0]).toBe(RUNTIME_DIRECTORY);
+    expect(spawnedSegments).toContain(HOST_GIT_DIRECTORY);
 
     const startFrame = harness.children[0]!.frames[0]!;
     expect(startFrame.operation).toBe("start");
