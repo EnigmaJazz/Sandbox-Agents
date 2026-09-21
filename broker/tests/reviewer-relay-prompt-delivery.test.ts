@@ -45,7 +45,12 @@ const projectPath = (path: string) => ({ id: path.split("/").pop() ?? "project",
 
 const BINDING_PROMPT =
   'GENTLE_AI_REVIEW_BINDING {"repository_context":"rctx2_example","target":"T","lineage":"L"}';
-const MATERIALIZED_PROMPT = `${CONTEXT_START}\nreview body\n${CONTEXT_END}`;
+/** The lens provider content block carried after the Go materialization header. */
+const MATERIALIZED_CONTENT = `${CONTEXT_START}\nreview body\n${CONTEXT_END}`;
+/** A full Go envelope: the materialization header, JSON, and the lens content. */
+const MATERIALIZED_PROMPT = `GENTLE_AI_REVIEW_PROVIDER_MATERIALIZATION ${JSON.stringify({
+  task_prompt: BINDING_PROMPT,
+})}\n${MATERIALIZED_CONTENT}`;
 
 /** A transport child that answers only the start frame with a prompt frame. */
 class PromptOnlyChild implements TransportChild {
@@ -183,7 +188,9 @@ describe("reviewer relay materialized prompt delivery", () => {
   });
 
   test("concurrent lens reviewers each receive their own materialized prompt", async () => {
-    const reliabilityMaterialized = `${CONTEXT_START}\nreliability body\n${CONTEXT_END}`;
+    const reliabilityMaterialized = `GENTLE_AI_REVIEW_PROVIDER_MATERIALIZATION ${JSON.stringify({
+      task_prompt: BINDING_PROMPT,
+    })}\n${CONTEXT_START}\nreliability body\n${CONTEXT_END}`;
     const { hooks, specs } = deliveryHarness([MATERIALIZED_PROMPT, reliabilityMaterialized]);
 
     await hooks["tool.execute.before"](taskInput("s-lenses", "c-risk"), {
