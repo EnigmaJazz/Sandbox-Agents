@@ -897,7 +897,7 @@ describe("reviewer relay spawn discipline", () => {
     // parent inherited.
     expect(RUNTIME_DIRECTORY).not.toBe(HOST_GIT_DIRECTORY);
 
-    const ambient = "/usr/bin:/opt/other/bin:/custom/bin";
+    const ambient = `${HOST_GIT_DIRECTORY}:/opt/other/bin:/custom/bin`;
     const built = buildTransportEnv({ HOME: "/home/x", PATH: ambient });
     const segments = built.PATH!.split(":");
     // The runtime directory leads, with the git directory immediately after it.
