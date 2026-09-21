@@ -71,3 +71,25 @@ describe("installer/rollback plugin coverage parity", () => {
     expect(rollback.length).toBe(EXPECTED_PLUGIN_FILES.length);
   });
 });
+
+// systemd-user/broker.env is installed verbatim by scripts/install-user-files
+// into ~/.config/opencode-sandbox/broker.env and loaded as the broker's
+// EnvironmentFile. The immutable-receipt-review runtime eligibility check
+// resolves the OpenCode runtime from that environment, so the template must
+// keep the opencode binary directory first on PATH.
+const OPENCODE_BIN_DIR = "/home/james/.opencode/bin";
+
+describe("broker env template", () => {
+  test("systemd-user/broker.env puts the opencode binary dir first on PATH", () => {
+    const source = readScript("systemd-user/broker.env");
+    const pathLine = source
+      .split("\n")
+      .find((line) => /^\s*PATH\s*=/.test(line));
+    expect(pathLine).toBeDefined();
+    if (pathLine === undefined) {
+      throw new Error("broker.env has no PATH line");
+    }
+    const value = pathLine.slice(pathLine.indexOf("=") + 1).trim();
+    expect(value.split(":")[0]).toBe(OPENCODE_BIN_DIR);
+  });
+});
