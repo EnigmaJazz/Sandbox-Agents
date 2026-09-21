@@ -88,6 +88,8 @@ interface Report {
   profile: LocationStatus | string;
   autoUpdate: LocationStatus | string;
   skillRegistry: LocationStatus | string;
+  projectGit: string;
+  codegraph: LocationStatus | string;
   brokerEnv: LocationStatus | string;
   launcher: LocationStatus | string;
   git: GitStatus;
@@ -231,17 +233,45 @@ function updateAutoUpdateGrant(path: string): LocationStatus | string {
   writeFileSync(historyFile, '{"entries":[]}\n', { mode: 0o644 });
   return `${grantStatus}; created`;
 }
-function updateSkillRegistryGrant(path: string): LocationStatus | string {
+export function updateSkillRegistryGrant(
+  path: string,
+  profilePath: string = PROFILE_PATH,
+  dryRun: boolean = DRY_RUN,
+): LocationStatus | string {
+  const atlDir = join(path, ".atl");
+  const result = appendAllowGrant(profilePath, toProfilePath(atlDir), dryRun);
+  if (!result.ok) return result.status;
+  if (existsSync(atlDir)) return result.status;
+  if (dryRun) return `${result.status}; would create ${atlDir}`;
+  mkdirSync(atlDir, { recursive: true });
+  return `${result.status}; created`;
+}
+// --- location 1c: nono profile allow (.codegraph + .git grants) ---------------
+
+/** `$HOME`-relative form used by the nono profile; absolute elsewhere. */
+function toProfilePath(path: string): string {
+  return path.startsWith(HOME + "/") ? `$HOME${path.slice(HOME.length)}` : path;
+}
+
+interface AppendResult {
+  ok: boolean;
+  status: string;
+}
+
+/** Append `dirAllow` to `filesystem.allow` idempotently, mirroring the
+ *  `.atl` grant writer. `ok` is false when the profile is unreadable, so
+ *  callers must not create directories. */
+function appendAllowGrant(
+  profilePath: string,
+  dirAllow: string,
+  dryRun: boolean,
+): AppendResult {
   let profile: Profile;
   try {
-    profile = JSON.parse(readFileSync(PROFILE_PATH, "utf8")) as Profile;
+    profile = JSON.parse(readFileSync(profilePath, "utf8")) as Profile;
   } catch {
-    return "skipped (profile is not valid JSON)";
+    return { ok: false, status: "skipped (profile is not valid JSON)" };
   }
-  const atlDir = join(path, ".atl");
-  const atlAllow = atlDir.startsWith(HOME + "/")
-    ? `$HOME${atlDir.slice(HOME.length)}`
-    : atlDir;
   let filesystem = profile.filesystem;
   if (filesystem === undefined) {
     filesystem = {};
@@ -250,30 +280,81 @@ function updateSkillRegistryGrant(path: string): LocationStatus | string {
   const allow = filesystem.allow;
   let grantStatus: string;
   if (!Array.isArray(allow)) {
-    if (DRY_RUN) {
-      grantStatus = `would add ${atlAllow}`;
+    if (dryRun) {
+      grantStatus = `would add ${dirAllow}`;
     } else {
-      filesystem.allow = [atlAllow];
-      atomicWrite(PROFILE_PATH, JSON.stringify(profile, null, 2) + "\n");
+      filesystem.allow = [dirAllow];
+      atomicWrite(profilePath, JSON.stringify(profile, null, 2) + "\n");
       grantStatus = "added";
     }
-  } else if (allow.includes(atlAllow)) {
+  } else if (allow.includes(dirAllow)) {
     grantStatus = "already registered";
-  } else if (DRY_RUN) {
-    grantStatus = `would add ${atlAllow}`;
+  } else if (dryRun) {
+    grantStatus = `would add ${dirAllow}`;
   } else {
-    allow.push(atlAllow);
-    atomicWrite(PROFILE_PATH, JSON.stringify(profile, null, 2) + "\n");
+    allow.push(dirAllow);
+    atomicWrite(profilePath, JSON.stringify(profile, null, 2) + "\n");
     grantStatus = "added";
   }
-  if (existsSync(atlDir)) {
-    return grantStatus;
+  return { ok: true, status: grantStatus };
+}
+
+/** T2 / docs/TODO.md item 27: create + grant `<project>/.codegraph` read-write,
+ *  mirroring the `.atl` helper. Directory creation is required because nono
+ *  binds grants to paths that exist at sandbox start and cannot create
+ *  `.codegraph` itself. Idempotent. */
+export function updateCodegraphGrant(
+  path: string,
+  profilePath: string = PROFILE_PATH,
+  dryRun: boolean = DRY_RUN,
+): LocationStatus | string {
+  const codegraphDir = join(path, ".codegraph");
+  const result = appendAllowGrant(
+    profilePath,
+    toProfilePath(codegraphDir),
+    dryRun,
+  );
+  if (!result.ok) return result.status;
+  if (existsSync(codegraphDir)) return result.status;
+  if (dryRun) return `${result.status}; would create ${codegraphDir}`;
+  mkdirSync(codegraphDir, { recursive: true });
+  return `${result.status}; created`;
+}
+
+export interface GitGrantResult {
+  status: string;
+  warning: string | null;
+}
+
+/** T1: grant `<project>/.git` read-write in `filesystem.allow`, idempotently.
+ *
+ *  This grant is deliberately broader than the `.atl`/`.codegraph` metadata
+ *  grants: `.git` is refs, index, and history, not a tool cache. The native
+ *  reviewer transport resolves the opaque repository-context binding only
+ *  through Git's registered sibling worktrees and keeps all authority,
+ *  materialization, and capture operations on that root
+ *  (`review_opencode_transport.go:328-334`).
+ *
+ *  `.git` is NEVER created here: a synthesized `.git` would be a broken Git
+ *  directory. `setupGit` runs `git init -b main` before the profile writers, so
+ *  it normally exists; when it does not, the grant is skipped with a warning
+ *  because nono binds grants to paths that exist at sandbox start. */
+export function updateProjectGitGrant(
+  path: string,
+  profilePath: string = PROFILE_PATH,
+  dryRun: boolean = DRY_RUN,
+): GitGrantResult {
+  const gitDir = join(path, ".git");
+  if (!existsSync(gitDir)) {
+    return {
+      status: "skipped (no .git directory)",
+      warning:
+        `no .git directory at ${gitDir}; the .git grant was skipped ` +
+        `(nono binds grants to paths that exist at sandbox start)`,
+    };
   }
-  if (DRY_RUN) {
-    return `${grantStatus}; would create ${atlDir}`;
-  }
-  mkdirSync(atlDir, { recursive: true });
-  return `${grantStatus}; created`;
+  const result = appendAllowGrant(profilePath, toProfilePath(gitDir), dryRun);
+  return { status: result.status, warning: null };
 }
 // --- location 2: live broker env ----------------------------------------------
 
@@ -573,80 +654,93 @@ function setupGit(
 
 // --- main ---------------------------------------------------------------------
 
-if (TARGETS.length === 0) {
-  console.error(
-    "usage: bun scripts/register-project.ts [--dry-run] [--create-remote] [--public] <path> [path...]",
+// The CLI entry point is guarded by `import.meta.main` so importing this
+// module (for the exported profile-grant helpers) never registers a project,
+// prints a usage error, or exits the host process.
+if (import.meta.main) {
+  if (TARGETS.length === 0) {
+    console.error(
+      "usage: bun scripts/register-project.ts [--dry-run] [--create-remote] [--public] <path> [path...]",
+    );
+    process.exit(2);
+  }
+
+  if (PUBLIC_REPO && !CREATE_REMOTE) {
+    console.error("warning: --public has no effect without --create-remote");
+  }
+
+  const brokerEntries = existingBrokerEnvEntries();
+  const usedIds = new Set(brokerEntries.map((e) => e.id));
+  const reports: Report[] = [];
+  let failed = false;
+
+  for (const path of TARGETS) {
+    const invalid = validateProject(path);
+    if (invalid !== null) {
+      console.error(`error: ${invalid}`);
+      failed = true;
+      continue;
+    }
+    // Reuse the id of an already-registered broker entry (matched by path) so the
+    // summary shows the real id instead of a project-N collision fallback.
+    const existingEntry = brokerEntries.find((e) => e.path === path);
+    const id =
+      existingEntry !== undefined
+        ? existingEntry.id
+        : deriveProjectId(path, usedIds);
+    const gitPlan = setupGit(path, CREATE_REMOTE, PUBLIC_REPO);
+    if (gitPlan.ghError !== null) {
+      console.error(`error: ${path}: ${gitPlan.ghError}`);
+      failed = true;
+    }
+    const projectGitGrant = updateProjectGitGrant(path);
+    const warnings = [...gitPlan.warnings];
+    if (projectGitGrant.warning !== null)
+      warnings.push(projectGitGrant.warning);
+    reports.push({
+      path,
+      id,
+      git: gitPlan.git,
+      identity: gitPlan.identity,
+      origin: gitPlan.origin,
+      ghRemote: gitPlan.ghRemote,
+      warnings,
+      profile: updateProfile(path),
+      autoUpdate: updateAutoUpdateGrant(path),
+      skillRegistry: updateSkillRegistryGrant(path),
+      projectGit: projectGitGrant.status,
+      codegraph: updateCodegraphGrant(path),
+      brokerEnv: updateBrokerEnv(path, id),
+      launcher: updateLauncher(path),
+    });
+  }
+
+  for (const r of reports) {
+    console.log(`\n${r.path}`);
+    console.log(`  id: ${r.id}`);
+    console.log(`  git:           ${r.git}`);
+    console.log(`  identity:      ${r.identity}`);
+    console.log(`  origin:        ${r.origin}`);
+    console.log(`  gh remote:     ${r.ghRemote}`);
+    console.log(`  profile read:  ${r.profile}`);
+    console.log(`  auto-update grant: ${r.autoUpdate}`);
+    console.log(`  skill registry:    ${r.skillRegistry}`);
+    console.log(`  .git grant:        ${r.projectGit}`);
+    console.log(`  .codegraph:        ${r.codegraph}`);
+    console.log(`  broker env:    ${r.brokerEnv}`);
+    console.log(`  launcher root: ${r.launcher}`);
+    for (const w of r.warnings) {
+      console.error(`  warning: ${w}`);
+    }
+  }
+
+  console.log("\nNext steps:");
+  console.log(
+    "  systemctl --user daemon-reload && systemctl --user restart sandbox-broker.service secure-opencode.service",
   );
-  process.exit(2);
+  console.log(
+    "  Note: openchamber-secure.service needs no restart for project registration.",
+  );
+
+  process.exit(failed ? 1 : 0);
 }
-
-if (PUBLIC_REPO && !CREATE_REMOTE) {
-  console.error("warning: --public has no effect without --create-remote");
-}
-
-const brokerEntries = existingBrokerEnvEntries();
-const usedIds = new Set(brokerEntries.map((e) => e.id));
-const reports: Report[] = [];
-let failed = false;
-
-for (const path of TARGETS) {
-  const invalid = validateProject(path);
-  if (invalid !== null) {
-    console.error(`error: ${invalid}`);
-    failed = true;
-    continue;
-  }
-  // Reuse the id of an already-registered broker entry (matched by path) so the
-  // summary shows the real id instead of a project-N collision fallback.
-  const existingEntry = brokerEntries.find((e) => e.path === path);
-  const id =
-    existingEntry !== undefined
-      ? existingEntry.id
-      : deriveProjectId(path, usedIds);
-  const gitPlan = setupGit(path, CREATE_REMOTE, PUBLIC_REPO);
-  if (gitPlan.ghError !== null) {
-    console.error(`error: ${path}: ${gitPlan.ghError}`);
-    failed = true;
-  }
-  reports.push({
-    path,
-    id,
-    git: gitPlan.git,
-    identity: gitPlan.identity,
-    origin: gitPlan.origin,
-    ghRemote: gitPlan.ghRemote,
-    warnings: gitPlan.warnings,
-    profile: updateProfile(path),
-    autoUpdate: updateAutoUpdateGrant(path),
-    skillRegistry: updateSkillRegistryGrant(path),
-    brokerEnv: updateBrokerEnv(path, id),
-    launcher: updateLauncher(path),
-  });
-}
-
-for (const r of reports) {
-  console.log(`\n${r.path}`);
-  console.log(`  id: ${r.id}`);
-  console.log(`  git:           ${r.git}`);
-  console.log(`  identity:      ${r.identity}`);
-  console.log(`  origin:        ${r.origin}`);
-  console.log(`  gh remote:     ${r.ghRemote}`);
-  console.log(`  profile read:  ${r.profile}`);
-  console.log(`  auto-update grant: ${r.autoUpdate}`);
-  console.log(`  skill registry:    ${r.skillRegistry}`);
-  console.log(`  broker env:    ${r.brokerEnv}`);
-  console.log(`  launcher root: ${r.launcher}`);
-  for (const w of r.warnings) {
-    console.error(`  warning: ${w}`);
-  }
-}
-
-console.log("\nNext steps:");
-console.log(
-  "  systemctl --user daemon-reload && systemctl --user restart sandbox-broker.service secure-opencode.service",
-);
-console.log(
-  "  Note: openchamber-secure.service needs no restart for project registration.",
-);
-
-process.exit(failed ? 1 : 0);

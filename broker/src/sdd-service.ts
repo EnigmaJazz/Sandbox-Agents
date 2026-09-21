@@ -282,12 +282,15 @@ export function buildReviewCaptureUnachievableOp(ctx: SddOpContext) {
   };
 }
 
-/** Review acknowledge-approved: flag-less candidate argv. */
+/** Review acknowledge-approved: the four provider-issued values are forwarded verbatim. */
 export function buildReviewAcknowledgeApprovedOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "reviewAcknowledgeApproved", req.sessionID, req.agent);
-    return ctx.sddRuntime.reviewAcknowledgeApproved({ projectDir: requireProjectDir(payload) });
+    return ctx.sddRuntime.reviewAcknowledgeApproved({
+      projectDir: requireProjectDir(payload),
+      ...reviewOptional(payload, ["lineage", "target", "expectedRevision", "token"]),
+    });
   };
 }
 

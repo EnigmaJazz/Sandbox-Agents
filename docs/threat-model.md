@@ -37,6 +37,101 @@ boundary between broker and OpenCode process; session IDs are opencode-issued.
 | S16 | Divergence detected | `computeDivergence` (baseline tree vs current host tree) before apply; refusal retains result (unit-tested). |
 | S17 | Config cannot modify itself | `protectedSecurityFiles` globs (broker src, nono profile, plugins, fragments, systemd unit, scripts, security/acceptance tests, threat model) rejected in apply; changes require manual review. |
 
+## Direct project-document mutation (`planDocAppend`)
+
+**Boundary**: the broker can append to exactly two project documents —
+`docs/TODO.md` (`doc: "todo"`) and `docs/PLAN.md` (`doc: "plan"`). It is the
+first broker operation that writes a project file directly instead of spawning
+a fixed-argv CLI.
+
+**Invariants**
+
+- No caller path/cwd/binary/argv: `doc` is an enum, and the two destinations
+  are compile-time constants joined beneath the canonical approved root.
+- Append-only: existing bytes are read, preserved verbatim and ordered, and
+  the trimmed block is appended (EOF or before the next equal/higher ATX
+  heading). There is no overwrite, truncate, replace, or delete input.
+- Bounded: content is trimmed, 1..16384 UTF-8 bytes, LF-only; the optional
+  heading is 1..256 bytes and control-free.
+- Atomic and serialized: per-destination lock, sibling `O_CREAT|O_EXCL` temp
+  file, fsync, close, revalidate destination/parent, rename, directory fsync;
+  temp files are removed on every failure path.
+- Path safety: destination and its real parent must resolve beneath the
+  canonical root; symlinked/non-regular existing destinations are rejected
+  before and immediately before the rename; protected/S17 destinations are
+  rejected before any I/O.
+- Authority: orchestrator-only mutation + fragment `ask` + metadata-rich
+  in-tool `ctx.ask` before the broker call.
+
+**Residual risk**: the broker writes Markdown inside the project, so a
+compromised approval could append misleading plan content. The two destination
+constants and byte/heading caps bound the blast radius; the files are not
+executable and not on the S17 list.
+## Host project registration (`host_register_project`) and S17 rollout
+
+**Boundary**: `registerProject` is an orchestrator-only broker mutation that
+runs the existing fixed-argv operator tool
+`bun scripts/register-project.ts [--dry-run] [--create-remote] [--public] <path>`.
+The broker accepts exactly `{path,dryRun,createRemote,makePublic}` and rejects
+every other key.
+
+**Invariants**
+
+- Authority: orchestrator-only mutation (broker `HOST_MUTATION_OPERATIONS` +
+  `authorizeHostDispatch`); broker authorization is authoritative, and a
+  non-orchestrator call is denied before any spawn.
+- Path ban before spawn: the target must be an existing absolute directory that
+  is neither `/`, `$HOME`, nor beneath
+  `$HOME/.ssh|.config|.local|.cache|.gnupg|.aws|.kube`, `/etc`, `/usr`, `/var`,
+  or `/tmp`. An ineligible path or an invalid flag combination
+  (`--public` without `--create-remote`) fails validation with NO process
+  spawned.
+- Fixed argv only: no caller-supplied cwd, binary, or argv; the script path is
+  a broker-owned constant.
+
+### Per-project profile grants written by registration
+
+Registration grants each project three entries in
+`nono/profile/opencode-secure.json`: the project tree stays `read`
+(`filesystem.read`), while `<project>/.atl` and `<project>/.codegraph` are
+`filesystem.allow` (read-write) metadata caches. It also grants
+`<project>/.git` read-write.
+
+**`.git` read-write is a deliberate, earned boundary decision.** It is broader
+than the `.atl`/`.codegraph` metadata grants because `.git` is refs, index, and
+history — not a tool cache. It exists because the native reviewer transport
+resolves the opaque repository-context binding only through Git's registered
+sibling worktrees and then keeps all authority, materialization, and capture
+operations on that root
+(`internal/cli/review_opencode_transport.go:328-334`). Without the grant the
+transport child exits `binding_invalid`; with only `<project>/.git/gentle-ai`
+read-write it stops at `materialization_unavailable`; with `<project>/.git`
+read-write it materializes the provider prompt. The project tree itself is
+never granted read-write, and unrelated profile entries are never rewritten.
+
+Registration never creates `.git`: a synthesized `.git` would be a broken Git
+directory. `git init -b main` runs before the profile writers, so `.git`
+normally exists; when it does not, the grant is skipped with a warning because
+nono binds grants to paths that exist at sandbox start. `<project>/.codegraph`
+is created because nono cannot create it, exactly as `.atl` already is.
+
+**S17 protected-path review**: registration mutates live host configuration
+that sits on or beside the S17 set — `nono/profile/opencode-secure.json`,
+`$HOME/.config/opencode-sandbox/broker.env`, and
+`scripts/secure-launcher.conf`. Any agent-produced change under
+`broker/src/**`, `nono/profile/**`, `systemd-user/**`, `opencode/plugins/**`,
+`opencode/config-fragments/**`, `scripts/**`, `tests/security/**`,
+`tests/acceptance/**`, or this document is rejected at apply time and requires
+explicit manual review.
+
+**`.new` staging / apply-review rollout**: S17 targets are never installed by
+an agent. Candidate files are staged as `<target>.new` OUTSIDE the live paths,
+the user reviews the diff, and only then copies the file into place and
+restarts the affected service(s). `sandbox_finish` exports the result bundle;
+`sandbox_apply` presents the diff and blocks for explicit human approval; a
+denial or failed apply retains the result unchanged. Rollback stops before the
+copy, or restores the prior files.
+
 ## Residual risks (honest, Gate 1)
 
 1. **auth.json is process-accessible** (required by §16 for OAuth) — only the
@@ -82,3 +177,32 @@ Security issues: open an issue in the repository or tell the repository owner
 directly (this repo has no public tracker configured). Include: affected
 gate, invariant (S#), reproduction, impact, suggested fix. Do not include
 credential material in any report.
+
+## Review lifecycle host tools (host-review-lifecycle)
+
+The nine `host_review_*` tools are orchestrator-only mutations with fragment
+`ask` plus an in-tool `ctx.ask`. Provider-issued tokens (target, lineage,
+expected revision, repository context, subject/request hash, lens, contract,
+policy, trace, attestation, release values) are validated only and passed
+byte-for-byte into their fixed argv positions; the broker never reconstructs,
+reorders, or defaults them. `reviewRecover.maintainerAuthorization` is
+validated as LF-only JSON and forwarded verbatim, and it is never echoed into
+approval metadata (only "present (redacted)").
+
+`reviewCaptureResult.input` is a project-relative path or the literal `-`.
+For a path, the broker snapshots a regular file of at most 512 KiB into the
+broker-private `${stateDir}/review-input/` directory (mode `0600`,
+`O_CREAT|O_EXCL`, random name), passes that absolute private path as
+`--input`, and unlinks it in a `finally` on success, nonzero exit, timeout,
+or spawn failure. Stale snapshots are removed when the executor is
+constructed. The staging directory lives OUTSIDE the project tree, so it
+cannot change the repository's untracked inventory. Literal `-` forwards
+explicit EOF with no staging; inline result bytes are not a supported
+transport.
+
+Residual risk: the caller supplies the project-relative input path, so a
+compromised orchestrator can ask the broker to read any regular file beneath
+the approved root and hand it to `gentle-ai`; the 512-KiB cap and canonical
+root check bound that disclosure. Verification must still resolve the exact
+`review acknowledge-approved` flag set against the installed binary before
+any flag is added.

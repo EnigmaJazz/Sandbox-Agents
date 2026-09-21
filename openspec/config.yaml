@@ -1,0 +1,50 @@
+schema: spec-driven
+strict_tdd: false
+
+context: |
+  Project: agent-sandbox-integration.
+  Stack: Bun + TypeScript; dependency-free broker using bun:test and Node built-ins.
+  Architecture: trusted sandbox broker with explicit security boundaries.
+  Persistence: hybrid Magic Context and OpenSpec.
+  Verification: cd broker && bun test; bun build src/main.ts.
+  English artifacts; no live configuration changes, installs, sudo, or credentials.
+
+projects:
+  - path: broker
+    stack: Bun + TypeScript
+    test_command: cd broker && bun test
+    test_framework: bun:test
+    test_layers:
+      unit: bun:test
+      integration: bun:test
+      e2e: null
+    coverage_command: null
+    linter_command: null
+    type_checker_command: bun build src/main.ts
+    formatter_command: null
+
+rules:
+  proposal:
+    - Include rollback plans for risky changes.
+    - Respect AGENTS.md repository and security constraints.
+  specs:
+    - Use Given/When/Then scenarios.
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY).
+  design:
+    - Document architecture decisions with rationale.
+    - Include sequence diagrams for complex flows.
+  tasks:
+    - Group tasks by phase with hierarchical numbering.
+    - Keep tasks completable in one session.
+  apply:
+    tdd: false
+    test_command: cd broker && bun test
+    guidelines:
+      - Follow existing code patterns and dependency-free broker constraints.
+      - Do not modify S17 protected paths without explicit manual review.
+  verify:
+    test_command: cd broker && bun test
+    build_command: bun build src/main.ts
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas.

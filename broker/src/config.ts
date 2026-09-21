@@ -36,7 +36,14 @@ export interface ResourceConfig {
   maxWorkers: number;
   maxAggregateCpu: number;
   maxAggregateMemBytes: number;
-  /** Max B->C patch lines an apply may carry (approval preview limit). */
+  /**
+   * Fully-visible review line limit for source-code `sandbox_copy_out` targets
+   * (see copy-review.ts). It is NOT a cap on what an apply may carry: an apply
+   * of any size proceeds as long as the complete B->C diff is written to the
+   * plain apply-preview artifact. The in-prompt apply preview text is capped
+   * separately by APPLY_PREVIEW_MAX_LINES (service.ts); this value bounds the
+   * copy-out review surface, not the apply.
+   */
   maxApplyDiffLines: number;
   execTimeoutMsDefault: number;
   execTimeoutMsMax: number;
@@ -132,6 +139,12 @@ export interface BrokerConfig {
    * SANDBOX_ACTIVE closes as FAILED_CLOSED "idle reaped".
    */
   reapIdleMs: number;
+  /**
+   * State-dir artifact GC: a bundle or temp index for a terminal/orphan
+   * session is removed only after this grace period (ms), so a just-finished
+   * session still has its transport artifact during apply. Default 1h.
+   */
+  artifactGraceMs: number;
   /**
    * Disconnect reap (Feature 2b): if a client disconnects while its session
    * is SANDBOX_ACTIVE with no result and idle past this threshold, the
@@ -301,6 +314,7 @@ export function defaultConfig(
     protectedSecurityFiles: DEFAULT_PROTECTED_SECURITY_FILES,
     reapIntervalMs: positiveIntEnv("BROKER_REAP_INTERVAL_MS", 60_000),
     reapIdleMs: positiveIntEnv("BROKER_REAP_IDLE_MS", 3_600_000),
+    artifactGraceMs: positiveIntEnv("BROKER_ARTIFACT_GRACE_MS", 3_600_000),
     disconnectReapMs: positiveIntEnv("BROKER_DISCONNECT_REAP_MS", 30_000),
     queueTimeoutMs: positiveIntEnv("BROKER_QUEUE_TIMEOUT_MS", 600_000),
     queueMaxLength: positiveIntEnv("BROKER_QUEUE_MAX_LENGTH", 32),

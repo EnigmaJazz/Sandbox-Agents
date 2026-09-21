@@ -819,7 +819,10 @@ export class SddRuntimeExecutor {
   async reviewAcknowledgeApproved(payload: Record<string, unknown>): Promise<SddRuntimeResult> {
     const projectRoot = this.resolveProjectRoot(payload.projectDir);
     return this.run(
-      buildReviewAcknowledgeApprovedArgv({ binary: this.options.binary }),
+      buildReviewAcknowledgeApprovedArgv({
+        binary: this.options.binary,
+        ...withoutProjectDir(payload),
+      }),
       projectRoot,
       true,
     );
@@ -941,6 +944,8 @@ interface ReviewFlagSpec {
   flag?: string;
   kind: ReviewFieldKind;
   values?: readonly string[];
+  /** When true the value must be present and non-empty; refusal names the flag. */
+  required?: boolean;
 }
 
 interface ReviewCommandSpec {
@@ -1011,7 +1016,12 @@ const REVIEW_COMMANDS: Record<string, ReviewCommandSpec> = {
     command: ["review", "acknowledge-approved"],
     needsRoot: false,
     emitCwd: false,
-    fields: [],
+    fields: [
+      { key: "lineage", flag: "--lineage", kind: "token", required: true },
+      { key: "target", flag: "--target", kind: "token", required: true },
+      { key: "expectedRevision", flag: "--expected-revision", kind: "sha256", required: true },
+      { key: "token", flag: "--token", kind: "token", required: true },
+    ],
   },
   reviewCaptureCorrectionPlan: {
     command: ["review", "capture-correction-plan"],
@@ -1260,7 +1270,13 @@ function buildReviewArgv(operation: string, input: Record<string, unknown>): str
       continue;
     }
     const value = input[field.key];
-    if (value === undefined) continue;
+    if (value === undefined) {
+      if (field.required) throw new ValidationError(`${field.flag} is required`);
+      continue;
+    }
+    if (field.required && value === "") {
+      throw new ValidationError(`${field.flag} is required`);
+    }
     applyReviewField(argv, field, value);
   }
   return argv;

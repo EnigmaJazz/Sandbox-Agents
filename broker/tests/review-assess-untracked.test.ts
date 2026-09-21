@@ -75,7 +75,7 @@ describe("review assess untracked declaration argv", () => {
         projectRoot,
         untrackedScope: "select",
         expectedUntrackedInventory: inventory,
-        intendedUntracked: ["a.ts", "src/b.ts"],
+        intendedUntracked: ["AGENTS.md", "broker/src/validation.ts"],
       }),
     ).toEqual([
       "gentle-ai",
@@ -85,8 +85,8 @@ describe("review assess untracked declaration argv", () => {
       projectRoot,
       "--untracked-scope=select",
       `--expected-untracked-inventory=${inventory}`,
-      "--intended-untracked=a.ts",
-      "--intended-untracked=src/b.ts",
+      "--intended-untracked=AGENTS.md",
+      "--intended-untracked=broker/src/validation.ts",
       "--json",
     ]);
   });
@@ -252,7 +252,7 @@ describe("review assess untracked declaration runtime wiring", () => {
       committedOnly: true,
       untrackedScope: "select",
       expectedUntrackedInventory: inventory,
-      intendedUntracked: ["a.ts"],
+      intendedUntracked: ["AGENTS.md"],
     });
 
     expect(calls).toEqual([
@@ -268,7 +268,7 @@ describe("review assess untracked declaration runtime wiring", () => {
           "--committed-only",
           "--untracked-scope=select",
           `--expected-untracked-inventory=${inventory}`,
-          "--intended-untracked=a.ts",
+          "--intended-untracked=AGENTS.md",
           "--json",
         ],
         cwd: projectRoot,

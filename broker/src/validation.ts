@@ -468,7 +468,19 @@ export function assertProjectRelativePath(
   }
 }
 
-/** Resolve a validated project-relative path beneath the canonical root. */
+/**
+ * Resolve a validated project-relative path beneath the canonical root.
+ *
+ * This is the single containment seam for host-tool paths. `resolve()` only
+ * normalizes `..`; it never follows symlinks, so a symlink placed inside the
+ * project can still point outside it and pass a purely lexical check. After the
+ * lexical guard, canonicalize with realpath and re-check containment:
+ * - an existing target resolves through `realpathSync`;
+ * - a not-yet-existing leaf (e.g. archive-compose `--output`) canonicalizes its
+ *   parent and re-joins the basename;
+ * - an unresolvable root or parent is refused, never silently degraded to the
+ *   lexical pathname.
+ */
 export function resolveProjectRelativePath(
   projectRoot: string,
   value: string,
@@ -479,7 +491,28 @@ export function resolveProjectRelativePath(
   if (!isWithin(projectRoot, resolved)) {
     throw new ValidationError(`${what} escapes the approved project root`);
   }
-  return resolved;
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(projectRoot);
+  } catch {
+    throw new ValidationError(`${what} project root does not resolve on the host`);
+  }
+  let canonical: string;
+  try {
+    canonical = realpathSync(resolved);
+  } catch {
+    let realParent: string;
+    try {
+      realParent = realpathSync(dirname(resolved));
+    } catch {
+      throw new ValidationError(`${what} parent directory does not resolve on the host`);
+    }
+    canonical = join(realParent, basename(resolved));
+  }
+  if (!isWithin(realRoot, canonical)) {
+    throw new ValidationError(`${what} escapes the approved project root`);
+  }
+  return canonical;
 }
 
 // ---------------------------------------------------------------------------
@@ -906,7 +939,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
     "projectDir", "target", "lineage", "expectedRevision", "repositoryContext",
     "requestHash", "reason", "detail", "withdraw",
   ],
-  reviewAcknowledgeApproved: ["projectDir"],
+  reviewAcknowledgeApproved: ["projectDir", "lineage", "target", "expectedRevision", "token"],
   reviewCaptureCorrectionPlan: [
     "projectDir", "target", "lineage", "expectedRevision", "repositoryContext",
     "requestHash", "correctionLines",
