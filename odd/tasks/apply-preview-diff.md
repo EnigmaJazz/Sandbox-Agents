@@ -2,7 +2,7 @@
 
 - **Feature:** `apply-preview-diff`
 - **Project:** `sandbox-integration` (`/home/james/agent-sandbox-integration`)
-- **Status:** T1–T3 implemented and verified in the sandbox; result retained, not installed (S17 refused apply). T4 (docs) and T5 (post-install readback) pending.
+- **Status:** T1–T3 installed (broker-owned plain and ANSI artifacts + the fail-closed approval guard); T4 (docs) and T5 (post-install readback) pending.
 - **Created:** 2026-09-19
 - **Delivery strategy:** `ask-on-risk`
 - **Chain strategy:** `stacked-to-main` (the user's standing choice)
@@ -344,12 +344,12 @@ no feature code, deploy, mirror, restart, or commit was performed.
   halves of one presentation change. Confirm the artifact-location decision
   (`.git/gentle-ai/**` vs broker state dir) before T1.
 
-## Implementation result (2026-09-20) — retained, not installed
+## Implementation result (2026-09-20) — installed (2026-09-22)
 
 T1, T2 and T3 are DONE (implemented and verified in the sandbox). T4 (docs) and
 T5 (post-install readback) remain pending.
 
-- **Result retained, not installed:** `refs/opencode-sandbox/result/ses_f4184a893ffe1h0mHlXInJJ6q6`.
+- **Result (installed 2026-09-22):** `refs/opencode-sandbox/result/ses_f4184a893ffe1h0mHlXInJJ6q6`.
   S17 refused apply with `result touches protected paths (S7/S17):
   broker/src/gitops.ts, broker/src/service.ts, opencode/plugins/sandbox-tools.ts`.
 - **Files:**
@@ -391,9 +391,9 @@ recorded deviation from the tracker constraint, not an oversight.
 
 | Task | Status  | Notes |
 |------|---------|-------|
-| T1   | DONE    | Plain full-diff artifact + metadata path. Broker owns the write at `<stateDir>/apply-preview/<sessionID>.diff`; `applyPreviewFiles` in the diff op; `previewFile` in the approval metadata. |
-| T2   | DONE    | Opt-in ANSI colour. `<sessionID>.ansi.diff`; single `coloriseDiff` in the writer; the plugin temp write is gone. |
-| T3   | DONE    | Tests. RED 8 fail / 8 → GREEN 8 / 0; new `broker/tests/apply-preview.test.ts`; `broker/tests/service-diff.test.ts` updated. |
+| T1   | installed | Plain full-diff artifact + metadata path. Broker owns the write at `<stateDir>/apply-preview/<sessionID>.diff`; `applyPreviewFiles` in the diff op; `previewFile` in the approval metadata. |
+| T2   | installed | Opt-in ANSI colour. `<sessionID>.ansi.diff`; single `coloriseDiff` in the writer; the plugin temp write is gone. |
+| T3   | installed | Tests. RED 8 fail / 8 → GREEN 8 / 0; new `broker/tests/apply-preview.test.ts`; `broker/tests/service-diff.test.ts` updated. |
 | T4   | pending | Docs. No tool or parameter surface changed, so the permission fragment is likely unchanged. |
 | T5   | pending | Post-install readback. The surface is unverified against a running broker until install. |
 
@@ -458,9 +458,7 @@ recorded deviation from the tracker constraint, not an oversight.
 
 ## Next step
 
-Install pending: a manual S17 install of this result together with the relay log
-fix (`refs/opencode-sandbox/result/ses_f4195f0fbffexkejqwVz70j1H6`), then
-`install-user-files --apply`, `daemon-reload`, restart `sandbox-broker` and
-`secure-opencode`. Expected host suite after both changes: **448 pass / 0 fail**.
-Then T5 — the post-install readback of the implemented path, the metadata field,
+Installed (2026-09-22): the broker-owned plain/ANSI artifacts and the fail-closed
+approval guard are committed and installed. T5 — the post-install readback of the
+implemented path, the metadata field,
 and the docs.

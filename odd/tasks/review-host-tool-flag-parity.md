@@ -2,7 +2,7 @@
 
 - **Feature:** `review-host-tool-flag-parity`
 - **Project:** `sandbox-integration` (`/home/james/agent-sandbox-integration`)
-- **Status:** planned — tracker only; no implementation started
+- **Status:** T1 implemented, installed and verified live (2026-09-21); T2–T5 remaining
 - **Created:** 2026-09-19
 - **Delivery strategy:** `ask-on-risk`
 - **Chain strategy:** `stacked-to-main` (the user's standing choice)
@@ -155,7 +155,7 @@ This tracker's creation is the only authorized output of the creating session; n
 
 | Task | Status  | Notes |
 |------|---------|-------|
-| T1   | pending | Not started. Accept + forward the four provider-issued values. |
+| T1   | done    | Implemented, installed and verified live on 2026-09-21 (commit `80ae253`; `broker/tests/review-acknowledge-approved.test.ts`). |
 | T2   | pending | Not started. Re-sweep for other drift; none found on 2026-09-19. |
 | T3   | pending | Not started. Tests: argv shape, refusals, token forwarding. |
 | T4   | pending | Not started. Fragment/manifest only if the surface changes. |
@@ -182,4 +182,4 @@ This tracker's creation is the only authorized output of the creating session; n
 
 ## Next step
 
-T1 — accept `lineage`, `target`, `expectedRevision`, and `token` for `reviewAcknowledgeApproved` and forward them as the four provider-issued argv flags, mirroring the provider continuation in `review_last_event_closure.go:33-43`. Confirm the S17 review path before any apply.
+T2 — re-run the required-flag sweep against the installed tree, confirm the two capability-gap notes (`assess --agent`, refuter/validation `--input`) are genuinely optional, and capture the closing T5 readback. T1 is installed and verified live (2026-09-21).

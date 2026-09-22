@@ -1,13 +1,46 @@
 # TODO — agent-sandbox-integration
 
-Last updated: 2026-09-11
+Last updated: 2026-09-22
 
-## In flight — agent-host-tools (2026-09-11)
+## Delivered — agent-host-tools (updated 2026-09-22)
 
-- Landed on host, UNCOMMITTED: (a) apply-preview prereq — removed applyResult line cap (broker/src/service.ts) + colour-coded `sandbox_apply` preview file (opencode/plugins/sandbox-tools.ts); (b) slice 1 — P0 SDD runtime host tools + authorization (194 tests). OpenSpec artifacts under `openspec/changes/agent-host-tools/`; Magic Context records 922–928 + resume memory 930.
-- Pending: slice 2 (git/gh: gitCommit/gitPush/ghIssueCreate), slice 3 (registerProject dispatch + docs/threat-model), then verify + archive.
-- Carry-forward (acceptance): restore full `BROKER_PROTECTED_SECURITY_FILES` + remove `BROKER_REAP_INTERVAL_MS`; reinstall plugin + restart secure OpenCode; commit landed slices as work units (hunk-split); fix `runPrepare` forcing refspec; S17 manual review.
-- Blocker: SDD dispatch latched for the current session — continue in a NEW session.
+- Committed and merged into the default branch. Slice 1 (P0 SDD runtime host tools +
+  authorization, 194 tests; OpenSpec artifacts under `openspec/changes/agent-host-tools/`),
+  the git/gh tools, and project registration landed in `c0bf4dc`; the review/state
+  corrections landed in `54743fc`…`b83c494` and were merged by `8ed9e96` ("merge review
+  slice 1 with its corrections"); the apply-preview fail-closed guard and its installer
+  carry-through landed in `df1b78f`/`6e0b37b`.
+- Push to `origin`: **unverified** from a sandbox worker. The worker snapshot exposes only
+  synthetic `work`/`baseline` refs and no remote, so host branch/remote state cannot be
+  inspected here.
+- Still open:
+  - Remove `BROKER_REAP_INTERVAL_MS`.
+  - Fix `runPrepare` forcing a refspec.
+  - S17 manual review.
+- Protected-list note: `BROKER_PROTECTED_SECURITY_FILES` in `systemd-user/broker.env`
+  already carries the full protected list (byte-identical to
+  `DEFAULT_PROTECTED_SECURITY_FILES` in `broker/src/config.ts`); only the bootstrap-window
+  comment above it is stale. `systemd-user/broker.env` is S17, so that comment fix is
+  user-installed.
+- Historical blocker (2026-09-11): "SDD dispatch latched for the current session — continue
+  in a NEW session." Resolved in practice — the agent-host-tools work subsequently completed
+  and landed in later sessions (`c0bf4dc`, `8ed9e96`) — so the latch no longer blocks.
+  Verify or drop.
+
+## Priority principle — fixed host operations over user-pasted commands
+
+Prefer fixed, approval-gated host operations over user-pasted commands — the human keeps
+the decision, the typing goes away. Concrete candidates, in order:
+
+1. `host_journal` — bounded user-journal read for allowlisted units
+   (`odd/tasks/host-journal-tool.md`).
+2. Host git reads — `status|diff|log|show|branch` (`odd/tasks/host-git-tools.md`).
+3. Result-ref inspect and install — approval-gated, S17-aware (see the "Sandbox result-ref
+   inspector" section below).
+4. Worktree lifecycle plus the `projectId` selector (see the "Planned — worktree review and
+   commit" section below).
+5. The review-pipeline tools from `docs/PLAN.md` — `host_git_range_materialize`,
+   `host_review_pipeline_run`, `host_review_artifact_write`, `host_git_read`.
 
 ## Completed
 
@@ -18,6 +51,7 @@ Last updated: 2026-09-11
 7. Sync systemd-user/broker.env template (9 projects, S17 real list, binary line)
 8. Host bun tests (117 pass) + build
 9. Apply-review file flow (applyPreview op + 6/6 tests; live after restart)
+11. Agent commit/push with authorization — `host_git_commit` and `host_git_push` exist and are in use (plugin tool + fragment `ask` + broker handler + fixed argv + tests)
 17. Revert live S17 bootstrap relaxation (real list now live)
 21. Idle-worker reaping + pool queue — clean/dirty reap (60s), queue park/progress/drain, operation-aware client timeout (exec 130s / ensureWorker 120s)
 
@@ -26,8 +60,7 @@ Last updated: 2026-09-11
 3. File nono 0.74 loopback regression at nolabs-ai/nono (drafted)
 5. Verify auto-update EACCES resolved (4 history files seeded, journal clean?)
 10. Make sandbox_copy_out identical to apply: diff-style review file, no 200 hard cap for source targets
-11. Agent commit/push with authorization (gitCommit/gitPush ops, approval-gated)
-12. GitHub issue reporting with human oversight (gh issue-create, approval-gated)
+12. GitHub issue reporting with human oversight — `host_gh_issue_create` is implemented and wired (plugin tool + fragment `ask` + broker handler + fixed `gh issue create` argv + tests); the remaining item is a live, human-oversight issue creation, unverified live
 13. Sandbox tool-definition pass (13 sandbox_* descriptions/schemas audit)
 14. Web/network access for agents (github.com, websearch hosts in nono allow_domain)
 16. Final security gate (manual-verification gates + AFT bypass finding + orchestrator staleness + file-mode finding)
@@ -35,11 +68,11 @@ Last updated: 2026-09-11
 20. Broker retained-result resume gap (RETAINED results are dead-ends)
 22. OpenChamber E2E verification on nono 0.73 (all providers respond)
 23. SDD runtime: verify BROKER_GENTLE_AI_BINARY in broker env + sdd-runtime tests on host
-27. register-project: create + grant `<project>/.codegraph` in the nono profile for new projects (mirror the existing `.atl` helper) so CodeGraph can write its index inside secure OpenCode. The grant must be paired with directory creation: nono binds grants to existing paths at sandbox start and cannot create `.codegraph` itself.
+27. Superseded — tracked by `odd/tasks/register-project-profile-grants.md` T2, which cites this item: create + grant `<project>/.codegraph` in the nono profile for new projects (mirror the existing `.atl` helper) so CodeGraph can write its index inside secure OpenCode. The grant must be paired with directory creation: nono binds grants to existing paths at sandbox start and cannot create `.codegraph` itself.
 
 ## In-progress / parked
 
-15. Role-based subagents SDD — Phase A (P0+A) code delivered (commit 6118de1, 159 tests); S17 review pending (NOT applied to host); parked at Phase B (9 tasks: B.1-B.3 researcher/worker, C.1-C.3 advisor/deliberation, D.1-D.3 security gate)
+15. Role-based subagents SDD — Phase A (P0+A) code committed. The tracker's original commit `6118de1` no longer exists in history (reset, then re-applied as `b6a5f8c`, "restore 6118de1, 3-way merge"); the "159 tests" figure is unverified. Parked at Phase B (9 tasks: B.1-B.3 researcher/worker, C.1-C.3 advisor/deliberation, D.1-D.3 security gate)
 18. Read-only orchestrator — part of Phase A (readOnlyAgents + plugin guard), code delivered, S17 pending
 
 ## New (2026-09-05)
@@ -47,6 +80,7 @@ Last updated: 2026-09-11
 24. sandbox_diff always shows 0 — buildRetainedDiff returns compare:'' while active-mode diff computes .new reference comparisons
 25. sandbox_apply not giving the correct S17 failure message
 26. runPrepare .broker-tmp mkdir + git bundle create status check (bites sandbox_bash-only writers)
+
 ## Sandbox result-ref inspector (host tool)
 
 **Problem:** the orchestrator cannot inspect the content of a sandbox result ref
@@ -63,6 +97,7 @@ would cover the blocking-ref case directly.
 
 **Acceptance:** the orchestrator can determine whether a blocking result ref matches the
 intended change without any host shell, and can diff two refs itself.
+
 ## Backlog captured 2026-09-21
 
 ### 1. Bug fix (blocking another repo) — acknowledge-approved must carry `--lineage`
@@ -77,8 +112,9 @@ Expected: forward all four provider-issued flags in the CLI's order —
 `--lineage --target --expected-revision --token`.
 
 Repository status: implemented as commit `80ae253` (unit 5 of the review batch), which emits
-all four and refuses a missing value before spawning. Not yet live for dependent repos until
-that branch is installed; verify against the affected repo afterwards.
+all four and refuses a missing value before spawning. **Live and verified (2026-09-21):** the
+acknowledgement was executed through `host_review_acknowledge_approved` on the installed
+stack, forwarding all four provider-issued flags, and it returned `action: acknowledged`.
 
 ### 2. Feature — readable `sandbox_apply` preview
 
@@ -98,6 +134,26 @@ Questions to settle at design time: how a request identifies its target project 
 requester; how evidence and reproduction steps travel with it; how approval-at-request is
 recorded, bounded and distinguished from apply-time approval; and how requests that touch
 S17/protected paths interact with the existing manual-review boundary.
+
+### 4. Bug — the GGA review hook conflicts with `host_git_commit`
+
+When GGA (Gentle AI) is active and the host git commit tool is used, the GGA code-review
+subagent appears to believe it is using the tool, does nothing, and the commit fails. Observed
+directly; the mechanism is unverified. First step is to reproduce with GGA enabled and capture
+three facts: whether the hook intercepts the commit call, whether the subagent is dispatched at
+all, and where the failure surfaces — the commit operation, the hook, or the subagent.
+
+### 5. Bug — the systematic `ce:review` pipeline cannot run from the orchestrator
+
+Four gaps: no non-mutating way to obtain a git range as data; no shared scratch surface between
+worker sessions; no execution surface for the bundled helpers (`ensure-ignore.mjs`,
+`validate-review.mjs`); and no artifact write surface for `review-summary.json`. Consequence:
+reviewers receive no diff and return DIFF_UNAVAILABLE, so `pre_existing` attribution — the core
+value of the review — goes unverified, and the packaged pipeline never runs at all.
+
+The full brief, the four proposed fixed host tools, their non-negotiable boundaries, the
+acceptance criteria and the regression risks are recorded in `docs/PLAN.md`.
+
 ## Planned — worktree review and commit without a per-worktree session
 
 **Problem:** the review and git host operations bind to the session's project and accept no
@@ -131,21 +187,3 @@ broke the stack was `install-user-files --apply` run from a checkout — not the
 
 **Acceptance:** a unit can be reviewed and committed from a worktree without moving the main
 tree and without opening a session in the worktree, and no host operation accepts a raw path.
-### 4. Bug — the GGA review hook conflicts with `host_git_commit`
-
-When GGA (Gentle AI) is active and the host git commit tool is used, the GGA code-review
-subagent appears to believe it is using the tool, does nothing, and the commit fails. Observed
-directly; the mechanism is unverified. First step is to reproduce with GGA enabled and capture
-three facts: whether the hook intercepts the commit call, whether the subagent is dispatched at
-all, and where the failure surfaces — the commit operation, the hook, or the subagent.
-
-### 5. Bug — the systematic `ce:review` pipeline cannot run from the orchestrator
-
-Four gaps: no non-mutating way to obtain a git range as data; no shared scratch surface between
-worker sessions; no execution surface for the bundled helpers (`ensure-ignore.mjs`,
-`validate-review.mjs`); and no artifact write surface for `review-summary.json`. Consequence:
-reviewers receive no diff and return DIFF_UNAVAILABLE, so `pre_existing` attribution — the core
-value of the review — goes unverified, and the packaged pipeline never runs at all.
-
-The full brief, the four proposed fixed host tools, their non-negotiable boundaries, the
-acceptance criteria and the regression risks are recorded in `docs/PLAN.md`.

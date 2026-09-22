@@ -2,7 +2,7 @@
 
 - **Feature:** `gentle-ai-3.1.0-integration-alignment`
 - **Project:** `sandbox-integration` (`/home/james/agent-sandbox-integration`)
-- **Status:** complete for the v6 change set (T1–T4); T5 recorded and pending
+- **Status:** T1–T4 committed and installed; T5 recorded and pending
 - **Created:** 2026-09-17
 - **Delivery strategy:** `ask-on-risk` (default). Rough forecast ≈600 authored changed lines
   (additions + deletions, excluding generated files), so the slice decision will be made when the
@@ -284,7 +284,7 @@ trusted-agent allowlist or any permission strength.
     (extended list in the T5 section).
   - Blocker: none — **corrected by T4.** The earlier prediction that the S17 guard would force
     manual re-application did not hold: the T3 change unit applied successfully and, together with
-    T1 and T2, is present in the host working tree (uncommitted). This supersedes the earlier
+    T1 and T2, is present in the host working tree (committed and installed). This supersedes the earlier
     "pending sandbox_apply / retained for manual application" notes on the T2 and T3 units.
 
 - T4 evidence (sandbox worker, 2026-09-17):
@@ -305,7 +305,7 @@ trusted-agent allowlist or any permission strength.
   - Corrected claim 1: the T3 retirement-test RED is **inferred, not captured** (see the corrected
     T3 RED line above).
   - Corrected claim 2: the T3 apply-blocker prediction was wrong — the apply succeeded and T1–T3
-    are in the host working tree (uncommitted).
+    are in the host working tree (committed and installed).
   - Environment note: `sandbox_bash` does not surface process exit codes and its relative `cwd`
     option fails (ENOENT); the suite ran as `bun --cwd broker test`, and exit codes were observed
     by spawning the exact argv from `bun -e` and printing the child's `.exitCode`.
@@ -379,7 +379,7 @@ not yet actioned; none of its targets are S17.
 
 ## Closing note — user actions for the v6 change set
 
-T1–T4 are complete and applied to the host working tree (uncommitted). Remaining user-owned steps:
+T1–T4 are complete, committed and installed. Remaining user-owned steps:
 
 1. Review the S17 diff (`broker/src/**`, `opencode/plugins/**`, `scripts/**`,
    `opencode/config-fragments/**`).
