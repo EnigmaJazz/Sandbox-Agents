@@ -187,3 +187,17 @@ broke the stack was `install-user-files --apply` run from a checkout — not the
 
 **Acceptance:** a unit can be reviewed and committed from a worktree without moving the main
 tree and without opening a session in the worktree, and no host operation accepts a raw path.
+### 6. Bug — commit and issue messages reject newlines
+
+`host_git_commit` refuses any message containing a control character, so a conventional commit
+body cannot be passed at all, and every repository using the tool runs into it. The check is
+over-broad: the message is delivered as a single argv element (`git commit -m <message> --
+<paths>`), so a newline cannot break the command — it only trips a general sanitizer. The same
+applies to the GitHub issue `body`.
+
+Proposed: allow `\n` (and `\t`) in `message` and in the issue `body`; keep rejecting NUL and the
+remaining C0 controls; keep the byte caps and the non-empty requirement; keep `title`
+single-line, which is a genuine constraint. Add tests that a multi-line message reaches
+`git commit` intact and that NUL is still refused. Check whether the same validator gates the
+other free-text fields (`host_plan_append` content, the review capture inputs) so the fix is
+consistent rather than one-off.
