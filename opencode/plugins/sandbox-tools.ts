@@ -55,6 +55,7 @@ import {
   buildReviewStartAsk,
   buildReviewValidateAsk,
   buildRegisterProjectAsk,
+  buildSandboxResultInstallAsk,
   buildGitPushAsk,
   buildSddArchiveComposeAsk,
   buildSddAttemptGrantAsk,
@@ -550,6 +551,71 @@ export default function sandboxToolsPlugin() {
             projectDir: currentProjectDirectory(ctx.directory),
             phase: args.phase,
             input: args.input,
+          }, ctx.agent);
+          return JSON.stringify(result, null, 2);
+        },
+      }),
+
+      host_sandbox_result: tool({
+        description:
+          "Read a sandbox result ref (read-only; no approval). Resolves the ref from a " +
+          "sandbox session id, returns the commit identity and timestamp, the changed paths " +
+          "with per-file added/removed counts, and a bounded/redacted patch. Set " +
+          "compareSandboxSessionID to diff two result refs. Never accepts a raw ref or a " +
+          "path list. Returns JSON.",
+        args: {
+          sandboxSessionID: sessionIdArg.optional(),
+          compareSandboxSessionID: sessionIdArg.optional(),
+        },
+        execute: async (args, ctx) => {
+          const c = await client();
+          const result = await c.request("sandboxResult", ctx.sessionID, {
+            projectDir: currentProjectDirectory(ctx.directory),
+            ...(args.sandboxSessionID ? { sandboxSessionID: args.sandboxSessionID } : {}),
+            ...(args.compareSandboxSessionID
+              ? { compareSandboxSessionID: args.compareSandboxSessionID }
+              : {}),
+          }, ctx.agent);
+          return JSON.stringify(result, null, 2);
+        },
+      }),
+
+      host_sandbox_result_install: tool({
+        description:
+          "Install a sandbox result ref into the working tree (orchestrator-only mutation; " +
+          "requires human approval). Reads the result first and binds the install to the exact " +
+          "previewed commit: if the ref moves between preview and install the broker refuses " +
+          "(result-commit-mismatch). The broker derives every path from the result's own diff; " +
+          "deleted paths are removed and present paths are restored, and the index is never " +
+          "staged. Never accepts a raw ref or a path list. Returns JSON.",
+        args: {
+          sandboxSessionID: sessionIdArg.optional(),
+        },
+        execute: async (args, ctx) => {
+          const c = await client();
+          const preview = (await c.request("sandboxResult", ctx.sessionID, {
+            projectDir: currentProjectDirectory(ctx.directory),
+            ...(args.sandboxSessionID ? { sandboxSessionID: args.sandboxSessionID } : {}),
+          }, ctx.agent)) as {
+            result: { ref: string; commit: string };
+            changedPaths: Array<{ path: string }>;
+          };
+          await ctx.ask(
+            buildSandboxResultInstallAsk({
+              resultRef: preview.result.ref,
+              resultCommit: preview.result.commit,
+              changedPaths: preview.changedPaths.map((entry) => entry.path),
+              ...(args.sandboxSessionID !== undefined
+                ? { sandboxSessionID: args.sandboxSessionID }
+                : {}),
+            }),
+          );
+          const result = await c.request("sandboxResultInstall", ctx.sessionID, {
+            projectDir: currentProjectDirectory(ctx.directory),
+            expectedResultCommit: preview.result.commit,
+            ...(args.sandboxSessionID !== undefined
+              ? { sandboxSessionID: args.sandboxSessionID }
+              : {}),
           }, ctx.agent);
           return JSON.stringify(result, null, 2);
         },

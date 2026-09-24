@@ -680,6 +680,22 @@ export function assertRegisterableProjectPath(
 
 /** One `-m` commit message: 1..4096 bytes, never flag-like, no control chars. */
 export const GIT_COMMIT_MESSAGE_MAX_BYTES = 4096;
+
+/** A full git object id: 40 hex (sha1) or 64 hex (sha256), lowercase only. */
+export const GIT_COMMIT_OID_RE = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
+
+/**
+ * `expectedResultCommit`: the exact result commit the caller previewed. A full
+ * lowercase object id; anything else fails closed before any git step runs.
+ */
+export function assertExpectedResultCommit(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !GIT_COMMIT_OID_RE.test(value)) {
+    throw new ValidationError(
+      "expectedResultCommit must be a full lowercase commit id (40 or 64 hex)",
+    );
+  }
+}
+
 /** `gh` value caps: repository slug, title, and body bytes. */
 export const GH_REPO_MAX_BYTES = 256;
 export const GH_TITLE_MAX_BYTES = 256;
@@ -788,6 +804,7 @@ export const HOST_READ_OPERATIONS: readonly string[] = [
   "reviewModeStatus",
   "reviewStatus",
   "reviewLensContext",
+  "sandboxResult",
 ];
 
 /** Host mutations: `gentle-orchestrator` only, fragment `ask` + in-tool `ctx.ask`. */
@@ -808,6 +825,7 @@ export const HOST_MUTATION_OPERATIONS: readonly string[] = [
   "reviewCaptureValidation",
   "reviewValidate",
   "reviewRecover",
+  "sandboxResultInstall",
 ];
 
 export function hostToolAccess(operation: unknown): HostToolAccess {
@@ -966,6 +984,8 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   gitCommit: ["projectDir", "message", "sandboxSessionID"],
   gitPush: ["projectDir", "remote", "setUpstream", "allowProtectedBranch"],
   ghIssueCreate: ["projectDir", "repo", "title", "body"],
+  sandboxResult: ["projectDir", "sandboxSessionID", "compareSandboxSessionID"],
+  sandboxResultInstall: ["projectDir", "sandboxSessionID", "expectedResultCommit"],
   hostSystemSummary: [],
   hostMemory: [],
   hostNetworkListeners: [],

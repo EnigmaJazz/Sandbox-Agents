@@ -10,6 +10,7 @@ import {
   buildReviewCaptureValidationAsk,
   buildReviewRecoverAsk,
   buildRegisterProjectAsk,
+  buildSandboxResultInstallAsk,
   buildReviewStartAsk,
   buildReviewValidateAsk,
   buildGitPushAsk,
@@ -276,3 +277,29 @@ describe("host review lens-context client timeout", () => {
     expect(OPERATION_TIMEOUT_MS.reviewLensContext).toBeGreaterThan(30_000);
   });
 });
+
+describe("sandbox result install ask metadata", () => {
+  test("binds the previewed commit and never auto-approves", () => {
+    const ask = buildSandboxResultInstallAsk({
+      resultRef: "refs/opencode-sandbox/result/worker-7",
+      resultCommit: "0123456789abcdef0123456789abcdef01234567",
+      changedPaths: ["broker/src/server.ts", "gone.ts"],
+      sandboxSessionID: "worker-7",
+    });
+    expect(ask.permission).toBe("host_sandbox_result_install");
+    expect(ask.metadata.operation).toBe("sandboxResultInstall");
+    expect(ask.always).toEqual([]);
+    expect(ask.patterns).toEqual(["*"]);
+    expect(ask.metadata.details).toMatchObject({
+      resultRef: "refs/opencode-sandbox/result/worker-7",
+      resultCommit: "0123456789abcdef0123456789abcdef01234567",
+      sandboxSessionID: "worker-7",
+      pathCount: 2,
+      pathPreview: "broker/src/server.ts, gone.ts",
+    });
+    expect(() =>
+      buildSandboxResultInstallAsk({ resultRef: "", resultCommit: "x" }),
+    ).toThrow(HostToolAskError);
+  });
+});
+

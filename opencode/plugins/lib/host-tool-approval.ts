@@ -33,7 +33,8 @@ export type HostMutationOperation =
   | "reviewValidate"
   | "reviewRecover"
   | "sddArchiveCompose"
-  | "registerProject";
+  | "registerProject"
+  | "sandboxResultInstall";
 
 export interface HostToolAskMetadata {
   operation: HostMutationOperation;
@@ -589,5 +590,43 @@ export function buildReviewRecoverAsk(args: ReviewRecoverAskArgs = {}): HostTool
       reason: args.reason,
       maintainerAuthorization: args.maintainerAuthorization !== undefined ? "present (redacted)" : undefined,
     }),
+  });
+}
+
+export interface SandboxResultInstallAskArgs {
+  resultRef: string;
+  resultCommit: string;
+  changedPaths?: readonly string[];
+  deletionPaths?: readonly string[];
+  sandboxSessionID?: string;
+}
+
+/** Approval metadata for `host_sandbox_result_install` (ref, commit, paths). */
+export function buildSandboxResultInstallAsk(args: SandboxResultInstallAskArgs): HostToolAsk {
+  assertNonEmpty(args.resultRef, "resultRef");
+  assertNonEmpty(args.resultCommit, "resultCommit");
+  const details: Record<string, string | number> = {
+    resultRef: args.resultRef,
+    resultCommit: args.resultCommit,
+  };
+  if (args.sandboxSessionID !== undefined) {
+    assertNonEmpty(args.sandboxSessionID, "sandboxSessionID");
+    details.sandboxSessionID = args.sandboxSessionID;
+  }
+  if (args.changedPaths !== undefined) {
+    assertRepoRelativePaths(args.changedPaths, "changedPaths");
+    details.pathCount = args.changedPaths.length;
+    details.pathPreview = args.changedPaths.slice(0, 20).join(", ");
+  }
+  if (args.deletionPaths !== undefined) {
+    assertRepoRelativePaths(args.deletionPaths, "deletionPaths");
+    details.deletionCount = args.deletionPaths.length;
+    details.deletionPreview = args.deletionPaths.slice(0, 20).join(", ");
+  }
+  return buildHostToolAsk({
+    permission: "host_sandbox_result_install",
+    operation: "sandboxResultInstall",
+    summary: `Install ${details.pathCount ?? 0} result path(s) from ${args.resultRef} at commit ${args.resultCommit.slice(0, 12)}`,
+    details,
   });
 }

@@ -77,6 +77,8 @@ import {
   buildPrepareResultOp,
   buildReadFileOp,
   buildRegisterProjectOp,
+  buildSandboxResultInstallOp,
+  buildSandboxResultOp,
   buildWorkerStatusOp,
   buildWriteFileOp,
   type OpContext,
@@ -400,6 +402,10 @@ export class BrokerServer {
         return buildGitPushOp(this.ctx)(req);
       case "ghIssueCreate":
         return buildGhIssueCreateOp(this.ctx)(req);
+      case "sandboxResult":
+        return buildSandboxResultOp(this.ctx)(req);
+      case "sandboxResultInstall":
+        return buildSandboxResultInstallOp(this.ctx)(req);
       case "policy":
         return buildPolicyOp(this.ctx)(req);
       case "planDocAppend":

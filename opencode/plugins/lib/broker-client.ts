@@ -66,6 +66,7 @@ export const OPERATION_TIMEOUT_MS: Record<string, number> = {
   bindSessionAgent: 10_000,
   ensureWorker: 120_000,
   gitCommit: 130_000,
+  sandboxResultInstall: 130_000,
   gitPush: 130_000,
   ghIssueCreate: 130_000,
   planDocAppend: 30_000,

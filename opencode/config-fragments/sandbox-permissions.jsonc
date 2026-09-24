@@ -79,6 +79,8 @@
     "host_review_mode_status": "allow",
     "host_review_status": "allow",
     "host_review_lens_context": "allow",
+    "host_sandbox_result": "allow",
+    "host_sandbox_result_install": "ask",
     "host_sdd_attempt_acquire": "deny",
     "host_sdd_attempt_status": "deny",
     "host_sdd_attempt_begin": "deny",

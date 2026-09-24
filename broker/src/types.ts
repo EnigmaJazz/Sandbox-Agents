@@ -61,6 +61,10 @@ export type Operation =
   | "reviewLensContext"
   | "sddAttemptGrant"
   | "planDocAppend"
+  // Host sandbox-result read (T1): fixed argv, read-only, no worker (§31).
+  | "sandboxResult"
+  // Host sandbox-result install (T2): fixed argv, approval-gated host mutation.
+  | "sandboxResultInstall"
   // Host-authoritative session→agent binding (plugin-only; never exposed as a
   // `host_*` or `sandbox_*` tool).
   | "bindSessionAgent"
@@ -126,6 +130,8 @@ export const OPERATIONS: readonly Operation[] = [
   "reviewLensContext",
   "sddAttemptGrant",
   "planDocAppend",
+  "sandboxResult",
+  "sandboxResultInstall",
   "bindSessionAgent",
   "reviewStart",
   "reviewCaptureResult",

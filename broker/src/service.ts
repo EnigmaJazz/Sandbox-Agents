@@ -34,6 +34,7 @@ import type { SpawnFn } from "./msb.ts";
 import {
   assertArgv,
   assertContent,
+  assertExpectedResultCommit,
   assertExternalCopyTarget,
   assertGrepQuery,
   assertPayloadKeys,
@@ -69,6 +70,13 @@ import {
   parseLsFilesLines,
   parseLsTreeLines,
 } from "./gitops.ts";
+import {
+  buildResultCommitArgv,
+  buildResultDeleteArgv,
+  buildResultRestoreArgv,
+  planSandboxResultInstall,
+  readSandboxResult,
+} from "./sandbox-result.ts";
 import {
   assertCopyOutReviewLimit,
   countCopyLines,
@@ -113,6 +121,7 @@ import type {
   MetricsRecord,
   PolicyRecord,
   Operation,
+  SessionState,
 } from "./types.ts";
 
 export interface OpContext {
@@ -2126,30 +2135,72 @@ async function runHostStep(
 }
 
 /**
- * Resolve the applied B→C result to commit.
- *
- * With no `sandboxSessionID`, this is the caller's own session (unchanged
- * behaviour). With an explicit identifier it is THAT sandbox session's
- * persisted APPLIED result. The identifier is a session id (validated as a
- * git ref component), never an arbitrary commit/tree/branch/path: the broker
- * derives the refs from its own persisted record, requires the record to be in
- * the sandbox result namespace and bound to the same project as the commit
- * target, and fails closed on anything else.
+ * Session states whose durable B→C result ref can be read by host tools.
+ * `APPLIED` is included so an applied result stays inspectable.
  */
-function resolveCommitResult(
+const RESULT_READABLE_STATES: readonly SessionState[] = [
+  "RESULT_READY",
+  "RETAINED",
+  "APPLIED",
+];
+
+interface ResultRefPolicy {
+  /** Acceptable session states for the caller. */
+  states: readonly SessionState[];
+  /** Fail-closed error prefix, e.g. "cannot commit" / "cannot read result". */
+  prefix: string;
+  /** Commit wording: the state gate is specifically "applied". */
+  applied: boolean;
+}
+
+/** Read-op policy: any state with a durable result, read wording. */
+const RESULT_READ_POLICY: ResultRefPolicy = {
+  states: RESULT_READABLE_STATES,
+  prefix: "cannot read result",
+  applied: false,
+};
+
+/**
+ * Install-op policy: any state with a durable result. Installing writes the
+ * result's own diff paths into the working tree under one approval; it is not
+ * the commit gate, so APPLIED is not required.
+ */
+const RESULT_INSTALL_POLICY: ResultRefPolicy = {
+  states: RESULT_READABLE_STATES,
+  prefix: "cannot install result",
+  applied: false,
+};
+
+/**
+ * Resolve a session's durable B→C result refs. Shared by the commit op
+ * (`APPLIED` only) and the read op (any state with a durable result). The
+ * identifier is a session id (validated as a git ref component), never an
+ * arbitrary commit/tree/branch/path: the broker derives the refs from its own
+ * persisted record, requires the record to be in the sandbox result namespace
+ * and bound to the same project as the caller, and fails closed otherwise.
+ */
+function resolveResultRefs(
   ctx: OpContext,
   callerSessionID: string,
   projectID: string,
   sandboxSessionID: unknown,
+  policy: ResultRefPolicy,
 ): { baseline: string; result: string } {
+  const { states, prefix, applied } = policy;
   if (sandboxSessionID === undefined) {
     const record = recordOr404(ctx.store, callerSessionID);
-    if (record.state !== "APPLIED" || !record.resultRef) {
-      throw new StateError("cannot commit: no applied B→C result for this session");
+    if (!states.includes(record.state) || !record.resultRef) {
+      throw new StateError(
+        applied
+          ? `${prefix}: no applied B→C result for this session`
+          : `${prefix}: no B→C result for this session`,
+      );
     }
     if (record.projectID !== projectID) {
       throw new StateError(
-        "cannot commit: this session's applied result is not bound to this project",
+        applied
+          ? `${prefix}: this session's applied result is not bound to this project`
+          : `${prefix}: this session's result is not bound to this project`,
       );
     }
     return {
@@ -2164,25 +2215,45 @@ function resolveCommitResult(
   // anything that could traverse or name an outside ref before any lookup.
   assertRefComponent(sandboxSessionID);
   const record = recordOr404(ctx.store, sandboxSessionID);
-  if (record.state !== "APPLIED" || !record.resultRef) {
+  if (!states.includes(record.state) || !record.resultRef) {
     throw new StateError(
-      `cannot commit: sandbox session ${sandboxSessionID} has no applied B→C result`,
+      applied
+        ? `${prefix}: sandbox session ${sandboxSessionID} has no applied B→C result`
+        : `${prefix}: sandbox session ${sandboxSessionID} has no B→C result`,
     );
   }
   if (record.projectID !== projectID) {
     throw new StateError(
-      `cannot commit: sandbox session ${sandboxSessionID} is not bound to this project`,
+      `${prefix}: sandbox session ${sandboxSessionID} is not bound to this project`,
     );
   }
   if (!record.resultRef.startsWith(`${RESULT_REF_PREFIX}/`)) {
     throw new StateError(
-      `cannot commit: sandbox session ${sandboxSessionID} result ref is outside the sandbox result namespace`,
+      `${prefix}: sandbox session ${sandboxSessionID} result ref is outside the sandbox result namespace`,
     );
   }
   return {
     baseline: record.baselineRef ?? baselineRef(sandboxSessionID),
     result: record.resultRef,
   };
+}
+
+/**
+ * Resolve the applied B→C result to commit. The result is the caller's own
+ * applied result unless `sandboxSessionID` names the (delegated) session whose
+ * result should be committed instead.
+ */
+function resolveCommitResult(
+  ctx: OpContext,
+  callerSessionID: string,
+  projectID: string,
+  sandboxSessionID: unknown,
+): { baseline: string; result: string } {
+  return resolveResultRefs(ctx, callerSessionID, projectID, sandboxSessionID, {
+    states: ["APPLIED"],
+    prefix: "cannot commit",
+    applied: true,
+  });
 }
 
 /**
@@ -2234,6 +2305,155 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
       }
     }
     return { committed: true, paths: changed, steps: results };
+  };
+}
+
+/**
+ * T1 read: inspect a session's durable B→C result ref with fixed argv only.
+ *
+ * The ref is resolved from a session id (never a caller-supplied raw ref);
+ * `compareSandboxSessionID` selects a two-ref comparison between two
+ * broker-resolved result refs. Read-only: no working-tree, index, or ref
+ * mutation, and no worker activation.
+ */
+export function buildSandboxResultOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as {
+      projectDir?: unknown;
+      sandboxSessionID?: unknown;
+      compareSandboxSessionID?: unknown;
+    };
+    authorizeHostDispatch(ctx, "sandboxResult", req.sessionID, req.agent);
+    const { projectID, projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const { baseline, result } = resolveResultRefs(
+      ctx,
+      req.sessionID,
+      projectID,
+      payload.sandboxSessionID,
+      RESULT_READ_POLICY,
+    );
+    // Resolve the comparison ref BEFORE any spawn so a bad second session
+    // fails closed without touching git.
+    let comparison: { sessionID: string; result: string } | null = null;
+    if (payload.compareSandboxSessionID !== undefined) {
+      const other = resolveResultRefs(
+        ctx,
+        req.sessionID,
+        projectID,
+        payload.compareSandboxSessionID,
+        RESULT_READ_POLICY,
+      );
+      comparison = {
+        sessionID: payload.compareSandboxSessionID as string,
+        result: other.result,
+      };
+    }
+    const sessionID =
+      payload.sandboxSessionID === undefined
+        ? req.sessionID
+        : (payload.sandboxSessionID as string);
+    return readSandboxResult(ctx, projectRoot, sessionID, baseline, result, comparison);
+  };
+}
+
+/**
+ * T2 install (approval-gated host mutation): write exactly the resolved B→C
+ * result's own diff paths into the host working tree. The broker derives every
+ * path from the persisted baseline/result refs; the caller never supplies a ref
+ * or a path list. Fixed argv only: `git restore --source=<result> --worktree`
+ * restores the working tree and never stages the index. The single human
+ * approval is the manual review, so S17 paths surface through it rather than
+ * being rejected (unlike gitCommit, which rejects them). No worker activation.
+ */
+export function buildSandboxResultInstallOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as {
+      projectDir?: unknown;
+      sandboxSessionID?: unknown;
+      expectedResultCommit?: unknown;
+    };
+    authorizeHostDispatch(ctx, "sandboxResultInstall", req.sessionID, req.agent);
+    assertExpectedResultCommit(payload.expectedResultCommit);
+    const expectedResultCommit = payload.expectedResultCommit;
+    const { projectID, projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const { baseline, result } = resolveResultRefs(
+      ctx,
+      req.sessionID,
+      projectID,
+      payload.sandboxSessionID,
+      RESULT_INSTALL_POLICY,
+    );
+    const resolvedCommit = await runHostStep(
+      ctx,
+      buildResultCommitArgv(result),
+      projectRoot,
+      60_000,
+    );
+    if (resolvedCommit.status !== 0) {
+      throw new StateError(
+        `cannot install result: cannot resolve the result ref commit (${trimErr(resolvedCommit.stderr)})`,
+      );
+    }
+    const resultCommit = resolvedCommit.stdout.trim().toLowerCase();
+    if (resultCommit !== expectedResultCommit) {
+      throw new StateError(
+        `cannot install result: the result ref moved since the preview (result-commit-mismatch): expectedResultCommit ${expectedResultCommit}, resolved ${resultCommit}`,
+      );
+    }
+    const changed = await changedPathsBetween(ctx, projectID, baseline, result);
+    if (changed.length === 0) {
+      throw new StateError("cannot install result: the B→C result is empty");
+    }
+    const rawChanges = await rawChangesBetween(ctx, projectID, baseline, result);
+    const rawPaths = rawChanges.map((change) => change.path).sort();
+    const sortedChanged = [...changed].sort();
+    if (
+      rawPaths.length !== sortedChanged.length ||
+      rawPaths.some((path, index) => path !== sortedChanged[index])
+    ) {
+      throw new StateError(
+        "cannot install result: raw metadata disagrees with the changed-path list",
+      );
+    }
+    const unsafe = rawChanges
+      .filter((change) => change.kind === "symlink" || change.kind === "submodule")
+      .map((change) => `${change.kind}:${change.path}`);
+    if (unsafe.length > 0) {
+      throw new StateError(
+        `cannot install result: unsafe symlink/submodule changes: ${unsafe.join(", ")}`,
+      );
+    }
+    const { restorePaths, deletePaths } = planSandboxResultInstall(rawChanges);
+    const steps: HostStepResult[] = [];
+    if (restorePaths.length > 0) {
+      const restore = await runHostStep(
+        ctx,
+        buildResultRestoreArgv(result, restorePaths),
+        projectRoot,
+      );
+      steps.push(restore);
+      if (restore.status !== 0) {
+        throw new MsbError(`cannot install result: git restore failed (${trimErr(restore.stderr)})`);
+      }
+    }
+    if (deletePaths.length > 0) {
+      const deleted = await runHostStep(ctx, buildResultDeleteArgv(deletePaths), projectRoot);
+      steps.push(deleted);
+      if (deleted.status !== 0) {
+        throw new MsbError(
+          `cannot install result: deleting removed paths failed (${trimErr(deleted.stderr)})`,
+        );
+      }
+    }
+    return {
+      installed: true,
+      resultRef: result,
+      resultCommit,
+      paths: changed,
+      restoredPaths: restorePaths,
+      deletedPaths: deletePaths,
+      steps,
+    };
   };
 }
 
