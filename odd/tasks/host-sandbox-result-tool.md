@@ -256,8 +256,47 @@ no feature code, deploy, mirror, restart, or commit was performed.
   plugin downgrade; and the manual `git show`/`git diff` readback before
   accepting a blocking ref.
 
+## Review
+
+- Review `review-a2ea785b68adb3b6`, contract `gentle-ai.review-integration/v2`,
+  candidate `0b40ce7..HEAD` (17 files, 2,104 lines, correction budget 200), four
+  lenses: risk, resilience, readability, and reliability.
+- After collection, review state was **escalated**, cause `unknown_causality`,
+  maintainer action informational. The reliability lane needed a second dispatch
+  after its first attempt hit the relay's 600-second deadline.
+- Two **CRITICAL** findings were both `deterministic` and `introduced`:
+  1. `broker/src/sandbox-result.ts:82-85` — installing a deletion could remove a
+     file outside the project when a working-tree parent directory is replaced
+     by a symlink; the path is classified from the ref diff while the removal
+     runs against the working tree.
+  2. `opencode/plugins/sandbox-tools.ts:583-622` and
+     `lib/host-tool-approval.ts:592-632` — the install approval showed only the
+     ref, commit, and up to 20 path names without a diff, and proceeded when the
+     preview patch was truncated, so the approval could not serve as the claimed
+     manual review of S17 paths.
+
+## Correction
+
+- Commit `8e9e0e1` (`fix(host): contain result deletions and show the diff at install approval`).
+- Deletions now resolve their working-tree parent with `realpath`, check
+  containment with the existing `isWithin` helper and canonical project root,
+  and `lstat` the target, refusing by name before any `rm`.
+- Install approval now routes through the existing `decideApplyPreviewApproval`
+  guard: a truncated preview without a complete artifact is refused before
+  `ctx.ask`; metadata carries the complete preview artifact path; and a bounded
+  diff accompanies the approval.
+- New regression tests: `sandbox-result-delete-containment.test.ts` and
+  `sandbox-result-install-preview.test.ts`. The correction result records held
+  RED evidence for both fixes.
+
+## Verification
+
+- Aggregate suite: 521 pass / 0 fail (2,637 expectations, 34 files).
+- Focused regressions: 19 pass / 0 fail.
+- Broker build: green.
+
 ## Next step
 
-The feature is implemented, installed, tested, documented, and committed, and has
-had **no independent review** — every check so far came from the session that
-wrote it. The next action is a review of `6620327`.
+The corrected candidate has had no independent review; it was written by the
+same session that fixed it. Re-review `8e9e0e1` as the remaining close-out, then
+record the review's lineage and findings in the final archive.
