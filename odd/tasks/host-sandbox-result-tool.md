@@ -2,7 +2,7 @@
 
 - **Feature:** `host-sandbox-result-tool`
 - **Project:** `sandbox-integration` (`/home/james/agent-sandbox-integration`)
-- **Status:** implementation in working tree — T1/T2 implemented and installed, T3/T4/T5 done; record T1/T2 commit identities once supplied
+- **Status:** implemented, installed, tested, documented, and committed; independent review pending
 - **Created:** 2026-09-23
 - **Delivery strategy:** `ask-on-risk`
 - **Chain strategy:** `stacked-to-main` (the user's standing choice)
@@ -219,15 +219,19 @@ no feature code, deploy, mirror, restart, or commit was performed.
 
 | Task | Status  | Notes |
 |------|---------|-------|
-| T1   | done    | Implemented, installed, and verified in the working tree with the suite green; record commit identity once supplied. |
-| T2   | done    | Implemented, installed, and verified in the working tree with the suite green; record commit identity once supplied. |
-| T3   | done    | Exposure completed. |
+| T1   | done    | Implemented, installed, and verified. Commit `6620327` (`feat(host): read and install a sandbox result ref from the orchestrator`); shares the work-unit commit with T2 because both modify the same files (`server.ts`, `service.ts`, `types.ts`, `validation.ts`, `sandbox-tools.ts`, `sandbox-permissions.jsonc`), which a hunk-level split would not have made safer. |
+| T2   | done    | Implemented, installed, and verified. Same work-unit commit `6620327` (`feat(host): read and install a sandbox result ref from the orchestrator`); T1/T2 share this commit because they modify the same files (`server.ts`, `service.ts`, `types.ts`, `validation.ts`, `sandbox-tools.ts`, `sandbox-permissions.jsonc`), which a hunk-level split would not have made safer. |
+| T3   | done    | Exposure completed; documented by `152f433` (`docs: document the sandbox result tools and close the tracker`). |
 | T4   | done    | Tests pass: twelve tests for the read operation, install suite, and live-git verification that install writes the working tree without staging the index. |
-| T5   | done    | Docs completed. |
+| T5   | done    | Docs completed; documented by `152f433` (`docs: document the sandbox result tools and close the tracker`). |
 
 ## Evidence
 
-- Tracker created: `odd/tasks/host-sandbox-result-tool.md` (this file).
+- Tracker created: `odd/tasks/host-sandbox-result-tool.md` (this file); first
+  recorded in commit `8848525`.
+- Commit `6620327`: `feat(host): read and install a sandbox result ref from the orchestrator` — contains T1 and T2 in one work-unit commit because the work touched the same files, and a hunk-level split would not have made the result safer.
+- Commit `152f433`: `docs: document the sandbox result tools and close the tracker` — documents T3 and T5 and closes the tracker.
+- T1/T2 implementation was installed and verified; the tests and implementation checks described below were from the session that wrote the feature.
 - Observed read-only this session via CodeGraph (current on-disk source):
   `broker/src/gitops.ts:35-46`, `:104-114`, `:242-256`, `:394-402`;
   `broker/src/service.ts:158`, `:2139-2186`, `:2196`;
@@ -254,8 +258,6 @@ no feature code, deploy, mirror, restart, or commit was performed.
 
 ## Next step
 
-1. Install the retained threat-model result
-   `refs/opencode-sandbox/result/ses_f2a680fbcffe4ofdUaecsnUiV2`; it touches S17
-   (`docs/threat-model.md`) and is user-installed.
-2. Record the T1/T2 commit identities once supplied; do not infer or invent them.
-3. Then review.
+The feature is implemented, installed, tested, documented, and committed, and has
+had **no independent review** — every check so far came from the session that
+wrote it. The next action is a review of `6620327`.
