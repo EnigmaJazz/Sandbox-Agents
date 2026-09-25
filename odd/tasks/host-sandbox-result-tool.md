@@ -2,7 +2,7 @@
 
 - **Feature:** `host-sandbox-result-tool`
 - **Project:** `sandbox-integration` (`/home/james/agent-sandbox-integration`)
-- **Status:** planned — tracker only; no implementation started
+- **Status:** implementation in working tree — T1/T2 implemented and installed, T3/T4/T5 done; record T1/T2 commit identities once supplied
 - **Created:** 2026-09-23
 - **Delivery strategy:** `ask-on-risk`
 - **Chain strategy:** `stacked-to-main` (the user's standing choice)
@@ -219,11 +219,11 @@ no feature code, deploy, mirror, restart, or commit was performed.
 
 | Task | Status  | Notes |
 |------|---------|-------|
-| T1   | pending | Not started. Read op + plugin read tool. |
-| T2   | pending | Not started. Approval-gated install. |
-| T3   | pending | Not started. Plugin, fragment, manifest, threat model. |
-| T4   | pending | Not started. Tests. |
-| T5   | pending | Not started. Docs. |
+| T1   | done    | Implemented, installed, and verified in the working tree with the suite green; record commit identity once supplied. |
+| T2   | done    | Implemented, installed, and verified in the working tree with the suite green; record commit identity once supplied. |
+| T3   | done    | Exposure completed. |
+| T4   | done    | Tests pass: twelve tests for the read operation, install suite, and live-git verification that install writes the working tree without staging the index. |
+| T5   | done    | Docs completed. |
 
 ## Evidence
 
@@ -235,6 +235,18 @@ no feature code, deploy, mirror, restart, or commit was performed.
   `opencode/plugins/lib/host-tool-approval.ts:20-36` (16 mutations).
 - `bun --cwd broker test` at tracker creation: 489 pass, 0 fail, 2187 expect()
   calls, 489 tests across 30 files, 0 failures.
+- Re-read current implementation sources: `opencode/plugins/sandbox-tools.ts:559-581`
+  (`host_sandbox_result`), `:583-622` (`host_sandbox_result_install`);
+  `broker/src/validation.ts:799-808` (8 read operations), `:811-829`
+  (17 mutations), `:987-988` (payload allowlists);
+  `opencode/config-fragments/sandbox-permissions.jsonc:82-83`.
+- `bun --cwd broker test` run for this update succeeded; complete aggregate totals
+  were unavailable in the returned output.
+- T4 evidence: twelve tests pass across the read operation and install suite.
+  The live-git test `sandboxResultInstall — live git: worktree written, index
+  untouched` verified that installation writes the working tree without staging
+  the index. Its RED run, after reverting to the `git checkout <ref> -- <paths>`
+  shape, produced staged `mod.ts` and `new.ts` entries that should not exist.
 - Reported by the user (2026-09-21; not reproduced here): the index-staging side
   effect and forced `git reset --mixed` + six-unit re-commit; the stale-checkout
   plugin downgrade; and the manual `git show`/`git diff` readback before
@@ -242,7 +254,8 @@ no feature code, deploy, mirror, restart, or commit was performed.
 
 ## Next step
 
-Confirm the T1/T2 shapes against `resolveCommitResult` and `buildDiffArgv`, then
-implement T1 (read) first as a reviewable unit. Confirm the S17 review/install
-path before any apply: the T2 approval is the manual review, and the agent never
-auto-applies S17 paths.
+1. Install the retained threat-model result
+   `refs/opencode-sandbox/result/ses_f2a680fbcffe4ofdUaecsnUiV2`; it touches S17
+   (`docs/threat-model.md`) and is user-installed.
+2. Record the T1/T2 commit identities once supplied; do not infer or invent them.
+3. Then review.

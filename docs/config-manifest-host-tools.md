@@ -237,11 +237,11 @@ collapses that map to a single `deny`.
 
 ## 5. Tool inventory + authority matrix
 
-`opencode/plugins/sandbox-tools.ts` registers **44 tools**: **13 `sandbox_*`**
-and **31 host tools** (2 `host_git_*`, 13 `host_review_*`, 13 `host_sdd_*`,
-3 other host mutations). The 31 host tools map exactly to the broker's 31 host
-operations: **9 read operations** (`broker/src/validation.ts:750-760`) and
-**22 mutation operations** (`broker/src/validation.ts:763-786`).
+`opencode/plugins/sandbox-tools.ts` registers **46 tools**: **13 `sandbox_*`**
+and **33 host tools** (2 `host_git_*`, 13 `host_review_*`, 13 `host_sdd_*`,
+5 other host tools). The 33 host tools map exactly to the broker's 33 host
+operations: **10 read operations** (`broker/src/validation.ts:799-808`) and
+**23 mutation operations** (`broker/src/validation.ts:811-829`).
 
 ### Authority model (read this first)
 
@@ -309,10 +309,12 @@ operations: **9 read operations** (`broker/src/validation.ts:750-760`) and
 | `host_sdd_attempt_grant` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:880`; `sdd-service.ts:351`; `validation.ts:775`; fragment `:88` |
 | `host_sdd_archive_compose` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:912`; `sdd-service.ts:371`; `validation.ts:766`; fragment `:104` |
 
-### 5d. other host mutations
+### 5d. other host tools
 
 | Tool | Read-only / mutation | Fragment permission | Agent(s) permitted per code | Evidence (file:line) |
 |---|---|---|---|---|
+| `host_sandbox_result` | read-only | allow | every agent | plugin `sandbox-tools.ts:559`; op `sandboxResult`; read list `validation.ts:799-808`; payload `validation.ts:987`; fragment `sandbox-permissions.jsonc:82` |
+| `host_sandbox_result_install` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:583`; op `sandboxResultInstall`; mutation list `validation.ts:811-829`; payload `validation.ts:988`; fragment `sandbox-permissions.jsonc:83` |
 | `host_gh_issue_create` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:980`; op `ghIssueCreate` `service.ts:1947`; `validation.ts:769`; fragment `:92` |
 | `host_plan_append` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:1003`; `service.ts:2270`; `validation.ts:776`; fragment `:93` |
 | `host_register_project` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:1280`; `service.ts:2038`; `validation.ts:770`; fragment `:94` |
@@ -363,7 +365,7 @@ broker-side (e.g. `ensureWorker` refuses orchestrator,
    (`broker/src/config.ts:247-259`, `DEFAULT_HOST_READ_CONFIG`), but the
    registering plugin was not found — see section 8.
 3. No host tool is missing from the fragment and no fragment host tool is
-   missing from code: the 31 fragment host entries match the 31 host tools
+   missing from code: the 33 fragment host entries match the 33 host tools
    one-for-one. The only host/review names absent from the fragment code path
    are the ten `host_*` read tools in item 2.
 

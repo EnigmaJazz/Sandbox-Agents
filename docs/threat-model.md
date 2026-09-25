@@ -206,3 +206,25 @@ the approved root and hand it to `gentle-ai`; the 512-KiB cap and canonical
 root check bound that disclosure. Verification must still resolve the exact
 `review acknowledge-approved` flag set against the installed binary before
 any flag is added.
+
+## Host sandbox result tools (`host-sandbox-result-tool`)
+
+**Install boundary**: `sandboxResultInstall` / `host_sandbox_result_install` is
+an orchestrator-only, approval-gated write into the host working tree. The
+approval is bound to the commit that was previewed. The operation writes only
+paths in the result's own diff, never writes outside that diff, and never stages
+the Git index. It requires the configured ask approval and is ask-gated; it is
+not an automatic apply path.
+
+**S17 review**: unlike `host_git_commit`, which refuses S17 paths through
+`checkProtectedPaths`, result installation deliberately surfaces S17 paths
+through the single approval. That approval is the manual review. The
+sandbox-apply boundary is unchanged and continues to refuse protected paths.
+
+**Environment boundary (verified 2026-09-24)**: the nono profile's bundled
+groups grant package-manager caches read-only: `~/.bun` through
+`group:bun_runtime` and `~/.npm` through `group:node_runtime`. In contrast,
+`~/.cache/opencode` is read-write. A package install therefore fails at its
+first cache write, and OpenCode logs nothing. Plugin and package installs belong
+to the non-secure OpenCode instance, which shares `~/.cache/opencode`; the secure
+instance consumes that cache only.
