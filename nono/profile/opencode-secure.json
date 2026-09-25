@@ -27,6 +27,7 @@
       "$HOME/.cache/opencode",
       "$HOME/.config/opencode",
       "$HOME/.cache/aft",
+      "~/.bun/install/cache",
       "$HOME/.local/share/cortexkit",
       "$HOME/.config/cortexkit",
       "$HOME/.gentle-ai",
@@ -124,7 +125,8 @@
       "mcp.context7.com",
       "context7.com",
       "registry.npmjs.org",
-      "registry.yarnpkg.com"
+      "registry.yarnpkg.com", 
+      "api.githubcopilot.com"
     ],
     "open_port": [
       4096,
