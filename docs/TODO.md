@@ -201,3 +201,31 @@ single-line, which is a genuine constraint. Add tests that a multi-line message 
 `git commit` intact and that NUL is still refused. Check whether the same validator gates the
 other free-text fields (`host_plan_append` content, the review capture inputs) so the fix is
 consistent rather than one-off.
+### 7. Gap — Python workers cannot run a project's tests
+
+Reported 2026-09-24 from the tesla project, where a sandbox worker could not run a single test and the change therefore shipped unverified.
+
+Evidence: the worker image carries pytest but none of the project's dependencies (`httpx`, `fastapi`, `pytest_asyncio`), has no `pip` and no `uv`, has no network, and provides Python 3.13.5 against a repository targeting 3.14 — so `pytest` dies while loading `tests/conftest.py`.
+
+This is a design gap, not a defect: the image carries *runners* and is validated by a dependency-free fixture, so a real project's dependency set was never in scope. Whatever we choose, it should be chosen deliberately, because "the worker cannot verify" pushes verification back onto the host and quietly weakens the point of sandboxing. Options to weigh:
+
+- read-only access to a project-local environment (awkward: a venv embeds absolute paths, and `.venv/` is gitignored so it is not in the captured baseline);
+- an offline wheelhouse the worker may install from, with `pip install --no-index` — requires pip in the image and a matching interpreter;
+- a per-project image layer pinning the project's Python version and dependencies;
+- accepting that Python projects verify on the host, and saying so in the workflow.
+
+The interpreter mismatch (3.13 vs 3.14) is part of the problem and must be decided rather than worked around.
+
+### 8. Defect — `sandbox_apply_patch` rejects hunks ending on added lines without trailing context
+
+Reported 2026-09-24 from the tesla project: hunks that end on added lines with no trailing context are refused, so the worker had to append trailing context to every hunk. Minor in impact, but the failure mode is wrong — it silently forces awkward patches instead of either accepting them or naming the constraint when it refuses.
+### 9. Defect — the idle reaper kills workers mid-turn, and a reaped session is a dead-end
+
+Evidence, `sandbox-broker` journal 2026-09-24: two delegated workers activated at 22:39:12 (`ensureWorker` ok 600ms, `exec` ok 518ms, `readFile` ok at 22:39:22). At 22:40:17 and 22:40:19 the `reaper` logged `bundle … / tmp_index …` for both sessions. At 22:40:36 `ensureWorker` returned `session … is FAILED_CLOSED; manual review required`, and the next read returned `not sandbox-active (state=FAILED_CLOSED)`.
+
+Roughly 55 seconds with no broker operation — a model composing a large documentation edit — was treated as idle and reaped. Two defects:
+
+1. The 60-second idle threshold fires while a turn is in flight, and a language-model turn routinely exceeds it. The broker distinguishes operation kinds for timeouts (`exec` 130s, `ensureWorker` 120s) but not for idleness.
+2. A reaped session becomes `FAILED_CLOSED` and cannot be resumed, so a single slow turn permanently kills that worker and any unapplied work on it. Every later operation on the session fails.
+
+Related to item 20 (`RETAINED` results are dead-ends): both are lifecycle states with no recovery path, and in both cases the operator has no way to clear them without a restart.
