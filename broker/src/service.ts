@@ -73,6 +73,7 @@ import {
 import {
   buildResultCommitArgv,
   buildResultDeleteArgv,
+  buildResultPatchArgv,
   buildResultRestoreArgv,
   planSandboxResultInstall,
   readSandboxResult,
@@ -2352,7 +2353,17 @@ export function buildSandboxResultOp(ctx: OpContext): OpHandler {
       payload.sandboxSessionID === undefined
         ? req.sessionID
         : (payload.sandboxSessionID as string);
-    return readSandboxResult(ctx, projectRoot, sessionID, baseline, result, comparison);
+    const readResult = await readSandboxResult(ctx, projectRoot, sessionID, baseline, result, comparison);
+    const completePatch = await ctx.git.spawn(buildResultPatchArgv(baseline, result), { cwd: projectRoot, timeoutMs: 60_000, maxOutputBytes: GIT_OUTPUT_MAX_BYTES });
+    let applyPreviewFiles: ApplyPreviewFiles | undefined;
+    if (completePatch.status === 0 && Buffer.byteLength(completePatch.stdout, "utf8") < GIT_OUTPUT_MAX_BYTES) {
+      try {
+        applyPreviewFiles = ensureCompleteApplyPreview(ctx.config.stateDir, sessionID, completePatch.stdout);
+      } catch {
+        // The install approval guard refuses a truncated preview without this artifact.
+      }
+    }
+    return { ...readResult, ...(applyPreviewFiles ? { applyPreviewFiles } : {}) };
   };
 }
 
@@ -2424,6 +2435,7 @@ export function buildSandboxResultInstallOp(ctx: OpContext): OpHandler {
       );
     }
     const { restorePaths, deletePaths } = planSandboxResultInstall(rawChanges);
+    assertResultDeleteTargetsContained(projectRoot, deletePaths);
     const steps: HostStepResult[] = [];
     if (restorePaths.length > 0) {
       const restore = await runHostStep(
@@ -2457,6 +2469,7 @@ export function buildSandboxResultInstallOp(ctx: OpContext): OpHandler {
   };
 }
 
+function assertResultDeleteTargetsContained(projectRoot: string, paths: readonly string[]): void { for (const path of paths) { const target = resolve(projectRoot, path); let parentRealPath: string; try { parentRealPath = realpathSync(dirname(target)); } catch { throw new StateError(`cannot install result: result-delete-parent-unavailable: cannot resolve parent for ${path}`); } if (!isWithin(projectRoot, parentRealPath)) throw new StateError(`cannot install result: result-delete-parent-escape: resolved parent for ${path} is outside the project`); try { if (!lstatSync(target).isFile()) throw new StateError(`cannot install result: result-delete-not-regular-file: ${path}`); } catch (error) { if (error instanceof StateError) throw error; if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new StateError(`cannot install result: result-delete-target-unavailable: cannot inspect ${path}`); } } }
 /**
  * Guarded push: the broker resolves branch/upstream/ahead itself and refuses
  * every unsafe condition BEFORE spawning the push.

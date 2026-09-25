@@ -599,16 +599,29 @@ export default function sandboxToolsPlugin() {
           }, ctx.agent)) as {
             result: { ref: string; commit: string };
             changedPaths: Array<{ path: string }>;
+            patch: string;
+            patchTruncated: boolean;
+            applyPreviewFiles?: { plain?: string; ansi?: string };
           };
-          await ctx.ask(
-            buildSandboxResultInstallAsk({
-              resultRef: preview.result.ref,
-              resultCommit: preview.result.commit,
-              changedPaths: preview.changedPaths.map((entry) => entry.path),
-              ...(args.sandboxSessionID !== undefined
-                ? { sandboxSessionID: args.sandboxSessionID }
-                : {}),
-            }),
+          const boundedPreview = preview.patch.length > 12_000
+            ? `${preview.patch.slice(0, 12_000)}\n(... approval preview truncated; inspect previewFile)`
+            : preview.patch;
+          const previewTruncated = preview.patchTruncated || preview.patch.length > 12_000;
+          await requestApplyApproval(
+            { previewTruncated, applyPreviewFiles: preview.applyPreviewFiles },
+            async (paths) => ctx.ask(
+              buildSandboxResultInstallAsk({
+                resultRef: preview.result.ref,
+                resultCommit: preview.result.commit,
+                changedPaths: preview.changedPaths.map((entry) => entry.path),
+                preview: boundedPreview,
+                previewTruncated,
+                ...(paths.previewFile ? { previewFile: paths.previewFile } : {}),
+                ...(args.sandboxSessionID !== undefined
+                  ? { sandboxSessionID: args.sandboxSessionID }
+                  : {}),
+              }),
+            ),
           );
           const result = await c.request("sandboxResultInstall", ctx.sessionID, {
             projectDir: currentProjectDirectory(ctx.directory),

@@ -599,6 +599,9 @@ export interface SandboxResultInstallAskArgs {
   changedPaths?: readonly string[];
   deletionPaths?: readonly string[];
   sandboxSessionID?: string;
+  preview?: string;
+  previewTruncated?: boolean;
+  previewFile?: string;
 }
 
 /** Approval metadata for `host_sandbox_result_install` (ref, commit, paths). */
@@ -623,6 +626,10 @@ export function buildSandboxResultInstallAsk(args: SandboxResultInstallAskArgs):
     details.deletionCount = args.deletionPaths.length;
     details.deletionPreview = args.deletionPaths.slice(0, 20).join(", ");
   }
+  if (args.previewTruncated && !args.previewFile) throw new HostToolAskError("truncated install preview requires a complete previewFile artifact");
+  if (args.preview !== undefined) details.preview = args.preview.length > 12_000 ? `${args.preview.slice(0, 12_000)}\n(... approval preview truncated; inspect previewFile)` : args.preview;
+  if (args.previewTruncated !== undefined) details.previewTruncated = args.previewTruncated ? "yes" : "no";
+  if (args.previewFile !== undefined) { assertNonEmpty(args.previewFile, "previewFile"); details.previewFile = args.previewFile; }
   return buildHostToolAsk({
     permission: "host_sandbox_result_install",
     operation: "sandboxResultInstall",
