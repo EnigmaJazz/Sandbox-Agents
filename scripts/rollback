@@ -46,7 +46,10 @@ done
 
 # --- 2. nono profile ---------------------------------------------------------
 NONO_DEST="$HOME/.config/nono/profiles/opencode-secure.json"
-if [[ -f "$NONO_DEST" ]] && cmp -s "$REPO_ROOT/nono/profile/opencode-secure.json" "$NONO_DEST"; then
+if [[ -L "$NONO_DEST" ]] && [[ "$(readlink "$NONO_DEST")" == "$REPO_ROOT/nono/profile/opencode-secure.json" ]]; then
+  log "remove installed nono profile symlink $NONO_DEST"
+  do_it rm -f "$NONO_DEST"
+elif [[ -f "$NONO_DEST" && ! -L "$NONO_DEST" ]] && cmp -s "$REPO_ROOT/nono/profile/opencode-secure.json" "$NONO_DEST"; then
   log "remove installed nono profile $NONO_DEST (matches repo copy)"
   do_it rm -f "$NONO_DEST"
 else
@@ -70,7 +73,7 @@ fi
 log "restore .bak files (newest first)"
 for bak in "$HOME/.config/nono/profiles/opencode-secure.json.bak-"* \
            "$HOME/.config/systemd/user/sandbox-broker.service.bak-"*; do
-  [[ -e "$bak" ]] || continue
+  [[ -f "$bak" && ! -L "$bak" ]] || continue
   ORIG="${bak%.bak-*}"
   log "restore $ORIG <- $bak"
   do_it cp -p "$bak" "$ORIG"

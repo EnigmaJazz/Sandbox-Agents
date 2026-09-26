@@ -69,11 +69,25 @@ install_file() { # src dest mode
 
 # --- 1. nono profile ---------------------------------------------------------
 NONO_DEST="$HOME/.config/nono/profiles/opencode-secure.json"
+NONO_SOURCE="$REPO_ROOT/nono/profile/opencode-secure.json"
 log "step 1: nono profile"
 if [[ "$APPLY" == "1" ]]; then
   "$NONO_BIN" profile validate "$REPO_ROOT/nono/profile/opencode-secure.json" >/dev/null
 fi
-install_file "$REPO_ROOT/nono/profile/opencode-secure.json" "$NONO_DEST" 0644
+if [[ -L "$NONO_DEST" ]] && [[ "$(readlink "$NONO_DEST")" == "$NONO_SOURCE" ]]; then
+  log "already linked $NONO_DEST -> $NONO_SOURCE"
+else
+  if [[ -f "$NONO_DEST" && ! -L "$NONO_DEST" ]]; then
+    backup "$NONO_DEST"
+  fi
+  log "link $NONO_SOURCE -> $NONO_DEST (symlink; not a copy)"
+  if [[ "$APPLY" == "1" ]]; then
+    mkdir -p "$(dirname "$NONO_DEST")"
+    rm -f "$NONO_DEST"
+    ln -s "$NONO_SOURCE" "$NONO_DEST"
+  fi
+  journal "symlink" "$NONO_SOURCE" "$NONO_DEST" ""
+fi
 
 # --- 2. opencode config fragment merge --------------------------------------
 log "step 2: opencode permission fragment (merge with diff FIRST)"

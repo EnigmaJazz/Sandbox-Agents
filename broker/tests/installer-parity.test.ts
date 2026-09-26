@@ -72,6 +72,25 @@ describe("installer/rollback plugin coverage parity", () => {
   });
 });
 
+describe("nono profile symlink install contract", () => {
+  test("installer links the repo profile and leaves an existing correct link alone", () => {
+    const source = readScript("scripts/install-user-files");
+    expect(source).toContain('NONO_SOURCE="$REPO_ROOT/nono/profile/opencode-secure.json"');
+    expect(source).toContain('[[ -L "$NONO_DEST" ]] && [[ "$(readlink "$NONO_DEST")" == "$NONO_SOURCE" ]]');
+    expect(source).toContain('log "link $NONO_SOURCE -> $NONO_DEST (symlink; not a copy)"');
+    expect(source).toContain('ln -s "$NONO_SOURCE" "$NONO_DEST"');
+    expect(source).toContain('"$NONO_BIN" profile validate "$REPO_ROOT/nono/profile/opencode-secure.json" >/dev/null');
+  });
+
+  test("rollback removes the installed symlink and restores regular-file backups", () => {
+    const source = readScript("scripts/rollback");
+    expect(source).toContain('if [[ -L "$NONO_DEST" ]]');
+    expect(source).toContain('do_it rm -f "$NONO_DEST"');
+    expect(source).toContain('[[ -f "$bak" && ! -L "$bak" ]]');
+    expect(source).toContain('do_it cp -p "$bak" "$ORIG"');
+  });
+});
+
 // systemd-user/broker.env is installed verbatim by scripts/install-user-files
 // into ~/.config/opencode-sandbox/broker.env and loaded as the broker's
 // EnvironmentFile. The immutable-receipt-review runtime eligibility check
