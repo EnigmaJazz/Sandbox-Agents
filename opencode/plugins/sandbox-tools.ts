@@ -61,6 +61,34 @@ import {
   buildSddAttemptGrantAsk,
 } from "./lib/host-tool-approval.ts";
 
+export function applyTargetedEdit(
+  content: string,
+  oldString: string,
+  newString: string,
+  replaceAll = false,
+): string {
+  if (oldString.length === 0) {
+    throw new Error("sandbox_edit: oldString must not be empty");
+  }
+  const firstIndex = content.indexOf(oldString);
+  if (firstIndex === -1) {
+    throw new Error("sandbox_edit: oldString was not found");
+  }
+  const secondIndex = content.indexOf(oldString, firstIndex + oldString.length);
+  if (secondIndex !== -1 && !replaceAll) {
+    throw new Error(
+      "sandbox_edit: oldString matched multiple times; set replaceAll to true to replace all",
+    );
+  }
+  const result = replaceAll
+    ? content.split(oldString).join(newString)
+    : `${content.slice(0, firstIndex)}${newString}${content.slice(firstIndex + oldString.length)}`;
+  if (result.length === 0) {
+    throw new Error("sandbox_edit: edit would leave the file empty");
+  }
+  return result;
+}
+
 const READ_ONLY_AGENTS: readonly string[] = ["gentle-orchestrator"];
 
 function assertNotOrchestrator(agent: string | undefined, toolName: string): void {
@@ -254,10 +282,11 @@ export default function sandboxToolsPlugin() {
 
       sandbox_write: tool({
         description:
-          "Create or overwrite a file in the worker-only sandbox. The first useful mutation " +
+          "Create or overwrite a file (replace the entire file contents) in the worker-only sandbox. The first useful mutation " +
           "activates the worker naturally—no dummy sandbox_bash; no approval is required and the " +
-          "host stays unchanged. path is relative to the sandbox project root, never absolute or " +
-          "traversal. The broker appends a final newline when absent.",
+          "host stays unchanged. Use sandbox_edit for targeted text changes that preserve the rest " +
+          "of the file. path is relative to the sandbox project root, never absolute or traversal. " +
+          "The broker appends a final newline when absent.",
         args: { path: pathArg, content: contentArg },
         execute: async (args, ctx) => {
           assertNotOrchestrator(ctx.agent, "sandbox_write");
@@ -269,22 +298,39 @@ export default function sandboxToolsPlugin() {
 
       sandbox_edit: tool({
         description:
-          "Replace the ENTIRE file contents in the worker-only sandbox; this is not a surgical edit. " +
-          "For targeted changes that should not replace the whole file, use sandbox_apply_patch. Provide the complete desired file contents. " +
-          "mutation activates the worker naturally—no dummy sandbox_bash; no approval is required " +
-          "and the host stays unchanged until sandbox_apply. path is relative to the sandbox " +
-          "project root, never absolute or traversal. The broker appends a final newline when absent.",
-        args: { path: pathArg, content: contentArg },
+          "Edit a file in the worker-only sandbox by replacing only the specified text. oldString " +
+          "must occur exactly once unless replaceAll is true. Refuses an empty oldString, no match, " +
+          "multiple matches without replaceAll, or a result that would leave the file empty. For " +
+          "whole-file replacement, use sandbox_write. The first useful mutation activates the worker " +
+          "naturally—no dummy sandbox_bash; no approval is required and the host stays unchanged " +
+          "until sandbox_apply. path is relative to the sandbox project root, never absolute or " +
+          "traversal. The broker appends a final newline when absent.",
+        args: {
+          path: pathArg,
+          oldString: z.string().max(1024 * 1024),
+          newString: z.string().max(1024 * 1024),
+          replaceAll: z.boolean().optional(),
+        },
         execute: async (args, ctx) => {
           assertNotOrchestrator(ctx.agent, "sandbox_edit");
-          try {
-            await ensureWorker(ctx.sessionID, ctx.directory);
-            const c = await client();
-            return formatResult("writeFile", await c.request("writeFile", ctx.sessionID, { path: args.path, content: args.content }, ctx.agent));
-          } catch (error) {
-            const detail = error instanceof Error ? error.message : String(error);
-            throw new Error(`sandbox_edit failed: ${detail}. It replaces the entire file; supply complete desired contents or use sandbox_apply_patch for targeted changes.`);
+          await ensureWorker(ctx.sessionID, ctx.directory);
+          const c = await client();
+          const file = (await c.request("readFile", ctx.sessionID, { path: args.path }, ctx.agent)) as {
+            content?: unknown;
+          };
+          if (typeof file.content !== "string") {
+            throw new Error("sandbox_edit: broker read returned no file content");
           }
+          const content = applyTargetedEdit(
+            file.content,
+            args.oldString,
+            args.newString,
+            args.replaceAll,
+          );
+          return formatResult(
+            "writeFile",
+            await c.request("writeFile", ctx.sessionID, { path: args.path, content }, ctx.agent),
+          );
         },
       }),
 
