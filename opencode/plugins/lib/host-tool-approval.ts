@@ -40,8 +40,8 @@ export interface HostToolAskMetadata {
   operation: HostMutationOperation;
   /** One-line human summary of the host mutation. */
   summary: string;
-  /** Exact, human-auditable arguments that drive the mutation. */
-  details: Record<string, string | number>;
+  /** Flat, human-auditable fields rendered by the approval harness. */
+  [key: string]: string | number;
 }
 
 export interface HostToolAsk {
@@ -93,9 +93,9 @@ export function buildHostToolAsk(input: {
     patterns: ["*"],
     always: [],
     metadata: {
+      ...input.details,
       operation: input.operation,
       summary: input.summary,
-      details: { ...input.details },
     },
   };
 }
@@ -627,7 +627,12 @@ export function buildSandboxResultInstallAsk(args: SandboxResultInstallAskArgs):
     details.deletionPreview = args.deletionPaths.slice(0, 20).join(", ");
   }
   if (args.previewTruncated && !args.previewFile) throw new HostToolAskError("truncated install preview requires a complete previewFile artifact");
-  if (args.preview !== undefined) details.preview = args.preview.length > 12_000 ? `${args.preview.slice(0, 12_000)}\n(... approval preview truncated; inspect previewFile)` : args.preview;
+  if (args.preview !== undefined) {
+    const truncationNote = "\n(... approval preview truncated; inspect previewFile)";
+    details.preview = args.preview.length > 12_000
+      ? `${args.preview.slice(0, 12_000 - truncationNote.length)}${truncationNote}`
+      : args.preview;
+  }
   if (args.previewTruncated !== undefined) details.previewTruncated = args.previewTruncated ? "yes" : "no";
   if (args.previewFile !== undefined) { assertNonEmpty(args.previewFile, "previewFile"); details.previewFile = args.previewFile; }
   return buildHostToolAsk({

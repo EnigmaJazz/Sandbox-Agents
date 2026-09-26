@@ -18,8 +18,22 @@ describe("sandbox result install approval preview", () => {
       preview: "diff --git a/a.ts b/a.ts\n+shown change",
       previewTruncated: false,
     });
-    expect(ask.metadata.details.previewFile).toBe("/state/apply-preview/worker-7.diff");
-    expect(ask.metadata.details.preview).toContain("+shown change");
+    expect(ask.metadata.previewFile).toBe("/state/apply-preview/worker-7.diff");
+    expect(ask.metadata.preview).toContain("+shown change");
+  });
+
+  test("caps oversized approval previews without losing the truncation marker", () => {
+    const ask = buildSandboxResultInstallAsk({
+      resultRef: "refs/opencode-sandbox/result/worker-7",
+      resultCommit: "0123456789abcdef0123456789abcdef01234567",
+      preview: "+change\n".repeat(2_000),
+      previewTruncated: true,
+      previewFile: "/state/apply-preview/worker-7.diff",
+    });
+    expect(ask.metadata.preview.length).toBeLessThanOrEqual(12_000);
+    expect(ask.metadata.preview).toContain("approval preview truncated");
+    expect(ask.metadata.previewTruncated).toBe("yes");
+    expect(ask.metadata.previewFile).toBe("/state/apply-preview/worker-7.diff");
   });
 
   test("large complete preview remains eligible for approval", async () => {

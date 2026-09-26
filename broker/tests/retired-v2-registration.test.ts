@@ -129,7 +129,7 @@ describe("v6 §28 retired v2 registration removal", () => {
     });
     expect(ask.permission).toBe("host_sdd_attempt_grant");
     expect(ask.metadata.operation).toBe("sddAttemptGrant");
-    expect(ask.metadata.details.rootCount).toBe(2);
+    expect(ask.metadata.rootCount).toBe(2);
     expect(ask.always).toEqual([]);
   });
 
