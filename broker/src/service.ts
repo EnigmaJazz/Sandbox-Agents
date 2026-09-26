@@ -1169,7 +1169,7 @@ export function buildApplyOp(ctx: OpContext): OpHandler {
       );
       if (check.status !== 0) {
         throw new MsbError(
-          `patch does not apply cleanly: ${check.stderr.trim()}`,
+          `patch does not apply cleanly: ${check.stderr.trim()}. Check unified-diff hunk line counts and include at least one unchanged context line in each changed-line hunk; an end-of-file append-only hunk is valid. Include a final newline.`,
         );
       }
       const applied = await ctx.adapter.exec(

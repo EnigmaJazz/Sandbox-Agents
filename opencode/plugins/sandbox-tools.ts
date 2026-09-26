@@ -269,16 +269,22 @@ export default function sandboxToolsPlugin() {
 
       sandbox_edit: tool({
         description:
-          "Replace the full contents of a file in the worker-only sandbox. The first useful " +
+          "Replace the ENTIRE file contents in the worker-only sandbox; this is not a surgical edit. " +
+          "For targeted changes that should not replace the whole file, use sandbox_apply_patch. Provide the complete desired file contents. " +
           "mutation activates the worker naturally—no dummy sandbox_bash; no approval is required " +
           "and the host stays unchanged until sandbox_apply. path is relative to the sandbox " +
           "project root, never absolute or traversal. The broker appends a final newline when absent.",
         args: { path: pathArg, content: contentArg },
         execute: async (args, ctx) => {
           assertNotOrchestrator(ctx.agent, "sandbox_edit");
-          await ensureWorker(ctx.sessionID, ctx.directory);
-          const c = await client();
-          return formatResult("writeFile", await c.request("writeFile", ctx.sessionID, { path: args.path, content: args.content }, ctx.agent));
+          try {
+            await ensureWorker(ctx.sessionID, ctx.directory);
+            const c = await client();
+            return formatResult("writeFile", await c.request("writeFile", ctx.sessionID, { path: args.path, content: args.content }, ctx.agent));
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            throw new Error(`sandbox_edit failed: ${detail}. It replaces the entire file; supply complete desired contents or use sandbox_apply_patch for targeted changes.`);
+          }
         },
       }),
 
@@ -287,15 +293,22 @@ export default function sandboxToolsPlugin() {
           "Apply ONLY a complete plain-text Git unified diff in the worker-only sandbox. No Markdown " +
           "fences, *** Begin Patch envelopes, shell commands, or code snippets. Patch paths are " +
           "relative to the sandbox project root, never /work or absolute/traversal, and must match " +
-          "the current worker checkout. git apply --check runs first. The first useful mutation " +
+          "the current worker checkout. git apply --check runs first. If rejected, check hunk line " +
+          "counts and context: changed-line hunks need unchanged context; EOF append-only hunks may " +
+          "end on added lines. Include a final newline. The first useful mutation " +
           "activates the worker naturally—no dummy sandbox_bash; no approval is required and the " +
           "host stays unchanged.",
         args: { patch: z.string().min(1).max(4 * 1024 * 1024) },
         execute: async (args, ctx) => {
           assertNotOrchestrator(ctx.agent, "sandbox_apply_patch");
-          await ensureWorker(ctx.sessionID, ctx.directory);
-          const c = await client();
-          return formatResult("applyPatch", await c.request("applyPatch", ctx.sessionID, { patch: args.patch }, ctx.agent));
+          try {
+            await ensureWorker(ctx.sessionID, ctx.directory);
+            const c = await client();
+            return formatResult("applyPatch", await c.request("applyPatch", ctx.sessionID, { patch: args.patch }, ctx.agent));
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            throw new Error(`sandbox_apply_patch failed: ${detail}. Provide a complete Git unified diff; check hunk line counts and include unchanged context for changed lines. Append-only EOF hunks may end on additions. Include a final newline.`);
+          }
         },
       }),
 
