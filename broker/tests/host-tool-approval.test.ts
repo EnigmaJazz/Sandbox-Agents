@@ -23,7 +23,7 @@ import {
 import { OPERATION_TIMEOUT_MS } from "../../opencode/plugins/lib/broker-client.ts";
 
 describe("host tool ask metadata", () => {
-  test("base builder exposes flat metadata and never auto-approves", () => {
+  test("base builder keeps approval metadata visible and never auto-approves", () => {
     const ask = buildHostToolAsk({
       permission: "host_example",
       operation: "sddArchiveCompose",
@@ -34,11 +34,25 @@ describe("host tool ask metadata", () => {
     expect(ask.patterns).toEqual(["*"]);
     expect(ask.always).toEqual([]);
     expect(ask.metadata).toEqual({
-      operation: "sddArchiveCompose",
+      hostOperation: "sddArchiveCompose",
       summary: "compose it",
       a: 1,
     });
     expect(ask.metadata).not.toHaveProperty("details");
+  });
+
+  test("base builder avoids PermissionCard metadata-suppression keys", () => {
+    const ask = buildHostToolAsk({
+      permission: "host_example",
+      operation: "sddArchiveCompose",
+      summary: "compose it",
+      details: { preview: "visible diff" },
+    });
+    // PermissionCard's genericContent and description branches suppress the Details dump.
+    for (const key of ["command", "content", "action", "operation", "description"]) {
+      expect(ask.metadata).not.toHaveProperty(key);
+    }
+    expect(ask.metadata.hostOperation).toBe("sddArchiveCompose");
   });
 
   test("base builder rejects malformed input", () => {
@@ -75,7 +89,7 @@ describe("host tool ask metadata", () => {
       output: "openspec/changes/y/composed.md",
     });
     expect(ask.permission).toBe("host_sdd_archive_compose");
-    expect(ask.metadata.operation).toBe("sddArchiveCompose");
+    expect(ask.metadata.hostOperation).toBe("sddArchiveCompose");
     expect(ask.metadata).toMatchObject({
       canonical: "openspec/specs/x/spec.md",
       delta: "openspec/changes/y/specs/x/spec.md",
@@ -92,7 +106,7 @@ describe("host tool ask metadata", () => {
       protectedPaths: [],
     });
     expect(ask.permission).toBe("host_git_commit");
-    expect(ask.metadata.operation).toBe("gitCommit");
+    expect(ask.metadata.hostOperation).toBe("gitCommit");
     expect(ask.metadata).toMatchObject({
       message: "fix: scoped",
       branch: "feature/x",
@@ -127,7 +141,7 @@ describe("host tool ask metadata", () => {
       warning: "creates a new commit",
     });
     expect(ask.permission).toBe("host_git_push");
-    expect(ask.metadata.operation).toBe("gitPush");
+    expect(ask.metadata.hostOperation).toBe("gitPush");
     expect(ask.metadata).toMatchObject({
       remote: "origin",
       branch: "feature/x",
@@ -142,7 +156,7 @@ describe("host tool ask metadata", () => {
   test("gh issue ask carries repo/title/body preview and byte count", () => {
     const ask = buildGhIssueCreateAsk({ repo: "owner/repo", title: "Bug", body: "line1\nline2" });
     expect(ask.permission).toBe("host_gh_issue_create");
-    expect(ask.metadata.operation).toBe("ghIssueCreate");
+    expect(ask.metadata.hostOperation).toBe("ghIssueCreate");
     expect(ask.metadata).toMatchObject({
       repo: "owner/repo",
       title: "Bug",
@@ -162,7 +176,7 @@ describe("host tool ask metadata", () => {
       reason: "widen",
     });
     expect(ask.permission).toBe("host_sdd_attempt_grant");
-    expect(ask.metadata.operation).toBe("sddAttemptGrant");
+    expect(ask.metadata.hostOperation).toBe("sddAttemptGrant");
     expect(ask.metadata).toMatchObject({
       rootCount: 2,
       changeInstance: "instance-token",
@@ -173,7 +187,7 @@ describe("host tool ask metadata", () => {
   test("plan append ask surfaces the document, heading, and byte count", () => {
     const ask = buildPlanDocAppendAsk({ doc: "todo", content: "line1\nline2", heading: "Next" });
     expect(ask.permission).toBe("host_plan_append");
-    expect(ask.metadata.operation).toBe("planDocAppend");
+    expect(ask.metadata.hostOperation).toBe("planDocAppend");
     expect(ask.metadata).toMatchObject({
       doc: "todo",
       contentBytes: 11,
@@ -200,7 +214,7 @@ describe("host tool ask metadata", () => {
       makePublic: true,
     });
     expect(ask.permission).toBe("host_register_project");
-    expect(ask.metadata.operation).toBe("registerProject");
+    expect(ask.metadata.hostOperation).toBe("registerProject");
     expect(ask.always).toEqual([]);
     expect(ask.patterns).toEqual(["*"]);
     expect(ask.metadata).toMatchObject({
@@ -291,7 +305,7 @@ describe("sandbox result install ask metadata", () => {
       previewFile: "/private/preview.patch",
     });
     expect(ask.permission).toBe("host_sandbox_result_install");
-    expect(ask.metadata.operation).toBe("sandboxResultInstall");
+    expect(ask.metadata.hostOperation).toBe("sandboxResultInstall");
     expect(ask.always).toEqual([]);
     expect(ask.patterns).toEqual(["*"]);
     expect(ask.metadata).toMatchObject({
@@ -302,7 +316,7 @@ describe("sandbox result install ask metadata", () => {
       pathCount: 2,
       pathPreview: "broker/src/server.ts, gone.ts",
       preview: "diff --git a/file.ts b/file.ts\n+visible change",
-      previewTruncated: "yes",
+      previewTruncated: true,
       previewFile: "/private/preview.patch",
     });
     expect(ask.metadata).not.toHaveProperty("details");

@@ -32,7 +32,7 @@ describe("sandbox result install approval preview", () => {
     });
     expect(ask.metadata.preview.length).toBeLessThanOrEqual(12_000);
     expect(ask.metadata.preview).toContain("approval preview truncated");
-    expect(ask.metadata.previewTruncated).toBe("yes");
+    expect(ask.metadata.previewTruncated).toBe(true);
     expect(ask.metadata.previewFile).toBe("/state/apply-preview/worker-7.diff");
   });
 

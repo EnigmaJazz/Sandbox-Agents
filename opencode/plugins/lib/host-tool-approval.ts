@@ -37,7 +37,7 @@ export type HostMutationOperation =
   | "sandboxResultInstall";
 
 export interface HostToolAskMetadata {
-  operation: HostMutationOperation;
+  hostOperation: HostMutationOperation;
   /** One-line human summary of the host mutation. */
   summary: string;
   /** Flat, human-auditable fields rendered by the approval harness. */
@@ -76,7 +76,7 @@ export function buildHostToolAsk(input: {
   permission: string;
   operation: HostMutationOperation;
   summary: string;
-  details: Record<string, string | number>;
+  details: Record<string, string | number | boolean>;
 }): HostToolAsk {
   assertNonEmpty(input.permission, "permission");
   assertNonEmpty(input.operation, "operation");
@@ -94,7 +94,7 @@ export function buildHostToolAsk(input: {
     always: [],
     metadata: {
       ...input.details,
-      operation: input.operation,
+      hostOperation: input.operation,
       summary: input.summary,
     },
   };
@@ -156,7 +156,7 @@ export interface GitCommitAskArgs {
 /** Approval metadata for `host_git_commit` (branch/subject/path preview/protected). */
 export function buildGitCommitAsk(args: GitCommitAskArgs): HostToolAsk {
   assertNonEmpty(args.message, "message");
-  const details: Record<string, string | number> = { message: args.message };
+  const details: Record<string, string | number | boolean> = { message: args.message };
   if (args.sandboxSessionID !== undefined) {
     assertNonEmpty(args.sandboxSessionID, "sandboxSessionID");
     details.sandboxSessionID = args.sandboxSessionID;
@@ -203,7 +203,7 @@ export function buildGitPushAsk(args: GitPushAskArgs): HostToolAsk {
   if (!Number.isInteger(args.ahead) || args.ahead < 0) {
     throw new HostToolAskError("ahead must be a non-negative integer");
   }
-  const details: Record<string, string | number> = {
+  const details: Record<string, string | number | boolean> = {
     remote: args.remote,
     branch: args.branch,
     ahead: args.ahead,
@@ -264,7 +264,7 @@ export function buildPlanDocAppendAsk(args: PlanDocAppendAskArgs): HostToolAsk {
   if (args.heading !== undefined) {
     assertNonEmpty(args.heading, "heading");
   }
-  const details: Record<string, string | number> = {
+  const details: Record<string, string | number | boolean> = {
     doc: args.doc,
     contentBytes: Buffer.byteLength(args.content, "utf8"),
   };
@@ -288,7 +288,7 @@ export interface RegisterProjectAskArgs {
 /** Approval metadata for `host_register_project` (path + yes/no flag summary). */
 export function buildRegisterProjectAsk(args: RegisterProjectAskArgs): HostToolAsk {
   assertNonEmpty(args.path, "path");
-  const details: Record<string, string | number> = {
+  const details: Record<string, string | number | boolean> = {
     path: args.path,
     dryRun: args.dryRun ? "yes" : "no",
     createRemote: args.createRemote ? "yes" : "no",
@@ -347,8 +347,8 @@ function assertReviewEnum(value: unknown, values: readonly string[], what: strin
 
 function reviewAskDetails(
   fields: Record<string, string | number | boolean | undefined>,
-): Record<string, string | number> {
-  const details: Record<string, string | number> = {};
+): Record<string, string | number | boolean> {
+  const details: Record<string, string | number | boolean> = {};
   for (const [key, value] of Object.entries(fields)) {
     if (value === undefined) continue;
     details[key] = typeof value === "boolean" ? (value ? "yes" : "no") : value;
@@ -608,7 +608,7 @@ export interface SandboxResultInstallAskArgs {
 export function buildSandboxResultInstallAsk(args: SandboxResultInstallAskArgs): HostToolAsk {
   assertNonEmpty(args.resultRef, "resultRef");
   assertNonEmpty(args.resultCommit, "resultCommit");
-  const details: Record<string, string | number> = {
+  const details: Record<string, string | number | boolean> = {
     resultRef: args.resultRef,
     resultCommit: args.resultCommit,
   };
@@ -633,7 +633,7 @@ export function buildSandboxResultInstallAsk(args: SandboxResultInstallAskArgs):
       ? `${args.preview.slice(0, 12_000 - truncationNote.length)}${truncationNote}`
       : args.preview;
   }
-  if (args.previewTruncated !== undefined) details.previewTruncated = args.previewTruncated ? "yes" : "no";
+  if (args.previewTruncated !== undefined) details.previewTruncated = args.previewTruncated;
   if (args.previewFile !== undefined) { assertNonEmpty(args.previewFile, "previewFile"); details.previewFile = args.previewFile; }
   return buildHostToolAsk({
     permission: "host_sandbox_result_install",
