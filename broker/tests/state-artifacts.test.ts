@@ -33,7 +33,7 @@ import {
   tmpIndexPathFor,
 } from "../src/artifacts.ts";
 import { bundlePathFor } from "../src/gitops.ts";
-import { runArtifactSweep, sweepStateArtifacts } from "../src/reaper.ts";
+import { runArtifactSweep, sweepIdle, sweepStateArtifacts } from "../src/reaper.ts";
 import {
   buildDiscardResultOp,
   runPrepare,
@@ -160,6 +160,34 @@ describe("state-dir artifact sweep", () => {
     }
   });
 
+  test("reaped SANDBOX_ACTIVE without resultRef keeps its bundle", async () => {
+    const stateDir = tempDir("artifacts-reaped-active-");
+    const active = {
+      ...record("reaped-active", "SANDBOX_ACTIVE"),
+      workerName: "worker-reaped-active",
+      workerState: "ACTIVE" as const,
+    };
+    writeArtifacts(stateDir, active.sessionID);
+    const ctx = sweepCtx(stateDir, [active]);
+    Object.assign(ctx, {
+      store: {
+        list: () => [active],
+        get: (sessionID: string) => sessionID === active.sessionID ? active : undefined,
+        touch: (_sessionID: string, patch: Partial<SessionRecord>) => Object.assign(active, patch),
+        transition: (_sessionID: string, _from: string, to: SessionState, patch: Partial<SessionRecord>) =>
+          Object.assign(active, patch, { state: to }),
+      },
+      adapter: { stop: async () => undefined, remove: async () => undefined },
+      pool: { allocations: [] },
+    });
+
+    await sweepIdle(ctx, 0);
+    const result = await sweepStateArtifacts(ctx, 0);
+
+    expect(result.removed).toBe(0);
+    expect(existsSync(bundlePathFor(stateDir, active.sessionID))).toBe(true);
+  });
+
   test("a still-fresh terminal record is kept until the grace elapses", async () => {
     const stateDir = tempDir("artifacts-fresh-");
     const records = [record("fresh-terminal", "APPLIED", 1_000)];
@@ -261,18 +289,21 @@ interface PrepareHarness {
   ctx: OpContext;
   stateDir: string;
   hostDir: string;
+  workerDir: string;
   sessionID: string;
   hostBundle: string;
   calls: string[];
 }
 
-function makePrepareHarness(runnerMode: "real" | "planned"): PrepareHarness {
+function makePrepareHarness(
+  runnerMode: "real" | "planned",
+  failBundleCreate = false,
+): PrepareHarness {
   const stateDir = tempDir("prepare-state-");
   const hostDir = tempDir("prepare-host-");
   const workerDir = tempDir("prepare-worker-");
   initRepo(hostDir);
   initRepo(workerDir);
-  mkdirSync(join(workerDir, ".broker-tmp"), { recursive: true });
   // A real B->C change so runPrepare commits and bundles.
   writeFileSync(join(workerDir, "a.txt"), "changed\n");
 
@@ -297,6 +328,14 @@ function makePrepareHarness(runnerMode: "real" | "planned"): PrepareHarness {
       opts?: { cwd?: string; env?: Record<string, string> },
     ) => {
       calls.push(argv.join(" "));
+      if (failBundleCreate && argv[0] === "git" && argv[1] === "bundle") {
+        return {
+          status: 1,
+          stdout: "",
+          stderr: "fatal: bundle write failed",
+          timedOut: false,
+        };
+      }
       const args = argv.map(workerPath);
       const cwd =
         opts?.cwd === "/work" ? workerDir : opts?.cwd ? workerPath(opts.cwd) : workerDir;
@@ -347,6 +386,7 @@ function makePrepareHarness(runnerMode: "real" | "planned"): PrepareHarness {
     ctx,
     stateDir,
     hostDir,
+    workerDir,
     sessionID,
     hostBundle: bundlePathFor(stateDir, sessionID),
     calls,
@@ -363,6 +403,10 @@ describe("runPrepare bundle retention", () => {
     // The temp snapshot index is transport too; a successful import clears it.
     expect(existsSync(tmpIndexPathFor(h.stateDir, h.sessionID))).toBe(false);
     expect(h.calls.some((c) => c.startsWith("git fetch"))).toBe(true);
+    const mkdirIndex = h.calls.indexOf("mkdir -p /work/.broker-tmp");
+    const bundleIndex = h.calls.findIndex((c) => c.startsWith("git bundle create"));
+    expect(mkdirIndex).toBeGreaterThanOrEqual(0);
+    expect(mkdirIndex).toBeLessThan(bundleIndex);
     // The durable copy is the host ref, and it resolves with the real content.
     const verify = spawnSync("git", ["rev-parse", "--verify", ref], {
       cwd: h.hostDir,
@@ -375,6 +419,30 @@ describe("runPrepare bundle retention", () => {
     });
     expect(show.status).toBe(0);
     expect(show.stdout).toBe("changed\n");
+  });
+
+  test("second prepare force-updates an existing non-fast-forward result ref", async () => {
+    const h = makePrepareHarness("real");
+    const ref = `refs/opencode-sandbox/result/${h.sessionID}`;
+    await runPrepare(h.ctx, h.sessionID);
+
+    git(h.workerDir, ["reset", "--hard", "HEAD~1"]);
+    writeFileSync(join(h.workerDir, "a.txt"), "second\n");
+    git(h.workerDir, ["add", "a.txt"]);
+    git(h.workerDir, ["commit", "-q", "-m", "second result"]);
+    const second = await runPrepare(h.ctx, h.sessionID);
+
+    expect(second).toBe(ref);
+    expect(h.calls.some((c) => c === `git fetch --no-tags ${h.hostBundle} +${ref}:${ref}`)).toBe(true);
+  });
+
+  test("bundle creation failure is surfaced before any result ref import", async () => {
+    const h = makePrepareHarness("real", true);
+
+    await expect(runPrepare(h.ctx, h.sessionID)).rejects.toThrow(
+      "result bundle creation failed: fatal: bundle write failed",
+    );
+    expect(h.calls.some((c) => c.startsWith("git fetch"))).toBe(false);
   });
 
   test("planned mode (import skipped) keeps the bundle as the only copy", async () => {

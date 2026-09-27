@@ -5,7 +5,11 @@
  * record never kills the sweep.
  */
 import { describe, expect, test } from "bun:test";
-import { sweepIdle } from "../src/reaper.ts";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { reapOnDisconnect, sweepIdle, sweepUnfinished } from "../src/reaper.ts";
+import { buildEnsureWorkerOp } from "../src/service.ts";
 import type { OpContext } from "../src/service.ts";
 import type { SessionRecord } from "../src/types.ts";
 
@@ -63,6 +67,7 @@ function makeHarness(initial: SessionRecord[], opts: { throwOnTouch?: string } =
     remove: async (name: string) => {
       removed.push(name);
     },
+    exec: async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }),
   };
 
   const ctx = {
@@ -103,7 +108,7 @@ describe("idle reaper sweep", () => {
     expect(h.logs[0]?.action).toBe("reaped_result_ready");
   });
 
-  test("stale SANDBOX_ACTIVE: FAILED_CLOSED with 'idle reaped' + allocation removed", async () => {
+  test("stale SANDBOX_ACTIVE releases its worker and remains resumable", async () => {
     const h = makeHarness([
       record({ sessionID: "a1", state: "SANDBOX_ACTIVE", updatedAt: iso(3_700_000) }),
     ]);
@@ -114,9 +119,96 @@ describe("idle reaper sweep", () => {
     expect(h.removed).toEqual(["worker-a1"]);
     expect(h.ctx.pool.allocations).toEqual([]);
     const rec = h.records.get("a1")!;
-    expect(rec.state).toBe("FAILED_CLOSED");
-    expect(rec.error).toBe("idle reaped");
+    expect(rec.state).toBe("SANDBOX_ACTIVE");
+    expect(rec.workerName).toBeUndefined();
+    expect(rec.workerState).toBe("DESTROYED");
+    expect(rec.reapedAt).toBeDefined();
+    expect(rec.error).toBeUndefined();
     expect(h.logs[0]?.action).toBe("reaped_active");
+  });
+
+  test("a reaped SANDBOX_ACTIVE session rebuilds on ensureWorker", async () => {
+    const h = makeHarness([
+      record({ sessionID: "rebuild", state: "SANDBOX_ACTIVE", updatedAt: iso(3_700_000) }),
+    ]);
+    await sweepIdle(h.ctx, 3_600_000);
+    const root = mkdtempSync(join(tmpdir(), "broker-reaper-rebuild-"));
+    const stateDir = join(root, "state");
+    const projectDir = join(root, "project");
+    mkdirSync(stateDir);
+    mkdirSync(join(projectDir, ".git"), { recursive: true });
+    Object.assign(h.ctx, {
+      config: {
+        stateDir,
+        projects: [{ id: "repo", path: projectDir }],
+        workerImage: "test-image",
+      },
+      budget: { perWorkerCpu: 2, perWorkerMemBytes: 2 * GiB },
+      git: {
+        runnerMode: "planned",
+        spawn: async (argv: string[]) => {
+          if (argv[1] === "bundle" && argv[2] === "create") {
+            writeFileSync(argv[3]!, "bundle");
+          }
+          const stdout = argv[1] === "rev-parse" ? "head\n"
+            : argv[1] === "write-tree" ? "tree\n"
+            : argv[1] === "commit-tree" ? "commit\n"
+            : "";
+          return { status: 0, stdout, stderr: "", timedOut: false };
+        },
+      },
+    });
+    Object.assign(h.ctx.adapter, {
+      workerNameFor: (sessionID: string) => `worker-${sessionID}`,
+      createWorker: async () => undefined,
+      copyIn: async () => undefined,
+    });
+    try {
+      const result = await buildEnsureWorkerOp(h.ctx)({
+        version: 1,
+        id: "rebuild",
+        operation: "ensureWorker",
+        sessionID: "rebuild",
+        payload: { projectDir },
+      });
+
+      expect(result).toEqual({ worker: "worker-rebuild", state: "SANDBOX_ACTIVE", reused: false });
+      expect(h.records.get("rebuild")!.workerState).toBe("ACTIVE");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("idle clean SANDBOX_ACTIVE releases its worker without closing the session", async () => {
+    const h = makeHarness([
+      record({ sessionID: "clean", state: "SANDBOX_ACTIVE", updatedAt: iso(70_000) }),
+    ]);
+
+    const { finished } = await sweepUnfinished(h.ctx, 60_000, (e) => h.logs.push(e));
+
+    expect(finished).toBe(1);
+    expect(h.stopped).toEqual(["worker-clean"]);
+    expect(h.removed).toEqual(["worker-clean"]);
+    expect(h.records.get("clean")!.state).toBe("SANDBOX_ACTIVE");
+    expect(h.records.get("clean")!.workerName).toBeUndefined();
+    expect(h.records.get("clean")!.workerState).toBe("DESTROYED");
+    expect(h.records.get("clean")!.reapedAt).toBeDefined();
+  });
+
+  test("socket-close idle SANDBOX_ACTIVE releases its worker without closing the session", async () => {
+    const h = makeHarness([
+      record({ sessionID: "disconnected", state: "SANDBOX_ACTIVE", updatedAt: iso(70_000) }),
+    ]);
+
+    const reaped = await reapOnDisconnect(h.ctx, "disconnected", 60_000, (e) => h.logs.push(e));
+
+    expect(reaped).toBe(true);
+    expect(h.stopped).toEqual(["worker-disconnected"]);
+    expect(h.removed).toEqual(["worker-disconnected"]);
+    expect(h.records.get("disconnected")!.state).toBe("SANDBOX_ACTIVE");
+    expect(h.records.get("disconnected")!.workerName).toBeUndefined();
+    expect(h.records.get("disconnected")!.workerState).toBe("DESTROYED");
+    expect(h.records.get("disconnected")!.reapedAt).toBeDefined();
   });
 
   test("fresh records are untouched", async () => {

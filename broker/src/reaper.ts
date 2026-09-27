@@ -338,14 +338,11 @@ export async function sweepIdle(
         reaped++;
       } else if (record.state === "SANDBOX_ACTIVE") {
         await releaseWorker(ctx, record);
-        ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "FAILED_CLOSED", {
+        ctx.store.touch(record.sessionID, {
           workerName: undefined,
           workerState: "DESTROYED",
-          error: "idle reaped",
           reapedAt: new Date(now).toISOString(),
         });
-        // Terminal: the transport artifacts are consumed (durability-gated).
-        await cleanupTerminalArtifacts(ctx, record.sessionID, onLog);
         onLog?.({ sessionID: record.sessionID, action: "reaped_active" });
         reaped++;
       }
@@ -394,7 +391,7 @@ export async function sweepUnfinished(
       const age = now - Date.parse(record.updatedAt);
       if (!(age > idleMs)) continue;
       // Has unstaged changes check: query worker git status --porcelain.
-      // If no changes, release and fail closed (nothing to export).
+      // A clean worker still gets a release-only reap; the session remains resumable.
       let hasChanges = true;
       try {
         const status = await ctx.adapter.exec(record.workerName, ["git", "status", "--porcelain", "--", ".", ":(exclude).broker-tmp", ":(exclude)*.bundle"], {
@@ -414,14 +411,11 @@ export async function sweepUnfinished(
       }
       if (!hasChanges) {
         await releaseWorker(ctx, record);
-        ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "FAILED_CLOSED", {
+        ctx.store.touch(record.sessionID, {
           workerName: undefined,
           workerState: "DESTROYED",
-          error: "idle clean worker released",
           reapedAt: new Date(now).toISOString(),
         });
-        // Terminal: the transport artifacts are consumed (durability-gated).
-        await cleanupTerminalArtifacts(ctx, record.sessionID, onLog);
         onLog?.({ sessionID: record.sessionID, action: "reaped_active", detail: "idle clean worker released" });
         finished++;
         continue;
@@ -468,14 +462,11 @@ export async function reapOnDisconnect(
   if (!(age > disconnectIdleMs)) return false;
   try {
     await releaseWorker(ctx, record);
-    ctx.store.transition(sessionID, "SANDBOX_ACTIVE", "FAILED_CLOSED", {
+    ctx.store.touch(sessionID, {
       workerName: undefined,
       workerState: "DESTROYED",
-      error: "client disconnected",
       reapedAt: new Date().toISOString(),
     });
-    // Terminal: the transport artifacts are consumed (durability-gated).
-    await cleanupTerminalArtifacts(ctx, sessionID, onLog);
     onLog?.({ sessionID, action: "reaped_active", detail: "client disconnected" });
     return true;
   } catch (err) {
