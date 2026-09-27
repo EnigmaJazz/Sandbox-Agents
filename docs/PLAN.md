@@ -1,3 +1,21 @@
+## Planned host operation — workflow router ledger append
+
+`ROUTER-LOG.md` is the workflow decision ledger: each routed work unit in every project should record its date, change or feature, unit class, route, specialist, evidence, and outcome. The ledger lives at `/home/james/ai-workspace/workflow_optimisation/ROUTER-LOG.md`, outside every project that produces the work. In the observed case, seven rows from this repository's session had to be handed to the user manually because this project had no authorized way to write into the ledger's project.
+
+### Proposed operation
+
+Extend `host_plan_append` with a `router-log` document value, alongside `todo` and `plan`, and have the broker resolve that value to the ledger's fixed canonical path. This is preferable to a sibling `host_router_log_append`: it reuses one narrow, fixed append surface and avoids growing the host API with a near-duplicate operation. The added cross-project mapping must remain an explicit broker-owned allowlist entry; it must not turn the operation into a general path writer. A dedicated sibling operation is the fallback only if the ledger's authorization or append semantics cannot safely share `host_plan_append`.
+
+Requirements:
+
+- Resolve the cross-project destination exclusively from the broker-owned document enum to its canonical path; never accept a caller-supplied target path.
+- Make it orchestrator-only and approval-gated.
+- Bound the appended content and validate the row schema: date, change/feature, unit class, route, specialist, evidence, and outcome.
+- Append atomically while preserving all existing bytes; fail closed on invalid input or write failure.
+- Enforce S17-aware path protection so this narrow ledger exception cannot authorize writes to other protected paths.
+
+Without this operation, ledger rows must be reconstructed from memory at session end. That is the same unverified synthesis this project has been working to eliminate; capture the evidence-backed row while the routed work and outcome are available instead.
+
 ## Brief — host review pipeline tools for the secure OpenCode orchestrator
 
 Source: brief from a secure-opencode session whose repo of record was

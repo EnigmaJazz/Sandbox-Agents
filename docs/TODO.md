@@ -9,7 +9,7 @@ Last reconciled: 2026-09-27. This file is the ordered project to-do list. Status
 3. **Trace-file inventory/consent defect** — **OPEN**; owner **A**. Keep `review start --trace` output outside the repository's untracked inventory so the consent gate remains valid. Tier 1 because the defect invalidates the gate's own precondition and was reproduced three times. Source: `docs/TODO.md` (consolidated from the prior follow-up at line 236 before this rewrite); `docs/PLAN.md` (review pipeline evidence).
 
 
-## Tier 2 — blocks other work (6 items)
+## Tier 2 — blocks other work (7 items)
 
 1. **Host review pipeline tools P-1–P-4** (`host_git_range_materialize`, `host_review_pipeline_run`, `host_review_artifact_write`, optional `host_git_read`) — **OPEN / proposed**; owner **A**. Build the fixed-argv, bounded, shared-materialization/execution/artifact surface. Tier 2 because reviewers currently lack the diff and packaged pipeline cannot run. Source: `docs/PLAN.md:21–56,58–64`.
 2. **Project `.git` read-write + `.codegraph` create/grant coverage** — **OPEN**; owner **A**. Add the registration/profile create-and-grant path, including linked worktree `.git` metadata. Tier 2 because projects/worktrees cannot be safely registered with the required index and git access. Source: `odd/tasks/register-project-profile-grants.md:87–111,193–201`; `docs/TODO.md` (prior item 27, line 71, consolidated here).
@@ -17,6 +17,7 @@ Last reconciled: 2026-09-27. This file is the ordered project to-do list. Status
 4. **Host git read tools** (`status|diff|log|show|branch`) — **OPEN**; owner **A**. Implement the read-only broker/plugin operations. Tier 2 because review and branch facts otherwise require user-pasted host commands. Source: `odd/tasks/host-git-tools.md:179–190,290–298`.
 5. **`host_journal`** — **OPEN**; owner **A**. Add bounded user-journal reads for allowlisted units after deciding the overlap with `hostServiceLogs`. Tier 2 because operational evidence is otherwise unavailable to the orchestrator. Source: `odd/tasks/host-journal-tool.md:219–280,336–344`.
 6. **Python worker verification** — **OPEN / design unresolved**; owner **A**. Decide dependency/interpreter provisioning or explicitly define host-side verification, including Python 3.14 compatibility. Tier 2 because one reported project could not run its tests in the worker. Source: `docs/TODO.md` (consolidated from the prior worker-verification item 7 at lines 204–217 before this rewrite).
+7. **Router-ledger append operation** — **PLANNED; external design dependency**; owner **A** for implementation, **X** for the design in the workflow-optimisation repository. Extend `host_plan_append` for the `router-log` document using the broker-owned destination enum and the bounded, validated, atomic, orchestrator-only, approval-gated, S17-aware behavior specified in `docs/PLAN.md:1–17`; do not duplicate that design here. Dependency: complete the external workflow-optimisation design before implementation. Tier 2 because the global ledger is required for every routed unit, while missing append capability forces manual row handoff and reconstruction. Source: `docs/PLAN.md:1–17`.
 
 ## Tier 3 — blocks users now (5 items)
 
