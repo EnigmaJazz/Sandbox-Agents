@@ -90,7 +90,13 @@ describe("snapshot plan (§17) — never touches the user's index/branch", () =>
     expect(imp.argvSteps[0]).toEqual(["git", "bundle", "verify", "/tmp/r.bundle"]);
     const fetch = imp.argvSteps[1];
     expect(fetch[1]).toBe("fetch");
-    expect(fetch.some((t) => t.includes(`${RESULT_REF_PREFIX}/sess123:${RESULT_REF_PREFIX}/sess123`))).toBe(true);
+    expect(fetch).toEqual([
+      "git",
+      "fetch",
+      "--no-tags",
+      "/tmp/r.bundle",
+      `+${RESULT_REF_PREFIX}/sess123:${RESULT_REF_PREFIX}/sess123`,
+    ]);
     // The user's branch must never appear in the plan.
     const all = imp.argvSteps.flat().join(" ");
     expect(all).not.toMatch(/\s(master|main|HEAD:)\b/);
