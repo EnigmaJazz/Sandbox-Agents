@@ -16,6 +16,24 @@ Requirements:
 
 Without this operation, ledger rows must be reconstructed from memory at session end. That is the same unverified synthesis this project has been working to eliminate; capture the evidence-backed row while the routed work and outcome are available instead.
 
+## Planned host operation — claim-retractions ledger append
+
+`CLAIM-RETRACTIONS.md` records retracted agent claims so the next session does not repeat them. It addresses an observed failure class: absence and mechanism claims asserted from a single under-scoped observation. In one session, five claims were retracted: a grep pattern that could not match its target was used to deny that a fix existed; “no prompt occurred” was inferred literally from “no prompt appeared”; a plausible but wrong mechanism blamed state GC for pruning a bundle that had never been written; an untested claim said a new session was required; and literal provider error text was treated as the root cause. Three later fixes each addressed a mechanism that did not exist, for the same reason: reasoning about the producer instead of reading the consumer.
+
+### Proposed operation
+
+Extend `host_plan_append` with a `claim-retractions` document value alongside `todo`, `plan`, and the planned `router-log`, and have the broker resolve that value to the ledger's fixed canonical path. Reuse the narrow append surface rather than adding a near-duplicate host operation; do not turn it into a general path writer.
+
+Requirements:
+
+- Resolve the destination exclusively from a broker-owned document enum to its canonical path; never accept a caller-supplied target path.
+- Make it orchestrator-only and approval-gated.
+- Bound appended content and validate each row against the schema: date; claim as stated; class (`observed`, `inferred`, or `assumed`); search or check performed; positive control (what the thing would look like if present, and why that search would match it); what caught the retraction; corrected conclusion.
+- Append atomically while preserving all existing bytes; fail closed on invalid input or write failure.
+- Enforce S17-aware path protection so this narrow ledger exception cannot authorize writes to other protected paths.
+
+Without this operation, records reconstructed from memory at session end are exactly the unverified synthesis this ledger exists to prevent.
+
 ## Brief — host review pipeline tools for the secure OpenCode orchestrator
 
 Source: brief from a secure-opencode session whose repo of record was
