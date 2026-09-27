@@ -2,7 +2,7 @@
 
 - **Feature:** `host-sandbox-result-tool`
 - **Project:** `sandbox-integration` (`/home/james/agent-sandbox-integration`)
-- **Status:** implemented, installed, tested, documented, and committed; independent review pending
+- **Status:** implemented, installed, tested, documented, committed, independently reviewed and approved; authority acknowledged and burned
 - **Created:** 2026-09-23
 - **Delivery strategy:** `ask-on-risk`
 - **Chain strategy:** `stacked-to-main` (the user's standing choice)
@@ -295,8 +295,42 @@ no feature code, deploy, mirror, restart, or commit was performed.
 - Focused regressions: 19 pass / 0 fail.
 - Broker build: green.
 
+## Review close-out
+
+- **Observed:** review closed and approved. Lineage `review-fef3d82d66ff12a3`,
+  target `sha256:0f93c820…`, revision `sha256:65d5d12e…`; acknowledgement
+  completed with authority burned. The candidate covered 15 files / 626 lines
+  against base tree `3c1e6e99…`.
+- **Observed:** six advisory findings were non-blocking; none opened a correction:
+  - `R1-001` — symlink install makes the policy follow later checkouts
+    (`scripts/install-user-files:88`).
+  - `R2-001` — containment helper compressed to one line
+    (`broker/src/service.ts:2472`).
+  - `R2-002` — patch catch gives diff advice for non-diff failures
+    (`opencode/plugins/sandbox-tools.ts:350-354`).
+  - `R3-001` — the same catch discards the original cause.
+  - `R3-002` — symlink deletion target is untested.
+  - `R3-003` — profile entry uses `~` where neighboring entries use `$HOME`.
+- **Observed:** follow-on work completed after review. A targeted `sandbox_edit`
+  replacement moved the helper to `opencode/plugins/lib/sandbox-edit-core.ts`;
+  an export-surface regression test covers every plugin wrapper and immediately
+  caught a second stray export, `tokenizeCommand` in `routing-guard.ts`.
+- **Observed:** the approval-rendering defect was root-caused and fixed. OpenChamber's
+  `PermissionCard` renders the metadata Details block only when metadata contains
+  none of `command`, `content`, `action`, `operation`, or `description`.
+  `buildHostToolAsk` injected `operation`, suppressing the preview in every
+  host-tool prompt. It was renamed to `hostOperation` and a suppressant-key
+  regression test was added. The preview was confirmed working after install
+  and restart.
+- **Inferred:** before the fix, the `*`-only reading of the pre-fix card condition
+  implied the preview would render; this was an inference, not a verified
+  observation. The verified behavior is the condition above and the post-fix
+  confirmation.
+
+## Final verification
+
+- **Observed:** `bun --cwd broker test` — 536 pass / 0 fail.
+
 ## Next step
 
-The corrected candidate has had no independent review; it was written by the
-same session that fixed it. Re-review `8e9e0e1` as the remaining close-out, then
-record the review's lineage and findings in the final archive.
+No further close-out work is recorded for this feature.

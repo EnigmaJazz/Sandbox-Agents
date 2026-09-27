@@ -219,13 +219,23 @@ The interpreter mismatch (3.13 vs 3.14) is part of the problem and must be decid
 ### 8. Defect — `sandbox_apply_patch` rejects hunks ending on added lines without trailing context
 
 Reported 2026-09-24 from the tesla project: hunks that end on added lines with no trailing context are refused, so the worker had to append trailing context to every hunk. Minor in impact, but the failure mode is wrong — it silently forces awkward patches instead of either accepting them or naming the constraint when it refuses.
-### 9. Defect — the idle reaper kills workers mid-turn, and a reaped session is a dead-end
+### 9. Defect — the idle reaper and retained-result lifecycle have three dead-end faces
 
 Evidence, `sandbox-broker` journal 2026-09-24: two delegated workers activated at 22:39:12 (`ensureWorker` ok 600ms, `exec` ok 518ms, `readFile` ok at 22:39:22). At 22:40:17 and 22:40:19 the `reaper` logged `bundle … / tmp_index …` for both sessions. At 22:40:36 `ensureWorker` returned `session … is FAILED_CLOSED; manual review required`, and the next read returned `not sandbox-active (state=FAILED_CLOSED)`.
 
-Roughly 55 seconds with no broker operation — a model composing a large documentation edit — was treated as idle and reaped. Two defects:
+Roughly 55 seconds with no broker operation — a model composing a large documentation edit — was treated as idle and reaped. The lifecycle gap has three faces:
 
-1. The 60-second idle threshold fires while a turn is in flight, and a language-model turn routinely exceeds it. The broker distinguishes operation kinds for timeouts (`exec` 130s, `ensureWorker` 120s) but not for idleness.
-2. A reaped session becomes `FAILED_CLOSED` and cannot be resumed, so a single slow turn permanently kills that worker and any unapplied work on it. Every later operation on the session fails.
+1. **In-progress export:** the idle reaper exports sessions while work is still in progress. The 60-second idle threshold can fire during a model turn; operation timeouts (`exec` 130s, `ensureWorker` 120s) do not protect in-flight composition from idleness.
+2. **Pruned failed import:** a failed result import becomes unrecoverable once state GC prunes its bundle.
+3. **No ref fallback:** there is no fallback from a session id to a surviving result ref.
 
-Related to item 20 (`RETAINED` results are dead-ends): both are lifecycle states with no recovery path, and in both cases the operator has no way to clear them without a restart.
+A reaped session becomes `FAILED_CLOSED` and cannot be resumed. Related to item 20 (`RETAINED` results are dead-ends): lifecycle states have no recovery path, leaving no way to clear them without a restart.
+
+### Additional follow-ups
+
+- **Trace-file defect:** the `review start --trace` value is written as a file in the repository, moving the untracked inventory and invalidating the consent gate's own precondition. Reproduced three times.
+- **Result-install revert hazard:** installing a result restores its tree for paths in that result's diff; a later change to the same path is silently reverted while the operation reports `installed: true`.
+- **Deployment-verification gap:** a stale installed plugin or nono profile mirror can masquerade as installed; there is no post-install byte verification.
+- **OpenChamber upstream note:** the suppressant-key gate used for metadata Details rendering is fragile by design; report it upstream.
+- **`R3-003`:** the profile's `~` entry may be inert; verify with `nono why`.
+- **Advisory lens findings to track:** `R2-001` (compressed containment helper), `R2-002` (patch catch gives diff advice for non-diff failures), `R3-001` (catch discards the original cause), and `R3-002` (symlink deletion target untested).
