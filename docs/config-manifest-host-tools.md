@@ -427,18 +427,16 @@ grants its `.git` read-write (the `.git` grant is written only when
 ### `BROKER_PROTECTED_SECURITY_FILES`
 
 The repository template holds the full S17 list
-(`systemd-user/broker.env:22`, listing `broker/src/**`, `broker/package.json`,
+(`systemd-user/broker.env:25-28`, listing `broker/src/**`, `broker/package.json`,
 `broker/tsconfig.json`, `nono/profile/**`, `opencode/plugins/**`,
 `opencode/config-fragments/**`, `systemd-user/**`, `scripts/**`,
 `tests/security/**`, `tests/acceptance/**`, `docs/threat-model.md`). The
-authoritative broker default is the same list
-(`broker/src/config.ts:204-216`). The live file
-(`~/.config/opencode-sandbox/broker.env`) is documented as **temporarily
-relaxed to `[]`** during the bootstrap window and must be restored before final
-acceptance: `openspec/changes/agent-host-tools/tasks.md:71` ("currently
-temporarily `[]` … must be restored before final acceptance"), echoed in
-`docs/TODO.md:9`. **Action:** restore the full list and restart
-`sandbox-broker`.
+authoritative broker default is the same list (`broker/src/config.ts:217-229`).
+The installed file (`~/.config/opencode-sandbox/broker.env`) is user-owned and
+was not read during this repository inspection. OpenSpec line 71 is a recorded
+acceptance task saying the live value was temporarily `[]`; it is not current
+live-state evidence. **Action:** the user must verify the installed value and
+restore the full list if needed, then restart `sandbox-broker`.
 
 ### `nono/profile/opencode-secure.json` (in sync?)
 
@@ -482,10 +480,11 @@ review, then restarts secured OpenCode.
 Everything below was **not** confirmable from the repository or from readable
 host files in this session. It is stated as unconfirmed, not guessed.
 
-1. **Live `BROKER_PROTECTED_SECURITY_FILES` value.** `~/.config/opencode-sandbox/`
-   is not readable from this session (permission denied). The relax-to-`[]`
-   statement is taken from `openspec/changes/agent-host-tools/tasks.md:71`, not
-   from a direct read of the live file.
+1. **Live `BROKER_PROTECTED_SECURITY_FILES` value.** The installed
+   `~/.config/opencode-sandbox/broker.env` is user-owned and was not read from
+   this repository session. The relax-to-`[]` statement is recorded in
+   `openspec/changes/agent-host-tools/tasks.md:71`; it is historical repository
+   evidence, not a direct observation of the current live value.
 2. **Live nono profile sync.** `~/.config/nono/profiles/` is not readable from
    this session (permission denied), so repo copy vs installed copy parity is
    unconfirmed. Compare with `cmp` at restore time.

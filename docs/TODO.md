@@ -1,241 +1,75 @@
 # TODO — agent-sandbox-integration
 
-Last updated: 2026-09-22
+Last reconciled: 2026-09-27. This file is the ordered project to-do list. Status claims are repository evidence only; live user configuration is not inspected here. Owners: **A** = agent, **U** = user, **X** = external project/person.
 
-## Delivered — agent-host-tools (updated 2026-09-22)
+## Tier 1 — silent work destruction / unrecoverable loss (4 open items)
 
-- Committed and merged into the default branch. Slice 1 (P0 SDD runtime host tools +
-  authorization, 194 tests; OpenSpec artifacts under `openspec/changes/agent-host-tools/`),
-  the git/gh tools, and project registration landed in `c0bf4dc`; the review/state
-  corrections landed in `54743fc`…`b83c494` and were merged by `8ed9e96` ("merge review
-  slice 1 with its corrections"); the apply-preview fail-closed guard and its installer
-  carry-through landed in `df1b78f`/`6e0b37b`.
-- Push to `origin`: **unverified** from a sandbox worker. The worker snapshot exposes only
-  synthetic `work`/`baseline` refs and no remote, so host branch/remote state cannot be
-  inspected here.
-- Still open:
-  - Remove `BROKER_REAP_INTERVAL_MS`.
-  - Fix `runPrepare` forcing a refspec.
-  - S17 manual review.
-- Protected-list note: `BROKER_PROTECTED_SECURITY_FILES` in `systemd-user/broker.env`
-  already carries the full protected list (byte-identical to
-  `DEFAULT_PROTECTED_SECURITY_FILES` in `broker/src/config.ts`); only the bootstrap-window
-  comment above it is stale. `systemd-user/broker.env` is S17, so that comment fix is
-  user-installed.
-- Historical blocker (2026-09-11): "SDD dispatch latched for the current session — continue
-  in a NEW session." Resolved in practice — the agent-host-tools work subsequently completed
-  and landed in later sessions (`c0bf4dc`, `8ed9e96`) — so the latch no longer blocks.
-  Verify or drop.
+1. **Idle reaper + retained-result recovery lifecycle** — **OPEN**; owner **A**. Prevent active work from being reaped during long model turns and make failed/RETAINED results recoverable after GC, including a surviving-ref fallback. Tier 1 because the recorded 55-second idle window closed active sessions and lost access to in-progress results. Source: `docs/TODO.md` (consolidated from the prior backlog evidence at lines 222–232 before this rewrite); `odd/tasks/host-sandbox-result-tool.md:268–287` (related retention concern).
+2. **Result-install revert hazard** — **OPEN**; owner **A**. Refuse or detect install when a changed worktree path has advanced since preview, rather than silently restoring the old result tree. Tier 1 because a successful-looking install can destroy later user edits. Source: `docs/TODO.md` (consolidated from the prior follow-up at lines 234–238 before this rewrite); `odd/tasks/host-sandbox-result-tool.md:55–66`.
+3. **`runPrepare` non-fast-forward import refspec** — **OPEN**; owner **A**. Make the import refspec force-update the intended ref and add the second-prepare/auto-finish regression test. Tier 1 because this already lost two slice-1 attempts. Source: `openspec/changes/agent-host-tools/tasks.md:74`.
+4. **Trace-file inventory/consent defect** — **OPEN**; owner **A**. Keep `review start --trace` output outside the repository's untracked inventory so the consent gate remains valid. Tier 1 because the defect invalidates the gate's own precondition and was reproduced three times. Source: `docs/TODO.md` (consolidated from the prior follow-up at line 236 before this rewrite); `docs/PLAN.md` (review pipeline evidence).
 
-## Priority principle — fixed host operations over user-pasted commands
 
-Prefer fixed, approval-gated host operations over user-pasted commands — the human keeps
-the decision, the typing goes away. Concrete candidates, in order:
+## Tier 2 — blocks other work (6 items)
 
-1. `host_journal` — bounded user-journal read for allowlisted units
-   (`odd/tasks/host-journal-tool.md`).
-2. Host git reads — `status|diff|log|show|branch` (`odd/tasks/host-git-tools.md`).
-3. Result-ref inspect and install — approval-gated, S17-aware (see the "Sandbox result-ref
-   inspector" section below).
-4. Worktree lifecycle plus the `projectId` selector (see the "Planned — worktree review and
-   commit" section below).
-5. The review-pipeline tools from `docs/PLAN.md` — `host_git_range_materialize`,
-   `host_review_pipeline_run`, `host_review_artifact_write`, `host_git_read`.
+1. **Host review pipeline tools P-1–P-4** (`host_git_range_materialize`, `host_review_pipeline_run`, `host_review_artifact_write`, optional `host_git_read`) — **OPEN / proposed**; owner **A**. Build the fixed-argv, bounded, shared-materialization/execution/artifact surface. Tier 2 because reviewers currently lack the diff and packaged pipeline cannot run. Source: `docs/PLAN.md:21–56,58–64`.
+2. **Project `.git` read-write + `.codegraph` create/grant coverage** — **OPEN**; owner **A**. Add the registration/profile create-and-grant path, including linked worktree `.git` metadata. Tier 2 because projects/worktrees cannot be safely registered with the required index and git access. Source: `odd/tasks/register-project-profile-grants.md:87–111,193–201`; `docs/TODO.md` (prior item 27, line 71, consolidated here).
+3. **Deployment-verification gap** — **OPEN**; owner **U** for installed-byte verification, **A** for a repo-side verifier proposal. Add a reliable post-install comparison so stale plugin/profile mirrors cannot appear current. Tier 2 because unverified installed bytes can invalidate subsequent checks. Source: `docs/TODO.md` (prior follow-up at line 238, consolidated here).
+4. **Host git read tools** (`status|diff|log|show|branch`) — **OPEN**; owner **A**. Implement the read-only broker/plugin operations. Tier 2 because review and branch facts otherwise require user-pasted host commands. Source: `odd/tasks/host-git-tools.md:179–190,290–298`.
+5. **`host_journal`** — **OPEN**; owner **A**. Add bounded user-journal reads for allowlisted units after deciding the overlap with `hostServiceLogs`. Tier 2 because operational evidence is otherwise unavailable to the orchestrator. Source: `odd/tasks/host-journal-tool.md:219–280,336–344`.
+6. **Python worker verification** — **OPEN / design unresolved**; owner **A**. Decide dependency/interpreter provisioning or explicitly define host-side verification, including Python 3.14 compatibility. Tier 2 because one reported project could not run its tests in the worker. Source: `docs/TODO.md` (consolidated from the prior worker-verification item 7 at lines 204–217 before this rewrite).
+
+## Tier 3 — blocks users now (5 items)
+
+1. **Commit and issue text newline rejection** — **OPEN**; owner **A**. Permit newline/tab in argv-contained commit messages and issue bodies while retaining NUL/control, size, and single-line title validation. Tier 3 because ordinary multi-line commit/issue content is rejected. Source: `docs/TODO.md` (consolidated from prior item 6 at lines 190–203 before this rewrite).
+2. **Remaining manual verification gates** — **OPEN; user-owned**; owner **U**. Complete the user-certified installation and acceptance checklists; agents must not self-certify. Tier 3 because these gates block live acceptance and use. Source: `docs/manual-verification.md:1–5,36–52,230–275`; `openspec/changes/agent-host-tools/tasks.md:69–78`.
+3. **`sandbox_diff` reports zero** — **OPEN**; owner **A**. Correct active/retained comparison behavior. Tier 3 because users cannot see the worker delta through the read surface. Source: `docs/TODO.md` (consolidated from prior item 24 at lines 80–82 before this rewrite).
+4. **Wrong `sandbox_apply` S17 failure message** — **OPEN**; owner **A**. Return the accurate protected-path refusal message. Tier 3 because users receive misleading failure feedback. Source: `docs/TODO.md` (consolidated from prior item 25 at lines 80–82 before this rewrite).
+5. **`sandbox_apply_patch` rejects valid EOF hunks** — **OPEN**; owner **A**. Accept append-only hunks ending in additions, or name the constraint clearly. Tier 3 because users must contort otherwise valid patches. Source: `docs/TODO.md` (consolidated from prior item 8 at lines 219–221 before this rewrite).
+
+## Tier 4 — advisory and tail (6 primary entries; 20 tail entries)
+
+1. **Advisory lens findings** (`R2-001`, `R2-002`, `R3-001`, `R3-002`; separately `R3-003`) — **OPEN / advisory**; owner **A**. Track containment-helper readability, misleading diff-catch advice, lost original cause, symlink-deletion test, and profile `~` validity. Tier 4 because the recorded review classified these as non-blocking. Source: `odd/tasks/host-sandbox-result-tool.md:300–313`; `docs/TODO.md` (prior lines 239–241).
+2. **Apply-preview docs and installed readback** — **OPEN**; owner **U** for installed-stack readback, **A** for documentation. Finish T4/T5 and reconcile the earlier body with the installed guard evidence. Tier 4 because code is recorded as installed but docs/readback remain pending. Source: `odd/tasks/apply-preview-diff.md:347–350,390–398,459–464`.
+3. **Host-tool flag-parity sweep** — **OPEN**; owner **A**. Complete T2–T5 sweep and readback; T1 alone is done. Tier 4 because the direct missing-flag defect is fixed and only the residual audit remains. Source: `odd/tasks/review-host-tool-flag-parity.md:154–162,183–185`.
+4. **Host-read operation for two verification gaps** — **UNRESOLVED / design external to this repository**; owner **X** for the design evidence, then **A** for implementation if authorized. Identify the two actual gaps from the external design before proposing an operation; do not guess their semantics. Tier 4 because this is an unscoped discovery/design dependency, not a verified implementation defect. Source: `docs/TODO.md` (this recorded request); the authoritative design and gap definitions are external and are not in this repository.
+5. **Cross-project change-request feature and corrections** — **OPEN / requirements unresolved**; owner **A**. Define target/requester identity, evidence transfer, approval at request time, and S17 interaction before implementation. Tier 4 because this is a proposed workflow rather than a current data-loss blocker. Source: `docs/TODO.md` (consolidated from prior item 3 at lines 127–136 before this rewrite).
+6. **Remaining tail — retain as separate tracked work**:
+   - **Push to `origin` status** — **UNVERIFIED**; owner **U**. Tier 4 because sandbox refs did not expose the host remote state and this is a user-side delivery check. Source: `docs/TODO.md` (prior Delivered note, lines 13–15).
+   - **GGA review-hook / `host_git_commit` conflict** — **OPEN; reproduce first, mechanism unverified**; owner **A**. Tier 4 because the cause must be established before this can be scoped. Source: `docs/TODO.md` (prior item 4, lines 138–145, consolidated here).
+   - **Worktree review/commit lifecycle and project selector** — **PROPOSED / not started**; owner **A**. Add allowlisted project selection and safe worktree lifecycle once linked `.git` grants are solved. Tier 4 because it depends on the Tier 2 grant work. Source: `docs/TODO.md` (prior plan, lines 157–189); `odd/tasks/register-project-profile-grants.md:102–111`.
+   - **Nono 0.74 loopback regression report** — **DRAFTED / external follow-through pending**; owner **X**. Tier 4 because the remaining action is external reporting. Source: `docs/TODO.md` (prior item 3, line 60).
+   - **Auto-update EACCES verification** — **UNRESOLVED**; owner **U**. Tier 4 because it is an unverified operational follow-up rather than a demonstrated current blocker. Source: `docs/TODO.md` (consolidated from prior item 5 at line 61 before this rewrite).
+   - **`sandbox_copy_out` diff-style review parity** — **OPEN**; owner **A**. Tier 4 because it improves review parity but is not a current apply failure. Source: `docs/TODO.md` (prior item 10, line 62).
+   - **Live human-oversight issue-creation check** — **UNVERIFIED live**; owner **U**. The `host_gh_issue_create` implementation is recorded as wired; only its live exercise remains. Tier 4 because implementation is recorded complete and only live evidence is pending. Source: `docs/TODO.md` (prior item 12, line 63, consolidated here).
+   - **Sandbox tool-definition audit** — **OPEN**; owner **A**. Tier 4 because it is a broad quality audit rather than a known outage. Source: `docs/TODO.md` (prior item 13, line 64).
+   - **Agent web/network access** — **OPEN**; owner **A**. Tier 4 because it is an optional capability expansion under deny-by-default networking. Source: `docs/TODO.md` (consolidated from prior item 14 at line 65 before this rewrite).
+   - **AFT sandbox-state gating** — **OPEN**; owner **A**. Tier 4 because it is a bounded hardening task below the user-facing defects. Source: `docs/TODO.md` (prior item 19, line 67).
+   - **OpenChamber E2E on nono 0.73** — **OPEN / user verification**; owner **U**. Tier 4 because this is an acceptance check rather than a code defect. Source: `docs/TODO.md` (prior item 22, line 69); `docs/manual-verification.md:230–240`.
+   - **SDD runtime host binary and test verification** — **OPEN / host verification**; owner **U**. Tier 4 because only host-side verification remains. Source: `docs/TODO.md` (prior item 23, line 70).
+   - **Role-based subagents Phase B** — **PARKED**; owner **A**; nine tasks remain. Tier 4 because the multi-phase feature is explicitly parked. Source: `docs/TODO.md` (consolidated from prior item 15 at line 75 before this rewrite).
+   - **Agent-host-tools slices 2–3, verification and archive** — **OPEN; must be dispatched in a new session**; owner **A**. The session latch arose in the prior malformed task-result session; later work does not change the requirement for the still-unchecked follow-on phases. Tier 4 because this is unfinished planned continuation rather than a failure in the completed slice. Source: `openspec/changes/agent-host-tools/tasks.md:69–78`.
+   - **Read-only orchestrator S17 review** — **CODE DELIVERED; USER REVIEW OPEN**; owner **U**. Tier 4 because this is a user-controlled protected-path gate rather than agent implementation. Source: `docs/TODO.md` (consolidated from prior item 18 at line 76 before this rewrite); `docs/manual-verification.md:249–275`.
+   - **`runPrepare` temp-directory/bundle status checks** — **OPEN**; owner **A**. This is distinct from the Tier 1 non-fast-forward refspec. Tier 4 because the old tracker records it as a separate lower-severity tooling defect. Source: `docs/TODO.md` (consolidated from prior item 26 at line 82 before this rewrite).
+   - **OpenChamber metadata Details suppressant-key note** — **OPEN / upstream report**; owner **X**. Tier 4 because the remaining action is an upstream advisory. Source: `docs/TODO.md` (prior follow-up, line 239).
+   - **Nono profile `~` entry (`R3-003`)** — **UNVERIFIED**; owner **U**. Tier 4 because the review marked it advisory and it requires user-side `nono why` verification. Source: `odd/tasks/host-sandbox-result-tool.md:304–313`.
+   - **HostFS MCP integration proposal** — **PARKED / not started**; owner **A**. Tier 4 because the full proposal remains unstarted. Source: `odd/tasks/hostfs-mcp-integration.md:421–440,463–468`.
+   - **Gentle AI 3.1.0 descriptive-doc alignment** — **OPEN; T5 only**; owner **A**. Tier 4 because implementation and tests are complete; only descriptive docs remain. Source: `odd/tasks/gentle-ai-3.1.0-integration-alignment.md:186–195,375–378`.
 
 ## Completed
 
-1. Copy-tool hardening (copy_in activation, copy_out source cap, env cap 200)
-2. Global AGENTS.md host-side SDD guidance (copy_in/copy_out flow)
-4. Worker test runners (bun + pytest in image, 9/9 copy-review)
-6. Broker commits (feat(broker) + chore(sandbox))
-7. Sync systemd-user/broker.env template (9 projects, S17 real list, binary line)
-8. Host bun tests (117 pass) + build
-9. Apply-review file flow (applyPreview op + 6/6 tests; live after restart)
-11. Agent commit/push with authorization — `host_git_commit` and `host_git_push` exist and are in use (plugin tool + fragment `ask` + broker handler + fixed argv + tests)
-17. Revert live S17 bootstrap relaxation (real list now live)
-21. Idle-worker reaping + pool queue — clean/dirty reap (60s), queue park/progress/drain, operation-aware client timeout (exec 130s / ensureWorker 120s)
+- **S17 protected-list repository template:** repository `systemd-user/broker.env` contains the full protected list, matching `DEFAULT_PROTECTED_SECURITY_FILES`; live installed `~/.config/opencode-sandbox/broker.env` is user-owned and was not read here. The old claim that the repository copy is `[]` is corrected below. Source: `systemd-user/broker.env:25–28`; `broker/src/config.ts:213–229`.
+- **SDD session latch:** the triggering latch is session-specific, not a repository-wide lock; the repository records that the unfinished slices, verification and archive must run in a NEW session. Later commits show work occurred in subsequent sessions, but do not complete the unchecked acceptance tasks. The TODO's former “resolved in practice” wording was too broad and is corrected below. Source: `openspec/changes/agent-host-tools/tasks.md:69–78`.
+- **Sandbox result-ref inspector/install:** implemented and registered; no longer a proposal. Source: `opencode/plugins/sandbox-tools.ts:591–635`; `odd/tasks/host-sandbox-result-tool.md:220–249`.
+- **A-R4 approval bypass:** plugin refuses approval when the preview is truncated and no complete plain artifact exists; see Tier 1 for the exact guard and regression evidence. This does not assert a broker-side size gate. Source: `opencode/plugins/lib/apply-preview-guard.ts:43–57`; `opencode/plugins/sandbox-tools.ts:428–465`; `odd/tasks/apply-preview-diff.md` (correction below).
+- **Acknowledge-approved lineage bug:** implemented and recorded live verified. Source: `docs/TODO.md` (prior lines 103–117); `odd/tasks/review-host-tool-flag-parity.md:154–160`.
+- **Readable apply preview / metadata rendering:** installed and post-install behavior recorded as confirmed. Source: `odd/tasks/host-sandbox-result-tool.md:278–287,318–323`; `odd/tasks/apply-preview-diff.md:347–368`.
+- **Copy-tool hardening; global AGENTS.md host-side SDD guidance; worker runners; broker commits/build; repository env template sync; apply-review file flow; host commit/push authorization; idle-reaper/pool-queue implementation.** These prior completed entries are retained as completed implementation records; open recovery risks are tracked in Tier 1. Source: prior `docs/TODO.md` Completed list; `openspec/changes/agent-host-tools/tasks.md:69–78`.
+- **Project registration `.codegraph` item 27:** not complete; superseded by the still-pending registration/profile-grants tracker and therefore moved to Tier 2, not marked done. Source: `odd/tasks/register-project-profile-grants.md:193–201`.
 
-## Pending
+## Contradiction resolutions and record corrections
 
-3. File nono 0.74 loopback regression at nolabs-ai/nono (drafted)
-5. Verify auto-update EACCES resolved (4 history files seeded, journal clean?)
-10. Make sandbox_copy_out identical to apply: diff-style review file, no 200 hard cap for source targets
-12. GitHub issue reporting with human oversight — `host_gh_issue_create` is implemented and wired (plugin tool + fragment `ask` + broker handler + fixed `gh issue create` argv + tests); the remaining item is a live, human-oversight issue creation, unverified live
-13. Sandbox tool-definition pass (13 sandbox_* descriptions/schemas audit)
-14. Web/network access for agents (github.com, websearch hosts in nono allow_domain)
-16. Final security gate (manual-verification gates + AFT bypass finding + orchestrator staleness + file-mode finding)
-19. AFT sandbox-state gating (deny host AFT post-activation)
-20. Broker retained-result resume gap (RETAINED results are dead-ends)
-22. OpenChamber E2E verification on nono 0.73 (all providers respond)
-23. SDD runtime: verify BROKER_GENTLE_AI_BINARY in broker env + sdd-runtime tests on host
-27. Superseded — tracked by `odd/tasks/register-project-profile-grants.md` T2, which cites this item: create + grant `<project>/.codegraph` in the nono profile for new projects (mirror the existing `.atl` helper) so CodeGraph can write its index inside secure OpenCode. The grant must be paired with directory creation: nono binds grants to existing paths at sandbox start and cannot create `.codegraph` itself.
-
-## In-progress / parked
-
-15. Role-based subagents SDD — Phase A (P0+A) code committed. The tracker's original commit `6118de1` no longer exists in history (reset, then re-applied as `b6a5f8c`, "restore 6118de1, 3-way merge"); the "159 tests" figure is unverified. Parked at Phase B (9 tasks: B.1-B.3 researcher/worker, C.1-C.3 advisor/deliberation, D.1-D.3 security gate)
-18. Read-only orchestrator — part of Phase A (readOnlyAgents + plugin guard), code delivered, S17 pending
-
-## New (2026-09-05)
-
-24. sandbox_diff always shows 0 — buildRetainedDiff returns compare:'' while active-mode diff computes .new reference comparisons
-25. sandbox_apply not giving the correct S17 failure message
-26. runPrepare .broker-tmp mkdir + git bundle create status check (bites sandbox_bash-only writers)
-
-## Sandbox result-ref inspector (host tool)
-
-**Problem:** the orchestrator cannot inspect the content of a sandbox result ref
-(`refs/opencode-sandbox/result/<sessionID>`). On 2026-09-20 a result import was rejected
-non-fast-forward because a pre-reset export already held that session's ref, and confirming
-whether the blocking ref contained the same work required the user to run `git show` and
-`git diff` by hand.
-
-**Proposed:** a read-only host operation (e.g. `host_sandbox_result`) that, for a session ID,
-returns the ref's commit identity and timestamp, the changed-path list with per-file
-added/removed counts, and the patch or a bounded excerpt. Fixed argv, no worker activation,
-bounded output, S17-aware, read-only. A comparison mode (baseline vs result, or any two refs)
-would cover the blocking-ref case directly.
-
-**Acceptance:** the orchestrator can determine whether a blocking result ref matches the
-intended change without any host shell, and can diff two refs itself.
-
-## Backlog captured 2026-09-21
-
-### 1. Bug fix (blocking another repo) — acknowledge-approved must carry `--lineage`
-
-`host_review_acknowledge_approved` builds an incomplete argv: it does not forward
-`--lineage` to `gentle-ai review acknowledge-approved`, and it exposes no parameters, so a
-caller cannot supply the missing flag. Reported from a dependent repo where an approved
-lineage (`action: execute`, `reason_code: approved_acknowledgement_required`) dead-ends —
-the orchestrator has no host Bash by design, so the final step needs a human at the CLI.
-
-Expected: forward all four provider-issued flags in the CLI's order —
-`--lineage --target --expected-revision --token`.
-
-Repository status: implemented as commit `80ae253` (unit 5 of the review batch), which emits
-all four and refuses a missing value before spawning. **Live and verified (2026-09-21):** the
-acknowledgement was executed through `host_review_acknowledge_approved` on the installed
-stack, forwarding all four provider-issued flags, and it returned `action: acknowledged`.
-
-### 2. Feature — readable `sandbox_apply` preview
-
-The approval prompt currently shows a `ses_…` filename and a terse summary, which tells the
-approver neither what the change is nor where to read it. Requested: every apply produces the
-two preview files under descriptive, stable, patch-derived names rather than the session id,
-and the approval prompt carries a brief human-readable description of the patch — including
-the project name and the full paths of both preview files.
-
-### 3. Feature — cross-project agent-to-agent change requests
-
-Agents in one project cannot request changes to another project they depend on. Requested: a
-direct agent-to-agent channel for bug fixes and feature requests across projects, gated by
-explicit user approval **at request time** in addition to the existing approval at apply time.
-
-Questions to settle at design time: how a request identifies its target project and its
-requester; how evidence and reproduction steps travel with it; how approval-at-request is
-recorded, bounded and distinguished from apply-time approval; and how requests that touch
-S17/protected paths interact with the existing manual-review boundary.
-
-### 4. Bug — the GGA review hook conflicts with `host_git_commit`
-
-When GGA (Gentle AI) is active and the host git commit tool is used, the GGA code-review
-subagent appears to believe it is using the tool, does nothing, and the commit fails. Observed
-directly; the mechanism is unverified. First step is to reproduce with GGA enabled and capture
-three facts: whether the hook intercepts the commit call, whether the subagent is dispatched at
-all, and where the failure surfaces — the commit operation, the hook, or the subagent.
-
-### 5. Bug — the systematic `ce:review` pipeline cannot run from the orchestrator
-
-Four gaps: no non-mutating way to obtain a git range as data; no shared scratch surface between
-worker sessions; no execution surface for the bundled helpers (`ensure-ignore.mjs`,
-`validate-review.mjs`); and no artifact write surface for `review-summary.json`. Consequence:
-reviewers receive no diff and return DIFF_UNAVAILABLE, so `pre_existing` attribution — the core
-value of the review — goes unverified, and the packaged pipeline never runs at all.
-
-The full brief, the four proposed fixed host tools, their non-negotiable boundaries, the
-acceptance criteria and the regression risks are recorded in `docs/PLAN.md`.
-
-## Planned — worktree review and commit without a per-worktree session
-
-**Problem:** the review and git host operations bind to the session's project and accept no
-cwd, so reviewing a git worktree requires a session whose project *is* that worktree. That
-constraint is what makes per-slice review awkward, and it is why tonight's checkouts were
-dangerous: the tree the broker installs from was also the tree under review. What actually
-broke the stack was `install-user-files --apply` run from a checkout — not the checkout.
-
-**Planned shape**
-
-1. **Project selector on the host operations.** Add an optional, allowlisted `projectId` to
-   `host_review_status|assess|start|capture_*|acknowledge_approved` and `host_git_commit`,
-   resolved through the broker's existing `BROKER_PROJECTS` registry. An id, never a path or
-   cwd; unknown ids refused. With this, a worktree registered as a project can be reviewed and
-   committed from the main session, and the new-session requirement disappears. It is also
-   stricter than today's implicit project binding.
-2. **Worktree lifecycle operations.** Read: `host_worktree_list`. Approval-gated mutations:
-   `host_worktree_create <projectId> <ref>` and `host_worktree_remove <projectId>`. Fixed
-   argv, canonical paths, sibling placement under the home directory (never /tmp), and
-   registration through the same path `host_register_project` uses so the relay's allowlist
-   check and the broker's project lookup both succeed.
-3. **A `worktree-committer` specialist.** Takes a worktree project id plus a unit spec;
-   implements through sandbox workers bound to that project, runs that project's tests, and
-   returns a prepared result for the orchestrator to review and commit. It never calls host
-   operations itself — those stay orchestrator-only, which is also why review and commit stay
-   with the orchestrator.
-4. **Grant coverage for git metadata.** A worktree's `.git` is a file pointing at the main
-   repository's `.git/worktrees/<name>`, so the profile grant for a worktree project must also
-   cover the main repository's git metadata. Today's per-project `.git` grant does not
-   obviously do that, and this is the wrinkle most likely to bite first.
-
-**Acceptance:** a unit can be reviewed and committed from a worktree without moving the main
-tree and without opening a session in the worktree, and no host operation accepts a raw path.
-### 6. Bug — commit and issue messages reject newlines
-
-`host_git_commit` refuses any message containing a control character, so a conventional commit
-body cannot be passed at all, and every repository using the tool runs into it. The check is
-over-broad: the message is delivered as a single argv element (`git commit -m <message> --
-<paths>`), so a newline cannot break the command — it only trips a general sanitizer. The same
-applies to the GitHub issue `body`.
-
-Proposed: allow `\n` (and `\t`) in `message` and in the issue `body`; keep rejecting NUL and the
-remaining C0 controls; keep the byte caps and the non-empty requirement; keep `title`
-single-line, which is a genuine constraint. Add tests that a multi-line message reaches
-`git commit` intact and that NUL is still refused. Check whether the same validator gates the
-other free-text fields (`host_plan_append` content, the review capture inputs) so the fix is
-consistent rather than one-off.
-### 7. Gap — Python workers cannot run a project's tests
-
-Reported 2026-09-24 from the tesla project, where a sandbox worker could not run a single test and the change therefore shipped unverified.
-
-Evidence: the worker image carries pytest but none of the project's dependencies (`httpx`, `fastapi`, `pytest_asyncio`), has no `pip` and no `uv`, has no network, and provides Python 3.13.5 against a repository targeting 3.14 — so `pytest` dies while loading `tests/conftest.py`.
-
-This is a design gap, not a defect: the image carries *runners* and is validated by a dependency-free fixture, so a real project's dependency set was never in scope. Whatever we choose, it should be chosen deliberately, because "the worker cannot verify" pushes verification back onto the host and quietly weakens the point of sandboxing. Options to weigh:
-
-- read-only access to a project-local environment (awkward: a venv embeds absolute paths, and `.venv/` is gitignored so it is not in the captured baseline);
-- an offline wheelhouse the worker may install from, with `pip install --no-index` — requires pip in the image and a matching interpreter;
-- a per-project image layer pinning the project's Python version and dependencies;
-- accepting that Python projects verify on the host, and saying so in the workflow.
-
-The interpreter mismatch (3.13 vs 3.14) is part of the problem and must be decided rather than worked around.
-
-### 8. Defect — `sandbox_apply_patch` rejects hunks ending on added lines without trailing context
-
-Reported 2026-09-24 from the tesla project: hunks that end on added lines with no trailing context are refused, so the worker had to append trailing context to every hunk. Minor in impact, but the failure mode is wrong — it silently forces awkward patches instead of either accepting them or naming the constraint when it refuses.
-### 9. Defect — the idle reaper and retained-result lifecycle have three dead-end faces
-
-Evidence, `sandbox-broker` journal 2026-09-24: two delegated workers activated at 22:39:12 (`ensureWorker` ok 600ms, `exec` ok 518ms, `readFile` ok at 22:39:22). At 22:40:17 and 22:40:19 the `reaper` logged `bundle … / tmp_index …` for both sessions. At 22:40:36 `ensureWorker` returned `session … is FAILED_CLOSED; manual review required`, and the next read returned `not sandbox-active (state=FAILED_CLOSED)`.
-
-Roughly 55 seconds with no broker operation — a model composing a large documentation edit — was treated as idle and reaped. The lifecycle gap has three faces:
-
-1. **In-progress export:** the idle reaper exports sessions while work is still in progress. The 60-second idle threshold can fire during a model turn; operation timeouts (`exec` 130s, `ensureWorker` 120s) do not protect in-flight composition from idleness.
-2. **Pruned failed import:** a failed result import becomes unrecoverable once state GC prunes its bundle.
-3. **No ref fallback:** there is no fallback from a session id to a surviving result ref.
-
-A reaped session becomes `FAILED_CLOSED` and cannot be resumed. Related to item 20 (`RETAINED` results are dead-ends): lifecycle states have no recovery path, leaving no way to clear them without a restart.
-
-### Additional follow-ups
-
-- **Trace-file defect:** the `review start --trace` value is written as a file in the repository, moving the untracked inventory and invalidating the consent gate's own precondition. Reproduced three times.
-- **Result-install revert hazard:** installing a result restores its tree for paths in that result's diff; a later change to the same path is silently reverted while the operation reports `installed: true`.
-- **Deployment-verification gap:** a stale installed plugin or nono profile mirror can masquerade as installed; there is no post-install byte verification.
-- **OpenChamber upstream note:** the suppressant-key gate used for metadata Details rendering is fragile by design; report it upstream.
-- **`R3-003`:** the profile's `~` entry may be inert; verify with `nono why`.
-- **Advisory lens findings to track:** `R2-001` (compressed containment helper), `R2-002` (patch catch gives diff advice for non-diff failures), `R3-001` (catch discards the original cause), and `R3-002` (symlink deletion target untested).
+1. **Protected-list state.** The contradiction was between the TODO saying the full list was already present, and manifest/OpenSpec text saying `[]`. Repository evidence: `systemd-user/broker.env:25–28` has a populated `BROKER_PROTECTED_SECURITY_FILES` JSON array; `broker/src/config.ts:217–229` has the same full default list. Resolution: the repository copy is full, not `[]`. The live installed env is user-owned and was not read; its state cannot be inferred. Correct the manifest and OpenSpec wording to distinguish repository template from documented live configuration; do not claim a live observation. Source: `docs/config-manifest-host-tools.md:427–441`; `openspec/changes/agent-host-tools/tasks.md:71`.
+2. **SDD session latch.** TODO said resolved because later commits landed; OpenSpec says phases still pending and must run in a NEW session. Resolution: the session-scoped latch is not cleared by work completed in later sessions; the open follow-on work must use a new session. Correct the TODO to remove “resolved in practice” and keep the OpenSpec note. Evidence: `openspec/changes/agent-host-tools/tasks.md:69–78`, including unchecked 5.1–5.6 and the explicit latch at line 78.
+3. **Result-ref inspector.** TODO presents it as proposed; tracker records T1–T5 done and the current plugin has registered `host_sandbox_result` and `host_sandbox_result_install`. Resolution: implemented, installed, and verified per tracker; move the proposal to Completed and remove the obsolete proposal block. Evidence: `opencode/plugins/sandbox-tools.ts:591–635`; `odd/tasks/host-sandbox-result-tool.md:220–249`.
+4. **A-R4 apply-preview.** Tracker body says apply has no gate; closing note says fail-closed guard installed. Resolution: the broker does not implement a preview-line-size gate, but the plugin `sandbox_apply` path cannot request approval for a truncated preview when `applyPreviewFiles.plain` is absent; it throws before `ctx.ask` and before `applyResult`. So approval cannot proceed in that condition through this plugin path. Correct the stale body to make this distinction and cite the guard; preserve any separate broker-bypass finding only if evidence identifies a path that bypasses the plugin. Evidence: `opencode/plugins/lib/apply-preview-guard.ts:43–57,65–74`; `opencode/plugins/sandbox-tools.ts:428–465`; `odd/tasks/apply-preview-diff.md:39–65,459–464`.
