@@ -9,7 +9,7 @@ mock.module("zod", () => ({
     get: () => () => schema,
   }),
 }));
-const { applyTargetedEdit } = await import("../../opencode/plugins/sandbox-tools.ts");
+const { applyTargetedEdit } = await import("../../opencode/plugins/lib/sandbox-edit-core.ts");
 
 const sandboxTools = readFileSync(
   new URL("../../opencode/plugins/sandbox-tools.ts", import.meta.url),
@@ -26,6 +26,39 @@ function refusalReason(run: () => unknown): string {
   }
   throw new Error("Expected targeted edit to be refused");
 }
+
+test("plugin wrappers export only their plugin function(s) and default", async () => {
+  const wrappers = [
+    {
+      path: "sandbox-tools.ts",
+      module: await import("../../opencode/plugins/sandbox-tools.ts"),
+      allowed: ["default"],
+    },
+    {
+      path: "routing-guard.ts",
+      module: await import("../../opencode/plugins/routing-guard.ts"),
+      allowed: ["default"],
+    },
+    {
+      path: "reviewer-relay-transport.ts",
+      module: await import("../../opencode/plugins/reviewer-relay-transport.ts"),
+      allowed: ["ReviewerRelayTransportPlugin", "default"],
+    },
+  ];
+
+  for (const wrapper of wrappers) {
+    const exportedNames = Object.keys(wrapper.module);
+    for (const name of exportedNames) {
+      expect(
+        wrapper.allowed,
+        `${wrapper.path} has unexpected plugin export: ${name}`,
+      ).toContain(name);
+    }
+    for (const name of wrapper.allowed) {
+      expect(exportedNames, `${wrapper.path} is missing plugin export: ${name}`).toContain(name);
+    }
+  }
+});
 
 test("sandbox_edit replaces one unique match in place", () => {
   expect(applyTargetedEdit("const value = 1;\n", "1", "2")).toBe("const value = 2;\n");

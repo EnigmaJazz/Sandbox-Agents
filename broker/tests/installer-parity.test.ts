@@ -63,6 +63,14 @@ describe("installer/rollback plugin coverage parity", () => {
     });
   }
 
+  test("both scripts explicitly include the sandbox edit core helper", () => {
+    for (const script of SCRIPTS) {
+      expect(pluginLoopEntries(script), `${script} omits lib/sandbox-edit-core.ts`).toContain(
+        "lib/sandbox-edit-core.ts",
+      );
+    }
+  });
+
   test("both scripts cover the same plugin files", () => {
     const installer = pluginLoopEntries(SCRIPTS[0]!);
     const rollback = pluginLoopEntries(SCRIPTS[1]!);

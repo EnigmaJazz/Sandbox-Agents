@@ -60,34 +60,7 @@ import {
   buildSddArchiveComposeAsk,
   buildSddAttemptGrantAsk,
 } from "./lib/host-tool-approval.ts";
-
-export function applyTargetedEdit(
-  content: string,
-  oldString: string,
-  newString: string,
-  replaceAll = false,
-): string {
-  if (oldString.length === 0) {
-    throw new Error("sandbox_edit: oldString must not be empty");
-  }
-  const firstIndex = content.indexOf(oldString);
-  if (firstIndex === -1) {
-    throw new Error("sandbox_edit: oldString was not found");
-  }
-  const secondIndex = content.indexOf(oldString, firstIndex + oldString.length);
-  if (secondIndex !== -1 && !replaceAll) {
-    throw new Error(
-      "sandbox_edit: oldString matched multiple times; set replaceAll to true to replace all",
-    );
-  }
-  const result = replaceAll
-    ? content.split(oldString).join(newString)
-    : `${content.slice(0, firstIndex)}${newString}${content.slice(firstIndex + oldString.length)}`;
-  if (result.length === 0) {
-    throw new Error("sandbox_edit: edit would leave the file empty");
-  }
-  return result;
-}
+import { applyTargetedEdit } from "./lib/sandbox-edit-core.ts";
 
 const READ_ONLY_AGENTS: readonly string[] = ["gentle-orchestrator"];
 
@@ -127,7 +100,7 @@ function notActiveError(): Error {
  * redirection, pipes or environment interpolation. The resulting argv is
  * validated broker-side (shell metacharacters rejected).
  */
-export function tokenizeCommand(command: string): string[] {
+function tokenizeCommand(command: string): string[] {
   const tokens: string[] = [];
   let current = "";
   let quote: "'" | '"' | null = null;
