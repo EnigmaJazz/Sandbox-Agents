@@ -1478,6 +1478,14 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
   });
   const hostBundle = bundlePathFor(ctx.config.stateDir, sessionID);
   const workerBundle = `/work/.broker-tmp/result-${sessionID}.bundle`;
+  const stagingDir = await ctx.adapter.exec(
+    worker,
+    ["mkdir", "-p", "/work/.broker-tmp"],
+    { cwd: "/work", timeoutMs: 30_000 },
+  );
+  if (stagingDir.status !== 0) {
+    throw new MsbError(`result bundle staging directory failed: ${trimErr(stagingDir.stderr)}`);
+  }
 
   // Worker side: stage the working tree (transfer artifacts excluded), commit
   // it when there is anything new, then publish result ref + bundle. Without
@@ -1539,7 +1547,7 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
       throw new MsbError(`result commit failed: ${trimErr(commit.stderr)}`);
     }
   }
-  await ctx.adapter.exec(
+  const updated = await ctx.adapter.exec(
     worker,
     ["git", "update-ref", ref, "HEAD"],
     {
@@ -1552,7 +1560,10 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
       },
     },
   );
-  await ctx.adapter.exec(
+  if (updated.status !== 0) {
+    throw new MsbError(`result ref staging failed: ${trimErr(updated.stderr)}`);
+  }
+  const bundle = await ctx.adapter.exec(
     worker,
     ["git", "bundle", "create", workerBundle, ref],
     {
@@ -1565,6 +1576,9 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
       },
     },
   );
+  if (bundle.status !== 0) {
+    throw new MsbError(`result bundle creation failed: ${trimErr(bundle.stderr)}`);
+  }
   await ctx.adapter.copyOut(worker, workerBundle, hostBundle);
 
   // Host side: verify + import under the sandbox result namespace.
@@ -1584,7 +1598,7 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
     throw new StateError("project not in allowlist");
   const projectID: string = record.projectID;
   const imported = await ctx.git.spawn(
-    ["git", "fetch", "--no-tags", hostBundle, `${ref}:${ref}`],
+    ["git", "fetch", "--no-tags", hostBundle, `+${ref}:${ref}`],
     {
       cwd: projectDirFor(ctx, projectID),
       timeoutMs: 120_000,
