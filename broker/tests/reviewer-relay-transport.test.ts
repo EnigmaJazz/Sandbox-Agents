@@ -293,6 +293,22 @@ describe("reviewer relay session root selection", () => {
     ).toBe(canonicalRepo);
   });
 
+  test("refuses a server root that is not broker-allowlisted without spawning a child", async () => {
+    const harness = relayHarness({
+      sessionDirectory: canonicalOther,
+      serverRoot: canonicalOther,
+      projectPaths: [projectPath(canonicalRepo)],
+      rootCache: new Map<string, string>(),
+    });
+    const refusal = await harness.hooks["tool.execute.before"](
+      taskInput("s-server-root-unlisted", "c1"),
+      { args: { subagent_type: "asi-review-readability", prompt: BINDING_PROMPT } },
+    );
+
+    expect(deliveredError(refusal)).toContain("reviewer_relay_root_refused");
+    expect(harness.children).toHaveLength(0);
+  });
+
   test("refuses a root outside the broker allowlist", () => {
     expect(() =>
       selectCanonicalSessionRoot({
