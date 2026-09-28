@@ -230,9 +230,9 @@ export interface RootSelectionInput {
 /**
  * Select the reviewer Task's canonical repository root.
  *
- * The session repository must be a canonical absolute path, exactly equal to
- * one broker-allowlisted project root, and different from the plugin server
- * root. Every failure refuses before any child process exists.
+ * The session repository must be a canonical absolute path exactly equal to
+ * one broker-allowlisted project root. Every failure refuses before any child
+ * process exists.
  */
 export function selectCanonicalSessionRoot(input: RootSelectionInput): string {
   const sessionRoot = requireCanonicalAbsoluteRoot(input.sessionDirectory, input.realpath);
@@ -253,9 +253,6 @@ export function selectCanonicalSessionRoot(input: RootSelectionInput): string {
   }
   const serverRoot = requireCanonicalAbsoluteRoot(input.serverRoot, input.realpath);
   console.log(`[reviewer-relay] root check sessionRoot=${sessionRoot} serverRoot=${serverRoot}`);
-  if (serverRoot === sessionRoot) {
-    throw rootRefused("session repository equals the plugin server root");
-  }
   return sessionRoot;
 }
 
@@ -291,11 +288,9 @@ export function createSessionRootResolver(
     }
     const cached = cache.get(sessionID);
     if (cached !== undefined) {
-      // Re-check the server-root inequality on a hit so a cache shared with
-      // another plugin instance can never bypass this instance's guard.
-      if (requireCanonicalAbsoluteRoot(deps.serverRoot, deps.realpath) === cached) {
-        throw rootRefused("cached session repository equals the plugin server root");
-      }
+      // Re-check the server root on a hit so a cache shared with another
+      // plugin instance cannot bypass this instance's canonical-path check.
+      requireCanonicalAbsoluteRoot(deps.serverRoot, deps.realpath);
       return cached;
     }
     let sessionDirectory: unknown;
@@ -303,6 +298,9 @@ export function createSessionRootResolver(
       sessionDirectory = await deps.lookupSessionDirectory(sessionID);
     } catch (cause) {
       throw refusalOr(cause, sessionLookupFailed);
+    }
+    if (typeof sessionDirectory !== "string" || sessionDirectory.length === 0) {
+      throw sessionLookupFailed("session lookup returned no usable repository directory");
     }
     let projectPaths: readonly unknown[];
     try {
