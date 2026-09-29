@@ -2,7 +2,7 @@
 
 - **Feature:** `reviewer-relay-root-guard`
 - **Project:** `sandbox-integration` (`/home/james/agent-sandbox-integration`)
-- **Status:** Implementation, checks and commit complete; scoped native assessment against boundary `2d92f331` remains pending canonical untracked inventory
+- **Status:** Implementation, checks, commits, and scoped native review complete; provider acknowledged approval and burned authority. The reviewed boundary has advanced to `ee831ace..HEAD`; the older range is accepted-by-deferral and will not be re-reviewed.
 
 ## Objective
 
@@ -89,13 +89,17 @@ TDD is active as RED-first test coverage: record observed RED before GREEN, or s
 - Source state: retained result `refs/opencode-sandbox/result/ses_f15e94c60ffeekX4aNWe9lIFoU` at commit `63467d2f`; restored into the working tree by hand because `opencode/plugins/**` is S17. `opencode/plugins/lib/reviewer-relay-core.ts` hash: `b3b1832cce24c078c43ebdfd392aa683e3c1bee4`.
 - The generated in-repository build artifact is absent from the working tree.
 
-## Work-unit commit and scoped assessment
+## Work-unit commits and closed scoped review
 
-- Work-unit commit: `8469d32` on `feat/review-and-state-hardening`, subject `fix(reviewer-relay): fail closed on session lookup instead of refusing the server root`; 3 files changed, 162 insertions(+), 15 deletions(−).
-- This tracker update is the follow-up metadata work unit required when the commit identity is known only after committing.
-- Scoped native assessment requested with `--base-ref 2d92f331 --committed-only`: `status: 1`; `risk: high`; `review_due: true`; `review_due_reason: high_risk`; `candidate.consumed: false`.
-- Assessment reason: `unassessable` because untracked files require an explicit declaration. The returned detail directs obtaining the canonical inventory through scoped review STATUS before rerunning the assessment. No review was started or consumed.
+- Commits on `feat/review-and-state-hardening`: `8469d32` (relay fix); `16195d8` (documentation correction and unallowlisted-case test); `dd345f2` (cache re-validation correction); `5a12cc5` (tracker metadata).
+- The first review lineage, `review-422ee52a26058f7b`, covered 36 lines against an 18-line budget and returned `correction_required` with two CRITICAL findings: `R3-cache-revalidation-not-enforced` and `R3-server-root-inequality-guard-removed`.
+- The user chose to correct the cache finding and record the server-root inequality issue as an accepted design decision. An 18-line correction plan was captured and the correction committed. The tracker metadata commit then widened scope by adding a third path, so the provider offered `recover` with disposition `scope_changed`. Recovery created successor lineage `review-8b3f47c19de20a55`, covering 61+18 lines against a 31-line budget.
+- The design finding was not re-raised. The risk lens accepted that the server-root equality clarification “does not remove an executable inequality check.” No `withdraw` or unachievable path was needed.
+- The successor review was **APPROVED** and its authority is burned. The acknowledgement returned `gentle-ai.review-acknowledged/v1`, `action: acknowledged`, `authority: burned`, `consumed_revision: sha256:06d73cbbb0fafd897283088a82f423374fee262fbc427c22bbd5328aad624b4b`, lineage `review-8b3f47c19de20a55`, target `sha256:5d0b59db2da091de955380cbbd55296b8eb61968d467f43ed4873421e373f109`.
+- Two non-blocking findings were explicitly designated by the provider as separate later work, not corrections: `R3-cache-hit-wrap` (**WARNING**, `opencode/plugins/lib/reviewer-relay-core.ts:294`, disposition *introduced*) because cache-hit calls `selectCanonicalSessionRoot` without the `refusalOr(cause, rootRefused)` wrapper used on the non-cache path, so an unexpected low-level failure can surface untyped; and `R2-001` (**SUGGESTION**, `opencode/plugins/lib/reviewer-relay-core.ts:256`) because the guard-site comment repeats the header rationale without stating a distinct invariant.
+- The reviewed range is now `ee831ace..HEAD`; the boundary has advanced, so future assessments cover only new commits. The older range `2d92f331..ee831ace` (approximately 16,000 lines) is **accepted-by-deferral** by explicit user decision: it was not reviewed and must not be re-reviewed.
+- Plugin bytes were installed by the user. Restart verification (`cmp` plus the service restart) remains for the user to confirm; it was not observed here.
 
 ## Next step
 
-Obtain the canonical untracked inventory through the returned scoped review STATUS continuation, then rerun the assessment with the same base and committed-only selectors and an explicit untracked declaration.
+The scoped review is closed and acknowledged. No further review is due for this reviewed range; future assessments start after `ee831ace`. Track `R3-cache-hit-wrap` and `R2-001` as separate advisory later-work units. The user still owns restart verification of installed plugin bytes.
