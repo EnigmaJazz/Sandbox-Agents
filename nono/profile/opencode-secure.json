@@ -125,8 +125,9 @@
       "mcp.context7.com",
       "context7.com",
       "registry.npmjs.org",
-      "registry.yarnpkg.com", 
-      "api.githubcopilot.com"
+      "registry.yarnpkg.com",
+      "api.githubcopilot.com",
+      "huggingface.co"
     ],
     "open_port": [
       4096,
