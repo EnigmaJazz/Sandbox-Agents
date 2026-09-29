@@ -253,6 +253,7 @@ export function selectCanonicalSessionRoot(input: RootSelectionInput): string {
   if (!allowlist.includes(sessionRoot)) {
     throw rootRefused("session repository is not an exact allowlisted project root");
   }
+  // Deliberately removed inequality guard: allowlisted server-root equality is permitted; allowlist validation and fail-closed lookup refusal replace it.
   const serverRoot = requireCanonicalAbsoluteRoot(input.serverRoot, input.realpath);
   console.log(`[reviewer-relay] root check sessionRoot=${sessionRoot} serverRoot=${serverRoot}`);
   return sessionRoot;
@@ -290,9 +291,8 @@ export function createSessionRootResolver(
     }
     const cached = cache.get(sessionID);
     if (cached !== undefined) {
-      // Re-validate the server root's canonical form for logging and sanity;
-      // this does not enforce a relationship between it and the cached root.
-      requireCanonicalAbsoluteRoot(deps.serverRoot, deps.realpath);
+      const projectPaths = await deps.loadAllowlistedPaths().catch((cause) => { throw refusalOr(cause, policyRefused); });
+      selectCanonicalSessionRoot({ sessionDirectory: cached, serverRoot: deps.serverRoot, projectPaths, realpath: deps.realpath });
       return cached;
     }
     let sessionDirectory: unknown;

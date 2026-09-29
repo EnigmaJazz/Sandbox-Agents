@@ -393,8 +393,18 @@ describe("reviewer relay session root selection", () => {
     expect(await resolve("session-1")).toBe(canonicalRepo);
     expect(await resolve("session-1")).toBe(canonicalRepo);
     expect(sessionLookups).toBe(1);
-    expect(policyLookups).toBe(1);
+    expect(policyLookups).toBe(2);
     expect(cache.get("session-1")).toBe(canonicalRepo);
+  });
+
+  test("cache hit refuses a root missing from the current broker allowlist", async () => {
+    const resolve = createSessionRootResolver({
+      lookupSessionDirectory: async () => { throw new Error("cache hit must not lookup"); },
+      loadAllowlistedPaths: async () => [canonicalOther],
+      realpath: realpathSync, serverRoot: canonicalOther,
+      cache: new Map([["session-1", canonicalRepo]]),
+    });
+    expect((await refusalOf(() => resolve("session-1"))).code).toBe("reviewer_relay_root_refused");
   });
 
   test("resolver never falls back to the server project when lookup fails", async () => {
