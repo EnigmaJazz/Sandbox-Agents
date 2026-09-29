@@ -2,7 +2,7 @@
 
 - **Feature:** `reviewer-relay-root-guard`
 - **Project:** `sandbox-integration` (`/home/james/agent-sandbox-integration`)
-- **Status:** Implementation and checks complete; commit and scoped native assessment pending
+- **Status:** Implementation, checks and commit complete; scoped native assessment against boundary `2d92f331` remains pending canonical untracked inventory
 
 ## Objective
 
@@ -89,6 +89,13 @@ TDD is active as RED-first test coverage: record observed RED before GREEN, or s
 - Source state: retained result `refs/opencode-sandbox/result/ses_f15e94c60ffeekX4aNWe9lIFoU` at commit `63467d2f`; restored into the working tree by hand because `opencode/plugins/**` is S17. `opencode/plugins/lib/reviewer-relay-core.ts` hash: `b3b1832cce24c078c43ebdfd392aa683e3c1bee4`.
 - The generated in-repository build artifact is absent from the working tree.
 
+## Work-unit commit and scoped assessment
+
+- Work-unit commit: `8469d32` on `feat/review-and-state-hardening`, subject `fix(reviewer-relay): fail closed on session lookup instead of refusing the server root`; 3 files changed, 162 insertions(+), 15 deletions(−).
+- This tracker update is the follow-up metadata work unit required when the commit identity is known only after committing.
+- Scoped native assessment requested with `--base-ref 2d92f331 --committed-only`: `status: 1`; `risk: high`; `review_due: true`; `review_due_reason: high_risk`; `candidate.consumed: false`.
+- Assessment reason: `unassessable` because untracked files require an explicit declaration. The returned detail directs obtaining the canonical inventory through scoped review STATUS before rerunning the assessment. No review was started or consumed.
+
 ## Next step
 
-Commit the implementation (user-owned because the candidate includes S17 paths), then perform the scoped native assessment against boundary `2d92f331`.
+Obtain the canonical untracked inventory through the returned scoped review STATUS continuation, then rerun the assessment with the same base and committed-only selectors and an explicit untracked declaration.
