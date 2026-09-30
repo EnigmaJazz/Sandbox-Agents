@@ -2,9 +2,11 @@
 
 Last reconciled: 2026-09-30. This file is the ordered project to-do list. Status claims are repository evidence only; live user configuration is not inspected here. Owners: **A** = agent, **U** = user, **X** = external project/person.
 
-## Tier 1 — silent work destruction / unrecoverable loss (1 open item)
+## Tier 1 — silent work destruction / unrecoverable loss (0 open items)
 
-1. **Trace-file inventory/consent defect** — **OPEN**; owner **A**. Keep `review start --trace` output outside the repository's untracked inventory so the consent gate remains valid. Tier 1 because the defect invalidates the gate's own precondition and was reproduced three times. Source: `docs/TODO.md` (consolidated from the prior follow-up at line 236 before this rewrite); `docs/PLAN.md` (review pipeline evidence).
+All three Tier 1 items are now implemented and committed.
+
+1. **Trace-file inventory/consent defect** — **COMPLETE**; owner **A**. The fix is committed as `f048a67` on `feat/review-and-state-hardening`. The scoped assessment against base `1407a78` returned `review_due: false`, reason `under_budget`; no review was due or run, so this change is not individually reviewed and joins the pending accumulated slice. Source: `odd/tasks/review-trace-write-guard.md`.
 
 
 ## Tier 2 — blocks other work (8 items)
