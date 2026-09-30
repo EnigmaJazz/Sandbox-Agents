@@ -53,7 +53,13 @@ export function brokerSocketPath(env: Record<string, string | undefined> = proce
 interface Pending {
   resolve: (resp: BrokerResponse) => void;
   reject: (err: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+interface PendingWrite {
+  data: Buffer;
+  offset: number;
+  onSent: () => void;
 }
 
 export interface BrokerClient {
@@ -99,10 +105,36 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
 
   const failPending = (err: Error) => {
     for (const p of pending.values()) {
-      clearTimeout(p.timer);
+      if (p.timer) clearTimeout(p.timer);
       p.reject(err);
     }
     pending.clear();
+  };
+  const outgoing: PendingWrite[] = [];
+
+  const flushWrites = (sock: ReturnType<typeof Bun.connect>) => {
+    if (socket !== sock) return;
+    while (outgoing.length > 0) {
+      const write = outgoing[0]!;
+      try {
+        const remaining = write.data.subarray(write.offset);
+        const writtenBytes = sock.write(remaining);
+        if (!Number.isInteger(writtenBytes) || writtenBytes < 0 || writtenBytes > remaining.length) {
+          throw new Error(`invalid socket write result: ${writtenBytes}`);
+        }
+        write.offset += writtenBytes;
+        if (write.offset < write.data.length) return;
+        outgoing.shift();
+        write.onSent();
+      } catch (err) {
+        outgoing.length = 0;
+        closed = true;
+        socket = null;
+        failPending(new BrokerClientError(`failed to write request: ${String(err)}`, "unavailable"));
+        sock.close();
+        return;
+      }
+    }
   };
 
   const connect = async (): Promise<void> => {
@@ -113,8 +145,12 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
         unix: opts.socketPath,
         socket: {
           open() {
-            /* connected; reset the receive accumulator */
+            /* connected; reset both frame accumulators */
             rx = Buffer.alloc(0);
+            outgoing.length = 0;
+          },
+          drain(sock) {
+            flushWrites(sock);
           },
           data(sock, data: Buffer) {
             // Mirror reviewer-relay-core.ts:828-844: buffer raw bytes and decode
@@ -145,7 +181,7 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
                 const p = recoveredId === undefined ? undefined : pending.get(recoveredId);
                 if (p && recoveredId !== undefined) {
                   pending.delete(recoveredId);
-                  clearTimeout(p.timer);
+                  if (p.timer) clearTimeout(p.timer);
                   p.reject(new BrokerClientError("broker returned an unparseable response frame", "malformed_response"));
                 } else {
                   const prefix = lineBytes.subarray(0, 160).toString("utf8");
@@ -182,12 +218,14 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
             closed = true;
             socket = null;
             rx = Buffer.alloc(0);
+            outgoing.length = 0;
             failPending(new BrokerClientError("broker socket closed", "unavailable"));
           },
           error(_sock, err) {
             closed = true;
             socket = null;
             rx = Buffer.alloc(0);
+            outgoing.length = 0;
             failPending(
               new BrokerClientError(
                 `broker connection error: ${String(err?.message ?? err)}`,
@@ -223,28 +261,29 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
       const id = randomUUID();
       return new Promise<unknown>((resolve, reject) => {
         const opTimeout = OPERATION_TIMEOUT_MS[operation] ?? timeoutMs;
-        const timer = setTimeout(() => {
-          const residualBytes = rx.length;
-          const residualPrefix = rx
-            .subarray(0, 160)
-            .toString("utf8")
-            .replace(/[^{}\[\]:,"\\]/g, ".");
-          console.warn("broker-client timed out with residual response bytes", {
-            operation,
-            residualBytes,
-            residualPrefix,
-          });
-          // Drop only the incomplete frame; other pending requests stay pending
-          // because their complete newline-delimited responses remain parseable.
-          rx = Buffer.alloc(0);
-          pending.delete(id);
-          reject(new BrokerClientError(`broker request '${operation}' timed out`, "timeout"));
-        }, opTimeout);
-        pending.set(id, {
-          resolve,
-          reject,
-          timer,
-        });
+        const pendingRequest: Pending = { resolve, reject };
+        const startTimeout = () => {
+          // Start only after the complete request frame is sent: backpressure
+          // must not consume the broker-response budget while bytes are queued.
+          pendingRequest.timer = setTimeout(() => {
+            const residualBytes = rx.length;
+            const residualPrefix = rx
+              .subarray(0, 160)
+              .toString("utf8")
+              .replace(/[^{}\[\]:,"\\]/g, ".");
+            console.warn("broker-client timed out with residual response bytes", {
+              operation,
+              residualBytes,
+              residualPrefix,
+            });
+            // Drop only the incomplete frame; other pending requests stay pending
+            // because their complete newline-delimited responses remain parseable.
+            rx = Buffer.alloc(0);
+            pending.delete(id);
+            reject(new BrokerClientError(`broker request '${operation}' timed out`, "timeout"));
+          }, opTimeout);
+        };
+        pending.set(id, pendingRequest);
         const line = JSON.stringify({
           version: 1,
           id,
@@ -253,13 +292,18 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
           ...(agent ? { agent } : {}),
           ...(payload !== undefined ? { payload } : {}),
         });
-        try {
-          socket?.write(`${line}\n`);
-        } catch (err) {
+        const currentSocket = socket;
+        if (!currentSocket) {
           pending.delete(id);
-          clearTimeout(timer);
-          reject(new BrokerClientError(`failed to write request: ${String(err)}`, "unavailable"));
+          reject(new BrokerClientError("broker socket is unavailable", "unavailable"));
+          return;
         }
+        outgoing.push({
+          data: Buffer.from(`${line}\n`),
+          offset: 0,
+          onSent: startTimeout,
+        });
+        flushWrites(currentSocket);
       }).then((resp: BrokerResponse) => {
         if (!resp.ok) {
           throw new BrokerClientError(

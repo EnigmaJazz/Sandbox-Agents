@@ -95,8 +95,59 @@ const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const REQUEST_ID_RE = /^[A-Za-z0-9-]{1,128}$/;
 
 interface SocketLike {
-  write(data: string): number;
+  write(data: string | Uint8Array): number;
   close(): void;
+}
+
+interface QueuedSocketWrite {
+  data: Buffer;
+  offset: number;
+  id?: string;
+}
+
+/** Per-connection FIFO: never write a later frame until its predecessor drains. */
+export class SocketWriteQueue {
+  private readonly writes: QueuedSocketWrite[] = [];
+
+  constructor(
+    private readonly socket: SocketLike,
+    private readonly onFailure: (error: unknown, id?: string) => void,
+  ) {}
+
+  get hasPendingWrites(): boolean {
+    return this.writes.length > 0;
+  }
+
+  enqueue(data: string, id?: string): number {
+    const write = { data: Buffer.from(data), offset: 0, id };
+    this.writes.push(write);
+    this.flush();
+    return write.offset;
+  }
+
+  drain(): void {
+    this.flush();
+  }
+
+  private flush(): void {
+    while (this.writes.length > 0) {
+      const write = this.writes[0]!;
+      try {
+        const remaining = write.data.subarray(write.offset);
+        const writtenBytes = this.socket.write(remaining);
+        if (!Number.isInteger(writtenBytes) || writtenBytes < 0 || writtenBytes > remaining.length) {
+          throw new Error(`invalid socket write result: ${writtenBytes}`);
+        }
+        write.offset += writtenBytes;
+        if (write.offset < write.data.length) return;
+        this.writes.shift();
+      } catch (error) {
+        this.writes.length = 0;
+        this.onFailure(error, write.id);
+        return;
+      }
+    }
+  }
 }
 
 type ServerContext = OpContext & { sddRuntime: SddRuntimeExecutor };
@@ -107,6 +158,7 @@ export class BrokerServer {
   private readonly sessionLocks = new Map<string, Promise<unknown>>();
   private readonly activeLocks = new Map<string, number>();
   private readonly buffers = new WeakMap<SocketLike, Buffer>();
+  private readonly socketWrites = new WeakMap<SocketLike, SocketWriteQueue>();
   /** Sessions each socket has dispatched requests for (disconnect cleanup). */
   private readonly sessionsBySocket = new WeakMap<SocketLike, Set<string>>();
   private listener: { stop(): void } | null = null;
@@ -168,6 +220,7 @@ export class BrokerServer {
           /* nothing per-connection */
         },
         data: (socket, data: Buffer) => this.onData(socket as unknown as SocketLike, data),
+        drain: (socket) => this.socketWrites.get(socket as unknown as SocketLike)?.drain(),
         close: (socket) => {
           this.onSocketClose(socket as unknown as SocketLike);
         },
@@ -455,21 +508,25 @@ export class BrokerServer {
 
   private respond(socket: SocketLike, resp: BrokerResponseEnvelope): void {
     const data = `${JSON.stringify(resp)}\n`;
-    try {
-      const writtenBytes = socket.write(data);
-      const expectedBytes = Buffer.byteLength(data);
-      // Bun buffers internally; backpressure is a candidate, not a proven cause.
-      if (writtenBytes < expectedBytes) {
-        console.warn("broker response write was short", {
-          id: resp.id,
-          expectedBytes,
-          writtenBytes,
+    let queue = this.socketWrites.get(socket);
+    if (!queue) {
+      queue = new SocketWriteQueue(socket, (err, id) => {
+        console.warn("broker response write failed", {
+          id,
+          error: String(err).slice(0, 160),
         });
-      }
-    } catch (err) {
-      console.warn("broker response write failed", {
+        // Closing fails all pending client requests promptly with unavailable.
+        socket.close();
+      });
+      this.socketWrites.set(socket, queue);
+    }
+    const expectedBytes = Buffer.byteLength(data);
+    const writtenBytes = queue.enqueue(data, resp.id);
+    if (writtenBytes < expectedBytes) {
+      console.warn("broker response write was short", {
         id: resp.id,
-        error: String(err).slice(0, 160),
+        expectedBytes,
+        writtenBytes,
       });
     }
   }
