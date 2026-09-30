@@ -2453,6 +2453,38 @@ export function buildSandboxResultInstallOp(ctx: OpContext): OpHandler {
     }
     const { restorePaths, deletePaths } = planSandboxResultInstall(rawChanges);
     assertResultDeleteTargetsContained(projectRoot, deletePaths);
+    const targetPaths = [...new Set([...restorePaths, ...deletePaths])].sort();
+    if (targetPaths.length > 0) {
+      const baselineCheck = await runHostStep(
+        ctx,
+        ["git", "diff", "--quiet", baseline, "--", ...targetPaths],
+        projectRoot,
+      );
+      if (baselineCheck.status === 1) {
+        const divergent = await runHostStep(
+          ctx,
+          ["git", "diff", "--name-only", "-z", baseline, "--", ...targetPaths],
+          projectRoot,
+        );
+        if (divergent.status !== 0) {
+          throw new StateError(
+            `cannot install result: cannot identify baseline divergence (${trimErr(divergent.stderr)})`,
+          );
+        }
+        const parsed = parseNulDelimitedPaths(divergent.stdout);
+        if (!parsed.complete || parsed.paths.length === 0) {
+          throw new StateError("cannot install result: cannot identify baseline divergence");
+        }
+        throw new StateError(
+          `cannot install result: working tree diverged from baseline at: ${parsed.paths.join(", ")}`,
+        );
+      }
+      if (baselineCheck.status !== 0) {
+        throw new StateError(
+          `cannot install result: baseline check failed (${trimErr(baselineCheck.stderr)})`,
+        );
+      }
+    }
     const steps: HostStepResult[] = [];
     if (restorePaths.length > 0) {
       const restore = await runHostStep(

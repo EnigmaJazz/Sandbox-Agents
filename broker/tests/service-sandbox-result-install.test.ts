@@ -113,6 +113,7 @@ function spawnStub(rules: StubRule[]) {
 const isNameOnly = (argv: string[]) => argv.includes("--name-only");
 const isRaw = (argv: string[]) => argv.includes("--raw");
 const isRevParse = (argv: string[]) => argv[1] === "rev-parse";
+const isWorkingTreeDiff = (argv: string[]) => argv[0] === "git" && argv[1] === "diff" && argv.includes("--quiet");
 const isRestore = (argv: string[]) => argv[1] === "restore";
 const isRm = (argv: string[]) => argv[0] === "rm";
 
@@ -143,7 +144,7 @@ const record7 = () => ({
 });
 
 describe("sandboxResultInstall — fixed argv and install", () => {
-  test("installs the result's present path with the fixed restore argv", async () => {
+  test("installs the result's present path when the baseline has not diverged", async () => {
     const { calls, spawn } = spawnStub([
       { match: isRevParse, result: ok({ stdout: `${COMMIT_7}\n` }) },
       { match: isNameOnly, result: ok({ stdout: "a.ts\u0000" }) },
@@ -162,6 +163,11 @@ describe("sandboxResultInstall — fixed argv and install", () => {
     expect(result.resultRef).toBe(RESULT_7);
     expect(result.resultCommit).toBe(COMMIT_7);
     expect(result.paths).toEqual(["a.ts"]);
+    const divergenceCheck = ["git", "diff", "--quiet", BASELINE_7, "--", "a.ts"];
+    expect(calls).toContainEqual(divergenceCheck);
+    expect(
+      calls.findIndex((argv) => JSON.stringify(argv) === JSON.stringify(divergenceCheck)),
+    ).toBeLessThan(calls.findIndex((argv) => argv[1] === "restore" || argv[0] === "rm"));
     expect(calls).toContainEqual([
       "git",
       "restore",
@@ -222,6 +228,53 @@ describe("sandboxResultInstall — fixed argv and install", () => {
         payload: { projectDir: projectRoot, ref: "refs/heads/main" },
       }),
     ).toThrow(ValidationError);
+  });
+});
+
+describe("sandboxResultInstall — baseline divergence", () => {
+  test("refuses a divergent restore path and names it before mutation", async () => {
+    const { calls, spawn } = spawnStub([
+      { match: isRevParse, result: ok({ stdout: `${COMMIT_7}\n` }) },
+      { match: isNameOnly, result: ok({ stdout: "a.ts\u0000" }) },
+      { match: isRaw, result: ok({ stdout: ":100644 100644 1111111 2222222 M\ta.ts\n" }) },
+      { match: isWorkingTreeDiff, result: { status: 1, stdout: "", stderr: "" } },
+      { match: (argv) => argv[0] === "git" && argv[1] === "diff" && argv.includes("--name-only"), result: ok({ stdout: "a.ts\u0000" }) },
+    ]);
+    const ctx = makeCtx(spawn, record7());
+    await expect(buildSandboxResultInstallOp(ctx)(installRequest())).rejects.toThrow(/a\.ts/);
+    const check = ["git", "diff", "--quiet", BASELINE_7, "--", "a.ts"];
+    expect(calls).toContainEqual(check);
+    expect(calls.some(isRestore)).toBe(false);
+    expect(calls.some(isRm)).toBe(false);
+  });
+
+  test("refuses a divergent delete path and names it before deletion", async () => {
+    const { calls, spawn } = spawnStub([
+      { match: isRevParse, result: ok({ stdout: `${COMMIT_7}\n` }) },
+      { match: isNameOnly, result: ok({ stdout: "gone.ts\u0000" }) },
+      { match: isRaw, result: ok({ stdout: ":100644 000000 1111111 0000000 D\tgone.ts\n" }) },
+      { match: isWorkingTreeDiff, result: { status: 1, stdout: "", stderr: "" } },
+      { match: (argv) => argv[0] === "git" && argv[1] === "diff" && argv.includes("--name-only"), result: ok({ stdout: "gone.ts\u0000" }) },
+    ]);
+    const ctx = makeCtx(spawn, record7());
+    await expect(buildSandboxResultInstallOp(ctx)(installRequest())).rejects.toThrow(/gone\.ts/);
+    const check = ["git", "diff", "--quiet", BASELINE_7, "--", "gone.ts"];
+    expect(calls).toContainEqual(check);
+    expect(calls.some(isRestore)).toBe(false);
+    expect(calls.some(isRm)).toBe(false);
+  });
+
+  test("refuses when the baseline cannot be resolved", async () => {
+    const { calls, spawn } = spawnStub([
+      { match: isRevParse, result: ok({ stdout: `${COMMIT_7}\n` }) },
+      { match: isNameOnly, result: ok({ stdout: "a.ts\u0000" }) },
+      { match: isRaw, result: ok({ stdout: ":100644 100644 1111111 2222222 M\ta.ts\n" }) },
+      { match: isWorkingTreeDiff, result: { status: 128, stdout: "", stderr: "fatal: bad revision" } },
+    ]);
+    const ctx = makeCtx(spawn, record7());
+    await expect(buildSandboxResultInstallOp(ctx)(installRequest())).rejects.toThrow(/baseline/);
+    expect(calls.some(isRestore)).toBe(false);
+    expect(calls.some(isRm)).toBe(false);
   });
 });
 
