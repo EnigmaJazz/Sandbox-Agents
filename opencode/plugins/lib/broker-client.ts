@@ -95,7 +95,7 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
   let socket: ReturnType<typeof Bun.connect> | null = null;
   let closed = false;
   let connecting: Promise<void> | null = null;
-  let rx = "";
+  let rx = Buffer.alloc(0);
 
   const failPending = (err: Error) => {
     for (const p of pending.values()) {
@@ -114,22 +114,49 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
         socket: {
           open() {
             /* connected; reset the receive accumulator */
-            rx = "";
+            rx = Buffer.alloc(0);
           },
           data(sock, data: Buffer) {
-            // NDJSON framing: a response line may arrive split across socket
-            // reads (large bodies), so accumulate and emit only complete lines.
-            rx += data.toString("utf8");
+            // Mirror reviewer-relay-core.ts:828-844: buffer raw bytes and decode
+            // only complete lines so chunk-split UTF-8 code points remain intact.
+            // No response-side size cap is imposed: the broker currently has no
+            // such cap, and introducing one changes the response contract without
+            // evidence that truncation caused the observed frame loss.
+            rx = Buffer.concat([rx, data]);
             let nl: number;
-            while ((nl = rx.indexOf("\n")) !== -1) {
-              const line = rx.slice(0, nl);
-              rx = rx.slice(nl + 1);
-              if (line.trim().length === 0) continue;
+            while ((nl = rx.indexOf(0x0a)) !== -1) {
+              const lineBytes = rx.subarray(0, nl);
+              rx = rx.subarray(nl + 1);
+              if (lineBytes.toString("utf8").trim().length === 0) continue;
+              const line = lineBytes.toString("utf8");
               let resp: BrokerResponse;
               try {
                 resp = JSON.parse(line) as BrokerResponse;
               } catch {
-                continue; // ignore malformed frames; keep the socket alive
+                const idMatch = /\"id\"\s*:\s*(\"(?:\\.|[^\"\\])*\")/.exec(line);
+                let recoveredId: string | undefined;
+                if (idMatch) {
+                  try {
+                    recoveredId = JSON.parse(idMatch[1]) as string;
+                  } catch {
+                    // A malformed id value is not safe to match to a caller.
+                  }
+                }
+                const p = recoveredId === undefined ? undefined : pending.get(recoveredId);
+                if (p && recoveredId !== undefined) {
+                  pending.delete(recoveredId);
+                  clearTimeout(p.timer);
+                  p.reject(new BrokerClientError("broker returned an unparseable response frame", "malformed_response"));
+                } else {
+                  const prefix = lineBytes.subarray(0, 160).toString("utf8");
+                  console.warn("broker-client discarded malformed response frame", {
+                    lineLength: lineBytes.length,
+                    prefix,
+                    pendingIds: [...pending.keys()].slice(0, 10),
+                    ...(recoveredId === undefined ? {} : { id: recoveredId }),
+                  });
+                }
+                continue; // keep the socket usable after a bad frame
               }
               // queued hold: log and keep pending open, waiting for real worker result with same id
               if ((resp as any).progress?.queued) {
@@ -143,19 +170,24 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
                 pending.delete(resp.id);
                 clearTimeout(p.timer);
                 p.resolve(resp);
+              } else {
+                console.warn("broker-client received unmatched response id", {
+                  id: resp.id,
+                  pendingCount: pending.size,
+                });
               }
             }
           },
           close() {
             closed = true;
             socket = null;
-            rx = "";
+            rx = Buffer.alloc(0);
             failPending(new BrokerClientError("broker socket closed", "unavailable"));
           },
           error(_sock, err) {
             closed = true;
             socket = null;
-            rx = "";
+            rx = Buffer.alloc(0);
             failPending(
               new BrokerClientError(
                 `broker connection error: ${String(err?.message ?? err)}`,
