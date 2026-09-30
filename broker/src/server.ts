@@ -95,7 +95,7 @@ const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const REQUEST_ID_RE = /^[A-Za-z0-9-]{1,128}$/;
 
 interface SocketLike {
-  write(data: string): void;
+  write(data: string): number;
   close(): void;
 }
 
@@ -454,10 +454,23 @@ export class BrokerServer {
   }
 
   private respond(socket: SocketLike, resp: BrokerResponseEnvelope): void {
+    const data = `${JSON.stringify(resp)}\n`;
     try {
-      socket.write(`${JSON.stringify(resp)}\n`);
-    } catch {
-      /* socket already closed (e.g. client disconnected while queued) */
+      const writtenBytes = socket.write(data);
+      const expectedBytes = Buffer.byteLength(data);
+      // Bun buffers internally; backpressure is a candidate, not a proven cause.
+      if (writtenBytes < expectedBytes) {
+        console.warn("broker response write was short", {
+          id: resp.id,
+          expectedBytes,
+          writtenBytes,
+        });
+      }
+    } catch (err) {
+      console.warn("broker response write failed", {
+        id: resp.id,
+        error: String(err).slice(0, 160),
+      });
     }
   }
 

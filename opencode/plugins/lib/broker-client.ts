@@ -224,6 +224,19 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
       return new Promise<unknown>((resolve, reject) => {
         const opTimeout = OPERATION_TIMEOUT_MS[operation] ?? timeoutMs;
         const timer = setTimeout(() => {
+          const residualBytes = rx.length;
+          const residualPrefix = rx
+            .subarray(0, 160)
+            .toString("utf8")
+            .replace(/[^{}\[\]:,"\\]/g, ".");
+          console.warn("broker-client timed out with residual response bytes", {
+            operation,
+            residualBytes,
+            residualPrefix,
+          });
+          // Drop only the incomplete frame; other pending requests stay pending
+          // because their complete newline-delimited responses remain parseable.
+          rx = Buffer.alloc(0);
           pending.delete(id);
           reject(new BrokerClientError(`broker request '${operation}' timed out`, "timeout"));
         }, opTimeout);

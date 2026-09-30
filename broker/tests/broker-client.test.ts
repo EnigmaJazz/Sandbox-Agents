@@ -57,6 +57,32 @@ describe("broker-client NDJSON framing", () => {
     } finally { client?.close(); server.stop(true); await unlink(socketPath).catch(() => {}); }
   });
 
+  test("discards a timed-out partial response so the next response resolves", async () => {
+    const socketPath = join(tmpdir(), `broker-client-${randomUUID()}.sock`);
+    let count = 0;
+    const logs: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => logs.push(args.map((value) => typeof value === "string" ? value : JSON.stringify(value)).join(" "));
+    const server = Bun.listen({ unix: socketPath, socket: { data(sock, chunk) {
+      const nl = chunk.indexOf(0x0a); if (nl < 0) return;
+      const req = JSON.parse(chunk.subarray(0, nl).toString("utf8")) as { id: string };
+      count++;
+      if (count === 1) {
+        sock.write(`{"version":1,"id":"${req.id}","ok":true,"result":"secret`);
+      } else {
+        sock.write(`${JSON.stringify({ version: 1, id: req.id, ok: true, result: "alive" })}\n`);
+      }
+    } } });
+    let client: Awaited<ReturnType<typeof createBrokerClient>> | null = null;
+    try {
+      client = await createBrokerClient({ socketPath, timeoutMs: 100 });
+      await expect(client.request("partial", "session-1")).rejects.toMatchObject({ code: "timeout" });
+      await expect(client.request("afterTimeout", "session-1")).resolves.toBe("alive");
+      expect(logs.join("\n")).toContain("residualBytes");
+      expect(logs.join("\n")).not.toContain("secret");
+    } finally { console.warn = originalWarn; client?.close(); server.stop(true); await unlink(socketPath).catch(() => {}); }
+  });
+
   test("logs unmatched response ids without rejecting unrelated requests", async () => {
     const socketPath = join(tmpdir(), `broker-client-${randomUUID()}.sock`);
     const logs: string[] = []; const originalWarn = console.warn;
