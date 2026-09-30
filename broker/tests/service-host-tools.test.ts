@@ -184,6 +184,64 @@ const HANDLERS: Record<
   registerProject: buildRegisterProjectOp,
 };
 
+describe("review trace path guard", () => {
+  function traceContext() {
+    const root = mkdtempSync(join(tmpdir(), "review-trace-guard-"));
+    const projectRoot = join(root, "project");
+    mkdirSync(projectRoot);
+    const ctx = makeCtx();
+    ctx.config.projects = [{ id: "repo", path: projectRoot }];
+    return { root, projectRoot, ctx };
+  }
+
+  test("refuses a trace path inside the project before calling reviewStart", async () => {
+    const { root, projectRoot, ctx } = traceContext();
+    try {
+      const handler = buildReviewStartOp(ctx);
+      await expect(
+        handler(request("reviewStart", { projectDir: projectRoot, trace: join(projectRoot, "trace.json") })),
+      ).rejects.toThrow(
+        "reviewStart trace must resolve unambiguously outside the project root",
+      );
+      expect(ctx.sddRuntime.calls).toHaveLength(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("forwards an outside-project trace token verbatim", async () => {
+    const { root, projectRoot, ctx } = traceContext();
+    try {
+      const trace = join(root, "outside-trace.json");
+      await buildReviewStartOp(ctx)(request("reviewStart", {
+        projectDir: projectRoot,
+        trace,
+        focus: "risk",
+      }));
+      expect(ctx.sddRuntime.calls).toEqual([{
+        method: "reviewStart",
+        payload: expect.objectContaining({ projectDir: projectRoot, trace, focus: "risk" }),
+      }]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses an unresolvable trace token before calling reviewStart", async () => {
+    const { root, projectRoot, ctx } = traceContext();
+    try {
+      await expect(
+        buildReviewStartOp(ctx)(request("reviewStart", { projectDir: projectRoot, trace: String.fromCharCode(0) })),
+      ).rejects.toThrow(
+        "reviewStart trace must resolve unambiguously outside the project root",
+      );
+      expect(ctx.sddRuntime.calls).toHaveLength(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("host tool authorization", () => {
   test("reads are open to every agent", () => {
     const ctx = makeCtx();
@@ -875,12 +933,12 @@ describe("host review lifecycle routing", () => {
       request(
         "reviewStart",
         {
-          projectDir: "/repo",
+          projectDir: process.cwd(),
           contract: "Contract-TOKEN.:v2",
           target: "Target-TOKEN",
           focus: "risk",
           lineage: "Lineage-TOKEN",
-          trace: "Trace-TOKEN",
+          trace: join(tmpdir(), "Trace-TOKEN"),
         },
         ORCHESTRATOR,
       ),
@@ -888,12 +946,12 @@ describe("host review lifecycle routing", () => {
     const call = (ctx.sddRuntime as unknown as { calls: RuntimeCall[] }).calls[0]!;
     expect(call.method).toBe("reviewStart");
     expect(call.payload).toMatchObject({
-      projectDir: "/repo",
+      projectDir: process.cwd(),
       contract: "Contract-TOKEN.:v2",
       target: "Target-TOKEN",
       focus: "risk",
       lineage: "Lineage-TOKEN",
-      trace: "Trace-TOKEN",
+      trace: join(tmpdir(), "Trace-TOKEN"),
     });
   });
 

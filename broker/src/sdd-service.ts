@@ -1,3 +1,5 @@
+import { lstatSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { SddRuntimeExecutor } from "./sdd-runtime.ts";
 import type { BrokerRequestEnvelope } from "./types.ts";
 import { assertPayloadKeys, ValidationError } from "./validation.ts";
@@ -203,13 +205,63 @@ function reviewOptional(payload: SddPayload, keys: readonly string[]): SddPayloa
   return out;
 }
 
-/** Review start: fixed argv, provider tokens preserved verbatim. */
+const REVIEW_TRACE_REFUSAL =
+  "reviewStart trace must resolve unambiguously outside the project root";
+
+function assertTraceOutsideProject(projectDir: string, trace: unknown): void {
+  if (typeof trace !== "string") throw new ValidationError(REVIEW_TRACE_REFUSAL);
+
+  let projectRoot: string;
+  try {
+    projectRoot = realpathSync(projectDir);
+  } catch {
+    throw new ValidationError(REVIEW_TRACE_REFUSAL);
+  }
+
+  let candidate = resolve(projectRoot, trace);
+  const missingParts: string[] = [];
+  while (true) {
+    try {
+      candidate = resolve(realpathSync(candidate), ...[...missingParts].reverse());
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") throw new ValidationError(REVIEW_TRACE_REFUSAL);
+      try {
+        lstatSync(candidate);
+        throw new ValidationError(REVIEW_TRACE_REFUSAL);
+      } catch (statError) {
+        if ((statError as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw new ValidationError(REVIEW_TRACE_REFUSAL);
+        }
+      }
+      const parent = dirname(candidate);
+      if (parent === candidate) throw new ValidationError(REVIEW_TRACE_REFUSAL);
+      missingParts.push(basename(candidate));
+      candidate = parent;
+    }
+  }
+
+  const fromRoot = relative(projectRoot, candidate);
+  if (
+    fromRoot === "" ||
+    (!isAbsolute(fromRoot) &&
+      fromRoot !== ".." &&
+      !fromRoot.startsWith(`..${sep}`))
+  ) {
+    throw new ValidationError(REVIEW_TRACE_REFUSAL);
+  }
+}
+
+/** Review start validates trace at the broker boundary, then preserves the provider token verbatim. */
 export function buildReviewStartOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "reviewStart", req.sessionID, req.agent);
+    const projectDir = requireProjectDir(payload);
+    if (payload.trace !== undefined) assertTraceOutsideProject(projectDir, payload.trace);
     return ctx.sddRuntime.reviewStart({
-      projectDir: requireProjectDir(payload),
+      projectDir,
       ...reviewOptional(payload, [
         "agent",
         "contract",
