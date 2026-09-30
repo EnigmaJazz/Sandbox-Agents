@@ -775,10 +775,13 @@ async function gcSessionArtifacts(
       remove = true;
     } else {
       let durable = false;
-      if (removalNeedsDurableRef(record)) {
+      const bundleExists = existsSync(
+        bundlePathFor(ctx.config.stateDir, sessionID),
+      );
+      if (removalNeedsDurableRef(record, bundleExists)) {
         durable = await durableHostRefResolves(ctx, record);
       }
-      remove = shouldRemoveSessionArtifacts(record, durable);
+      remove = shouldRemoveSessionArtifacts(record, durable, bundleExists);
     }
     if (!remove) return;
     for (const r of removeSessionArtifacts(ctx.config.stateDir, sessionID)) {

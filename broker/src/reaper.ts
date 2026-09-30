@@ -28,7 +28,8 @@
  * not-yet-durable record's artifact is NEVER removed - it may still be the
  * only copy (planned mode / not-yet-imported result). See artifacts.ts.
  */
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { bundlePathFor } from "./gitops.ts";
 import {
   durableHostRefResolves,
   listOrphanArtifactCandidates,
@@ -122,11 +123,12 @@ async function cleanupTerminalArtifacts(
   try {
     const record = ctx.store.get(sessionID);
     if (!record) return;
+    const bundleExists = existsSync(bundlePathFor(stateDir, sessionID));
     let durable = false;
-    if (removalNeedsDurableRef(record)) {
+    if (removalNeedsDurableRef(record, bundleExists)) {
       durable = await durableHostRefResolves(ctx, record);
     }
-    if (!shouldRemoveSessionArtifacts(record, durable)) return;
+    if (!shouldRemoveSessionArtifacts(record, durable, bundleExists)) return;
     logRemovals(sessionID, removeSessionArtifacts(stateDir, sessionID), onLog);
   } catch (err) {
     onLog?.({
@@ -169,11 +171,14 @@ export async function sweepStateArtifacts(
       const age = now - Date.parse(record.updatedAt);
       // NaN-safe: an unparseable timestamp is never "stale enough".
       if (!(age > graceMs)) continue;
+      const bundleExists = existsSync(
+        bundlePathFor(ctx.config.stateDir, record.sessionID),
+      );
       let durable = false;
-      if (removalNeedsDurableRef(record)) {
+      if (removalNeedsDurableRef(record, bundleExists)) {
         durable = await durableHostRefResolves(ctx, record);
       }
-      if (!shouldRemoveSessionArtifacts(record, durable)) continue;
+      if (!shouldRemoveSessionArtifacts(record, durable, bundleExists)) continue;
       const result = logRemovals(
         record.sessionID,
         removeSessionArtifacts(ctx.config.stateDir, record.sessionID),

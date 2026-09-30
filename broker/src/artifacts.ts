@@ -155,27 +155,35 @@ type RemovableRecord = Pick<SessionRecord, "state" | "resultRef">;
 
 /**
  * True when the removal decision for this record depends on a durable host
- * result ref. REJECTED and result-less FAILED_CLOSED are already safe to
- * remove; every other state must prove durability first.
+ * result ref. REJECTED and result-less FAILED_CLOSED without a bundle are
+ * already safe to remove; every other state must prove durability first.
  */
-export function removalNeedsDurableRef(record: RemovableRecord): boolean {
+export function removalNeedsDurableRef(
+  record: RemovableRecord,
+  bundleExists: boolean,
+): boolean {
   if (record.state === "REJECTED") return false;
-  if (record.state === "FAILED_CLOSED") return record.resultRef != null;
+  if (record.state === "FAILED_CLOSED") {
+    return record.resultRef != null || bundleExists;
+  }
   return true;
 }
 
 /**
  * The single removal predicate. `durable` is the result of
  * `durableHostRefResolves` (false when it was not applicable or did not
- * resolve). Only the three documented cases return true.
+ * resolve). Callers supply whether the bundle exists so a missing `resultRef`
+ * is not mistaken for proof that no result bundle was produced. Only the
+ * three documented cases return true.
  */
 export function shouldRemoveSessionArtifacts(
   record: RemovableRecord,
   durable: boolean,
+  bundleExists: boolean,
 ): boolean {
   if (record.state === "REJECTED") return true;
   if (record.state === "FAILED_CLOSED") {
-    return record.resultRef == null || durable;
+    return (record.resultRef == null && !bundleExists) || durable;
   }
   // APPLIED / RETAINED / any other state: the durable ref is the only proof
   // that the on-disk artifact is redundant.

@@ -29,7 +29,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   durableHostRefResolves,
+  removalNeedsDurableRef,
   removeSessionArtifacts,
+  shouldRemoveSessionArtifacts,
   tmpIndexPathFor,
 } from "../src/artifacts.ts";
 import { bundlePathFor } from "../src/gitops.ts";
@@ -140,6 +142,29 @@ describe("state-dir artifact sweep", () => {
     expect(logs.every((e) => e.action === "swept_artifact")).toBe(true);
     expect(logs.some((e) => e.detail?.includes("bundle"))).toBe(true);
     expect(logs.some((e) => e.detail?.includes("tmp_index"))).toBe(true);
+  });
+
+  test("FAILED_CLOSED bundle is retained without a durable ref", async () => {
+    const stateDir = tempDir("artifacts-failed-closed-bundle-");
+    const failed = record("failed-with-bundle", "FAILED_CLOSED");
+    const { bundle } = writeArtifacts(stateDir, failed.sessionID);
+
+    const result = await sweepStateArtifacts(
+      sweepCtx(stateDir, [failed], { durable: false }),
+      GRACE,
+    );
+
+    expect(result.removed).toBe(0);
+    expect(existsSync(bundle)).toBe(true);
+    expect(removalNeedsDurableRef(failed, true)).toBe(true);
+    expect(shouldRemoveSessionArtifacts(failed, false, true)).toBe(false);
+  });
+
+  test("FAILED_CLOSED without a bundle remains removable", () => {
+    const failed = record("failed-without-bundle", "FAILED_CLOSED");
+
+    expect(removalNeedsDurableRef(failed, false)).toBe(false);
+    expect(shouldRemoveSessionArtifacts(failed, false, false)).toBe(true);
   });
 
   test("live records (CREATING_SANDBOX, SANDBOX_ACTIVE, unimported RESULT_READY) are never swept", async () => {
@@ -574,25 +599,27 @@ describe("durability-gated terminal artifact removal", () => {
     for (const p of Object.values(sweptPaths)) expect(existsSync(p)).toBe(false);
   });
 
-  test("REJECTED and result-less FAILED_CLOSED remove every artifact with no host ref", async () => {
+  test("REJECTED and result-less FAILED_CLOSED without a bundle remove their artifacts", async () => {
     const stateDir = tempDir("artifacts-abandoned-");
     const rejected = record("rejected", "REJECTED");
     const failed = record("failed-closed", "FAILED_CLOSED");
     const rejectedPaths = writeAllArtifacts(stateDir, rejected.sessionID);
     const failedPaths = writeAllArtifacts(stateDir, failed.sessionID);
+    rmSync(failedPaths.bundle);
 
     const result = await sweepStateArtifacts(
       sweepCtx(stateDir, [rejected, failed], { durable: false }),
       GRACE,
     );
 
-    expect(result.removed).toBe(12);
+    expect(result.removed).toBe(11);
     for (const p of [
       ...Object.values(rejectedPaths),
-      ...Object.values(failedPaths),
+      ...Object.values(failedPaths).filter((path) => path !== failedPaths.bundle),
     ]) {
       expect(existsSync(p)).toBe(false);
     }
+    expect(existsSync(failedPaths.bundle)).toBe(false);
   });
 
   test("FAILED_CLOSED with a result ref is kept until the ref resolves", async () => {
