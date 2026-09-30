@@ -927,6 +927,17 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
         );
       }
       await ctx.adapter.copyIn(worker, hostTmp, workerTmp);
+      const targetDir = workerDirOf(payload.path as string);
+      const targetMkdir = await ctx.adapter.exec(
+        worker,
+        ["mkdir", "-p", "--", targetDir],
+        { timeoutMs: 30_000 },
+      );
+      if (targetMkdir.status !== 0) {
+        throw new MsbError(
+          `writeFile target mkdir failed in worker (status ${targetMkdir.status}): ${targetMkdir.stderr.trim()}`,
+        );
+      }
       const moved = await ctx.adapter.exec(
         worker,
         ["mv", "-f", workerTmp, payload.path as string],
