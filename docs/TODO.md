@@ -2,13 +2,26 @@
 
 Last reconciled: 2026-10-01. This file is the ordered project to-do list. Status claims are repository evidence only; live user configuration is not inspected here. Owners: **A** = agent, **U** = user, **X** = external project/person.
 
-## Tier 1 — silent work destruction / unrecoverable loss (1 open item)
+## Tier 1 — silent work destruction / unrecoverable loss (2 open items)
 
-Earlier Tier 1 items are implemented and committed; one new item is open.
+Earlier Tier 1 items are implemented and committed; two new items are open.
 
 1. **Trace-file inventory/consent defect** — **COMPLETE**; owner **A**. The fix is committed as `f048a67` on `feat/review-and-state-hardening`. The scoped assessment against base `1407a78` returned `review_due: false`, reason `under_budget`; no review was due or run, so this change is not individually reviewed and joins the pending accumulated slice. Source: `odd/tasks/review-trace-write-guard.md`.
 
 2. **`readFile` silently truncates at 512 KB; `sandbox_edit` can write the truncated file back** — **OPEN**; owner **A**. `spawnArgv` stops keeping output at `outputMaxBytes` (512 KB) without flagging it, and `MsbAdapter.run` converts CRLF to LF in all output, including `cat`. Now that `81c78cc` delivers large replies, a read of a file over 512 KB returns partial content, and `sandbox_edit` would write that partial content back. Fix: add a `truncated` flag, refuse partial reads, preserve line endings, and decide how the 512 KB read cap relates to the 1 MB write cap. This is slice 2 (T3) of `odd/tasks/socket-write-drain.md`, and a prerequisite of the external advisor system. Source: `odd/tasks/socket-write-drain.md`; `broker/src/msb.ts:70`.
+
+3. **`writeFile` resets file mode and ownership (`sandbox_edit` / `sandbox_write`)** — **OPEN**; owner **A**. Observed 2026-10-01 in a workflow_optimisation probe: a `sandbox_edit` on `verify-workflow.sh` changed it from `100755` to `100644`. Mechanism in `buildWriteFileOp` (`broker/src/service.ts`):
+   1. the new content goes to a host temp file forced to `0644`;
+   2. `msb copy` places it in the worker owned by root;
+   3. `mv -f` replaces the target, so the original mode and owner are lost.
+
+   The worker user can't `chmod` the root-owned result (`Operation not permitted`). An applied result would carry the mode change to the host silently, and the verifier runs that script. Proposed fix, keeping the atomic rename:
+   1. when the target exists, read its mode with `stat -c %a`;
+   2. copy the root-owned temp to a second temp **in the target's directory** with `cp --no-preserve=mode,ownership`, so the worker user owns it;
+   3. `chmod` that copy to the saved mode, then `mv -f` it over the target;
+   4. remove the first temp.
+
+   New files keep `0644`. Tests: editing an executable leaves `git diff` with no mode change; the edited file is owned by the worker user; new files are `0644`. Also check whether `copyIn` (`sandbox_copy_in`) has the same root-ownership effect. Source: workflow_optimisation probe report 2026-10-01; `broker/src/service.ts` `buildWriteFileOp`.
 
 
 ## Tier 2 — blocks other work (12 items)
@@ -26,13 +39,14 @@ Earlier Tier 1 items are implemented and committed; one new item is open.
 11. **Install-vs-commit gap** — **OPEN**; owner **A**. After a result is installed with `host_sandbox_result_install`, `host_git_commit` refuses with `no applied B->C result`, so installed work can't be committed through the host tools and commits are handed over manually. Tier 2 because every installed result in workflow_optimisation hits it. Source: workflow_optimisation `docs/TODO.md` (2026-09-30 "item 1 fixed and verified; commit needs the host"); their item 8.
 12. **Project-scoped signal for the routing guard** — **PLANNED; external design dependency**; owner **A** for the host-side operation, **X** for the design. The routing guard is project-blind: its markers can't satisfy a stage artifact for another project because no trustworthy session-to-project source exists. The guard's tracker plans a durable project-scoped signal, with the host-side operation built here. Tier 2 because stage gating, including any future advice stage, stays project-blind without it. Source: workflow_optimisation `odd/tasks/routing-guard-keys.md` (implementation order item 5; Debt).
 
-## Tier 3 — blocks users now (5 items)
+## Tier 3 — blocks users now (6 items)
 
 1. **Commit and issue text newline rejection** — **OPEN**; owner **A**. Permit newline/tab in argv-contained commit messages and issue bodies while retaining NUL/control, size, and single-line title validation. Tier 3 because ordinary multi-line commit/issue content is rejected. Source: `docs/TODO.md` (consolidated from prior item 6 at lines 190–203 before this rewrite).
 2. **Remaining manual verification gates** — **OPEN; user-owned**; owner **U**. Complete the user-certified installation and acceptance checklists; agents must not self-certify. Tier 3 because these gates block live acceptance and use. Source: `docs/manual-verification.md:1–5,36–52,230–275`; `openspec/changes/agent-host-tools/tasks.md:69–78`.
 3. **`sandbox_diff` reports zero** — **OPEN**; owner **A**. Correct active/retained comparison behavior. Tier 3 because users cannot see the worker delta through the read surface. Source: `docs/TODO.md` (consolidated from prior item 24 at lines 80–82 before this rewrite).
 4. **Wrong `sandbox_apply` S17 failure message** — **OPEN**; owner **A**. Return the accurate protected-path refusal message. Tier 3 because users receive misleading failure feedback. Source: `docs/TODO.md` (consolidated from prior item 25 at lines 80–82 before this rewrite).
 5. **`sandbox_apply_patch` rejects valid EOF hunks** — **OPEN**; owner **A**. Accept append-only hunks ending in additions, or name the constraint clearly. Tier 3 because users must contort otherwise valid patches. Source: `docs/TODO.md` (consolidated from prior item 8 at lines 219–221 before this rewrite).
+6. **No way to abandon an active sandbox session** — **OPEN / design**; owner **A**. `sandbox_discard` accepts only `RESULT_READY`/`RETAINED` (`buildDiscardResultOp`), so an agent that damages its worker (for example the mode change in Tier 1 item 3) must `sandbox_finish` an unwanted result before it can discard it, or wait for the idle reaper. Decide whether discard should also release an active worker, or whether a separate abandon operation is needed. Until then, `sandbox_finish` followed by `sandbox_discard` is the safe path. Tier 3 because users get a confusing refusal at the moment they're trying to back out safely. Source: workflow_optimisation probe report 2026-10-01.
 
 ## Tier 4 — advisory and tail (11 primary entries; 20 tail entries)
 
