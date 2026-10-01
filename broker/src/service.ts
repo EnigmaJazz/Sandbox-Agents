@@ -864,11 +864,39 @@ export function buildReadFileOp(ctx: OpContext): OpHandler {
     assertSandboxPath(payload.path, ctx.config.resource.pathMaxBytes);
     const record = recordOr404(ctx.store, req.sessionID);
     const worker = requireActiveWorker(record);
+    const path = payload.path as string;
+    const maxBytes = ctx.config.resource.contentMaxBytes;
+    // Size first: a read must be refused, never silently shortened. The read
+    // limit equals the write limit, so anything sandbox_write accepts can be
+    // read back whole by sandbox_edit.
+    const stat = await ctx.adapter.exec(
+      worker,
+      ["stat", "-L", "-c", "%s:%F", "--", path],
+      { timeoutMs: 30_000 },
+    );
+    if (stat.status !== 0) {
+      throw new MsbError(
+        `readFile failed in worker (status ${stat.status}): ${stat.stderr.trim()}`,
+      );
+    }
+    const statLine = /^(\d+):(regular file|regular empty file)\s*$/.exec(stat.stdout);
+    if (!statLine) {
+      throw new ValidationError(`readFile target is not a regular file: ${path}`);
+    }
+    const size = Number(statLine[1]);
+    if (size > maxBytes) {
+      throw new ValidationError(
+        `readFile refused: ${path} is ${size} bytes, over the ${maxBytes}-byte limit; use sandbox_grep or sandbox_copy_out`,
+      );
+    }
+    // base64, not cat: the exact bytes survive the exec channel, including
+    // CRLF line endings that the adapter's PTY normalization would rewrite.
     const result = await ctx.adapter.exec(
       worker,
-      ["cat", "--", payload.path as string],
+      ["base64", "-w", "0", "--", path],
       {
         timeoutMs: 30_000,
+        maxOutputBytes: Math.ceil(maxBytes / 3) * 4 + 64,
       },
     );
     if (result.status !== 0) {
@@ -876,7 +904,21 @@ export function buildReadFileOp(ctx: OpContext): OpHandler {
         `readFile failed in worker (status ${result.status}): ${result.stderr.trim()}`,
       );
     }
-    return { content: result.stdout };
+    const bytes = Buffer.from(result.stdout.replace(/\s+/g, ""), "base64");
+    if (bytes.length !== size) {
+      throw new MsbError(
+        `readFile refused: read ${bytes.length} of ${size} bytes from ${path} (truncated or changed during the read)`,
+      );
+    }
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    } catch {
+      throw new ValidationError(
+        `readFile refused: ${path} is not valid UTF-8 text; use sandbox_copy_out for binary files`,
+      );
+    }
+    return { content };
   };
 }
 

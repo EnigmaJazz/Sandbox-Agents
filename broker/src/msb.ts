@@ -294,7 +294,7 @@ export class MsbAdapter {
   async exec(
     workerName: string,
     argv: string[],
-    opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {},
+    opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string>; maxOutputBytes?: number } = {},
   ): Promise<SpawnResult> {
     const env = assertWorkerEnv(opts.env, this.config.resource.envAllowedKeys);
     const envArgs: string[] = [];
@@ -322,6 +322,7 @@ export class MsbAdapter {
           opts.timeoutMs ?? this.config.resource.execTimeoutMsDefault,
           this.config.resource.execTimeoutMsMax,
         ) + 10_000,
+      maxOutputBytes: opts.maxOutputBytes,
     });
     return res;
   }
