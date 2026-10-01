@@ -936,6 +936,8 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
       `write-${req.sessionID}-${randomUUID()}.tmp`,
     );
     const workerTmp = `/work/.broker-tmp/write-${randomUUID()}.tmp`;
+    const targetPath = payload.path as string;
+    let stageTmp: string | null = null;
     try {
       mkdirSync(join(ctx.config.stateDir, "tmp"), {
         recursive: true,
@@ -968,8 +970,11 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
           `writeFile mkdir failed in worker (status ${mkdirRes.status}): ${mkdirRes.stderr.trim()}`,
         );
       }
+      // Read the target's mode BEFORE replacing it: the replacement must keep
+      // it (an executable script must stay executable).
+      const targetMode = await existingTargetMode(ctx, worker, targetPath);
       await ctx.adapter.copyIn(worker, hostTmp, workerTmp);
-      const targetDir = workerDirOf(payload.path as string);
+      const targetDir = workerDirOf(targetPath);
       const targetMkdir = await ctx.adapter.exec(
         worker,
         ["mkdir", "-p", "--", targetDir],
@@ -980,21 +985,27 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
           `writeFile target mkdir failed in worker (status ${targetMkdir.status}): ${targetMkdir.stderr.trim()}`,
         );
       }
-      const moved = await ctx.adapter.exec(
+      // The copied-in temp is root-owned, so the worker user cannot chmod it.
+      // Stage a worker-owned copy beside the target (same filesystem, so the
+      // final mv stays an atomic rename), set its mode, then replace.
+      stageTmp = `${targetDir}/.broker-write-${randomUUID()}.tmp`;
+      await execOrThrow(ctx, worker, ["cp", "--", workerTmp, stageTmp], "writeFile stage");
+      await execOrThrow(
+        ctx,
         worker,
-        ["mv", "-f", workerTmp, payload.path as string],
-        {
-          timeoutMs: 30_000,
-        },
+        ["chmod", targetMode ?? "644", "--", stageTmp],
+        "writeFile chmod",
       );
-      if (moved.status !== 0) {
-        throw new MsbError(
-          `writeFile failed in worker (status ${moved.status}): ${moved.stderr.trim()}`,
-        );
-      }
+      await execOrThrow(ctx, worker, ["mv", "-f", "--", stageTmp, targetPath], "writeFile");
+      stageTmp = null;
       return { path: payload.path };
     } finally {
       rmSync(hostTmp, { force: true });
+      // Best-effort worker cleanup; a failure here must not mask the result.
+      const leftovers = stageTmp ? [workerTmp, stageTmp] : [workerTmp];
+      await ctx.adapter
+        .exec(worker, ["rm", "-f", "--", ...leftovers], { timeoutMs: 30_000 })
+        .catch(() => undefined);
     }
   };
 }
@@ -1173,6 +1184,48 @@ export function buildCopyInOp(ctx: OpContext): OpHandler {
     }
     return { path: payload.workerPath };
   };
+}
+
+/** Run a worker command; any non-zero status fails closed with its stderr. */
+async function execOrThrow(
+  ctx: OpContext,
+  worker: string,
+  argv: string[],
+  what: string,
+): Promise<void> {
+  const res = await ctx.adapter.exec(worker, argv, { timeoutMs: 30_000 });
+  if (res.status !== 0) {
+    throw new MsbError(`${what} failed in worker (status ${res.status}): ${res.stderr.trim()}`);
+  }
+}
+
+/**
+ * Octal mode of an existing regular-file target, or null when the target
+ * does not exist. A non-regular target (directory, device) is refused, and a
+ * target that exists but cannot be inspected fails closed.
+ */
+async function existingTargetMode(
+  ctx: OpContext,
+  worker: string,
+  path: string,
+): Promise<string | null> {
+  const stat = await ctx.adapter.exec(
+    worker,
+    ["stat", "-L", "-c", "%a:%F", "--", path],
+    { timeoutMs: 30_000 },
+  );
+  if (stat.status === 0) {
+    const m = /^([0-7]{3,4}):(regular file|regular empty file)\s*$/.exec(stat.stdout);
+    if (!m) throw new ValidationError(`writeFile target is not a regular file: ${path}`);
+    return m[1]!;
+  }
+  const exists = await ctx.adapter.exec(worker, ["test", "-e", path], { timeoutMs: 30_000 });
+  if (exists.status === 0) {
+    throw new MsbError(
+      `writeFile could not read the existing mode of ${path}: ${stat.stderr.trim()}`,
+    );
+  }
+  return null;
 }
 
 function workerDirOf(filePath: string): string {

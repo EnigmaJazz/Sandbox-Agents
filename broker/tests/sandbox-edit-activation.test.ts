@@ -68,6 +68,10 @@ test("writeFile creates a missing target parent before moving the temporary file
   const directories = new Set(["/work/.broker-tmp"]);
   const ctx = makeContext(session(), async (argv) => {
     commands.push(argv);
+    // The target does not exist yet.
+    if (argv[0] === "stat" || argv[0] === "test") {
+      return { status: 1, stdout: "", stderr: "No such file or directory", timedOut: false };
+    }
     if (argv[0] === "mkdir" && argv[1] === "-p") directories.add(argv.at(-1)!);
     if (argv[0] === "mv" && !directories.has("nested")) {
       return { status: 1, stdout: "", stderr: "No such file or directory", timedOut: false };
@@ -78,7 +82,10 @@ test("writeFile creates a missing target parent before moving the temporary file
   await buildWriteFileOp(ctx)(request("writeFile", { path: "nested/new-file.md", content: "contents" }));
 
   expect(commands).toContainEqual(["mkdir", "-p", "--", "nested"]);
-  expect(commands.at(-1)?.[0]).toBe("mv");
+  const mkdirAt = commands.findIndex((c) => c.join(" ") === "mkdir -p -- nested");
+  const mvAt = commands.findIndex((c) => c[0] === "mv");
+  expect(mvAt).toBeGreaterThan(mkdirAt);
+  expect(commands.at(-1)?.[0]).toBe("rm");
 });
 
 test("readFile still refuses when the session has no active worker recorded", async () => {

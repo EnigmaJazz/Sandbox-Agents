@@ -218,6 +218,84 @@ describe("readFile returns the exact bytes or refuses", () => {
   });
 });
 
+describe("writeFile keeps the target's mode and leaves it worker-owned", () => {
+  test("an executable script stays 755 after an edit", async () => {
+    const worker = new FakeWorker();
+    worker.file("verify-workflow.sh", "#!/usr/bin/env bash\necho old\n", "755");
+    await write(worker, "verify-workflow.sh", "#!/usr/bin/env bash\necho new\n");
+    const node = worker.get("verify-workflow.sh")!;
+    expect(node.bytes.toString()).toBe("#!/usr/bin/env bash\necho new\n");
+    expect(node.mode).toBe("755");
+    expect(node.owner).toBe("worker");
+  });
+
+  test("a restrictive mode is preserved too", async () => {
+    const worker = new FakeWorker();
+    worker.file("secret.conf", "a=1\n", "600");
+    await write(worker, "secret.conf", "a=2\n");
+    expect(worker.get("secret.conf")!.mode).toBe("600");
+  });
+
+  test("a previously root-owned target becomes worker-owned and keeps its mode", async () => {
+    const worker = new FakeWorker();
+    worker.file("tool.sh", "old\n", "755", "root");
+    await write(worker, "tool.sh", "new\n");
+    expect(worker.get("tool.sh")).toMatchObject({ mode: "755", owner: "worker" });
+  });
+
+  test("a new file is created 644, worker-owned, in a created parent", async () => {
+    const worker = new FakeWorker();
+    await write(worker, "nested/new-file.md", "contents");
+    const node = worker.get("nested/new-file.md")!;
+    expect(node.bytes.toString()).toBe("contents\n");
+    expect(node).toMatchObject({ mode: "644", owner: "worker" });
+  });
+
+  test("no temporary files are left behind", async () => {
+    const worker = new FakeWorker();
+    worker.file("a.txt", "1\n");
+    await write(worker, "a.txt", "2\n");
+    expect(worker.leftovers()).toEqual([]);
+  });
+
+  test("a failed replace leaves the original intact and cleans up its temps", async () => {
+    const worker = new FakeWorker();
+    worker.file("keep.sh", "original\n", "755");
+    worker.override = (argv) => (argv[0] === "mv" ? fail("mv: disk full") : undefined);
+    await expect(write(worker, "keep.sh", "replacement\n")).rejects.toThrow("mv: disk full");
+    expect(worker.get("keep.sh")).toMatchObject({ mode: "755" });
+    expect(worker.get("keep.sh")!.bytes.toString()).toBe("original\n");
+    expect(worker.leftovers()).toEqual([]);
+  });
+
+  test("a directory target is refused before anything is copied in", async () => {
+    const worker = new FakeWorker();
+    worker.exec(["mkdir", "-p", "--", "docs"]);
+    await expect(write(worker, "docs", "x")).rejects.toThrow("not a regular file");
+    expect(worker.commands.some((c) => c[0] === "cp" || c[0] === "mv")).toBe(false);
+  });
+
+  test("an existing target whose mode cannot be read fails closed", async () => {
+    const worker = new FakeWorker();
+    worker.file("odd.txt", "x\n", "644");
+    worker.override = (argv) => (argv[0] === "stat" ? fail("stat: Permission denied") : undefined);
+    await expect(write(worker, "odd.txt", "y\n")).rejects.toThrow("could not read the existing mode");
+    expect(worker.get("odd.txt")!.bytes.toString()).toBe("x\n");
+  });
+
+  test("an edit round trip through readFile and writeFile keeps bytes and mode", async () => {
+    const worker = new FakeWorker();
+    const original = `#!/usr/bin/env bash\r\n${"echo line\r\n".repeat(30_000)}`; // ~330 KB, CRLF
+    worker.file("big.sh", original, "755");
+    const { content } = await read(worker, "big.sh");
+    const edited = content.replace("echo line\r\n", "echo first\r\n");
+    await write(worker, "big.sh", edited);
+    const node = worker.get("big.sh")!;
+    expect(node.bytes.toString()).toBe(edited);
+    expect(node.mode).toBe("755");
+  });
+});
+
 describe("MsbAdapter.exec output limit", () => {
   test("a per-call maxOutputBytes reaches the spawn", async () => {
     const previous = getSpawnImpl();
