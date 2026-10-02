@@ -19,7 +19,7 @@ gentle-ai 4.0.0 removed `sdd-status`, `sdd-continue`, `sdd-attempt`, `sdd-archiv
 ## Constraints
 
 - Never delete SDD code, argv builders, approval builders or tests.
-- No behaviour change on gentle-ai 3.7.0 with default settings.
+- No behaviour change on gentle-ai 3.7.0 with default settings. Broker: met by `auto`. Plugin: met by install timing; the T2 plugin change is installed on upgrade day, because the plugin can't detect the version at load time (see the plan's step 2).
 - Fail closed: an unknown gentle-ai version disables SDD rather than enabling it.
 - `broker/src/**` and `opencode/plugins/**` are S17: the user reviews and installs.
 - Broker stays dependency-free (`bun:test` and node builtins only).
@@ -31,7 +31,7 @@ gentle-ai 4.0.0 removed `sdd-status`, `sdd-continue`, `sdd-attempt`, `sdd-archiv
   - Resolved once at startup in `main.ts` and logged, with a warning when an explicit setting disagrees with the detected major.
   - The five SDD operations refuse with a typed `PolicyError` when disabled. Review operations are never gated.
   - `defaultConfig` defaults to disabled (fail closed); tests that exercise SDD set it explicitly.
-- [ ] **T2 — Plugin dormancy.**
+- [x] **T2 — Plugin dormancy.**
   - Move the five `host_sdd_*` tool definitions to `opencode/plugins/lib/legacy-sdd-tools.ts`.
   - Register them only when `OPENCODE_SANDBOX_LEGACY_SDD=1`.
   - Approval builders unchanged.
@@ -63,6 +63,12 @@ Started 2026-10-02.
   - Checks: `bun test` passed 600, 0 fail; `bun build src/main.ts` succeeded (output outside the repo).
   - Live: detection on the installed binary reads major 3, so `auto` enables SDD and there's no behaviour change on 3.7.0. A missing binary resolves to dormant, with a warning.
 
+- **T1 committed** as `2c17837`.
+- **T2 done.** The five `host_sdd_*` definitions moved to `opencode/plugins/lib/legacy-sdd-tools.ts` and are registered from `sandbox-tools.ts` only when `OPENCODE_SANDBOX_LEGACY_SDD=1`. The four SDD-only argument schemas moved with them; the shared revision schema, `client()` and the project-directory check are passed in. A script check confirms the moved bodies are identical to the originals apart from those three substitutions. `scripts/install-user-files` and `scripts/rollback` list the new file (the existing parity test caught the omission).
+  - Tests: 5 new in `broker/tests/legacy-sdd-tools.test.ts`. They failed before implementation (module missing), then passed.
+  - Checks: `bun test` passed 605, 0 fail. The plugin bundle builds (`bun build opencode/plugins/sandbox-tools.ts`, externals for the SDK and zod), and so does the broker.
+  - Deviation: the plugin defaults to dormant even on 3.7.0, so it's installed on upgrade day (recorded in the plan).
+
 ## Next step
 
-T2.
+Both tasks are done. Remaining pre-upgrade steps 3–6 (permission fragment, prompt and docs, OpenSpec archive, rollback kit) are in `docs/upgrades/gentle-ai-4.md`.

@@ -57,10 +57,9 @@ import {
   buildRegisterProjectAsk,
   buildSandboxResultInstallAsk,
   buildGitPushAsk,
-  buildSddArchiveComposeAsk,
-  buildSddAttemptGrantAsk,
 } from "./lib/host-tool-approval.ts";
 import { applyTargetedEdit } from "./lib/sandbox-edit-core.ts";
+import { buildLegacySddTools, legacySddToolsEnabled } from "./lib/legacy-sdd-tools.ts";
 
 const READ_ONLY_AGENTS: readonly string[] = ["gentle-orchestrator"];
 
@@ -140,12 +139,8 @@ function tokenizeCommand(command: string): string[] {
 const pathArg = z.string().min(1).max(4096);
 const sessionIdArg = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 const contentArg = z.string().max(1024 * 1024);
-const sddIdentifierArg = z.string().regex(/^[A-Za-z0-9._-]{1,128}$/).refine((value) => !value.includes(".."));
-const sddLowercaseRequestIdArg = z.string().regex(/^[a-z0-9][a-z0-9-]{0,127}$/);
-const sddContractArg = z.enum(["gentle-ai.sdd-status/v2"]);
 const untrackedInventoryArg = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const reviewAgentArg = z.string().regex(/^[a-z0-9_-]{1,64}$/);
-const sddPathArg = z.string().min(1).max(4096);
 
 function currentProjectDirectory(directory: string | undefined): string {
   if (!directory) throw new Error("host-side SDD runtime requires the current project directory");
@@ -536,58 +531,6 @@ export default function sandboxToolsPlugin() {
         },
       }),
 
-      host_sdd_status: tool({
-        description:
-          "Run a host-side, allowlisted SDD runtime status operation (read-only; no approval). The " +
-          "broker uses the current canonical project root and exact operation-specific argv, never " +
-          "sandbox_bash; this tool never accepts arbitrary cwd, binary, or argv and does not activate " +
-          "a worker. Returns JSON.",
-        args: {
-          change: sddIdentifierArg.optional(),
-          contract: sddContractArg.optional(),
-        },
-        execute: async (args, ctx) => {
-          const c = await client();
-          const result = await c.request("sddStatus", ctx.sessionID, {
-            projectDir: currentProjectDirectory(ctx.directory),
-            ...(args.change ? { change: args.change } : {}),
-            ...(args.contract ? { contract: args.contract } : {}),
-          }, ctx.agent);
-          return JSON.stringify(result, null, 2);
-        },
-      }),
-
-      host_sdd_continue: tool({
-        description:
-          "Run a host-side, allowlisted SDD continue operation (read-only; no approval). Exact " +
-          "frozen argv, canonical project root, no worker activation. Returns JSON.",
-        args: { change: sddIdentifierArg.optional() },
-        execute: async (args, ctx) => {
-          const c = await client();
-          const result = await c.request("sddContinue", ctx.sessionID, {
-            projectDir: currentProjectDirectory(ctx.directory),
-            ...(args.change ? { change: args.change } : {}),
-          }, ctx.agent);
-          return JSON.stringify(result, null, 2);
-        },
-      }),
-
-      host_sdd_task_result: tool({
-        description:
-          "Validate a per-phase SDD task result (read-only; no approval). phase is " +
-          "the SDD phase id; input is a project-relative path or '-'. Returns JSON.",
-        args: { phase: sddIdentifierArg, input: sddPathArg },
-        execute: async (args, ctx) => {
-          const c = await client();
-          const result = await c.request("sddTaskResult", ctx.sessionID, {
-            projectDir: currentProjectDirectory(ctx.directory),
-            phase: args.phase,
-            input: args.input,
-          }, ctx.agent);
-          return JSON.stringify(result, null, 2);
-        },
-      }),
-
       host_sandbox_result: tool({
         description:
           "Read a sandbox result ref (read-only; no approval). Resolves the ref from a " +
@@ -777,57 +720,6 @@ export default function sandboxToolsPlugin() {
             target: args.target,
             expectedRevision: args.expectedRevision,
             lens: args.lens,
-          }, ctx.agent);
-          return JSON.stringify(result, null, 2);
-        },
-      }),
-
-      host_sdd_attempt_grant: tool({
-        description:
-          "Grant canonical host roots to a caller change instance (orchestrator-only " +
-          "mutation; requires human approval). Roots are forwarded in order; an " +
-          "initial grant may omit the CAS revision. Returns JSON.",
-        args: {
-          change: sddIdentifierArg,
-          expectedRevision: untrackedInventoryArg.optional(),
-          roots: z.array(z.string().min(1).max(4096)).min(1).max(32),
-          changeInstance: z.string().min(1).max(128),
-          requestId: sddLowercaseRequestIdArg,
-          actor: z.string().min(1).max(128),
-          reason: z.string().min(1).max(500),
-        },
-        execute: async (args, ctx) => {
-          await ctx.ask(buildSddAttemptGrantAsk(args));
-          const c = await client();
-          const payload: Record<string, unknown> = {
-            projectDir: currentProjectDirectory(ctx.directory),
-            change: args.change,
-            roots: args.roots,
-            changeInstance: args.changeInstance,
-            requestId: args.requestId,
-            actor: args.actor,
-            reason: args.reason,
-          };
-          if (args.expectedRevision) payload.expectedRevision = args.expectedRevision;
-          const result = await c.request("sddAttemptGrant", ctx.sessionID, payload, ctx.agent);
-          return JSON.stringify(result, null, 2);
-        },
-      }),
-
-      host_sdd_archive_compose: tool({
-        description:
-          "Compose an SDD archive delta into the canonical spec (orchestrator-only " +
-          "mutation; requires human approval). canonical/delta/output are " +
-          "project-relative paths. Returns JSON.",
-        args: { canonical: sddPathArg, delta: sddPathArg, output: sddPathArg },
-        execute: async (args, ctx) => {
-          await ctx.ask(buildSddArchiveComposeAsk(args));
-          const c = await client();
-          const result = await c.request("sddArchiveCompose", ctx.sessionID, {
-            projectDir: currentProjectDirectory(ctx.directory),
-            canonical: args.canonical,
-            delta: args.delta,
-            output: args.output,
           }, ctx.agent);
           return JSON.stringify(result, null, 2);
         },
@@ -1220,6 +1112,16 @@ export default function sandboxToolsPlugin() {
           return JSON.stringify(result, null, 2);
         },
       }),
+
+      // gentle-ai 4 retired SDD: the five host_sdd_* tools are dormant unless
+      // OPENCODE_SANDBOX_LEGACY_SDD=1 (rollback to 3.x). See lib/legacy-sdd-tools.ts.
+      ...(legacySddToolsEnabled()
+        ? buildLegacySddTools({
+            client,
+            projectDirectory: currentProjectDirectory,
+            revisionArg: untrackedInventoryArg,
+          })
+        : {}),
     },
     "chat.params": async (input: unknown) => {
       // Host-authoritative session->agent binding: only a host-resolved
