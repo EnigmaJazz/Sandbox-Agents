@@ -123,6 +123,9 @@ files, so they must be reliable first.
   existing `input` behaviour is unchanged for other lineages.
 
 ### A5. OpenCode host tools (`opencode/plugins/sandbox-tools.ts`)
+- **Where they go:** if TODO step P0 (shared tool table) has landed, define these tools in the
+  shared table only; the V1 adapter picks them up, and the late V2 adapter will too. Don't
+  write them directly into an adapter.
 - **New tools:** `host_advisor_ask`, `host_advisor_get` and `host_advisor_list`, using the
   existing `client()`/`formatResult` pattern and host-authoritative `sessionID`/`agent`.
 - **Extended arguments:** `host_review_start` gets `externalLenses`, and

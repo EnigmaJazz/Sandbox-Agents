@@ -118,17 +118,42 @@ Installed today: OpenCode 1.18.33 (V1, `~/.opencode/bin/opencode`), OpenChamber 
 - **The V2 data root starts as a copy** of the V1 data, so any carry-over migration happens on the copy.
 - **Rollback** is to stop the V2 launcher, start V1, and reinstall OpenChamber 1.24.2. Note its exact install command before upgrading it.
 
-**Workstreams (ordered; each slice its own ODD task under the 400-line cap)**
+**Avoiding duplicate work: one implementation, thin adapters, adapter written late**
 
-- **V0 — Discovery (read-only, scratch fixtures; no installation).**
+- **Only the OpenCode plugin entry layer differs between V1 and V2.** The broker, `lib/` modules and the gentle-ai 4 dormancy switch are shared, and changes to them are made once.
+- **Keep all tool logic in one host-neutral table** (step P0). Each OpenCode version then needs only a thin adapter that translates that table into its plugin API.
+- **Write the V2 adapter late: just before cutover, never in advance.** Do it only when the cutover date is set, gentle-ai 4 is installed and verified, and V0 has been refreshed against the target V2 release. A V2 adapter written early would have to be kept in step with every later V1 change, which is exactly the duplication this plan avoids.
+- **Until then, all new tools and features land in the shared table and run through the V1 adapter.** That includes plan A's advisor tools.
+- **Reconcile first.** Before starting, reconcile this plan with workflow_optimisation's parallel V2 queue (Q40–Q47 and `~/ai-workspace/OPENCODE-V2-PLUGIN-TASKS.md`) so only one plan drives the plugin work.
+
+**Workstreams**
+
+Timing:
+- **Now, on V1:** P0, V0 and V1. These are useful even if V2 never happens.
+- **Late, just before cutover:** V2–V7, in order, as one bounded run of ODD tasks (each under the 400-line cap).
+
+- **P0 — Shared tool table and thin V1 adapter (now; a no-behaviour-change refactor of the V1 plugin).**
+  - Move every tool's definition into one host-neutral table in `opencode/plugins/lib/` (for example `tool-specs.ts`), with:
+    - name, description and argument schema;
+    - a handler that takes `(args, { sessionID, agent, directory })` and returns the result string;
+    - an approval spec stated independently of the host. For example: "ask, with this metadata builder and this preview guard", or "none".
+    - It reuses `broker-client`, `sandbox-edit-core`, `host-tool-approval` and `apply-preview-guard` unchanged.
+  - Reduce `opencode/plugins/sandbox-tools.ts` to a thin V1 adapter. It maps the table to `tool({...})`, maps approval specs to `ctx.ask`, and takes `sessionID`, `agent` and `directory` from the V1 context. The legacy SDD tools stay dormant, following the gentle-ai 4 plan.
+  - Tests:
+    - the adapter registers exactly the table's tool names;
+    - every gated tool's approval spec is preserved, and asks before acting;
+    - `bun test` stays green with unchanged behaviour.
+  - The same idea for config: keep permission and agent entries in one source, or add a parity test, so V5 can generate the V2 format rather than copying it by hand.
+- **V0 — Discovery (read-only, scratch fixtures; no installation).** Do it now, then refresh it against the exact target release just before cutover.
   - Pin the target version (≥ 2.0.15; gentle-ai proved 2.0.19 with SDK 2.0.4; re-check 2.0.21's declarations for drift).
   - Record V2's built-in tool IDs and input shapes (the equivalents of read/grep/glob/list/bash/edit/write/apply_patch, plus `subagent`).
   - Record the V2 permission config format (native ordered rules), agent config, `serve` flags and authentication, the env vars for config and data roots, how to turn off the `~/.claude`/`~/.agents` sources, the session-ID format against the broker's `SESSION_ID_RE`, Code Mode semantics, and whether permission prompts show `message`/metadata.
   - Output: `docs/opencode-v2-discovery.md`, with sources.
 - **V1 — Broker.** Expected to be a no-op. Confirm V2 session IDs pass validation and add a regression test.
-- **V2 — `opencode/plugins-v2/sandbox-tools.ts`.**
-  - Port the 38 tools to `ctx.tool.transform`, reusing every `lib/` module unchanged (`broker-client`, `sandbox-edit-core`, `host-tool-approval`, `apply-preview-guard`). The directory comes from `ctx.location.directory` at setup, the agent from `Tool.Context.agent`.
-  - Replace `ctx.ask` per V0's permission findings.
+- **V2 — Thin V2 adapter, `opencode/plugins-v2/sandbox-tools.ts` (late: written just before cutover, not in advance).**
+  - Map P0's shared tool table to `ctx.tool.transform`. No tool logic is written here. The directory comes from `ctx.location.directory` at setup, the agent from `Tool.Context.agent`.
+  - Map approval specs to V2 permissions, per V0's findings (replacing `ctx.ask`).
+  - Parity test: the V2 adapter registers exactly the same tool names, and preserves every approval spec, as the V1 adapter.
   - Keep the legacy SDD tools dormant, following the gentle-ai 4 plan.
 - **V3 — `routing-guard` and the system rule.** Port the guard to `ctx.tool.hook("execute.before")` (throw to refuse) using V2 tool IDs, and the rule text to `ctx.session.hook("model.request")`. Name the file so it sorts first: hook order follows sorted discovery, and a throwing hook skips later plugins' hooks.
 - **V4 — Reviewer relay.** Port it to `subagent` and the V2 hook shapes, or retire it in favour of gentle-ai v4's managed V2 transport (which already binds `review-*` agents and refuses mismatches). The `asi-review-*` scheme existed only because the V1 transport owned the `review-*` names. Decide in V0. Either way, never synthesise provider values (AGENTS.md).
@@ -146,7 +171,7 @@ Installed today: OpenCode 1.18.33 (V1, `~/.opencode/bin/opencode`), OpenChamber 
   - Pure-logic tests for the new adapters (hook payload mapping, tool registration list, the permission mapping) in `broker/tests/`. The broker stays dependency-free, so no V2 SDK import in tests.
   - A gated V2 host fixture modelled on gentle-ai's `scripts/test-opencode-v2-host.py`: isolated XDG roots, loopback-only network, a scripted provider.
 
-**Cutover (user, after gentle-ai 4 is upgraded and V0–V7 are installed and verified)**
+**Cutover (user, after gentle-ai 4 is upgraded, and after P0, the refreshed V0, and the late V2–V7 are installed and verified)**
 
 1. Back up `~/.local/share/opencode`, record the OpenChamber 1.24.2 reinstall command, and install the pinned V2 CLI to its own path.
 2. Copy the V1 data into the V2 data root, start `start-secure-opencode-v2`, then run the manual gates on V2:
