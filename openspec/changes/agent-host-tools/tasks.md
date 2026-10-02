@@ -68,14 +68,16 @@ S17 protected paths require explicit manual review; deliver through sandbox `.ne
 
 ## Phase 5: Acceptance & Carry-forward (operator-owned)
 
-- [ ] 5.1 User: verify `BROKER_PROTECTED_SECURITY_FILES` in the live `~/.config/opencode-sandbox/broker.env` and restore the full S17 list if it is relaxed; remove `BROKER_REAP_INTERVAL_MS=3600000`; restart `sandbox-broker`. The repository template is full (`systemd-user/broker.env:25-28`); live installed state is user-owned and unverified here. Rule B: full protection is required before final acceptance.
-- [ ] 5.2 Reinstall the repository plugin to `~/.config/opencode/plugins/` and restart the secure OpenCode so the new host tools (`host_sdd_*`, `host_review_*`, `host_git_*`, `host_gh_*`), the colour-coded `sandbox_apply` preview, and the `sdd-attempt` acquire/settle ledger are live.
-- [ ] 5.3 Commit the landed work as reviewable work units. PR 1 (apply-preview prereq) and PR 2 (slice 1) are currently intermixed in the working tree; `broker/src/service.ts` and `opencode/plugins/sandbox-tools.ts` need hunk-splitting.
-- [ ] 5.4 Fix `runPrepare` import fetch to a forcing refspec (`+<ref>:<ref>`) in `broker/src/service.ts` (~line 1263) and `broker/src/gitops.ts:88`; add a test proving a second prepare/auto-finish succeeds. Prevents the reaper-induced non-fast-forward that lost two slice-1 attempts.
-- [ ] 5.5 S17 manual review of all protected-path changes (`broker/src/**`, `opencode/plugins/**`, `opencode/config-fragments/**`) before final acceptance.
-- [ ] 5.6 Run slices 2–3 and verify under the full `gentle-ai sdd-attempt acquire/settle` ledger once the plugin is reinstalled (the settle TOOL was not live for slices 1–2, which ran under a documented bootstrap exception).
+This phase can no longer run as written because the SDD/OpenSpec workflow was retired with gentle-ai 4; see `docs/upgrades/gentle-ai-4.md`.
 
-Note: SDD phase dispatch is latched in the session that hit sdd_task_result_malformed from sdd-apply; slices 2–3, verify, and archive must run in a NEW session.
+- [ ] 5.1 **Superseded** by the gentle-ai 4 retirement; live host configuration verification is outside this retired phase. See `docs/upgrades/gentle-ai-4.md`.
+- [ ] 5.2 **Superseded** by the gentle-ai 4 retirement; the SDD/OpenSpec workflow and its host-tool installation sequence are no longer active. See `docs/upgrades/gentle-ai-4.md`.
+- [ ] 5.3 **Superseded** by the gentle-ai 4 retirement; this SDD phase's carry-forward sequence is no longer active. See `docs/upgrades/gentle-ai-4.md`.
+- [ ] 5.4 **Superseded** by the gentle-ai 4 retirement; the `runPrepare` forcing-refspec fix is recorded as landed in `docs/TODO.md:114`. See `docs/upgrades/gentle-ai-4.md`.
+- [ ] 5.5 **Superseded** by the gentle-ai 4 retirement; this phase's SDD acceptance sequence is no longer active. See `docs/upgrades/gentle-ai-4.md`.
+- [ ] 5.6 **Superseded** by the gentle-ai 4 retirement; slices 2–3, verification, and archive can no longer continue through SDD/OpenSpec. See `docs/upgrades/gentle-ai-4.md`.
+
+Note: SDD phase dispatch was latched in the session that hit sdd_task_result_malformed from sdd-apply; this historical latch does not reactivate the retired workflow.
 
 ### Work unit: host-sdd-attempt-ledger-tools
 

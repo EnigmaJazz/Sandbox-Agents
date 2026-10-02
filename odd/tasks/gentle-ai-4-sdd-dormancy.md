@@ -41,9 +41,9 @@ gentle-ai 4.0.0 removed `sdd-status`, `sdd-continue`, `sdd-attempt`, `sdd-archiv
 - [x] **T4 — Prompt and docs.**
   - Mark the `sandbox-rules.md` SDD section dormant and fix the retired tool name.
   - Move the manifest's `host_sdd_*` rows to a dormant table and correct the totals.
-- [ ] **T5 — OpenSpec archive.**
-  - Add a retirement line for `openspec/` to its README; mark `agent-host-tools` tasks 5.1–5.6 superseded.
-  - Update the `docs/TODO.md` Tier 4 tail and mark upgrade-doc steps 3–5 done.
+- [x] **T5 — OpenSpec archive.**
+  - Added `openspec/README.md` stating OpenSpec was retired with gentle-ai 4 and this directory is read-only history; marked `agent-host-tools` tasks 5.1–5.6 superseded without checking them complete.
+  - Updated the `docs/TODO.md` Tier 4 tail and marked upgrade-doc steps 3–5 done; step 6 remains open and user-owned.
 
 ## Acceptance criteria
 
@@ -81,7 +81,10 @@ Started 2026-10-02.
   - The user ran the suite on the host; all tests passed.
 - **T4 done.** The prompt marks host-side SDD dormant by default, identifies the exact legacy opt-in, and no longer advertises the retired `host_sdd_attempt_acquire`. The manifest now places all 13 `host_sdd_*` entries in its dormant table with `deny` permissions, cites `legacy-sdd-tools.ts` and `broker/src/legacy-sdd.ts`, and records the default total as 13 sandbox + 20 host = 33 tools (33 prior host entries − 8 already retired − 5 dormant by default).
   - Checks: `bun --cwd broker test --reporter=dot` passed 647, 0 fail. The requested `bun --cwd broker test` was also run; its detailed output was truncated by the tool.
+- **T4 commit recorded:** `83f448c`.
+- **T5 done.** Added the OpenSpec read-only-history README; retained and marked tasks 5.1–5.6 superseded without checking them complete; updated both Tier 4 TODO entries; and marked pre-upgrade steps 3–5 done. The step 5 commit hash will be recorded in a follow-up metadata update; step 6 remains open and user-owned.
+  - Checks: `bun --cwd broker test --reporter=dot` — 647 pass, 0 fail, 3,070 expect() calls, 45 files. Read back all changed files after editing.
 
 ## Next step
 
-Both tasks are done. Remaining pre-upgrade steps 3–6 (permission fragment, prompt and docs, OpenSpec archive, rollback kit) are in `docs/upgrades/gentle-ai-4.md`.
+T5 is complete. Pre-upgrade step 6 (the rollback kit) remains open and user-owned in `docs/upgrades/gentle-ai-4.md`.
