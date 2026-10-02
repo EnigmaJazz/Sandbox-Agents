@@ -321,11 +321,17 @@ export function buildEnsureWorkerOp(ctx: OpContext): (req: BrokerRequestEnvelope
           record.workerState !== "DESTROYED" &&
           record.workerState !== "FAILED"
         ) {
-          await assertPinnedSnapshotCompatible(ctx, projectID, record, payload.snapshot);
+          if (payload.snapshot !== undefined) {
+            await assertPinnedSnapshotCompatible(ctx, projectID, record, payload.snapshot);
+          }
+          const snapshot =
+            (record as SessionRecordWithSnapshotIdentity).snapshotIdentity ??
+            await pinnedSnapshotIdentity(ctx, projectID, record, payload.snapshot);
           return {
             worker: record.workerName,
             state: record.state,
             reused: true,
+            snapshot,
           };
         }
         break;
@@ -494,13 +500,14 @@ async function createWorkerForSession(
         workerName,
         workerState: "ACTIVE",
         baselineRef: baselineRef(sessionID),
+        snapshotIdentity: snapshot,
         resultRef: undefined,
         error: undefined,
         resources: {
           cpu: ctx.budget.perWorkerCpu,
           memBytes: ctx.budget.perWorkerMemBytes,
         },
-      },
+      } as Partial<SessionRecord> & { snapshotIdentity: SnapshotIdentity },
     );
     return { worker: workerName, state: next.state, reused: false, snapshot };
   } catch (err) {
@@ -674,6 +681,7 @@ function ensureGitRepo(ctx: OpContext, repoDir: string): void {
  */
 type SnapshotSelection = { worktree: true } | { resultRef: string } | { commit: string };
 type SnapshotIdentity = { commit: string; tree: string; source: "worktree" | "resultRef" | "commit"; resultRef?: string; headSha: string };
+type SessionRecordWithSnapshotIdentity = SessionRecord & { snapshotIdentity?: SnapshotIdentity };
 
 function snapshotFromPayload(value: unknown): SnapshotSelection {
   if (value === undefined) return { worktree: true };
@@ -732,6 +740,39 @@ async function assertPinnedSnapshotCompatible(
   } finally {
     rmSync(index, { force: true });
   }
+}
+
+async function pinnedSnapshotIdentity(
+  ctx: OpContext,
+  projectID: string,
+  record: SessionRecord,
+  rawSelection: unknown,
+): Promise<SnapshotIdentity> {
+  const repoDir = projectDirFor(ctx, projectID);
+  const env = { GIT_DIR: join(repoDir, ".git") };
+  if (!record.baselineRef) throw new StateError("existing worker has no pinned snapshot identity");
+  const commit = await ctx.git.spawn(["git", "rev-parse", "--verify", `${record.baselineRef}^{commit}`], { env, cwd: repoDir });
+  if (commit.status !== 0 || !/^[0-9a-f]{40}$/.test(commit.stdout.trim())) {
+    throw new StateError("existing worker snapshot identity cannot be resolved");
+  }
+  const commitSha = commit.stdout.trim();
+  const tree = await ctx.git.spawn(["git", "rev-parse", "--verify", `${commitSha}^{tree}`], { env, cwd: repoDir });
+  const head = await ctx.git.spawn(["git", "rev-parse", "--verify", `${commitSha}^`], { env, cwd: repoDir });
+  const subject = await ctx.git.spawn(["git", "log", "-1", "--format=%s", commitSha], { env, cwd: repoDir });
+  if (tree.status !== 0 || !/^[0-9a-f]{40}$/.test(tree.stdout.trim())) {
+    throw new StateError("existing worker snapshot identity cannot be resolved");
+  }
+  const selection = rawSelection === undefined ? undefined : snapshotFromPayload(rawSelection);
+  const source: SnapshotIdentity["source"] = selection
+    ? "resultRef" in selection ? "resultRef" : "commit"
+    : subject.status === 0 && subject.stdout.trim() === `opencode-sandbox baseline for ${record.sessionID}` ? "worktree" : "commit";
+  return {
+    commit: commitSha,
+    tree: tree.stdout.trim(),
+    source,
+    ...(selection && "resultRef" in selection ? { resultRef: selection.resultRef } : {}),
+    headSha: /^[0-9a-f]{40}$/.test(head.stdout.trim()) ? head.stdout.trim() : commitSha,
+  };
 }
 
 async function runSnapshot(

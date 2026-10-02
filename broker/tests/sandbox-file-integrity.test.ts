@@ -370,6 +370,7 @@ describe("ensureWorker snapshot pinning", () => {
     git(dir, "commit", "-qam", "move ref");
     git(dir, "update-ref", "refs/opencode-sandbox/result/pinned", git(dir, "rev-parse", "HEAD"));
     expect(result.snapshot).toMatchObject({ commit: first, tree: git(dir, "rev-parse", `${first}^{tree}`), source: "resultRef", resultRef: "refs/opencode-sandbox/result/pinned" });
+    await expect(ensure("pinned")).resolves.toMatchObject({ reused: true, snapshot: result.snapshot });
   });
 
   test("uncommitted working-tree changes produce a distinct snapshot commit", async () => {
@@ -398,7 +399,8 @@ describe("ensureWorker snapshot pinning", () => {
     await worktreeHarness.ensure("worktree-session");
     await expect(worktreeHarness.ensure("worktree-session")).resolves.toMatchObject({ reused: true });
     Bun.write(join(dir, "file.txt"), "changed after worker creation\\n");
-    await expect(worktreeHarness.ensure("worktree-session")).rejects.toThrow(/snapshot/i);
+    await expect(worktreeHarness.ensure("worktree-session")).resolves.toMatchObject({ reused: true });
+    await expect(worktreeHarness.ensure("worktree-session", { worktree: true })).rejects.toThrow(/snapshot/i);
     expect(worktreeHarness.created).toHaveLength(1);
   });
 });
