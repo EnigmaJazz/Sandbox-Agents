@@ -199,25 +199,27 @@ collapses that map to a single `deny`.
   `host_service_logs`, `host_tailscale_status`, `host_memory`,
   `host_disk_usage`, `host_network_listeners`, `host_process_list`,
   `host_docker_list`, `host_docker_logs` (`sandbox-permissions.jsonc:64-73`)
-- Host read-only SDD/review tools: `host_sdd_status`, `host_sdd_continue`,
-  `host_sdd_verify_validate`, `host_sdd_task_result`, `host_review_assess`,
-  `host_review_mode_status`, `host_review_status`, `host_review_lens_context`,
-  `host_sdd_attempt_status` (`sandbox-permissions.jsonc:74-81,83`)
+- Host read-only review tools: `host_review_assess`,
+  `host_review_mode_status`, `host_review_status`, `host_review_lens_context`
+  (`sandbox-permissions.jsonc:79-82)
 
 ### ASK (mutations)
 
 - `sandbox_apply` (`sandbox-permissions.jsonc:62`)
-- Host mutations: `host_sdd_attempt_acquire`, `host_sdd_attempt_begin`,
-  `host_sdd_attempt_rescope`, `host_sdd_attempt_finish`,
-  `host_sdd_attempt_reset`, `host_sdd_attempt_grant`,
-  `host_sdd_attempt_settle`, `host_sdd_archive_compose`,
-  `host_git_commit`, `host_git_push`, `host_gh_issue_create`,
+- Host mutations: `host_git_commit`, `host_git_push`, `host_gh_issue_create`,
   `host_plan_append`, `host_register_project`, `host_review_start`,
   `host_review_capture_result`, `host_review_capture_unachievable`,
   `host_review_acknowledge_approved`, `host_review_capture_correction_plan`,
   `host_review_capture_refuter`, `host_review_capture_validation`,
   `host_review_validate`, `host_review_recover`
-  (`sandbox-permissions.jsonc:82,84-104`)
+  (`sandbox-permissions.jsonc:94-107)
+
+All 13 `host_sdd_*` permission entries are `deny` and are documented in the
+**Dormant since gentle-ai 4** table below. The five remaining legacy tool
+definitions are in `opencode/plugins/lib/legacy-sdd-tools.ts` and are registered
+only with `OPENCODE_SANDBOX_LEGACY_SDD=1`; the broker's
+`broker/src/legacy-sdd.ts` independently keeps their operations dormant by
+default.
 
 ### DENY (globals + protected secret reads)
 
@@ -237,11 +239,14 @@ collapses that map to a single `deny`.
 
 ## 5. Tool inventory + authority matrix
 
-`opencode/plugins/sandbox-tools.ts` registers **46 tools**: **13 `sandbox_*`**
-and **33 host tools** (2 `host_git_*`, 13 `host_review_*`, 13 `host_sdd_*`,
-5 other host tools). The 33 host tools map exactly to the broker's 33 host
-operations: **10 read operations** (`broker/src/validation.ts:799-808`) and
-**23 mutation operations** (`broker/src/validation.ts:811-829`).
+By default, `opencode/plugins/sandbox-tools.ts` registers **33 tools**: **13
+`sandbox_*`** and **20 host tools**. Arithmetic from the former inventory:
+**33 host entries − 8 already-retired SDD tools − 5 legacy SDD tools dormant by
+default = 20 host tools**; **13 sandbox tools + 20 host tools = 33 total**.
+The five remaining legacy tool definitions are in
+`opencode/plugins/lib/legacy-sdd-tools.ts` and are registered only when
+`OPENCODE_SANDBOX_LEGACY_SDD=1`. The broker's `broker/src/legacy-sdd.ts`
+independently gates their operations.
 
 ### Authority model (read this first)
 
@@ -291,23 +296,30 @@ operations: **10 read operations** (`broker/src/validation.ts:799-808`) and
 | `host_review_recover` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:1245`; `sdd-service.ts:566`; `validation.ts:785`; fragment `:103` |
 | `host_review_acknowledge_approved` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:1127`; `sdd-service.ts:473`; `validation.ts:780`; fragment `:98` |
 
-### 5c. host sdd
+### 5c. Dormant since gentle-ai 4 — host SDD entries
+
+These 13 permission entries are retained for history and rollback reference, but
+all are currently `deny`. gentle-ai 4 retired SDD; the five remaining plugin
+definitions live in `opencode/plugins/lib/legacy-sdd-tools.ts` and are
+registered only when `OPENCODE_SANDBOX_LEGACY_SDD=1`. The broker independently
+gates those five operations in `broker/src/legacy-sdd.ts`. The other eight rows
+are already-retired tools and are not registered.
 
 | Tool | Read-only / mutation | Fragment permission | Agent(s) permitted per code | Evidence (file:line) |
 |---|---|---|---|---|
-| `host_sdd_status` | read-only | allow | every agent | plugin `sandbox-tools.ts:476`; op `sddStatus` `sdd-service.ts:65`; `validation.ts:751`; fragment `:74` |
-| `host_sdd_continue` | read-only | allow | every agent | plugin `sandbox-tools.ts:497`; `sdd-service.ts:77`; `validation.ts:752`; fragment `:75` |
-| `host_sdd_verify_validate` | read-only | allow | every agent | plugin `sandbox-tools.ts:512`; `sdd-service.ts:89`; `validation.ts:753`; fragment `:76` |
-| `host_sdd_task_result` | read-only | allow | every agent | plugin `sandbox-tools.ts:533`; `sdd-service.ts:103`; `validation.ts:754`; fragment `:77` |
-| `host_sdd_attempt_status` | read-only | allow | every agent | plugin `sandbox-tools.ts:637`; `sdd-service.ts:178`; `validation.ts:759`; fragment `:83` |
-| `host_sdd_attempt_acquire` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:653`; `sdd-service.ts:194`; `validation.ts:764`; fragment `:82` |
-| `host_sdd_attempt_settle` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:681`; `sdd-service.ts:224`; `validation.ts:765`; fragment `:89` |
-| `host_sdd_attempt_begin` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:742`; `sdd-service.ts:267`; `validation.ts:771`; fragment `:84` |
-| `host_sdd_attempt_rescope` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:769`; `sdd-service.ts:287`; `validation.ts:772`; fragment `:85` |
-| `host_sdd_attempt_finish` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:796`; `sdd-service.ts:300`; `validation.ts:773`; fragment `:86` |
-| `host_sdd_attempt_reset` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:850`; `sdd-service.ts:332`; `validation.ts:774`; fragment `:87` |
-| `host_sdd_attempt_grant` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:880`; `sdd-service.ts:351`; `validation.ts:775`; fragment `:88` |
-| `host_sdd_archive_compose` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:912`; `sdd-service.ts:371`; `validation.ts:766`; fragment `:104` |
+| `host_sdd_status` | read-only | deny | every agent (only when legacy tools enabled) | `legacy-sdd-tools.ts:47`; broker gate `legacy-sdd.ts:22-36,84-88`; fragment `sandbox-permissions.jsonc:75` |
+| `host_sdd_continue` | read-only | deny | every agent (only when legacy tools enabled) | `legacy-sdd-tools.ts:67`; broker gate `legacy-sdd.ts:22-36,84-88`; fragment `sandbox-permissions.jsonc:76` |
+| `host_sdd_verify_validate` | retired read-only | deny | not registered | fragment `sandbox-permissions.jsonc:77`; broker legacy dormancy `legacy-sdd.ts:22-36,84-88` |
+| `host_sdd_task_result` | read-only | deny | every agent (only when legacy tools enabled) | `legacy-sdd-tools.ts:81`; broker gate `legacy-sdd.ts:22-36,84-88`; fragment `sandbox-permissions.jsonc:78` |
+| `host_sdd_attempt_status` | retired read-only | deny | not registered | fragment `sandbox-permissions.jsonc:83`; broker legacy dormancy `legacy-sdd.ts:22-36,84-88` |
+| `host_sdd_attempt_acquire` | retired mutation | deny | not registered | fragment `sandbox-permissions.jsonc:85`; broker legacy dormancy `legacy-sdd.ts:22-36,84-88` |
+| `host_sdd_attempt_settle` | retired mutation | deny | not registered | fragment `sandbox-permissions.jsonc:93`; broker legacy dormancy `legacy-sdd.ts:22-36,84-88` |
+| `host_sdd_attempt_begin` | retired mutation | deny | not registered | fragment `sandbox-permissions.jsonc:87`; broker legacy dormancy `legacy-sdd.ts:22-36,84-88` |
+| `host_sdd_attempt_rescope` | retired mutation | deny | not registered | fragment `sandbox-permissions.jsonc:88`; broker legacy dormancy `legacy-sdd.ts:22-36,84-88` |
+| `host_sdd_attempt_finish` | retired mutation | deny | not registered | fragment `sandbox-permissions.jsonc:89`; broker legacy dormancy `legacy-sdd.ts:22-36,84-88` |
+| `host_sdd_attempt_reset` | retired mutation | deny | not registered | fragment `sandbox-permissions.jsonc:90`; broker legacy dormancy `legacy-sdd.ts:22-36,84-88` |
+| `host_sdd_attempt_grant` | mutation | deny | `gentle-orchestrator` only (only when legacy tools enabled) | `legacy-sdd-tools.ts:96`; broker gate `legacy-sdd.ts:22-36,84-88`; fragment `sandbox-permissions.jsonc:92` |
+| `host_sdd_archive_compose` | mutation | deny | `gentle-orchestrator` only (only when legacy tools enabled) | `legacy-sdd-tools.ts:127`; broker gate `legacy-sdd.ts:22-36,84-88`; fragment `sandbox-permissions.jsonc:109` |
 
 ### 5d. other host tools
 
@@ -364,10 +376,10 @@ broker-side (e.g. `ensureWorker` refuses orchestrator,
    `~/.config/opencode/plugins/**`. Their broker read config exists
    (`broker/src/config.ts:247-259`, `DEFAULT_HOST_READ_CONFIG`), but the
    registering plugin was not found — see section 8.
-3. No host tool is missing from the fragment and no fragment host tool is
-   missing from code: the 33 fragment host entries match the 33 host tools
-   one-for-one. The only host/review names absent from the fragment code path
-   are the ten `host_*` read tools in item 2.
+3. The 20 default-registered host tools are represented in active tables 5a,
+   5b, and 5d. The 13 SDD entries are denied and retained only in the dormant
+   table (5c); they are not part of the default tool count. The ten `host_*`
+   read names in item 2 still have no registering plugin identified.
 
 ---
 
@@ -777,22 +789,22 @@ says "Do not weaken"; the fragment's own `{ "allow": [], "deny": [ … ] }` shap
 "host_process_list": "allow",
 "host_docker_list": "allow",
 "host_docker_logs": "allow",
-"host_sdd_status": "allow",
-"host_sdd_continue": "allow",
-"host_sdd_verify_validate": "allow",
-"host_sdd_task_result": "allow",
+"host_sdd_status": "deny",
+"host_sdd_continue": "deny",
+"host_sdd_verify_validate": "deny",
+"host_sdd_task_result": "deny",
 "host_review_assess": "allow",
 "host_review_mode_status": "allow",
 "host_review_status": "allow",
 "host_review_lens_context": "allow",
-"host_sdd_attempt_acquire": "ask",
-"host_sdd_attempt_status": "allow",
-"host_sdd_attempt_begin": "ask",
-"host_sdd_attempt_rescope": "ask",
-"host_sdd_attempt_finish": "ask",
-"host_sdd_attempt_reset": "ask",
-"host_sdd_attempt_grant": "ask",
-"host_sdd_attempt_settle": "ask",
+"host_sdd_attempt_acquire": "deny",
+"host_sdd_attempt_status": "deny",
+"host_sdd_attempt_begin": "deny",
+"host_sdd_attempt_rescope": "deny",
+"host_sdd_attempt_finish": "deny",
+"host_sdd_attempt_reset": "deny",
+"host_sdd_attempt_grant": "deny",
+"host_sdd_attempt_settle": "deny",
 "host_git_commit": "ask",
 "host_git_push": "ask",
 "host_gh_issue_create": "ask",
@@ -807,7 +819,7 @@ says "Do not weaken"; the fragment's own `{ "allow": [], "deny": [ … ] }` shap
 "host_review_capture_validation": "ask",
 "host_review_validate": "ask",
 "host_review_recover": "ask",
-"host_sdd_archive_compose": "ask"
+"host_sdd_archive_compose": "deny"
 ```
 
 **`read` deny-pattern union (shown explicitly).** Live list

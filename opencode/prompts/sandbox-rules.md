@@ -26,13 +26,18 @@ worker**. No extra confirmation is needed to create it.
   tree stays untouched until an approved apply (S2).
 - Approved external reference reads on the host remain available (S6).
 
-## Host-side SDD runtime
+## Host-side SDD runtime (dormant since gentle-ai 4)
 
 - Never run `gentle-ai sdd-status` or `gentle-ai sdd-attempt acquire` through
   built-in bash or `sandbox_bash`.
-- Use `host_sdd_status` / `host_sdd_attempt_acquire`. The broker runs exact
-  host argv against the current canonical, allowlisted project root and returns
-  JSON.
+- By default, no `host_sdd_*` tools are registered. For rollback to gentle-ai
+  3.x only, the five legacy tools are registered when
+  `OPENCODE_SANDBOX_LEGACY_SDD=1`; they include `host_sdd_status`, but not the
+  retired `host_sdd_attempt_acquire` tool. The broker independently gates the
+  five legacy operations using `BROKER_LEGACY_SDD`.
+- With that explicit legacy setting enabled, use the registered tool for its
+  exact operation. The broker runs exact host argv against the current
+  canonical, allowlisted project root and returns JSON.
 - Worker paths remain `/work`; these tools are not a host mount or shell
   escape, and they do not activate a worker.
 

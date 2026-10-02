@@ -35,6 +35,15 @@ gentle-ai 4.0.0 removed `sdd-status`, `sdd-continue`, `sdd-attempt`, `sdd-archiv
   - Move the five `host_sdd_*` tool definitions to `opencode/plugins/lib/legacy-sdd-tools.ts`.
   - Register them only when `OPENCODE_SANDBOX_LEGACY_SDD=1`.
   - Approval builders unchanged.
+- [x] **T3 — Permission fragment.**
+  - Change the five live `host_sdd_*` entries to `deny`, keep the entries, and record rollback values in a comment.
+  - Update the permission-fragment test and mark the role-agents SDD gate historical.
+- [x] **T4 — Prompt and docs.**
+  - Mark the `sandbox-rules.md` SDD section dormant and fix the retired tool name.
+  - Move the manifest's `host_sdd_*` rows to a dormant table and correct the totals.
+- [ ] **T5 — OpenSpec archive.**
+  - Add a retirement line for `openspec/` to its README; mark `agent-host-tools` tasks 5.1–5.6 superseded.
+  - Update the `docs/TODO.md` Tier 4 tail and mark upgrade-doc steps 3–5 done.
 
 ## Acceptance criteria
 
@@ -68,6 +77,10 @@ Started 2026-10-02.
   - Tests: 5 new in `broker/tests/legacy-sdd-tools.test.ts`. They failed before implementation (module missing), then passed.
   - Checks: `bun test` passed 605, 0 fail. The plugin bundle builds (`bun build opencode/plugins/sandbox-tools.ts`, externals for the SDK and zod), and so does the broker.
   - Deviation: the plugin defaults to dormant even on 3.7.0, so it's installed on upgrade day (recorded in the plan).
+- **T3 done and committed as `5e65f46`** (`chore(sdd): mark the five live host_sdd_* permissions dormant for gentle-ai 4`, 3 files, 12 insertions / 8 deletions).
+  - The user ran the suite on the host; all tests passed.
+- **T4 done.** The prompt marks host-side SDD dormant by default, identifies the exact legacy opt-in, and no longer advertises the retired `host_sdd_attempt_acquire`. The manifest now places all 13 `host_sdd_*` entries in its dormant table with `deny` permissions, cites `legacy-sdd-tools.ts` and `broker/src/legacy-sdd.ts`, and records the default total as 13 sandbox + 20 host = 33 tools (33 prior host entries − 8 already retired − 5 dormant by default).
+  - Checks: `bun --cwd broker test --reporter=dot` passed 647, 0 fail. The requested `bun --cwd broker test` was also run; its detailed output was truncated by the tool.
 
 ## Next step
 
