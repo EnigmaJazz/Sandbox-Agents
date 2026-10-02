@@ -27,7 +27,7 @@ reply. This covers `docs/TODO.md` Tier 2 item 13, plus the remaining client-side
   - An oversize line is discarded up to its newline and answered with a typed `protocol` error
     under the request id recovered from the line's start. The socket stays open.
   - Several pipelined lines never add up against one cap.
-- [ ] **T2 — Client receive fixes.**
+- [x] **T2 — Client receive fixes.**
   - On a timeout, clear the receive buffer only when its partial frame belongs to the request
     that timed out.
   - A queued-hold frame re-arms a bounded deadline (the broker queue timeout plus margin)
@@ -67,7 +67,15 @@ Started 2026-10-02.
   - Old behaviour, shown against the committed `server.ts`: a 1.2 MiB request made both it and a concurrent normal request fail with "broker socket closed".
   - The end-to-end test uses a raw socket client because `sandbox-edit-tool-activation.test.ts` module-mocks `broker-client.ts`, and that mock leaks across files.
   - Checks: `bun test` passed 613, 0 fail; `bun build src/main.ts` succeeded.
+  - Committed as `9c44aa9`.
+- **T2 done.** `opencode/plugins/lib/broker-client.ts`:
+  - **Timeouts:** a timeout discards the partial reply only when its frame id (read from the frame start) is the timed-out request's. Otherwise the partial reply is kept and completes. I first tried "never clear", but the existing test `broker-client.test.ts` ("discards a timed-out partial response…") showed it breaks the never-completing truncated-frame case, so the id match is required.
+  - **Queued holds:** the first queued notice replaces the deadline once with `queuedHoldTimeoutMs` (default 600 s, the broker's queue timeout) plus the operation timeout. Later notices never extend it.
+  - **Anchored id recovery:** malformed-frame recovery now reads an id only from the frame start (`{"version":1,"id":…`), so a fragment that merely contains an id can't fail that caller.
+  - **Redacted logging:** discarded-frame logs are structure-only, so no content leaks.
+  - Tests: 5 new in `broker/tests/broker-client-receive.test.ts`, which imports the client with a query suffix so the module mock in `sandbox-edit-tool-activation.test.ts` can't leak in. Three failed before the change (neighbour reply lost; both queued holds hung), then passed. The anchoring test was added with the change.
+  - Checks: `bun test` passed 618, 0 fail. The plugin and broker builds both succeed.
 
 ## Next step
 
-T2.
+Both tasks are done. `docs/TODO.md` Tier 2 item 13 and `odd/tasks/socket-write-drain.md` (T4 client items) are updated after the delegated gentle-ai 4 docs work lands, to avoid editing the TODO concurrently. The user installs the broker restart and the plugin (S17).
