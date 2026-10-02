@@ -82,7 +82,7 @@ Started 2026-10-02.
 - **T4 done.** The prompt marks host-side SDD dormant by default, identifies the exact legacy opt-in, and no longer advertises the retired `host_sdd_attempt_acquire`. The manifest now places all 13 `host_sdd_*` entries in its dormant table with `deny` permissions, cites `legacy-sdd-tools.ts` and `broker/src/legacy-sdd.ts`, and records the default total as 13 sandbox + 20 host = 33 tools (33 prior host entries − 8 already retired − 5 dormant by default).
   - Checks: `bun --cwd broker test --reporter=dot` passed 647, 0 fail. The requested `bun --cwd broker test` was also run; its detailed output was truncated by the tool.
 - **T4 commit recorded:** `83f448c`.
-- **T5 done.** Added the OpenSpec read-only-history README; retained and marked tasks 5.1–5.6 superseded without checking them complete; updated both Tier 4 TODO entries; and marked pre-upgrade steps 3–5 done. The step 5 commit hash will be recorded in a follow-up metadata update; step 6 remains open and user-owned.
+- **T5 done and committed as `8152748`.** Added the OpenSpec read-only-history README; retained and marked tasks 5.1–5.6 superseded without checking them complete; updated both Tier 4 TODO entries; and marked pre-upgrade steps 3–5 done. Step 6 remains open and user-owned.
   - Checks: `bun --cwd broker test --reporter=dot` — 647 pass, 0 fail, 3,070 expect() calls, 45 files. Read back all changed files after editing.
 
 ## Next step
