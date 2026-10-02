@@ -115,7 +115,7 @@ The security core (A1, A3, A4) is complete. Remaining: A2 (snapshot pinning and 
 ## A2a review and follow-up
 
 - **Review:** approved; authority burned. Lineage `review-7dc1caa8ea859908`; target `sha256:ac279408…`; consumed revision `sha256:d2f95f0d…`; commit `1b3d246`.
-- **Last reviewed boundary:** commit `1b3d246`. The next review must pass that commit as `base-ref`, never the previous commit. A single-work-unit window is always `under_budget`, so the checkpoint would silently never fire.
+- **Last reviewed boundary:** commit `1b3d246`. The boundary **advanced to `3253224`** by a `passive` assessment (3 paths / 29 lines, reason `non_executable_only`). The next review must pass `3253224` as `base-ref`, never the previous commit. A previous-commit base makes every window a single work unit, always `under_budget`, so the checkpoint would silently never fire.
 - **Later advisory work (non-blocking):**
   - `R3-ensureWorker-snapshot-return-inconsistent` (reliability, WARNING, `broker/src/service.ts:505`) — `ensureWorker` returns a `snapshot` identity on a new worker but omits it on reuse.
   - `R4-001` (resilience, WARNING, `broker/src/service.ts:324`) — a repeat call omitting `snapshot` defaults to worktree, so a session pinned to a commit/resultRef is refused rather than reused.
