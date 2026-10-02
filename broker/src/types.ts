@@ -100,7 +100,13 @@ export type Operation =
   | "copyIn"
   // read-only policy/introspection (used by the routing guard plugin)
   | "policy"
-  | "registerProject";
+  | "registerProject"
+  // External advisors (advisor-records.ts): evidence records, never authority.
+  | "advisorAsk"
+  | "advisorGet"
+  | "advisorList"
+  | "advisorRead"
+  | "advisorRespond";
 
 /** Every Operation that exists in the protocol. Immutable; unknown ops fail closed. */
 export const OPERATIONS: readonly Operation[] = [
@@ -158,6 +164,11 @@ export const OPERATIONS: readonly Operation[] = [
   "copyIn",
   "policy",
   "registerProject",
+  "advisorAsk",
+  "advisorGet",
+  "advisorList",
+  "advisorRead",
+  "advisorRespond",
 ];
 
 /** Worker policy fields the LLM must NEVER be able to supply (§7, §11). */

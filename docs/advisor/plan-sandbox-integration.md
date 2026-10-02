@@ -1,6 +1,6 @@
 # Plan A: build the external advisor system (agent-sandbox-integration)
 
-Status: **in progress**. Done: A0, and A1 (`cb29902`). In progress: A3. Task record: `odd/tasks/external-advisors.md`. Executor: the OpenCode sandbox agents of this repository, following
+Status: **in progress**. Done: A0, A1 (`cb29902`), and A3a (records for pre-code advice). Next: A3b, then A4. Task record: `odd/tasks/external-advisors.md`. Executor: the OpenCode sandbox agents of this repository, following
 WORKFLOW.md (ODD tracker first, work-unit commits under the 400-line cap, review per slice).
 
 Most paths here are **S17** (`broker/src/**`, `opencode/plugins/**`, `nono/profile/**`,
@@ -82,6 +82,12 @@ files, so they must be reliable first.
   commit; evidence path, symlink and size refusals; manifest hashes.
 
 ### A3. Advisory records (`broker/src/advisor-records.ts`, new)
+- **A3a done** (store, lifecycle, pre-code advice). As built:
+  - **Immutability:** request, claim and response are separate files, each published once by an exclusive hard link, so they're immutable at the OS level.
+  - **Claiming:** the first advisor session to `advisorRead` claims the request; only that session may `advisorRespond`, once.
+  - **Expiry:** status is derived, and an unanswered request expires after 24 h.
+  - **Payload:** the payload-key allowlist is what refuses a `token` field.
+  - **Remaining for A3b:** the `review-lens` kind.
 - **Operations:**
   - main socket: `advisorAsk`, `advisorGet`, `advisorList`;
   - advisor socket: `advisorRead`, `advisorRespond`.

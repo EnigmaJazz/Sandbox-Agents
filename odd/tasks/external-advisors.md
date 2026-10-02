@@ -29,7 +29,9 @@ adjudication; they never get authority to issue keys. Plan:
   - The main socket refuses any `advisor-*` session id.
   - Disconnect reaps the advisor session through the existing disconnect clean-up.
 - [ ] **A2 — Snapshot pinning, identity, evidence export.** See the plan.
-- [ ] **A3 — Advisory records.** See the plan.
+- [ ] **A3 — Advisory records.** Split into:
+  - [x] **A3a — Store, lifecycle and pre-code advice.**
+  - [ ] **A3b — Review-lens requests.** The broker reads `target`, `order`, both subject hashes and the `lens-context` text from gentle-ai for an external-lens lineage, and validates responses against the cached reviewer schema, including the `subject_hash` match and the `inspection.paths` coverage.
 - [ ] **A4 — Stored-response relay into `reviewCaptureResult`.** Design and failing tests are
   written once A3's store exists.
 - [ ] **A5–A9.** See the plan.
@@ -65,6 +67,18 @@ Started 2026-10-02 with A1.
   - Checks: `bun test` passed 630, 0 fail; `bun build src/main.ts` succeeded.
   - Not yet: `resultDiff`, `evidenceKeep`, `advisorRead` and `advisorRespond` don't exist. A2 and A3 add them to the allowlist.
 
+- **A3a done.**
+  - New `broker/src/advisor-records.ts`. `advisorAsk` (orchestrator-only host mutation), `advisorGet` and `advisorList` (host reads) are on the main socket; `advisorRead` and `advisorRespond` are advisor-socket only.
+  - **Storage:** records live under `<stateDir>/advisor/<projectId>/requests/` (directories 0700, files 0600). The request, its claim and its response are each published once by an exclusive hard link, so immutability holds at the OS level, races included.
+  - **Status** is derived from which files exist and the clock (pending, claimed, submitted, declined, or expired after a 24 h TTL).
+  - **Selection:** `rotate` resolves to the least recently used host per project and is persisted; `selection.rule` is required; `group` is recorded.
+  - **Advisor view:** an advisor sees only its own request (no response field, no other records). Its project comes from its broker-assigned session id.
+  - **Refusals:** a token is refused by the payload-key allowlist, and `review-lens` is refused until A3b.
+  - **Wiring:** `types.ts`, `validation.ts` (payload keys; read/mutation classes), `server.ts` dispatch, and `advisor-socket.ts` (allowlist; the main socket refuses the advisor-only operations).
+  - Tests: 16 new in `broker/tests/advisor-records.test.ts` (they failed before implementation, module missing), plus an end-to-end socket test in `advisor-socket.test.ts`: the orchestrator asks on the main socket, the advisor claims and answers on its socket, a second answer is refused, the main socket can't read as an advisor, and the orchestrator reads the answer.
+  - Checks: `bun test` passed 647, 0 fail; `bun build src/main.ts` succeeded.
+  - Not yet: user overrides (`advisor-open --override-reason`, A7) and evidence references (A2).
+
 ## Next step
 
-A4 design and failing tests need A3's record store, so the order is A2, A3, then A4. Slices A2, A3 and A5 can be handed off from test-first specs; A4 stays with Claude.
+Next: A3b (review-lens records), then A4 (stored-response relay). Both are Claude-owned. A2 and A5 can be handed off from test-first specs. Slices A2, A3 and A5 can be handed off from test-first specs; A4 stays with Claude.

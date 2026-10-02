@@ -805,6 +805,8 @@ export const HOST_READ_OPERATIONS: readonly string[] = [
   "reviewStatus",
   "reviewLensContext",
   "sandboxResult",
+  "advisorGet",
+  "advisorList",
 ];
 
 /** Host mutations: `gentle-orchestrator` only, fragment `ask` + in-tool `ctx.ask`. */
@@ -826,6 +828,7 @@ export const HOST_MUTATION_OPERATIONS: readonly string[] = [
   "reviewValidate",
   "reviewRecover",
   "sandboxResultInstall",
+  "advisorAsk",
 ];
 
 export function hostToolAccess(operation: unknown): HostToolAccess {
@@ -1002,6 +1005,15 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   copyIn: ["hostSource", "workerPath", "confirm"],
   policy: [],
   registerProject: ["path", "dryRun", "createRemote", "makePublic"],
+  // External advisors (advisor-records.ts). No field may carry an acknowledgement token.
+  advisorAsk: [
+    "projectDir", "kind", "binding", "snapshot", "host", "selection", "group", "parentId",
+    "question", "evidenceRefs", "review",
+  ],
+  advisorGet: ["projectDir", "id"],
+  advisorList: ["projectDir", "task", "step", "status"],
+  advisorRead: ["id"],
+  advisorRespond: ["id", "status", "verdict", "findings"],
 };
 
 export function assertPayloadKeys(operation: string, payload: unknown): void {

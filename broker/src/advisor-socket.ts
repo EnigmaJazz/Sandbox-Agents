@@ -37,7 +37,13 @@ export const ADVISOR_ALLOWED_OPERATIONS: ReadonlySet<string> = new Set([
   "listDir",
   "grep",
   "diff",
+  // A3a: read one advisory request (claims it), answer it once.
+  "advisorRead",
+  "advisorRespond",
 ]);
+
+/** Operations that exist only for advisor connections; the main socket refuses them. */
+export const ADVISOR_ONLY_OPERATIONS: ReadonlySet<string> = new Set(["advisorRead", "advisorRespond"]);
 
 export interface AdvisorBinding {
   projectId: string;
@@ -93,6 +99,9 @@ export function bindAdvisorRequest(req: BrokerRequestEnvelope, binding: AdvisorB
 
 /** The main socket never operates an advisor session. */
 export function refuseAdvisorSessionOnMain(req: BrokerRequestEnvelope): BrokerRequestEnvelope {
+  if (ADVISOR_ONLY_OPERATIONS.has(req.operation)) {
+    throw new PolicyError(`operation '${req.operation}' is available only on an advisor socket`);
+  }
   if (isAdvisorSessionID(req.sessionID)) {
     throw new PolicyError("advisor sessions are reachable only through their advisor socket");
   }

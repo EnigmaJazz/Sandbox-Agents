@@ -57,7 +57,7 @@ describe("advisor socket naming and sessions", () => {
 describe("advisor request binding", () => {
   test("the allowlist is exactly the worker operations", () => {
     expect([...ADVISOR_ALLOWED_OPERATIONS].sort()).toEqual(
-      ["applyPatch", "destroyWorker", "diff", "ensureWorker", "exec", "grep", "listDir", "readFile", "workerStatus", "writeFile"],
+      ["advisorRead", "advisorRespond", "applyPatch", "destroyWorker", "diff", "ensureWorker", "exec", "grep", "listDir", "readFile", "workerStatus", "writeFile"],
     );
   });
 
@@ -107,7 +107,7 @@ describe("advisor request binding", () => {
 
 /** Raw NDJSON connection: send frames, collect replies by id. */
 async function connect(socketPath: string) {
-  const replies = new Map<string, { ok: boolean; error?: { message: string } }>();
+  const replies = new Map<string, { ok: boolean; result?: unknown; error?: { message: string } }>();
   let rx = "";
   const sock = await Bun.connect({
     unix: socketPath,
@@ -124,8 +124,8 @@ async function connect(socketPath: string) {
     },
   });
   return {
-    async ask(id: string, operation: string, sessionID: string, payload?: unknown) {
-      sock.write(`${JSON.stringify({ version: 1, id, operation, sessionID, ...(payload ? { payload } : {}) })}\n`);
+    async ask(id: string, operation: string, sessionID: string, payload?: unknown, agent?: string) {
+      sock.write(`${JSON.stringify({ version: 1, id, operation, sessionID, ...(agent ? { agent } : {}), ...(payload ? { payload } : {}) })}\n`);
       for (let i = 0; i < 200 && !replies.has(id); i++) await Bun.sleep(10);
       return replies.get(id);
     },
@@ -180,6 +180,60 @@ describe("BrokerServer advisor listener", () => {
       one.close();
       two.close();
       main.close();
+      server.shutdown();
+    }
+  }, 20_000);
+
+  test("end to end: the orchestrator asks, an advisor claims and answers, the orchestrator reads it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "advisor-socket-"));
+    roots.push(root);
+    const projectPath = join(root, "repo");
+    mkdirSync(projectPath);
+    const socketPath = join(root, "broker.sock");
+    const config = defaultConfig({
+      stateDir: join(root, "state"),
+      socketPath,
+      projects: [{ id: "repo", path: projectPath }],
+      advisorProjects: ["repo"],
+      readOnlyAgents: ["gentle-orchestrator"],
+    });
+    const server = new BrokerServer(config);
+    await server.start();
+    const main = await connect(socketPath);
+    const advisor = await connect(advisorSocketPath(socketPath, "repo"));
+    try {
+      const sendAs = async (conn: typeof main, id: string, operation: string, sessionID: string, payload?: unknown, agent?: string) => {
+        return conn.ask(id, operation, sessionID, payload, agent);
+      };
+      // Host-authoritative orchestrator binding, as the plugin's chat.params hook does.
+      expect((await sendAs(main, "bind", "bindSessionAgent", "ses_orch", { agent: "gentle-orchestrator" }))?.ok).toBe(true);
+      const asked = await sendAs(main, "ask", "advisorAsk", "ses_orch", {
+        projectDir: projectPath,
+        kind: "pre-code-advice",
+        binding: { task: "odd/tasks/feature-x.md#T1", step: "pre-code" },
+        snapshot: { worktree: true },
+        host: "rotate",
+        selection: { rule: "default-rotate" },
+        question: "Anything missing?",
+      });
+      expect(asked?.ok).toBe(true);
+      const requestId = (asked as unknown as { result: { id: string } }).result.id;
+
+      expect((await sendAs(main, "steal", "advisorRead", "ses_orch", { id: requestId }))?.error?.message).toContain("only on an advisor socket");
+      const read = await sendAs(advisor, "read", "advisorRead", "advisor", { id: requestId });
+      expect(read?.ok).toBe(true);
+      const answered = await sendAs(advisor, "answer", "advisorRespond", "advisor", { id: requestId, status: "submitted", verdict: "Add a rollback step." });
+      expect(answered?.ok).toBe(true);
+      expect((await sendAs(advisor, "again", "advisorRespond", "advisor", { id: requestId, status: "submitted", verdict: "x" }))?.error?.message).toContain("already");
+
+      const got = await sendAs(main, "get", "advisorGet", "ses_orch", { projectDir: projectPath, id: requestId });
+      expect((got as unknown as { result: { status: string; response: { verdict: string } } }).result).toMatchObject({
+        status: "submitted",
+        response: { verdict: "Add a rollback step." },
+      });
+    } finally {
+      main.close();
+      advisor.close();
       server.shutdown();
     }
   }, 20_000);

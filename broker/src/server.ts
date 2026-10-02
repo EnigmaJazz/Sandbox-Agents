@@ -46,6 +46,13 @@ import {
 } from "./sdd-service.ts";
 import { Logger, durationMs, startTimer } from "./logging.ts";
 import {
+  buildAdvisorAskOp,
+  buildAdvisorGetOp,
+  buildAdvisorListOp,
+  buildAdvisorReadOp,
+  buildAdvisorRespondOp,
+} from "./advisor-records.ts";
+import {
   advisorSocketPath,
   bindAdvisorRequest,
   newAdvisorSessionID,
@@ -640,6 +647,16 @@ export class BrokerServer {
         return buildCopyInOp(this.ctx)(req);
       case "registerProject":
         return buildRegisterProjectOp(this.ctx)(req);
+      case "advisorAsk":
+        return buildAdvisorAskOp(this.ctx)(req);
+      case "advisorGet":
+        return buildAdvisorGetOp(this.ctx)(req);
+      case "advisorList":
+        return buildAdvisorListOp(this.ctx)(req);
+      case "advisorRead":
+        return buildAdvisorReadOp(this.ctx)(req);
+      case "advisorRespond":
+        return buildAdvisorRespondOp(this.ctx)(req);
       default:
         return buildHostOp(this.ctx)(req);
     }
