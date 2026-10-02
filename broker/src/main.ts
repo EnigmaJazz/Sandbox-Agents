@@ -6,14 +6,21 @@
  *
  * Environment overrides: BROKER_SOCKET, BROKER_STATE_DIR, BROKER_LOG_FILE,
  * BROKER_GIT_MODE (real|planned), MSB_BINARY, MSB_WORKER_IMAGE,
- * BROKER_GENTLE_AI_BINARY, BROKER_REAP_INTERVAL_MS, BROKER_REAP_IDLE_MS,
- * BROKER_QUEUE_TIMEOUT_MS, BROKER_QUEUE_MAX_LENGTH.
+ * BROKER_GENTLE_AI_BINARY, BROKER_LEGACY_SDD (auto|on|off), BROKER_REAP_INTERVAL_MS,
+ * BROKER_REAP_IDLE_MS, BROKER_QUEUE_TIMEOUT_MS, BROKER_QUEUE_MAX_LENGTH.
  *
  * Gate 1: nothing is installed; run manually for local testing only.
  * The systemd unit (systemd-user/sandbox-broker.service) is the intended
  * production launcher after Gate 4 manual review.
  */
 import { defaultConfig } from "./config.ts";
+import {
+  detectGentleAiMajor,
+  parseLegacySddMode,
+  resolveLegacySdd,
+  type LegacySddMode,
+} from "./legacy-sdd.ts";
+import { spawnArgv } from "./msb.ts";
 import { BrokerServer } from "./server.ts";
 
 interface CliArgs {
@@ -167,6 +174,21 @@ async function main(): Promise<void> {
     logPath: args.logFile ?? process.env.BROKER_LOG_FILE,
     ...parseBrokerEnv(),
   });
+  // Legacy SDD dormancy (gentle-ai 4): resolve once, before serving.
+  let legacySddMode: LegacySddMode;
+  try {
+    legacySddMode = parseLegacySddMode(process.env.BROKER_LEGACY_SDD);
+  } catch (err) {
+    console.error(`invalid BROKER_LEGACY_SDD: ${(err as Error).message}`);
+    process.exit(1);
+  }
+  const gentleAiMajor = await detectGentleAiMajor(config.sddRuntime.binary, spawnArgv);
+  const legacySdd = resolveLegacySdd(legacySddMode, gentleAiMajor);
+  config.sddRuntime.legacySddEnabled = legacySdd.enabled;
+  console.error(
+    `legacy SDD ${legacySdd.enabled ? "enabled" : "dormant"} (BROKER_LEGACY_SDD=${legacySddMode}, gentle-ai major ${gentleAiMajor ?? "unknown"})`,
+  );
+  if (legacySdd.warning) console.error(`warning: ${legacySdd.warning}`);
   const server = new BrokerServer(config);
   const shutdown = () => {
     server.shutdown?.();

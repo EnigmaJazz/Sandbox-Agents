@@ -86,6 +86,9 @@ function makeRuntime() {
 function makeCtx(options: { recordAgent?: string; readOnlyAgents?: string[] } = {}): SddOpContext {
   const config = defaultConfig({
     readOnlyAgents: options.readOnlyAgents ?? [ORCHESTRATOR],
+    // These tests exercise the SDD operations as they run on gentle-ai 3.x
+    // (the rollback path); the dormant default is covered by legacy-sdd-dormancy.test.ts.
+    sddRuntime: { legacySddEnabled: true },
   });
   const record: SessionRecord | undefined =
     (options as { noRecord?: boolean }).noRecord === true

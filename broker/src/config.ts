@@ -85,6 +85,12 @@ export interface SddRuntimeConfig {
   /** Trusted host executable; never supplied by a request payload. */
   binary: string;
   outputMaxBytes: number;
+  /**
+   * Whether the five legacy SDD operations may run (legacy-sdd.ts). main.ts
+   * resolves it at startup from BROKER_LEGACY_SDD and the installed gentle-ai
+   * version; the default is false so any other construction fails closed.
+   */
+  legacySddEnabled: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +371,7 @@ export function defaultConfig(
     sddRuntime: {
       binary: process.env.BROKER_GENTLE_AI_BINARY ?? "gentle-ai",
       outputMaxBytes: 512 * 1024,
+      legacySddEnabled: false,
     },
     network: {
       mode: "deny-by-default",

@@ -4,6 +4,7 @@ import type { SddRuntimeExecutor } from "./sdd-runtime.ts";
 import type { BrokerRequestEnvelope } from "./types.ts";
 import { assertPayloadKeys, ValidationError } from "./validation.ts";
 import { authorizeHostDispatch, type OpContext } from "./service.ts";
+import { assertLegacySddEnabled } from "./legacy-sdd.ts";
 
 export interface SddOpContext extends OpContext {
   sddRuntime: SddRuntimeExecutor;
@@ -55,6 +56,7 @@ function requireStringArray(payload: SddPayload, key: string): string[] {
 /** Host-side SDD status; deliberately has no worker/session dependency. */
 export function buildSddStatusOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
+    assertLegacySddEnabled(ctx.config);
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "sddStatus", req.sessionID, req.agent);
     return ctx.sddRuntime.status(requireProjectDir(payload), {
@@ -67,6 +69,7 @@ export function buildSddStatusOp(ctx: SddOpContext) {
 /** Host-side SDD continue; exact frozen argv without `--json`. */
 export function buildSddContinueOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
+    assertLegacySddEnabled(ctx.config);
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "sddContinue", req.sessionID, req.agent);
     return ctx.sddRuntime.sddContinue({
@@ -79,6 +82,7 @@ export function buildSddContinueOp(ctx: SddOpContext) {
 /** Read-only per-phase task-result validation. */
 export function buildSddTaskResultOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
+    assertLegacySddEnabled(ctx.config);
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "sddTaskResult", req.sessionID, req.agent);
     return ctx.sddRuntime.taskResult({
@@ -165,6 +169,7 @@ export function buildReviewLensContextOp(ctx: SddOpContext) {
 /** Host-side attempt grant: registers canonical host roots for a caller token. */
 export function buildSddAttemptGrantOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
+    assertLegacySddEnabled(ctx.config);
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "sddAttemptGrant", req.sessionID, req.agent);
     return ctx.sddRuntime.attemptGrant({
@@ -185,6 +190,7 @@ export function buildSddAttemptGrantOp(ctx: SddOpContext) {
 /** Host-side deterministic archive-delta composition. */
 export function buildSddArchiveComposeOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
+    assertLegacySddEnabled(ctx.config);
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "sddArchiveCompose", req.sessionID, req.agent);
     return ctx.sddRuntime.archiveCompose({

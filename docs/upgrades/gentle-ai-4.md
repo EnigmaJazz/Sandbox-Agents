@@ -16,7 +16,7 @@ Reviewed 2026-10-01 against the v4.0.0 release notes and the tagged source (`ff7
 
 **Before the upgrade (safe on 3.7.0, no behaviour change until switched)**
 
-1. **Broker dormancy switch.** Add `sddRuntime.legacySddEnabled`, defaulting to `true` while 3.x is installed, with an env override in `systemd-user/broker.env`. When it's off, dispatching the five `sdd*` operations is refused with a typed `PolicyError` ("SDD retired in gentle-ai 4; dormant — enable legacySddEnabled only after rolling back to 3.x"). Operations, payload allowlists, classification and argv builders stay registered. Review operations, which share `sdd-runtime.ts`/`sdd-service.ts`, are never gated. At startup, log the detected `gentle-ai --version` and warn when the switch and the major version disagree. Tests: refused when off and allowed when on, for each of the five operations; review operations unaffected in both states; argv builders unchanged.
+1. **Broker dormancy switch.** **Done in T1 of `odd/tasks/gentle-ai-4-sdd-dormancy.md`.** `BROKER_LEGACY_SDD=auto|on|off` (default `auto`): `auto` enables the five `sdd*` operations only when `gentle-ai --version` reports a major below 4, and an unreadable version keeps them dormant. It's resolved once at broker start and logged, with a warning when `on`/`off` disagrees with the detected version. A dormant operation refuses with a typed `PolicyError` ("SDD retired in gentle-ai 4; this operation is dormant…") before any gentle-ai call. Review operations are never gated. `defaultConfig` defaults to dormant, so any non-`main.ts` construction fails closed. Because of `auto`, upgrade day needs no broker setting change, only a restart.
 2. **Plugin dormancy.** Move the five `host_sdd_*` tool definitions out of the default tool map into `opencode/plugins/lib/legacy-sdd-tools.ts`. Keep `lib/` so the OpenCode loader never auto-loads it. Register those tools only when `OPENCODE_SANDBOX_LEGACY_SDD=1`. `buildSddAttemptGrantAsk` and `buildSddArchiveComposeAsk` stay. Tests: the default tool set has no `host_sdd_*`; the env flag restores exactly the five, with unchanged argument schemas.
 3. **Permission fragment.** In `opencode/config-fragments/sandbox-permissions.jsonc`, change the five live `host_sdd_*` entries to `deny`, keeping the entries and adding a comment on how to restore them for rollback. The eight already-retired entries stay `deny`.
 4. **Prompt and docs.**
@@ -26,7 +26,7 @@ Reviewed 2026-10-01 against the v4.0.0 release notes and the tagged source (`ff7
 5. **OpenSpec archive.** Keep `openspec/` as read-only history, with a README line saying it was retired with gentle-ai 4. `openspec/changes/agent-host-tools` tasks 5.1–5.6 can no longer be continued through SDD. Close them as superseded, or move any still-wanted work into an ODD tracker, and update the `docs/TODO.md` Tier 4 "Agent-host-tools slices 2–3" and "SDD runtime host binary" entries to match.
 6. **Rollback kit (user).** Before upgrading, copy the 3.7.0 binary to a stable path outside Homebrew's Cellar, e.g. `~/.local/share/opencode-sandbox/gentle-ai-3.7.0`, because `brew upgrade` cleanup removes the old keg. Rollback is then:
    1. set `BROKER_GENTLE_AI_BINARY` to that binary;
-   2. set the dormancy switch and `OPENCODE_SANDBOX_LEGACY_SDD=1`;
+   2. keep `BROKER_LEGACY_SDD=auto` (or set `on`) and set `OPENCODE_SANDBOX_LEGACY_SDD=1`;
    3. restore the `host_sdd_*` permissions;
    4. run that binary's `gentle-ai sync` to restore its managed assets.
 
@@ -36,7 +36,7 @@ Reviewed 2026-10-01 against the v4.0.0 release notes and the tagged source (`ff7
 
 1. Rollback kit in place; the broker and plugin from steps 1–5 are installed and verified on 3.7.0 with the switch still on.
 2. `brew upgrade gentle-ai` (or `go install github.com/gentleman-programming/gentle-ai/v4/cmd/gentle-ai@v4.0.0`; v3's self-update cannot cross to v4). Then `gentle-ai sync`. Sync exits non-zero if it can't detect OpenCode's version; treat that as a failure.
-3. Turn off `legacySddEnabled` and restart the broker. Reinstall the plugin without `OPENCODE_SANDBOX_LEGACY_SDD` and restart OpenCode.
+3. Restart the broker and check its startup line reads `legacy SDD dormant (BROKER_LEGACY_SDD=auto, gentle-ai major 4)`. Reinstall the plugin without `OPENCODE_SANDBOX_LEGACY_SDD` and restart OpenCode.
 4. Verify:
    - `gentle-ai review capabilities` reports contract `1.2.0`;
    - every `host_sdd_*` call is refused with the dormancy message;
