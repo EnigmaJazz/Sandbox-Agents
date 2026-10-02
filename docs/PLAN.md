@@ -13,6 +13,7 @@ Requirements:
 - Bound the appended content and validate the row schema: date, change/feature, unit class, route, specialist, evidence, and outcome.
 - Append atomically while preserving all existing bytes; fail closed on invalid input or write failure.
 - Enforce S17-aware path protection so this narrow ledger exception cannot authorize writes to other protected paths.
+- Do not route the destination through the existing project-root containment (`isWithin(projectRoot, …)` in `buildPlanDocAppendOp`, `assertBeneathProjectRoot` in `appendPlanDocAtomically`): that check correctly refuses an out-of-project path. Give the enum entry its own fixed, canonical, symlink-checked destination and its own containment check, and leave project-root containment unchanged for every other document.
 
 Without this operation, ledger rows must be reconstructed from memory at session end. That is the same unverified synthesis this project has been working to eliminate; capture the evidence-backed row while the routed work and outcome are available instead.
 
@@ -31,6 +32,7 @@ Requirements:
 - Bound appended content and validate each row against the schema: date; claim as stated; class (`observed`, `inferred`, or `assumed`); search or check performed; positive control (what the thing would look like if present, and why that search would match it); what caught the retraction; corrected conclusion.
 - Append atomically while preserving all existing bytes; fail closed on invalid input or write failure.
 - Enforce S17-aware path protection so this narrow ledger exception cannot authorize writes to other protected paths.
+- Do not route the destination through the existing project-root containment (`isWithin(projectRoot, …)` in `buildPlanDocAppendOp`, `assertBeneathProjectRoot` in `appendPlanDocAtomically`): that check correctly refuses an out-of-project path. Give the enum entry its own fixed, canonical, symlink-checked destination and its own containment check, and leave project-root containment unchanged for every other document.
 
 Without this operation, records reconstructed from memory at session end are exactly the unverified synthesis this ledger exists to prevent.
 
