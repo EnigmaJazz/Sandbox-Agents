@@ -1,6 +1,6 @@
 # Plan A: build the external advisor system (agent-sandbox-integration)
 
-Status: **in progress**. Done: A0, A1 (`cb29902`), A3a (`8cf78d9`) and A3b (review-lens records). Next: A4. Task record: `odd/tasks/external-advisors.md`. Executor: the OpenCode sandbox agents of this repository, following
+Status: **in progress**. Done: the security core: A0, A1 (`cb29902`), A3 (`8cf78d9`, `0b402f3`) and A4 (relay). Next: A2, A5–A9. Task record: `odd/tasks/external-advisors.md`. Executor: the OpenCode sandbox agents of this repository, following
 WORKFLOW.md (ODD tracker first, work-unit commits under the 400-line cap, review per slice).
 
 Most paths here are **S17** (`broker/src/**`, `opencode/plugins/**`, `nono/profile/**`,
@@ -120,6 +120,10 @@ files, so they must be reliable first.
   non-external-lens lineage refusal.
 
 ### A4. Review integration (`sdd-service.ts`, `sdd-runtime.ts`)
+- **Done**, and verified live end to end against gentle-ai. As built:
+  - The caller of a relay supplies only `projectDir` and `inputFromAdvisorResponse`. The broker supplies every capture field, including `--subject-hash` (required by the v2 contract), so mismatches between caller and provider values can't arise.
+  - The relay marker lives in `<stateDir>/advisor/<projectId>/relayed/<lineage>.<lens>` and is released when gentle-ai refuses.
+  - Module: `broker/src/advisor-relay.ts`.
 - **`reviewStart` gains `externalLenses: true`.** It omits `agent` and records the lineage as
   external-lens in broker state.
 - **`reviewCaptureResult` gains `inputFromAdvisorResponse`.** For external-lens lineages a

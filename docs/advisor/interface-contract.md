@@ -92,10 +92,17 @@ external-lens lineage (§4). The broker records the lineage as external-lens in 
 ### `host_review_capture_result` (existing): extra argument
 
 `inputFromAdvisorResponse: "<id>"`. For an external-lens lineage this is the **only** accepted
-input; a free-form `input` is refused. The broker:
-1. reads the current `collect` transition from gentle-ai;
-2. checks that lineage, target, lens, order and subject hash match the stored response;
-3. runs `capture-result --preflight`, then the real capture with the stored bytes.
+input: a free-form `input`/`inputJson` and any `agent` are refused. With it, the caller sends
+**only** `projectDir` and the id; every other capture field is refused, because the broker
+supplies it. The broker:
+1. reads the current `collect` input for the response's lens from gentle-ai;
+2. checks its target, order and subject hash against the stored response, refusing it as stale
+   otherwise;
+3. takes the current revision and repository context from that fresh input;
+4. relays each (lineage, lens) at most once;
+5. runs `capture-result --preflight`, then the real capture, with the stored result.
+
+Implemented in `broker/src/advisor-relay.ts`, and verified live 2026-10-02.
 
 ## 4. External-lens lineages (verified against gentle-ai 3.7.0, 2026-10-01)
 

@@ -951,10 +951,14 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
     "untrackedScope", "expectedUntrackedInventory", "intendedUntracked",
     "baseRef", "committedOnly", "workspaceOverlay", "lineage", "consent",
     "locale", "policy", "trace",
+    // External advisors (A4): start without a runtime agent and register the lineage.
+    "externalLenses",
   ],
   reviewCaptureResult: [
     "projectDir", "agent", "input", "inputJson", "lens", "order", "target", "lineage",
     "expectedRevision", "repositoryContext", "subjectHash", "materialize", "preflight",
+    // External advisors (A4): relay a stored advisory response; exclusive with everything above but projectDir.
+    "inputFromAdvisorResponse",
   ],
   reviewCaptureUnachievable: [
     "projectDir", "target", "lineage", "expectedRevision", "repositoryContext",

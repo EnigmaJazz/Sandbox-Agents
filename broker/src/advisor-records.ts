@@ -423,6 +423,28 @@ function view(dir: string, request: StoredRequest, now: number) {
   };
 }
 
+/**
+ * The stored pieces a relay needs (A4): only a submitted review-lens response
+ * is relayable. Everything here is read from the immutable record files.
+ */
+export function readRelayableLensResponse(
+  ctx: OpContext,
+  projectId: string,
+  id: unknown,
+): { id: string; review: StoredReview; reviewerResult: unknown } {
+  const dir = requestsDir(ctx, projectId);
+  const requestId = matching(id, ID_RE, "inputFromAdvisorResponse");
+  const request = loadRequest(dir, requestId);
+  if (request.kind !== "review-lens" || !request.review) {
+    throw new PolicyError("only a review-lens advisory response can be relayed into a review capture");
+  }
+  const response = readJson<StoredResponse>(join(dir, `${requestId}.response.json`));
+  if (!response || response.status !== "submitted" || response.reviewerResult === undefined) {
+    throw new PolicyError("the advisory request has no submitted reviewer result to relay");
+  }
+  return { id: requestId, review: request.review, reviewerResult: response.reviewerResult };
+}
+
 export function buildAdvisorGetOp(ctx: OpContext, now: Clock = Date.now) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
     const p = payloadOf(req);

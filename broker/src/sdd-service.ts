@@ -2,9 +2,12 @@ import { lstatSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { SddRuntimeExecutor } from "./sdd-runtime.ts";
 import type { BrokerRequestEnvelope } from "./types.ts";
-import { assertPayloadKeys, ValidationError } from "./validation.ts";
+import { assertPayloadKeys, resolveProjectID, ValidationError } from "./validation.ts";
 import { authorizeHostDispatch, type OpContext } from "./service.ts";
 import { assertLegacySddEnabled } from "./legacy-sdd.ts";
+import { markExternalLensLineage } from "./advisor-lineages.ts";
+import { guardExternalLensCapture, relayAdvisorResponse } from "./advisor-relay.ts";
+import { PolicyError } from "./policy.ts";
 
 export interface SddOpContext extends OpContext {
   sddRuntime: SddRuntimeExecutor;
@@ -266,7 +269,17 @@ export function buildReviewStartOp(ctx: SddOpContext) {
     authorizeHostDispatch(ctx, "reviewStart", req.sessionID, req.agent);
     const projectDir = requireProjectDir(payload);
     if (payload.trace !== undefined) assertTraceOutsideProject(projectDir, payload.trace);
-    return ctx.sddRuntime.reviewStart({
+    // External advisors (A4): an external-lens lineage starts WITHOUT a runtime
+    // agent, so gentle-ai asks for reviewer results as files; the broker then
+    // records the lineage so only stored advisor responses can fill it.
+    const externalLenses = payload.externalLenses;
+    if (externalLenses !== undefined && externalLenses !== true) {
+      throw new ValidationError("externalLenses must be true when present");
+    }
+    if (externalLenses === true && payload.agent !== undefined) {
+      throw new PolicyError("externalLenses starts a review without a runtime agent; do not pass agent");
+    }
+    const started = await ctx.sddRuntime.reviewStart({
       projectDir,
       ...reviewOptional(payload, [
         "agent",
@@ -287,6 +300,13 @@ export function buildReviewStartOp(ctx: SddOpContext) {
         "trace",
       ]),
     });
+    if (externalLenses === true && started.status === 0) {
+      const lineage = (started.json as { lineage_id?: unknown } | null)?.lineage_id;
+      if (typeof lineage === "string") {
+        markExternalLensLineage(ctx, resolveProjectID(projectDir, ctx.config.projects), lineage);
+      }
+    }
+    return started;
   };
 }
 
@@ -299,8 +319,13 @@ export function buildReviewCaptureResultOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "reviewCaptureResult", req.sessionID, req.agent);
+    const projectDir = requireProjectDir(payload);
+    if (payload.inputFromAdvisorResponse !== undefined) {
+      return relayAdvisorResponse(ctx, projectDir, payload);
+    }
+    guardExternalLensCapture(ctx, projectDir, payload);
     return ctx.sddRuntime.reviewCaptureResult({
-      projectDir: requireProjectDir(payload),
+      projectDir,
       ...reviewOptional(payload, [
         "agent",
         "input",
