@@ -2,7 +2,7 @@
 
 Moved from `docs/TODO.md` on 2026-10-02; the TODO keeps a short entry pointing here.
 
-Reviewed 2026-10-01 against the v4.0.0 release notes and the tagged source (`ff77164`), compared with v3.7.0 (`6dee8f8`). Upgrade blocker today: Homebrew still offers 3.7.0, which is how this machine installed it.
+Reviewed 2026-10-01 against the v4.0.0 release notes and the tagged source (`ff77164`), compared with v3.7.0 (`6dee8f8`). Homebrew has offered 4.0.0 since 2026-10-02 (it originally offered only 3.7.0); the user preserved the 3.7.0 binary for rollback at `~/.local/share/opencode-sandbox/gentle-ai-3.7.0`.
 
 **What v4 changes for this repository**
 

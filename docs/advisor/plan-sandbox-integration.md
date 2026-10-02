@@ -1,6 +1,6 @@
 # Plan A: build the external advisor system (agent-sandbox-integration)
 
-Status: **proposed**. Executor: the OpenCode sandbox agents of this repository, following
+Status: **in progress**. Done: A0, and A1 (`cb29902`). In progress: A3. Task record: `odd/tasks/external-advisors.md`. Executor: the OpenCode sandbox agents of this repository, following
 WORKFLOW.md (ODD tracker first, work-unit commits under the 400-line cap, review per slice).
 
 Most paths here are **S17** (`broker/src/**`, `opencode/plugins/**`, `nono/profile/**`,
@@ -51,6 +51,10 @@ files, so they must be reliable first.
 - Propose adding `advisor/**` to the S17 list in AGENTS.md. That edit is the user's call.
 
 ### A1. Advisor socket and trusted binding (`broker/src/server.ts`, `config.ts`)
+- **Done in `cb29902`.** Two design choices made while building it:
+  - **One connection is one session.** The broker assigns `advisor-<projectId>-<16 hex>` when the connection opens, and rewrites every request to it. The client sends the placeholder `advisor` (or the assigned id), so it can never name another session. Several sessions means several connections.
+  - **The agent is always `external-advisor`**, and `ensureWorker` is pinned to the listener's project.
+  - `BROKER_ADVISOR_PROJECTS` (JSON array of registered project ids, default empty) enables the listeners. The advisor-specific operations join the allowlist with A2 and A3.
 - **A per-project listener**, `$XDG_RUNTIME_DIR/opencode-sandbox-advisor-<projectId>.sock`
   (0600), configured from broker config and never from requests.
 - **Role and project come from the listener.** Each connection gets its own sessions,
