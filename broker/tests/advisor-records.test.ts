@@ -155,6 +155,16 @@ describe("asking", () => {
     });
   });
 
+  test("concurrent rotate asks never resolve to the same host twice in a row (R3-rotate-race)", async () => {
+    const { call, projectPath } = setup();
+    const asked = await Promise.all(Array.from({ length: 10 }, () => call("advisorAsk", ORCH_SESSION, advice(projectPath))));
+    const hosts = await Promise.all(
+      asked.map(async (a: { id: string }) => (await call("advisorGet", ORCH_SESSION, { projectDir: projectPath, id: a.id })).selection.resolvedHost),
+    );
+    // Strict alternation in creation order proves no read-modify-write interleaved.
+    expect(hosts).toEqual(["claude", "agy", "claude", "agy", "claude", "agy", "claude", "agy", "claude", "agy"]);
+  });
+
   test("a follow-up is a new request in its parent's thread", async () => {
     const { call, projectPath } = setup();
     const first = await call("advisorAsk", ORCH_SESSION, advice(projectPath));

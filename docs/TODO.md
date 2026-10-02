@@ -13,7 +13,7 @@ All Tier 1 items are implemented and committed.
 3. **`writeFile` mode and ownership reset** — **COMPLETE**; see Completed.
 
 
-## Tier 2 — blocks other work (13 items)
+## Tier 2 — blocks other work (14 items)
 
 1. **Host review pipeline tools P-1–P-4** (`host_git_range_materialize`, `host_review_pipeline_run`, `host_review_artifact_write`, optional `host_git_read`) — **OPEN / proposed**; owner **A**. Build the fixed-argv, bounded, shared-materialization/execution/artifact surface. Tier 2 because reviewers currently lack the diff and packaged pipeline cannot run. Source: `docs/PLAN.md:37–106` ("Brief — host review pipeline tools").
 2. **Project `.git` read-write + `.codegraph` create/grant coverage** — **OPEN**; owner **A**. Add the registration/profile create-and-grant path, including linked worktree `.git` metadata. Tier 2 because projects/worktrees cannot be safely registered with the required index and git access. Source: `odd/tasks/register-project-profile-grants.md:87–111,193–201`; `docs/TODO.md` (prior item 27, line 71, consolidated here).
@@ -33,6 +33,8 @@ All Tier 1 items are implemented and committed.
 
 
 13. **Server request-line cap (1 MB) drops large writes and patches** — **COMPLETE**; see Completed.
+
+14. **`bun` reported unavailable in general sandbox workers** — **OPEN; reproduce first**; owner **U** (image) / **A** (diagnosis). Observed 2026-10-02 by the agent delegated the gentle-ai 4 docs work. `scripts/build-worker-image` is designed to install a pinned bun (it pins 1.3.14 to match the host), so suspect a worker image built before that change, or `PATH` inside the worker. Check with `sandbox_bash ["bun", "--version"]` and the image's build date; rebuild the image if it predates bun. Tier 2 because delegated agents can't run `bun test` in their workers, so their broker and plugin changes arrive unverified.
 
 ## Planned upgrades (plans in `docs/upgrades/`)
 

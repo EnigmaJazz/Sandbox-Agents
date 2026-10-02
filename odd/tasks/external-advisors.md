@@ -79,6 +79,12 @@ Started 2026-10-02 with A1.
   - Checks: `bun test` passed 647, 0 fail; `bun build src/main.ts` succeeded.
   - Not yet: user overrides (`advisor-open --override-reason`, A7) and evidence references (A2).
 
+- **Review correction (`R3-rotate-race`).** Native review lineage `review-96365efe7a5eaa5e` (run from another chat) raised a CRITICAL reliability finding: a race in the `rotation.json` read-modify-write.
+  - **Verification:** it doesn't reproduce. `rotateHost`, and everything in `advisorAsk` before it, is synchronous on a single-threaded runtime in a single broker process, and 10 concurrent asks alternate hosts strictly.
+  - **Correction:** make the invariant explicit and tested rather than add an unneeded lock. There's a documented invariant on `rotateHost` and a concurrency regression test.
+  - **Mutation check:** splitting the read and write with an `await` makes the test fail (mutation reverted).
+  - Checks: `bun test` passed 648, 0 fail.
+
 ## Next step
 
 Next: A3b (review-lens records), then A4 (stored-response relay). Both are Claude-owned. A2 and A5 can be handed off from test-first specs. Slices A2, A3 and A5 can be handed off from test-first specs; A4 stays with Claude.

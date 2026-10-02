@@ -211,7 +211,17 @@ function statusOf(request: StoredRequest, claim: StoredClaim | undefined, respon
   return claim ? "claimed" : "pending";
 }
 
-/** Least recently used host for the project; the update is synchronous, so asks never interleave. */
+/**
+ * Least recently used host for the project.
+ *
+ * INVARIANT (review finding R3-rotate-race): the read of rotation.json and its
+ * replacement must stay in ONE synchronous stretch, with no `await` and no
+ * async fs call between them. The broker is a single process on a
+ * single-threaded runtime, so a synchronous read-modify-write cannot
+ * interleave with another ask. Callers may await before or after this
+ * function, never inside it. The test "concurrent rotate asks never resolve
+ * to the same host twice in a row" fails if this stretch is ever split.
+ */
 function rotateHost(dir: string): Host {
   const path = join(dir, "..", "rotation.json");
   const last = readJson<{ last?: Host }>(path)?.last;
