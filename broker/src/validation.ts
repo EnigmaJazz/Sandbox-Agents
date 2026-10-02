@@ -706,15 +706,27 @@ export const GIT_REMOTE_RE = /^(?!.*\.\.)[A-Za-z0-9._][A-Za-z0-9._-]{0,254}$/;
 export const GIT_BRANCH_RE = /^(?!.*\.\.)[A-Za-z0-9._/][A-Za-z0-9._/-]{0,254}$/;
 /** Allowlisted `owner/name` GitHub repository slug. */
 export const GH_REPO_RE = /^(?!-)[A-Za-z0-9._-]{1,100}\/(?!-)[A-Za-z0-9._-]{1,100}$/;
-/** Body control characters that remain rejected while tab/newline/CR are kept. */
+/** Body controls rejected while tab/newline and CRLF are permitted. */
 const BODY_UNSAFE_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+const BARE_CARRIAGE_RETURN_RE = /\r(?!\n)/;
+
+function assertBodyTextControls(value: string, what: string): void {
+  if (BODY_UNSAFE_CONTROL_RE.test(value) || BARE_CARRIAGE_RETURN_RE.test(value)) {
+    throw new ValidationError(`${what} contains control characters or NUL`);
+  }
+}
 
 export function assertGitCommitMessage(value: unknown): asserts value is string {
   if (typeof value !== "string" || value.length === 0) {
     throw new ValidationError("message must be a non-empty string");
   }
   assertMaxBytes(value, GIT_COMMIT_MESSAGE_MAX_BYTES, "message");
-  assertNoControlChars(value, "message");
+  const subject = value.split(/\r?\n/, 1)[0];
+  if (subject.length === 0) {
+    throw new ValidationError("message subject must be a non-empty single line");
+  }
+  // These values are individual argv elements, never shell input; no shell-metacharacter check applies.
+  assertBodyTextControls(value, "message");
   if (value.startsWith("-")) {
     throw new ValidationError("message must not start with '-'");
   }
@@ -781,9 +793,7 @@ export function assertGhBody(value: unknown): asserts value is string {
     throw new ValidationError("body must be a string");
   }
   assertMaxBytes(value, GH_BODY_MAX_BYTES, "body");
-  if (BODY_UNSAFE_CONTROL_RE.test(value)) {
-    throw new ValidationError("body contains control characters or NUL");
-  }
+  assertBodyTextControls(value, "body");
   if (value.startsWith("-")) {
     throw new ValidationError("body must not start with '-'");
   }

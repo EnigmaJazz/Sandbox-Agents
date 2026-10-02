@@ -214,7 +214,7 @@ describe("host git commit argv (§31) — ref-scoped, never sweeps", () => {
   test("message is bounded, flag-safe, control-free", () => {
     expect(() => buildGitCommitArgv({ paths, message: "" })).toThrow(ValidationError);
     expect(() => buildGitCommitArgv({ paths, message: "-x" })).toThrow(ValidationError);
-    expect(() => buildGitCommitArgv({ paths, message: "a\nb" })).toThrow(ValidationError);
+    expect(() => buildGitCommitArgv({ paths, message: "a\nb" })).not.toThrow();
     expect(() => buildGitCommitArgv({ paths, message: "x".repeat(4097) })).toThrow(ValidationError);
   });
 });
