@@ -111,3 +111,12 @@ Started 2026-10-02 with A1.
 ## Next step
 
 The security core (A1, A3, A4) is complete. Remaining: A2 (snapshot pinning and evidence export), A5 (OpenCode host tools), A6 (advisor MCP server), A7/A8 (launchers, behind their config-isolation gates), A9 (confinement). These can be handed off from test-first specs; the user installs. A2 and A5 can be handed off from test-first specs. Slices A2, A3 and A5 can be handed off from test-first specs; A4 stays with Claude.
+
+## A2a review and follow-up
+
+- **Review:** approved; authority burned. Lineage `review-7dc1caa8ea859908`; target `sha256:ac279408…`; consumed revision `sha256:d2f95f0d…`; commit `1b3d246`.
+- **Last reviewed boundary:** commit `1b3d246`. The next review must pass that commit as `base-ref`, never the previous commit. A single-work-unit window is always `under_budget`, so the checkpoint would silently never fire.
+- **Later advisory work (non-blocking):**
+  - `R3-ensureWorker-snapshot-return-inconsistent` (reliability, WARNING, `broker/src/service.ts:505`) — `ensureWorker` returns a `snapshot` identity on a new worker but omits it on reuse.
+  - `R4-001` (resilience, WARNING, `broker/src/service.ts:324`) — a repeat call omitting `snapshot` defaults to worktree, so a session pinned to a commit/resultRef is refused rather than reused.
+- **Sandbox invocation constraint:** run from the project root with `bun --cwd broker test`; never change cwd. At the root, `bun --version` reports 1.3.14; `bun test` and `printenv` from `broker/` return ENOENT. Root-causing the cwd behaviour is planned as a separate unit.
