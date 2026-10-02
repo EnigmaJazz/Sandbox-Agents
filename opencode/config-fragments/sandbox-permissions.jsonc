@@ -71,10 +71,11 @@
     "host_process_list": "allow",
     "host_docker_list": "allow",
     "host_docker_logs": "allow",
-    "host_sdd_status": "allow",
-    "host_sdd_continue": "allow",
+    // Dormant since gentle-ai 4 (docs/upgrades/gentle-ai-4.md); rollback: restore host_sdd_status/host_sdd_continue/host_sdd_task_result to "allow" and host_sdd_attempt_grant/host_sdd_archive_compose to "ask".
+    "host_sdd_status": "deny",
+    "host_sdd_continue": "deny",
     "host_sdd_verify_validate": "deny",
-    "host_sdd_task_result": "allow",
+    "host_sdd_task_result": "deny",
     "host_review_assess": "allow",
     "host_review_mode_status": "allow",
     "host_review_status": "allow",
@@ -87,7 +88,8 @@
     "host_sdd_attempt_rescope": "deny",
     "host_sdd_attempt_finish": "deny",
     "host_sdd_attempt_reset": "deny",
-    "host_sdd_attempt_grant": "ask",
+    // Dormant per the gentle-ai 4 note above; restore to "ask" on rollback.
+    "host_sdd_attempt_grant": "deny",
     "host_sdd_attempt_settle": "deny",
     "host_git_commit": "ask",
     "host_git_push": "ask",
@@ -103,6 +105,7 @@
     "host_review_capture_validation": "ask",
     "host_review_validate": "ask",
     "host_review_recover": "ask",
-    "host_sdd_archive_compose": "ask"
+    // Dormant per the gentle-ai 4 note above; restore to "ask" on rollback.
+    "host_sdd_archive_compose": "deny"
   }
 }
