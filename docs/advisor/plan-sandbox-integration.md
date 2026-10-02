@@ -1,6 +1,6 @@
 # Plan A: build the external advisor system (agent-sandbox-integration)
 
-Status: **in progress**. Done: A0, A1 (`cb29902`), and A3a (records for pre-code advice). Next: A3b, then A4. Task record: `odd/tasks/external-advisors.md`. Executor: the OpenCode sandbox agents of this repository, following
+Status: **in progress**. Done: A0, A1 (`cb29902`), A3a (`8cf78d9`) and A3b (review-lens records). Next: A4. Task record: `odd/tasks/external-advisors.md`. Executor: the OpenCode sandbox agents of this repository, following
 WORKFLOW.md (ODD tracker first, work-unit commits under the 400-line cap, review per slice).
 
 Most paths here are **S17** (`broker/src/**`, `opencode/plugins/**`, `nono/profile/**`,
@@ -87,7 +87,11 @@ files, so they must be reliable first.
   - **Claiming:** the first advisor session to `advisorRead` claims the request; only that session may `advisorRespond`, once.
   - **Expiry:** status is derived, and an unanswered request expires after 24 h.
   - **Payload:** the payload-key allowlist is what refuses a `token` field.
-  - **Remaining for A3b:** the `review-lens` kind.
+- **A3b done.** As built:
+  - Under the v2 contract the `collect` input, its artifact subject and the lens-context binding share one `subject_hash`, so the broker stores one hash and cross-checks the lens-context against it.
+  - There's no changed-path manifest in v2, so inspection-path coverage is left to gentle-ai's preflight.
+  - The lineage registry is `broker/src/advisor-lineages.ts`.
+  - The reviewer-result pre-check is `broker/src/advisor-reviewer-result.ts`, verified live to agree with `capture-result --preflight` on an accepted result.
 - **Operations:**
   - main socket: `advisorAsk`, `advisorGet`, `advisorList`;
   - advisor socket: `advisorRead`, `advisorRespond`.

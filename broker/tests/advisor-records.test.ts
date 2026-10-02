@@ -131,11 +131,11 @@ describe("asking", () => {
     await expect(call("advisorAsk", ORCH_SESSION, advice(projectPath, { token: "abc" }))).rejects.toThrow("token");
   });
 
-  test("review-lens requests are refused until A3b", async () => {
+  test("a review-lens request needs a lineage started for external advisors (A3b)", async () => {
     const { call, projectPath } = setup();
     await expect(
       call("advisorAsk", ORCH_SESSION, advice(projectPath, { kind: "review-lens", review: { lineage: "review-x", lens: "review-risk" } })),
-    ).rejects.toThrow("not available yet");
+    ).rejects.toThrow("not an external-lens lineage");
   });
 
   test("rotate alternates hosts per project; an explicit host is kept", async () => {

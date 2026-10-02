@@ -33,7 +33,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { isExternalLensLineage } from "./advisor-lineages.ts";
+import { validateReviewerResult } from "./advisor-reviewer-result.ts";
 import { PolicyError } from "./policy.ts";
+import type { SddRuntimeExecutor } from "./sdd-runtime.ts";
 import { authorizeHostDispatch, type OpContext } from "./service.ts";
 import type { BrokerRequestEnvelope } from "./types.ts";
 import { ValidationError, assertPayloadKeys, resolveProjectID } from "./validation.ts";
@@ -57,6 +60,21 @@ const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 const MAX_TEXT_BYTES = 64 * 1024;
 const MAX_FINDINGS_BYTES = 256 * 1024;
 const MAX_EVIDENCE_REFS = 32;
+const MAX_LENS_CONTEXT_BYTES = 1024 * 1024;
+const REVIEW_LENSES = ["review-risk", "review-resilience", "review-readability", "review-reliability"] as const;
+
+/** Advisory operations that reach gentle-ai (review-lens asks) need its runtime. */
+type AdvisorContext = OpContext & { sddRuntime?: Pick<SddRuntimeExecutor, "reviewStatus" | "reviewLensContext"> };
+
+interface StoredReview {
+  lineage: string;
+  lens: string;
+  /** Provider values read by the broker from gentle-ai, never from the caller. */
+  target: string;
+  order: number;
+  subjectHash: string;
+  lensContext: string;
+}
 
 interface StoredRequest {
   schema: "advisor-request/v1";
@@ -69,8 +87,9 @@ interface StoredRequest {
   group: string | null;
   thread: string;
   parentId: string | null;
-  question: string;
+  question: string | null;
   evidenceRefs: string[];
+  review: StoredReview | null;
   askedBy: string;
   createdAt: number;
   expiresAt: number;
@@ -83,8 +102,10 @@ interface StoredClaim {
 
 interface StoredResponse {
   status: "submitted" | "declined";
-  verdict: string;
+  verdict: string | null;
   findings: unknown[];
+  /** review-lens only: the reviewer result exactly as submitted, relayed byte-for-byte by A4. */
+  reviewerResult?: unknown;
   session: string;
   respondedAt: number;
 }
@@ -244,7 +265,64 @@ function advisorProject(sessionID: string, operation: string): string {
 
 type Clock = () => number;
 
-export function buildAdvisorAskOp(ctx: OpContext, now: Clock = Date.now) {
+/**
+ * Read the provider values for one lens of an external-lens lineage from
+ * gentle-ai: the current `collect` input for that lens (target, order,
+ * subject hash) and its reviewer task (`review lens-context`). The caller
+ * supplies only lineage and lens; everything else comes from the provider.
+ */
+async function providerReview(ctx: AdvisorContext, projectId: string, projectDir: string, value: unknown): Promise<StoredReview> {
+  const r = exactKeys(value, ["lineage", "lens"], "review");
+  const lens = r.lens;
+  if (typeof lens !== "string" || !(REVIEW_LENSES as readonly string[]).includes(lens)) {
+    throw new ValidationError(`review.lens must be one of ${REVIEW_LENSES.join(", ")}`);
+  }
+  const lineage = r.lineage as string;
+  if (!isExternalLensLineage(ctx, projectId, lineage)) {
+    throw new PolicyError(`lineage ${lineage} is not an external-lens lineage (start it with externalLenses)`);
+  }
+  if (!ctx.sddRuntime) throw new PolicyError("review-lens requests need the gentle-ai runtime");
+  const status = await ctx.sddRuntime.reviewStatus({ projectDir, lineage });
+  if (status.status !== 0 || !status.json || typeof status.json !== "object") {
+    throw new PolicyError(`gentle-ai review status failed (exit ${String(status.status)}): ${status.stderr.slice(0, 300)}`);
+  }
+  const transition = (status.json as { next_transition?: { kind?: string; collect?: { inputs?: unknown[] } } }).next_transition;
+  const inputs = transition?.kind === "collect" ? (transition.collect?.inputs ?? []) : [];
+  const args = inputs
+    .map((input) => (input as { arguments?: Array<{ name: string; value: string }> }).arguments ?? [])
+    .map((list) => Object.fromEntries(list.map((a) => [a.name, a.value])) as Record<string, string>)
+    .find((a) => a.lens === lens);
+  if (!args) throw new PolicyError(`lineage ${lineage} is not collecting a result for ${lens}`);
+  const order = Number(args.order);
+  if (!args.target || !args["subject-hash"] || !args["expected-revision"] || !args["repository-context"] || !Number.isInteger(order)) {
+    throw new PolicyError("gentle-ai collect input is missing provider values");
+  }
+  const context = await ctx.sddRuntime.reviewLensContext({
+    projectDir,
+    repositoryContext: args["repository-context"],
+    lineage,
+    target: args.target,
+    expectedRevision: args["expected-revision"],
+    lens,
+  });
+  if (context.status !== 0 || typeof context.text !== "string" || context.text.length === 0) {
+    throw new PolicyError(`gentle-ai review lens-context failed (exit ${String(context.status)})`);
+  }
+  if (Buffer.byteLength(context.text) > MAX_LENS_CONTEXT_BYTES) throw new PolicyError("lens-context exceeds 1 MiB");
+  const bindingLine = context.text.split("\n").find((line) => line.startsWith("GENTLE_AI_REVIEW_BINDING "));
+  let bound: { subject_hash?: string } | undefined;
+  try {
+    bound = bindingLine ? JSON.parse(bindingLine.slice("GENTLE_AI_REVIEW_BINDING ".length)) : undefined;
+  } catch {
+    bound = undefined;
+  }
+  if (bound?.subject_hash !== args["subject-hash"]) {
+    throw new PolicyError("lens-context binding disagrees with the provider's subject hash");
+  }
+  return { lineage, lens, target: args.target, order, subjectHash: args["subject-hash"], lensContext: context.text };
+}
+
+export function buildAdvisorAskOp(ctx: AdvisorContext, now: Clock = Date.now) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
     const p = payloadOf(req);
     authorizeHostDispatch(ctx, "advisorAsk", req.sessionID, req.agent);
@@ -253,10 +331,9 @@ export function buildAdvisorAskOp(ctx: OpContext, now: Clock = Date.now) {
     if (kind !== "pre-code-advice" && kind !== "review-lens") {
       throw new ValidationError("kind must be pre-code-advice or review-lens");
     }
-    if (kind === "review-lens") {
-      throw new PolicyError("review-lens requests are not available yet (external advisors A3b)");
+    if (kind === "pre-code-advice" && p.review !== undefined) {
+      throw new ValidationError("review is only valid for review-lens requests");
     }
-    if (p.review !== undefined) throw new ValidationError("review is only valid for review-lens requests");
     const binding = validBinding(p.binding);
     const snapshot = validSnapshot(p.snapshot);
     const host = p.host;
@@ -266,8 +343,9 @@ export function buildAdvisorAskOp(ctx: OpContext, now: Clock = Date.now) {
     const selection = exactKeys(p.selection, ["rule"], "selection");
     const rule = matching(selection.rule, TOKEN_RE, "selection.rule");
     const group = p.group === undefined ? null : matching(p.group, TOKEN_RE, "group");
-    const question = text(p.question, "question", true)!;
+    const question = text(p.question, "question", kind === "pre-code-advice") ?? null;
     const evidenceRefs = validEvidenceRefs(p.evidenceRefs);
+    const review = kind === "review-lens" ? await providerReview(ctx, projectId, p.projectDir as string, p.review) : null;
     const dir = requestsDir(ctx, projectId);
     let thread: string | undefined;
     let parentId: string | null = null;
@@ -292,6 +370,7 @@ export function buildAdvisorAskOp(ctx: OpContext, now: Clock = Date.now) {
       parentId,
       question,
       evidenceRefs,
+      review,
       askedBy: req.sessionID,
       createdAt: created,
       expiresAt: created + ADVISOR_REQUEST_TTL_MS,
@@ -316,10 +395,31 @@ function view(dir: string, request: StoredRequest, now: number) {
     selection: { ...request.selection, override: null },
     question: request.question,
     evidenceRefs: request.evidenceRefs,
+    ...(request.review
+      ? {
+          review: {
+            lineage: request.review.lineage,
+            lens: request.review.lens,
+            target: request.review.target,
+            order: request.review.order,
+            subjectHash: request.review.subjectHash,
+            lensContextBytes: Buffer.byteLength(request.review.lensContext),
+          },
+        }
+      : {}),
     createdAt: request.createdAt,
     expiresAt: request.expiresAt,
     ...(claim ? { advisor: { session: claim.session } } : {}),
-    ...(response ? { response: { verdict: response.verdict, findings: response.findings, respondedAt: response.respondedAt } } : {}),
+    ...(response
+      ? {
+          response: {
+            verdict: response.verdict,
+            findings: response.findings,
+            ...(response.reviewerResult !== undefined ? { reviewerResult: response.reviewerResult } : {}),
+            respondedAt: response.respondedAt,
+          },
+        }
+      : {}),
   };
 }
 
@@ -387,6 +487,18 @@ export function buildAdvisorReadOp(ctx: OpContext, now: Clock = Date.now) {
       resolvedHost: request.selection.resolvedHost,
       question: request.question,
       evidenceRefs: request.evidenceRefs,
+      ...(request.review
+        ? {
+            review: {
+              lineage: request.review.lineage,
+              lens: request.review.lens,
+              target: request.review.target,
+              order: request.review.order,
+              subjectHash: request.review.subjectHash,
+              lensContext: request.review.lensContext,
+            },
+          }
+        : {}),
       status: statusOf(request, claim, response, at),
     };
   };
@@ -401,7 +513,22 @@ export function buildAdvisorRespondOp(ctx: OpContext, now: Clock = Date.now) {
     const request = loadRequest(dir, id);
     const status = p.status;
     if (status !== "submitted" && status !== "declined") throw new ValidationError("status must be submitted or declined");
-    const verdict = text(p.verdict, "verdict", true)!;
+    let verdict: string | null;
+    let reviewerResult: unknown;
+    if (request.kind === "review-lens") {
+      if (status === "submitted") {
+        if (p.reviewerResult === undefined) throw new ValidationError("a submitted review-lens response needs reviewerResult");
+        validateReviewerResult(p.reviewerResult, { subjectHash: request.review!.subjectHash, lens: request.review!.lens });
+        reviewerResult = p.reviewerResult;
+        verdict = text(p.verdict, "verdict", false) ?? null;
+      } else {
+        if (p.reviewerResult !== undefined) throw new ValidationError("a declined response carries no reviewerResult");
+        verdict = text(p.verdict, "verdict", true)!;
+      }
+    } else {
+      if (p.reviewerResult !== undefined) throw new ValidationError("reviewerResult is only valid for review-lens requests");
+      verdict = text(p.verdict, "verdict", true)!;
+    }
     const findings = validFindings(p.findings);
     const at = now();
     if (existsSync(join(dir, `${id}.response.json`))) throw new PolicyError("advisory request was already answered");
@@ -409,7 +536,14 @@ export function buildAdvisorRespondOp(ctx: OpContext, now: Clock = Date.now) {
     const claim = readJson<StoredClaim>(join(dir, `${id}.claim`));
     if (!claim) throw new PolicyError("advisory request is not claimed; read it first");
     if (claim.session !== req.sessionID) throw new PolicyError("advisory request is claimed by another advisor");
-    const stored: StoredResponse = { status, verdict, findings, session: req.sessionID, respondedAt: at };
+    const stored: StoredResponse = {
+      status,
+      verdict,
+      findings,
+      ...(reviewerResult !== undefined ? { reviewerResult } : {}),
+      session: req.sessionID,
+      respondedAt: at,
+    };
     if (!publishExclusive(dir, `${id}.response.json`, stored)) {
       throw new PolicyError("advisory request was already answered");
     }

@@ -29,9 +29,9 @@ adjudication; they never get authority to issue keys. Plan:
   - The main socket refuses any `advisor-*` session id.
   - Disconnect reaps the advisor session through the existing disconnect clean-up.
 - [ ] **A2 — Snapshot pinning, identity, evidence export.** See the plan.
-- [ ] **A3 — Advisory records.** Split into:
+- [x] **A3 — Advisory records.** Split into:
   - [x] **A3a — Store, lifecycle and pre-code advice.**
-  - [ ] **A3b — Review-lens requests.** The broker reads `target`, `order`, both subject hashes and the `lens-context` text from gentle-ai for an external-lens lineage, and validates responses against the cached reviewer schema, including the `subject_hash` match and the `inspection.paths` coverage.
+  - [x] **A3b — Review-lens requests.** The broker reads `target`, `order`, both subject hashes and the `lens-context` text from gentle-ai for an external-lens lineage, and validates responses against the cached reviewer schema, including the `subject_hash` match and the `inspection.paths` coverage.
 - [ ] **A4 — Stored-response relay into `reviewCaptureResult`.** Design and failing tests are
   written once A3's store exists.
 - [ ] **A5–A9.** See the plan.
@@ -85,6 +85,16 @@ Started 2026-10-02 with A1.
   - **Mutation check:** splitting the read and write with an `await` makes the test fail (mutation reverted).
   - Checks: `bun test` passed 648, 0 fail.
 
+- **A3b done.**
+  - New `broker/src/advisor-lineages.ts`: the external-lens lineage registry, written by A4's `reviewStart`.
+  - New `broker/src/advisor-reviewer-result.ts`: a structural pre-check mirroring the gentle-ai reviewer schema; gentle-ai's preflight at relay time stays authoritative.
+  - `advisor-records.ts`: a `review-lens` ask requires a registered lineage. The broker then reads the lens's `collect` input (`review status --contract v2 --next-transition --lineage`, through the existing runtime wrapper) and its `review lens-context`. It cross-checks the lens-context binding's `subject_hash` against the provider's, and stores lineage, lens, target, order, subject hash and the reviewer task. The caller supplies only lineage and lens.
+  - The advisor's view includes the reviewer task. A submitted lens response needs a `reviewerResult` that passes the pre-check, and is stored exactly as submitted; a declined one needs a reason.
+  - **Verified 2026-10-02:** an agentless lineage returns the same `collect` input with or without `--agent opencode` under v2. v2 passes `subject-hash` as an explicit capture argument and has no changed-path manifest, so path coverage is left to gentle-ai's preflight.
+  - Tests: 13 new in `broker/tests/advisor-review-lens.test.ts` (they failed before implementation, modules missing). The obsolete A3a "refused until A3b" test was replaced by the registered-lineage rule.
+  - **Live check against real gentle-ai** (throwaway agentless lineage `review-d6d1312c5655c0de`): the ask read a 10,352-byte reviewer task. A result that passed the broker pre-check also passed `gentle-ai review capture-result --preflight` (`validation: accepted`).
+  - Checks: `bun test` passed 660, 0 fail; `bun build src/main.ts` succeeded.
+
 ## Next step
 
-Next: A3b (review-lens records), then A4 (stored-response relay). Both are Claude-owned. A2 and A5 can be handed off from test-first specs. Slices A2, A3 and A5 can be handed off from test-first specs; A4 stays with Claude.
+Next: A4 (`reviewStart` `externalLenses` writes the registry; `reviewCaptureResult` relays only stored responses, with fresh provider values and `--subject-hash`). Claude-owned. A2 and A5 can be handed off from test-first specs. Slices A2, A3 and A5 can be handed off from test-first specs; A4 stays with Claude.

@@ -1013,7 +1013,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   advisorGet: ["projectDir", "id"],
   advisorList: ["projectDir", "task", "step", "status"],
   advisorRead: ["id"],
-  advisorRespond: ["id", "status", "verdict", "findings"],
+  advisorRespond: ["id", "status", "verdict", "findings", "reviewerResult"],
 };
 
 export function assertPayloadKeys(operation: string, payload: unknown): void {
