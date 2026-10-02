@@ -6,7 +6,8 @@
  *
  * Environment overrides: BROKER_SOCKET, BROKER_STATE_DIR, BROKER_LOG_FILE,
  * BROKER_GIT_MODE (real|planned), MSB_BINARY, MSB_WORKER_IMAGE,
- * BROKER_GENTLE_AI_BINARY, BROKER_LEGACY_SDD (auto|on|off), BROKER_REAP_INTERVAL_MS,
+ * BROKER_GENTLE_AI_BINARY, BROKER_LEGACY_SDD (auto|on|off), BROKER_ADVISOR_PROJECTS,
+ * BROKER_REAP_INTERVAL_MS,
  * BROKER_REAP_IDLE_MS, BROKER_QUEUE_TIMEOUT_MS, BROKER_QUEUE_MAX_LENGTH.
  *
  * Gate 1: nothing is installed; run manually for local testing only.
@@ -77,6 +78,7 @@ function parseBrokerEnv(): {
   resource?: { maxApplyDiffLines?: number };
   externalCopyTargets?: string[];
   sddRuntime?: { binary: string };
+  advisorProjects?: string[];
 } {
   const raw = process.env.BROKER_PROJECTS;
   const out: {
@@ -86,6 +88,7 @@ function parseBrokerEnv(): {
     resource?: { maxApplyDiffLines?: number };
     externalCopyTargets?: string[];
     sddRuntime?: { binary: string };
+    advisorProjects?: string[];
   } = {};
   const gentleAiBinary = process.env.BROKER_GENTLE_AI_BINARY;
   if (gentleAiBinary !== undefined) {
@@ -156,6 +159,19 @@ function parseBrokerEnv(): {
       out.externalCopyTargets = parsed as string[];
     } catch (err) {
       console.error(`invalid BROKER_EXTERNAL_COPY_TARGETS: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  }
+  const advisorProjects = process.env.BROKER_ADVISOR_PROJECTS;
+  if (advisorProjects) {
+    try {
+      const parsed = JSON.parse(advisorProjects) as unknown;
+      if (!Array.isArray(parsed) || parsed.some((p) => typeof p !== "string")) {
+        throw new Error("BROKER_ADVISOR_PROJECTS must be a JSON array of project ids");
+      }
+      out.advisorProjects = parsed as string[];
+    } catch (err) {
+      console.error(`invalid BROKER_ADVISOR_PROJECTS: ${(err as Error).message}`);
       process.exit(1);
     }
   }

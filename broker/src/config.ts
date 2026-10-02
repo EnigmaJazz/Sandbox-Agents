@@ -135,6 +135,11 @@ export interface BrokerConfig {
   /** S17: security components agents must never modify. */
   protectedSecurityFiles: string[];
   /**
+   * Registered project ids that get an external-advisor socket
+   * (advisor-socket.ts). Empty means no advisor listener at all.
+   */
+  advisorProjects: string[];
+  /**
    * Idle reaper (Feature 1): sweep interval in ms. Every interval, workers
    * whose records are untouched for reapIdleMs are released.
    */
@@ -318,6 +323,7 @@ export function defaultConfig(
     externalCopyTargets: DEFAULT_EXTERNAL_COPY_TARGETS,
     protectedPaths: DEFAULT_PROTECTED_PATHS,
     protectedSecurityFiles: DEFAULT_PROTECTED_SECURITY_FILES,
+    advisorProjects: [],
     reapIntervalMs: positiveIntEnv("BROKER_REAP_INTERVAL_MS", 60_000),
     reapIdleMs: positiveIntEnv("BROKER_REAP_IDLE_MS", 3_600_000),
     artifactGraceMs: positiveIntEnv("BROKER_ARTIFACT_GRACE_MS", 3_600_000),

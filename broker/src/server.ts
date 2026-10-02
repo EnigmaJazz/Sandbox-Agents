@@ -45,6 +45,13 @@ import {
   buildSddTaskResultOp,
 } from "./sdd-service.ts";
 import { Logger, durationMs, startTimer } from "./logging.ts";
+import {
+  advisorSocketPath,
+  bindAdvisorRequest,
+  newAdvisorSessionID,
+  refuseAdvisorSessionOnMain,
+  type AdvisorBinding,
+} from "./advisor-socket.ts";
 import { ValidationError } from "./validation.ts";
 import { PolicyError } from "./policy.ts";
 import { PendingQueue, QueuedTimedOutError } from "./queue.ts";
@@ -243,6 +250,9 @@ export class BrokerServer {
   private readonly socketWrites = new WeakMap<SocketLike, SocketWriteQueue>();
   /** Sessions each socket has dispatched requests for (disconnect cleanup). */
   private readonly sessionsBySocket = new WeakMap<SocketLike, Set<string>>();
+  /** Advisor connections and the one session each is bound to (advisor-socket.ts). */
+  private readonly advisorBindings = new WeakMap<SocketLike, AdvisorBinding>();
+  private readonly advisorListeners: Array<{ stop(closeActive?: boolean): void }> = [];
   private listener: { stop(): void } | null = null;
   private reaper: ReaperHandle | null = null;
 
@@ -318,7 +328,45 @@ export class BrokerServer {
     });
     this.listener = listener;
     chmodSync(socketPath, 0o600);
+    await this.startAdvisorListeners();
     this.logger.log({ operation: "broker.start", result: "ok" });
+  }
+
+  /**
+   * One 0600 listener per configured advisor project. Each connection is bound
+   * at open to a fresh broker-assigned session; see advisor-socket.ts.
+   */
+  private async startAdvisorListeners(): Promise<void> {
+    for (const projectId of this.config.advisorProjects) {
+      const project = this.config.projects.find((p) => p.id === projectId);
+      if (!project) {
+        throw new ValidationError(`advisor project '${projectId}' is not a registered project`);
+      }
+      const path = advisorSocketPath(this.config.socketPath, projectId);
+      const listener = await Bun.listen({
+        unix: path,
+        socket: {
+          open: (socket) => {
+            const sessionID = newAdvisorSessionID(projectId);
+            this.advisorBindings.set(socket as unknown as SocketLike, {
+              projectId,
+              projectPath: project.path,
+              sessionID,
+            });
+            this.logger.log({ operation: "advisor.connect", sessionID, result: "ok" });
+          },
+          data: (socket, data: Buffer) => this.onData(socket as unknown as SocketLike, data),
+          drain: (socket) => this.socketWrites.get(socket as unknown as SocketLike)?.drain(),
+          close: (socket) => this.onSocketClose(socket as unknown as SocketLike),
+          error: (socket, err) => {
+            this.logger.log({ operation: "advisor.connection", result: "error", error: String(err?.message ?? err) });
+            this.onSocketClose(socket as unknown as SocketLike);
+          },
+        },
+      });
+      this.advisorListeners.push(listener);
+      chmodSync(path, 0o600);
+    }
   }
 
   /**
@@ -350,6 +398,13 @@ export class BrokerServer {
       this.listener?.stop();
     } catch {
       /* already closed */
+    }
+    for (const listener of this.advisorListeners.splice(0)) {
+      try {
+        listener.stop();
+      } catch {
+        /* already closed */
+      }
     }
   }
 
@@ -384,6 +439,15 @@ export class BrokerServer {
       envelope = this.parseRequest(line);
     } catch (err) {
       this.respond(socket, this.errorResponse("0", err));
+      return;
+    }
+    // The connection, not the request, decides an advisor's session and agent.
+    try {
+      const advisor = this.advisorBindings.get(socket);
+      envelope = advisor ? bindAdvisorRequest(envelope, advisor) : refuseAdvisorSessionOnMain(envelope);
+    } catch (err) {
+      this.respond(socket, this.errorResponse(envelope.id, err));
+      this.logger.log({ sessionID: envelope.sessionID, operation: envelope.operation, result: "error", error: String((err as Error).message) });
       return;
     }
     // Track the session on this socket so a close can cancel parked entries.
