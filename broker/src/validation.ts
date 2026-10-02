@@ -885,7 +885,7 @@ export class HostToolPolicy {
 // ---------------------------------------------------------------------------
 
 export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
-  ensureWorker: ["projectDir"],
+  ensureWorker: ["projectDir", "snapshot"],
   exec: ["argv", "cwd", "timeoutMs", "env"],
   readFile: ["path"],
   writeFile: ["path", "content"],

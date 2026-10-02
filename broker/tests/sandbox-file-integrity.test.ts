@@ -10,7 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
 import { MsbAdapter, getSpawnImpl, setSpawnImpl } from "../src/msb.ts";
-import { buildReadFileOp, buildWriteFileOp, type OpContext } from "../src/service.ts";
+import { buildEnsureWorkerOp, buildReadFileOp, buildWriteFileOp, type OpContext } from "../src/service.ts";
+import { SessionStore } from "../src/state.ts";
 import type { BrokerRequestEnvelope, SessionRecord } from "../src/types.ts";
 
 type Owner = "root" | "worker";
@@ -293,6 +294,112 @@ describe("writeFile keeps the target's mode and leaves it worker-owned", () => {
     const node = worker.get("big.sh")!;
     expect(node.bytes.toString()).toBe(edited);
     expect(node.mode).toBe("755");
+  });
+});
+
+describe("ensureWorker snapshot pinning", () => {
+  function git(repo: string, ...args: string[]): string {
+    const result = Bun.spawnSync(["git", ...args], { cwd: repo });
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    return result.stdout.toString().trim();
+  }
+
+  function repo(): string {
+    const dir = mkdtempSync(join(tmpdir(), "snapshot-pinning-"));
+    roots.push(dir);
+    git(dir, "init", "-q");
+    git(dir, "config", "user.name", "Test");
+    git(dir, "config", "user.email", "test@example.invalid");
+    Bun.write(join(dir, "file.txt"), "base\\n");
+    git(dir, "add", "file.txt");
+    git(dir, "commit", "-qm", "base");
+    return dir;
+  }
+
+  function ensureContext(dir: string) {
+    const stateDir = mkdtempSync(join(tmpdir(), "snapshot-state-"));
+    roots.push(stateDir);
+    const store = new SessionStore(stateDir);
+    const created: string[] = [];
+    const ctx = {
+      config: defaultConfig({ stateDir, projects: [{ id: "repo", path: dir }] }),
+      store,
+      adapter: {
+        workerNameFor: (id: string) => `worker-${id}`,
+        createWorker: async ({ name }: { name: string }) => { created.push(name); },
+        copyIn: async () => undefined,
+        exec: async () => ok(),
+        stop: async () => undefined,
+        remove: async () => undefined,
+      },
+      budget: { perWorkerCpu: 2, perWorkerMemBytes: 2 * 1024 ** 3, maxAggregateCpu: 8, maxAggregateMemBytes: 8 * 1024 ** 3, maxWorkers: 4 },
+      resources: { cpuCount: 16, totalMemBytes: 32 * 1024 ** 3 },
+      pool: { allocations: [] },
+      hostRead: { has: () => false, execute: async () => ({}) },
+      logger: {},
+      git: {
+        runnerMode: "real" as const,
+        spawn: async (argv: string[], opts?: { cwd?: string; env?: Record<string, string> }) => {
+          const result = Bun.spawnSync(argv, { cwd: opts?.cwd ?? dir, env: { ...process.env, ...opts?.env } });
+          return { status: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString(), timedOut: false };
+        },
+      },
+    } as unknown as OpContext;
+    const ensure = (sessionID: string, snapshot?: Record<string, unknown>) =>
+      buildEnsureWorkerOp(ctx)({ version: 1, id: `req-${sessionID}`, operation: "ensureWorker", sessionID, agent: "test", payload: { projectDir: dir, ...(snapshot ? { snapshot } : {}) } } as BrokerRequestEnvelope);
+    return { ensure, created };
+  }
+
+  test("refuses HEAD~1, arbitrary and another project's result refs, and a short SHA", async () => {
+    const dir = repo();
+    const other = repo();
+    git(other, "update-ref", "refs/opencode-sandbox/result/other", git(other, "rev-parse", "HEAD"));
+    const { ensure } = ensureContext(dir);
+    for (const snapshot of [{ resultRef: "HEAD~1" }, { resultRef: "refs/heads/unrelated" }, { resultRef: "refs/opencode-sandbox/result/other" }, { commit: "deadbeef" }]) {
+      await expect(ensure(`refused-${JSON.stringify(snapshot)}`, snapshot)).rejects.toThrow();
+    }
+  });
+
+  test("pins the resolved result commit even after its ref moves", async () => {
+    const dir = repo();
+    const first = git(dir, "rev-parse", "HEAD");
+    git(dir, "update-ref", "refs/opencode-sandbox/result/pinned", first);
+    const { ensure } = ensureContext(dir);
+    const result = await ensure("pinned", { resultRef: "refs/opencode-sandbox/result/pinned" }) as { snapshot: { commit: string; tree: string; source: string; resultRef: string; headSha: string } };
+    Bun.write(join(dir, "file.txt"), "moved\\n");
+    git(dir, "commit", "-qam", "move ref");
+    git(dir, "update-ref", "refs/opencode-sandbox/result/pinned", git(dir, "rev-parse", "HEAD"));
+    expect(result.snapshot).toMatchObject({ commit: first, tree: git(dir, "rev-parse", `${first}^{tree}`), source: "resultRef", resultRef: "refs/opencode-sandbox/result/pinned" });
+  });
+
+  test("uncommitted working-tree changes produce a distinct snapshot commit", async () => {
+    const dir = repo();
+    const head = git(dir, "rev-parse", "HEAD");
+    Bun.write(join(dir, "file.txt"), "uncommitted\\n");
+    const { ensure } = ensureContext(dir);
+    const result = await ensure("worktree") as { snapshot: { commit: string; tree: string; source: string; headSha: string } };
+    expect(result.snapshot).toMatchObject({ source: "worktree", headSha: head });
+    expect(result.snapshot.commit).not.toBe(head);
+    expect(result.snapshot.tree).not.toBe(git(dir, "rev-parse", `${head}^{tree}`));
+  });
+
+  test("refuses a different snapshot for an existing worker", async () => {
+    const dir = repo();
+    const first = git(dir, "rev-parse", "HEAD");
+    Bun.write(join(dir, "file.txt"), "next\\n");
+    git(dir, "commit", "-qam", "next");
+    const second = git(dir, "rev-parse", "HEAD");
+    const { ensure, created } = ensureContext(dir);
+    await ensure("same-session", { commit: first });
+    await expect(ensure("same-session", { commit: second })).rejects.toThrow(/snapshot/i);
+    expect(created).toHaveLength(1);
+
+    const worktreeHarness = ensureContext(dir);
+    await worktreeHarness.ensure("worktree-session");
+    await expect(worktreeHarness.ensure("worktree-session")).resolves.toMatchObject({ reused: true });
+    Bun.write(join(dir, "file.txt"), "changed after worker creation\\n");
+    await expect(worktreeHarness.ensure("worktree-session")).rejects.toThrow(/snapshot/i);
+    expect(worktreeHarness.created).toHaveLength(1);
   });
 });
 

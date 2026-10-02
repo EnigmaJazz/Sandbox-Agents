@@ -172,7 +172,7 @@ describe("idle reaper sweep", () => {
         payload: { projectDir },
       });
 
-      expect(result).toEqual({ worker: "worker-rebuild", state: "SANDBOX_ACTIVE", reused: false });
+      expect(result).toEqual({ worker: "worker-rebuild", state: "SANDBOX_ACTIVE", reused: false, snapshot: { commit: "commit", tree: "tree", source: "worktree", headSha: "head" } });
       expect(h.records.get("rebuild")!.workerState).toBe("ACTIVE");
     } finally {
       rmSync(root, { recursive: true, force: true });

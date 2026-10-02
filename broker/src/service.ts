@@ -300,7 +300,7 @@ export function buildEnsureWorkerOp(ctx: OpContext): (req: BrokerRequestEnvelope
         `orchestrator agent "${req.agent}" is not allowed to create a worker (orchestrator-readonly)`,
       );
     }
-    const payload = payloadOf(req) as { projectDir?: unknown };
+    const payload = payloadOf(req) as { projectDir?: unknown; snapshot?: unknown };
     const projectID = resolveProjectID(payload.projectDir, ctx.config.projects);
     const record = ctx.store.touch(req.sessionID, {
       projectID,
@@ -321,6 +321,7 @@ export function buildEnsureWorkerOp(ctx: OpContext): (req: BrokerRequestEnvelope
           record.workerState !== "DESTROYED" &&
           record.workerState !== "FAILED"
         ) {
+          await assertPinnedSnapshotCompatible(ctx, projectID, record, payload.snapshot);
           return {
             worker: record.workerName,
             state: record.state,
@@ -425,7 +426,8 @@ async function createWorkerForSession(
     // Snapshot: synthetic baseline B under refs/opencode-sandbox/baseline/<id>.
     // MUST be awaited — the bundle is required before createWorker/copyIn.
     const bundle = bundlePathFor(ctx.config.stateDir, sessionID);
-    await runSnapshot(ctx, repoDir, sessionID, bundle);
+    const snapshotSelection = snapshotFromPayload(payloadOf(req)?.snapshot);
+    const snapshot = await runSnapshot(ctx, repoDir, sessionID, bundle, snapshotSelection);
 
     // Create the worker from the TRUSTED image with policy-derived resources.
     await ctx.adapter.createWorker({
@@ -500,7 +502,7 @@ async function createWorkerForSession(
         },
       },
     );
-    return { worker: workerName, state: next.state, reused: false };
+    return { worker: workerName, state: next.state, reused: false, snapshot };
   } catch (err) {
     // §10: creation failure -> FAILED_CLOSED. Never fall back to host (S14).
     // Gate 5 live finding: a partially created worker must not be left
@@ -670,12 +672,75 @@ function ensureGitRepo(ctx: OpContext, repoDir: string): void {
  * bundle for the worker. The user's branch/index are never touched (§17).
  * Any failure fails closed (S14) — no partial state is published.
  */
+type SnapshotSelection = { worktree: true } | { resultRef: string } | { commit: string };
+type SnapshotIdentity = { commit: string; tree: string; source: "worktree" | "resultRef" | "commit"; resultRef?: string; headSha: string };
+
+function snapshotFromPayload(value: unknown): SnapshotSelection {
+  if (value === undefined) return { worktree: true };
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new ValidationError("snapshot must be an object");
+  const snapshot = value as Record<string, unknown>;
+  const keys = Object.keys(snapshot);
+  if (keys.length !== 1) throw new ValidationError("snapshot must name exactly one of resultRef, commit, worktree");
+  if (keys[0] === "worktree" && snapshot.worktree === true) return { worktree: true };
+  if (keys[0] === "resultRef" && typeof snapshot.resultRef === "string" && /^refs\/opencode-sandbox\/result\/[A-Za-z0-9_-]{1,64}$/.test(snapshot.resultRef)) {
+    return { resultRef: snapshot.resultRef };
+  }
+  if (keys[0] === "commit" && typeof snapshot.commit === "string" && /^[0-9a-fA-F]{40}$/.test(snapshot.commit)) {
+    return { commit: snapshot.commit };
+  }
+  throw new ValidationError("snapshot must contain a valid resultRef, full commit SHA, or worktree: true");
+}
+
+async function assertPinnedSnapshotCompatible(
+  ctx: OpContext,
+  projectID: string,
+  record: SessionRecord,
+  rawSelection: unknown,
+): Promise<void> {
+  const selection = snapshotFromPayload(rawSelection);
+  const repoDir = projectDirFor(ctx, projectID);
+  const env = { GIT_DIR: join(repoDir, ".git") };
+  if (!record.baselineRef) throw new StateError("existing worker has no pinned snapshot identity");
+  const current = await ctx.git.spawn(["git", "rev-parse", "--verify", `${record.baselineRef}^{commit}`], { env, cwd: repoDir });
+  if (current.status !== 0 || !/^[0-9a-f]{40}$/.test(current.stdout.trim())) throw new StateError("existing worker snapshot identity cannot be resolved");
+  if (!("worktree" in selection)) {
+    const reference = "resultRef" in selection ? selection.resultRef : selection.commit;
+    const resolved = await ctx.git.spawn(["git", "rev-parse", "--verify", `${reference}^{commit}`], { env, cwd: repoDir });
+    if (resolved.status !== 0 || !/^[0-9a-f]{40}$/.test(resolved.stdout.trim())) {
+      throw new StateError("snapshot does not resolve to a commit in the registered project");
+    }
+    if (current.stdout.trim() !== resolved.stdout.trim()) throw new StateError("snapshot differs from the existing worker snapshot");
+    return;
+  }
+  const head = await ctx.git.spawn(["git", "rev-parse", "--verify", "HEAD"], { env, cwd: repoDir });
+  if (head.status !== 0) throw new StateError("project has no HEAD commit; cannot compare worker snapshot");
+  const index = join(ctx.config.stateDir, "tmp", `${record.sessionID}.snapshot-check.index`);
+  mkdirSync(join(ctx.config.stateDir, "tmp"), { recursive: true, mode: 0o700 });
+  const worktreeEnv = { ...env, GIT_INDEX_FILE: index };
+  try {
+    for (const argv of [["git", "read-tree", "HEAD"], ["git", "add", "-A", "--"]]) {
+      const result = await ctx.git.spawn(argv, { env: worktreeEnv, cwd: repoDir });
+      if (result.status !== 0) throw new StateError(`cannot compare working-tree snapshot: ${trimErr(result.stderr)}`);
+    }
+    const tree = await ctx.git.spawn(["git", "write-tree"], { env: worktreeEnv, cwd: repoDir });
+    const oldTree = await ctx.git.spawn(["git", "rev-parse", "--verify", `${current.stdout.trim()}^{tree}`], { env, cwd: repoDir });
+    const oldParent = await ctx.git.spawn(["git", "rev-parse", "--verify", `${current.stdout.trim()}^`], { env, cwd: repoDir });
+    const oldSubject = await ctx.git.spawn(["git", "log", "-1", "--format=%s", current.stdout.trim()], { env, cwd: repoDir });
+    if (tree.status !== 0 || oldTree.status !== 0 || oldParent.status !== 0 || oldSubject.status !== 0 || tree.stdout.trim() !== oldTree.stdout.trim() || oldParent.stdout.trim() !== head.stdout.trim() || oldSubject.stdout.trim() !== `opencode-sandbox baseline for ${record.sessionID}`) {
+      throw new StateError("snapshot differs from the existing worker snapshot");
+    }
+  } finally {
+    rmSync(index, { force: true });
+  }
+}
+
 async function runSnapshot(
   ctx: OpContext,
   repoDir: string,
   sessionID: string,
   bundle: string,
-): Promise<string> {
+  selection: SnapshotSelection,
+): Promise<SnapshotIdentity> {
   mkdirSync(join(ctx.config.stateDir, "bundles"), {
     recursive: true,
     mode: 0o700,
@@ -695,54 +760,42 @@ async function runSnapshot(
   const git = (argv: string[], timeoutMs = 120_000) =>
     ctx.git.spawn(argv, { env, cwd: repoDir, timeoutMs });
 
-  // HEAD must exist: the baseline commit B has HEAD as its parent.
   const head = await git(["git", "rev-parse", "--verify", "HEAD"]);
-  if (head.status !== 0) {
-    throw new StateError(
-      `project has no HEAD commit; cannot snapshot (${repoDir})`,
-    );
+  if (head.status !== 0) throw new StateError(`project has no HEAD commit; cannot snapshot (${repoDir})`);
+  const headSha = head.stdout.trim();
+  let commitSha: string;
+  let treeSha: string;
+  let source: SnapshotIdentity["source"];
+  let pinnedResultRef: string | undefined;
+  if ("worktree" in selection) {
+    const add = await git(["git", "add", "-A", "--"]);
+    if (add.status !== 0) throw new StateError(`snapshot add failed: ${trimErr(add.stderr)}`);
+    const tree = await git(["git", "write-tree"]);
+    if (tree.status !== 0) throw new StateError(`snapshot write-tree failed: ${trimErr(tree.stderr)}`);
+    treeSha = tree.stdout.trim();
+    const commit = await git(["git", "commit-tree", treeSha, "-p", "HEAD", "-m", `opencode-sandbox baseline for ${sessionID}`]);
+    if (commit.status !== 0) throw new StateError(`snapshot commit-tree failed: ${trimErr(commit.stderr)}`);
+    commitSha = commit.stdout.trim();
+    source = "worktree";
+  } else {
+    const reference = "resultRef" in selection ? selection.resultRef : selection.commit;
+    const resolved = await git(["git", "rev-parse", "--verify", `${reference}^{commit}`]);
+    if (resolved.status !== 0 || !/^[0-9a-f]{40}$/.test(resolved.stdout.trim())) {
+      throw new StateError("snapshot does not resolve to a commit in the registered project");
+    }
+    commitSha = resolved.stdout.trim();
+    const tree = await git(["git", "rev-parse", "--verify", `${commitSha}^{tree}`]);
+    if (tree.status !== 0 || !/^[0-9a-f]{40}$/.test(tree.stdout.trim())) throw new StateError("snapshot commit tree cannot be resolved");
+    treeSha = tree.stdout.trim();
+    source = "resultRef" in selection ? "resultRef" : "commit";
+    if ("resultRef" in selection) pinnedResultRef = selection.resultRef;
   }
-
-  // Stage the full working tree (HEAD + staged + unstaged + untracked,
-  // respecting .gitignore) into the TEMPORARY index only.
-  const add = await git(["git", "add", "-A", "--"]);
-  if (add.status !== 0) {
-    throw new StateError(`snapshot add failed: ${trimErr(add.stderr)}`);
-  }
-  const tree = await git(["git", "write-tree"]);
-  if (tree.status !== 0) {
-    throw new StateError(`snapshot write-tree failed: ${trimErr(tree.stderr)}`);
-  }
-  const commit = await git([
-    "git",
-    "commit-tree",
-    tree.stdout.trim(),
-    "-p",
-    "HEAD",
-    "-m",
-    `opencode-sandbox baseline for ${sessionID}`,
-  ]);
-  if (commit.status !== 0) {
-    throw new StateError(
-      `snapshot commit-tree failed: ${trimErr(commit.stderr)}`,
-    );
-  }
-  const update = await git(["git", "update-ref", ref, commit.stdout.trim()]);
-  if (update.status !== 0) {
-    throw new StateError(
-      `snapshot update-ref failed: ${trimErr(update.stderr)}`,
-    );
-  }
+  const update = await git(["git", "update-ref", ref, commitSha]);
+  if (update.status !== 0) throw new StateError(`snapshot update-ref failed: ${trimErr(update.stderr)}`);
   const bundleCreate = await git(["git", "bundle", "create", bundle, ref]);
-  if (bundleCreate.status !== 0) {
-    throw new StateError(
-      `snapshot bundle failed: ${trimErr(bundleCreate.stderr)}`,
-    );
-  }
-  // systemd UMask=0077 makes git create the bundle 0600 -> root-owned in the
-  // guest -> unreadable by the non-root worker user (Gate 5 live finding).
+  if (bundleCreate.status !== 0) throw new StateError(`snapshot bundle failed: ${trimErr(bundleCreate.stderr)}`);
   chmodSync(bundle, 0o644);
-  return ref;
+  return { commit: commitSha, tree: treeSha, source, ...(pinnedResultRef ? { resultRef: pinnedResultRef } : {}), headSha };
 }
 
 function trimErr(s: string): string {
