@@ -892,8 +892,14 @@ export function buildExecOp(ctx: OpContext): OpHandler {
     );
     let cwd: string | undefined;
     if (payload.cwd !== undefined) {
-      assertSandboxPath(payload.cwd, ctx.config.resource.pathMaxBytes);
-      cwd = payload.cwd;
+      if (payload.cwd === "/work") {
+        cwd = "/work";
+      } else {
+        assertSandboxPath(payload.cwd, ctx.config.resource.pathMaxBytes);
+        // The API cwd is project-relative; msb needs a guest-absolute workdir.
+        // Relative workdirs are unusable by the guest, so anchor them under /work.
+        cwd = resolve("/work", payload.cwd);
+      }
     }
     const record = recordOr404(ctx.store, req.sessionID);
     const worker = requireActiveWorker(record);
