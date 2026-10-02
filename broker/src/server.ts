@@ -23,7 +23,7 @@ import { computeBudget, discoverHostResources } from "./policy.ts";
 import { SessionStore, StateError } from "./state.ts";
 import { MsbAdapter, MsbError, spawnArgv, type SpawnFn } from "./msb.ts";
 import { HostReadExecutor, buildHostReadOps } from "./hostread.ts";
-import { REVIEW_INPUT_DIR_NAME, SddRuntimeExecutor } from "./sdd-runtime.ts";
+import { REVIEW_INPUT_DIR_NAME, REVIEW_INPUT_MAX_BYTES, SddRuntimeExecutor } from "./sdd-runtime.ts";
 import {
   buildReviewAcknowledgeApprovedOp,
   buildReviewAssessOp,
@@ -90,7 +90,89 @@ import type {
   Operation,
 } from "./types.ts";
 
-const MAX_LINE_BYTES = 1024 * 1024;
+/** JSON escapes a byte to at most 6 bytes (`\u0000`); content may hold any character. */
+const JSON_ESCAPE_WORST_CASE = 6;
+/** Allowance for the request envelope and every non-payload field. */
+const REQUEST_ENVELOPE_ALLOWANCE = 64 * 1024;
+/** Bytes of an oversize line kept to recover its request id. */
+const OVERSIZE_ID_PREFIX_BYTES = 512;
+const OVERSIZE_ID_RE = /"id"\s*:\s*"([A-Za-z0-9-]{1,128})"/;
+
+/**
+ * The largest request line the broker accepts: the largest payload any
+ * operation allows, JSON-escaped in the worst case, plus the envelope. Kept
+ * derived from config so a raised payload limit can never be silently
+ * undercut by the transport (TODO Tier 2 item 13).
+ */
+export function maxRequestLineBytes(resource: { contentMaxBytes: number; patchMaxBytes: number }): number {
+  const largestPayload = Math.max(resource.contentMaxBytes, resource.patchMaxBytes, REVIEW_INPUT_MAX_BYTES);
+  return largestPayload * JSON_ESCAPE_WORST_CASE + REQUEST_ENVELOPE_ALLOWANCE;
+}
+
+export type FramedRequest =
+  | { kind: "line"; line: string }
+  | { kind: "oversize"; id: string | undefined; bytes: number };
+
+/**
+ * Splits one connection's byte stream into newline-delimited request lines and
+ * caps each line on its own. An oversize line is discarded up to its newline
+ * and reported once, with the request id recovered from its first bytes, so
+ * the connection (shared by every plugin session) stays usable.
+ */
+export class RequestLineFramer {
+  private pending = Buffer.alloc(0);
+  private discarding = false;
+  private discardedBytes = 0;
+  private discardPrefix = Buffer.alloc(0);
+
+  constructor(private readonly maxLineBytes: number) {}
+
+  push(chunk: Buffer): FramedRequest[] {
+    const events: FramedRequest[] = [];
+    let data = chunk;
+    let offset = 0;
+    if (this.discarding) {
+      const nl = data.indexOf(0x0a);
+      if (nl === -1) {
+        this.discardedBytes += data.length;
+        return events;
+      }
+      this.discardedBytes += nl;
+      events.push(this.oversize(this.discardPrefix, this.discardedBytes));
+      this.discarding = false;
+      this.discardedBytes = 0;
+      this.discardPrefix = Buffer.alloc(0);
+      offset = nl + 1;
+    } else if (this.pending.length > 0) {
+      data = Buffer.concat([this.pending, chunk]);
+    }
+    let nl: number;
+    while ((nl = data.indexOf(0x0a, offset)) !== -1) {
+      const line = data.subarray(offset, nl);
+      offset = nl + 1;
+      events.push(
+        line.length > this.maxLineBytes
+          ? this.oversize(line, line.length)
+          : { kind: "line", line: line.toString("utf8") },
+      );
+    }
+    const rest = data.subarray(offset);
+    if (rest.length > this.maxLineBytes) {
+      this.discarding = true;
+      this.discardedBytes = rest.length;
+      this.discardPrefix = Buffer.from(rest.subarray(0, OVERSIZE_ID_PREFIX_BYTES));
+      this.pending = Buffer.alloc(0);
+    } else {
+      this.pending = Buffer.from(rest);
+    }
+    return events;
+  }
+
+  private oversize(line: Buffer, bytes: number): FramedRequest {
+    const prefix = line.subarray(0, OVERSIZE_ID_PREFIX_BYTES).toString("utf8");
+    return { kind: "oversize", id: OVERSIZE_ID_RE.exec(prefix)?.[1], bytes };
+  }
+}
 const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const REQUEST_ID_RE = /^[A-Za-z0-9-]{1,128}$/;
 
@@ -157,7 +239,7 @@ export class BrokerServer {
   private readonly ctx: ServerContext;
   private readonly sessionLocks = new Map<string, Promise<unknown>>();
   private readonly activeLocks = new Map<string, number>();
-  private readonly buffers = new WeakMap<SocketLike, Buffer>();
+  private readonly framers = new WeakMap<SocketLike, RequestLineFramer>();
   private readonly socketWrites = new WeakMap<SocketLike, SocketWriteQueue>();
   /** Sessions each socket has dispatched requests for (disconnect cleanup). */
   private readonly sessionsBySocket = new WeakMap<SocketLike, Set<string>>();
@@ -272,26 +354,27 @@ export class BrokerServer {
   }
 
   private onData(socket: SocketLike, data: Buffer): void {
-    const prev = this.buffers.get(socket) ?? Buffer.alloc(0);
-    const buf = Buffer.concat([prev, data]);
-    if (buf.length > MAX_LINE_BYTES + 1) {
+    let framer = this.framers.get(socket);
+    if (!framer) {
+      framer = new RequestLineFramer(maxRequestLineBytes(this.config.resource));
+      this.framers.set(socket, framer);
+    }
+    for (const event of framer.push(data)) {
+      if (event.kind === "line") {
+        void this.dispatchLine(socket, event.line);
+        continue;
+      }
+      // Refuse this request alone; the connection carries other sessions' work.
       this.respond(socket, {
         version: 1,
-        id: "0",
+        id: event.id ?? "0",
         ok: false,
-        error: { code: "protocol", message: "request line exceeds size cap" },
+        error: {
+          code: "protocol",
+          message: `request line of ${event.bytes} bytes exceeds the ${maxRequestLineBytes(this.config.resource)}-byte cap`,
+        },
       });
-      socket.close();
-      return;
     }
-    let nl: number;
-    let offset = 0;
-    while ((nl = buf.indexOf(0x0a, offset)) !== -1) {
-      const line = buf.subarray(offset, nl).toString("utf8");
-      offset = nl + 1;
-      void this.dispatchLine(socket, line);
-    }
-    this.buffers.set(socket, buf.subarray(offset));
   }
 
   private async dispatchLine(socket: SocketLike, line: string): Promise<void> {
