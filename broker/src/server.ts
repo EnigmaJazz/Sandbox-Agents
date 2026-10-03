@@ -48,6 +48,7 @@ import { Logger, durationMs, startTimer } from "./logging.ts";
 import {
   buildAdvisorAskOp,
   buildAdvisorGetOp,
+  buildAdvisorEvidenceKeepOp,
   buildAdvisorListOp,
   buildAdvisorReadOp,
   buildAdvisorRespondOp,
@@ -662,6 +663,8 @@ export class BrokerServer {
         return buildAdvisorReadOp(this.ctx)(req);
       case "advisorRespond":
         return buildAdvisorRespondOp(this.ctx)(req);
+      case "evidenceKeep":
+        return buildAdvisorEvidenceKeepOp(this.ctx)(req);
       default:
         return buildHostOp(this.ctx)(req);
     }

@@ -41,10 +41,11 @@ export const ADVISOR_ALLOWED_OPERATIONS: ReadonlySet<string> = new Set([
   // A3a: read one advisory request (claims it), answer it once.
   "advisorRead",
   "advisorRespond",
+  "evidenceKeep",
 ]);
 
 /** Operations that exist only for advisor connections; the main socket refuses them. */
-export const ADVISOR_ONLY_OPERATIONS: ReadonlySet<string> = new Set(["advisorRead", "advisorRespond"]);
+export const ADVISOR_ONLY_OPERATIONS: ReadonlySet<string> = new Set(["advisorRead", "advisorRespond", "evidenceKeep"]);
 
 export interface AdvisorBinding {
   projectId: string;

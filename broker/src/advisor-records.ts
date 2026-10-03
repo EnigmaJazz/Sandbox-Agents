@@ -20,7 +20,7 @@
  * advisorList (reads). Advisor socket: advisorRead and advisorRespond, whose
  * project is taken from the broker-assigned advisor session id.
  */
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -29,6 +29,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -100,12 +101,19 @@ interface StoredClaim {
   claimedAt: number;
 }
 
+interface StoredEvidence {
+  dir: string;
+  manifestSha256: string;
+  files: Array<{ path: string; sha256: string }>;
+}
+
 interface StoredResponse {
   status: "submitted" | "declined";
   verdict: string | null;
   findings: unknown[];
   /** review-lens only: the reviewer result exactly as submitted, relayed byte-for-byte by A4. */
   reviewerResult?: unknown;
+  evidence?: StoredEvidence;
   session: string;
   respondedAt: number;
 }
@@ -418,6 +426,7 @@ function view(dir: string, request: StoredRequest, now: number) {
             ...(response.reviewerResult !== undefined ? { reviewerResult: response.reviewerResult } : {}),
             respondedAt: response.respondedAt,
           },
+          ...(response.evidence ? { evidence: response.evidence } : {}),
         }
       : {}),
   };
@@ -526,6 +535,101 @@ export function buildAdvisorReadOp(ctx: OpContext, now: Clock = Date.now) {
   };
 }
 
+const MAX_KEPT_PATHS = 32;
+const MAX_KEPT_FILE_BYTES = 1024 * 1024;
+const MAX_KEPT_TOTAL_BYTES = 8 * 1024 * 1024;
+
+export function buildAdvisorEvidenceKeepOp(ctx: OpContext, now: Clock = Date.now) {
+  return async (req: BrokerRequestEnvelope): Promise<unknown> => {
+    const p = payloadOf(req);
+    const projectId = advisorProject(req.sessionID, "evidenceKeep");
+    const id = matching(p.requestId, ID_RE, "requestId");
+    if (!Array.isArray(p.paths) || p.paths.some((path) => typeof path !== "string")) {
+      throw new ValidationError("paths must be an array of strings");
+    }
+    if (p.paths.length > MAX_KEPT_PATHS) throw new ValidationError(`evidenceKeep accepts at most ${MAX_KEPT_PATHS} paths`);
+    const paths = p.paths as string[];
+    const requestDir = requestsDir(ctx, projectId);
+    const request = loadRequest(requestDir, id);
+    const session = ctx.store.get(req.sessionID);
+    if (!session?.workerName || session.projectID !== projectId || session.state !== "SANDBOX_ACTIVE") {
+      throw new PolicyError("evidenceKeep requires the calling advisor's active worker");
+    }
+    const nowAt = now();
+    if (nowAt > request.expiresAt) throw new PolicyError("advisory request has expired");
+    if (existsSync(join(requestDir, `${id}.response.json`))) throw new PolicyError("evidence cannot be kept after the request was answered");
+    const claim = readJson<StoredClaim>(join(requestDir, `${id}.claim`));
+    if (!claim) throw new PolicyError("advisory request is not claimed; read it first");
+    if (claim.session !== req.sessionID) throw new PolicyError("advisory request is claimed by another advisor");
+
+    const snapshotCommit = await ctx.adapter.exec(session.workerName, ["git", "-C", "/work", "rev-parse", "--verify", "HEAD"], { timeoutMs: 30_000, maxOutputBytes: 4096 });
+    const snapshotTree = await ctx.adapter.exec(session.workerName, ["git", "-C", "/work", "rev-parse", "--verify", "HEAD^{tree}"], { timeoutMs: 30_000, maxOutputBytes: 4096 });
+    const commit = snapshotCommit.stdout.trim();
+    const tree = snapshotTree.stdout.trim();
+    if (snapshotCommit.status !== 0 || snapshotTree.status !== 0 || !/^[0-9a-f]{40}$/.test(commit) || !/^[0-9a-f]{40}$/.test(tree)) {
+      throw new PolicyError("advisor worker pinned snapshot identity is unavailable");
+    }
+    const evidenceRoot = privateDir(join(requestDir, "evidence"));
+    const finalDir = join(evidenceRoot, id);
+    if (existsSync(finalDir)) throw new PolicyError("evidence was already kept for this request");
+    const stageDir = privateDir(join(evidenceRoot, `.tmp-${id}-${randomBytes(6).toString("hex")}`));
+    const manifestFiles: Array<{ path: string; sha256: string }> = [];
+    const seen = new Set<string>();
+    let totalBytes = 0;
+    try {
+      for (const path of paths) {
+        if (!path.startsWith(".advisor/") || path.includes("\0")) throw new ValidationError("evidence paths must be under .advisor/");
+        // Broker path validators are host-side/lexical and cannot establish worker containment.
+        const canonical = await ctx.adapter.exec(session.workerName, ["realpath", "-e", "--", path], { timeoutMs: 30_000, maxOutputBytes: 4096 });
+        if (canonical.status !== 0) throw new PolicyError(`evidence path cannot be canonicalized: ${path}`);
+        const workerPath = canonical.stdout.trim();
+        if (!workerPath.startsWith("/work/.advisor/") || workerPath === "/work/.advisor/") throw new ValidationError("evidence path escapes /work/.advisor/");
+        if (seen.has(workerPath)) throw new ValidationError("evidence paths must be unique");
+        seen.add(workerPath);
+        const stat = await ctx.adapter.exec(session.workerName, ["stat", "-c", "%F", "--", path], { timeoutMs: 30_000, maxOutputBytes: 4096 });
+        if (stat.status !== 0 || stat.stdout.trim() !== "regular file" && stat.stdout.trim() !== "regular empty file") {
+          throw new ValidationError(`evidence path must be an unsymlinked regular file: ${path}`);
+        }
+        // This one base64 read is binary-safe. A worker can still swap the file between
+        // canonicalisation and read; accepted because it is the advisor's isolated sandbox.
+        const encoded = await ctx.adapter.exec(session.workerName, ["base64", "-w", "0", "--", path], {
+          timeoutMs: 30_000,
+          maxOutputBytes: Math.ceil(MAX_KEPT_FILE_BYTES / 3) * 4 + 8,
+        });
+        if (encoded.status !== 0) throw new PolicyError(`evidence read failed: ${path}`);
+        const bytes = Buffer.from(encoded.stdout.replace(/\s+/g, ""), "base64");
+        if (bytes.length > MAX_KEPT_FILE_BYTES) throw new ValidationError(`evidence file exceeds ${MAX_KEPT_FILE_BYTES} bytes: ${path}`);
+        totalBytes += bytes.length;
+        if (totalBytes > MAX_KEPT_TOTAL_BYTES) throw new ValidationError(`evidence set exceeds ${MAX_KEPT_TOTAL_BYTES} bytes`);
+        const relative = workerPath.slice("/work/.advisor/".length);
+        const destination = join(stageDir, relative);
+        privateDir(join(destination, ".."));
+        writeFileSync(destination, bytes, { mode: 0o600, flag: "wx" });
+        chmodSync(destination, 0o600);
+        const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+        manifestFiles.push({ path: relative, sha256: digest });
+      }
+      const manifest = {
+        schema: "advisor-evidence/v1",
+        requestId: id,
+        snapshot: { commit, tree },
+        files: manifestFiles,
+      };
+      const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+      const manifestPath = join(stageDir, "manifest.json");
+      writeFileSync(manifestPath, manifestBytes, { mode: 0o600, flag: "wx" });
+      chmodSync(manifestPath, 0o600);
+      if (existsSync(finalDir)) throw new PolicyError("evidence was already kept for this request");
+      renameSync(stageDir, finalDir);
+      const manifestSha256 = `sha256:${createHash("sha256").update(manifestBytes).digest("hex")}`;
+      return { requestId: id, evidence: { dir: finalDir, manifestSha256, files: manifestFiles } };
+    } catch (error) {
+      rmSync(stageDir, { recursive: true, force: true });
+      throw error;
+    }
+  };
+}
+
 export function buildAdvisorRespondOp(ctx: OpContext, now: Clock = Date.now) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
     const p = payloadOf(req);
@@ -558,11 +662,22 @@ export function buildAdvisorRespondOp(ctx: OpContext, now: Clock = Date.now) {
     const claim = readJson<StoredClaim>(join(dir, `${id}.claim`));
     if (!claim) throw new PolicyError("advisory request is not claimed; read it first");
     if (claim.session !== req.sessionID) throw new PolicyError("advisory request is claimed by another advisor");
+    const evidenceDir = join(dir, "evidence", id);
+    const manifestPath = join(evidenceDir, "manifest.json");
+    const manifestBytes = existsSync(manifestPath) ? readFileSync(manifestPath) : undefined;
+    const manifest = manifestBytes ? JSON.parse(manifestBytes.toString("utf8")) as { files?: Array<{ path: string; sha256: string }> } : undefined;
     const stored: StoredResponse = {
       status,
       verdict,
       findings,
       ...(reviewerResult !== undefined ? { reviewerResult } : {}),
+      ...(manifestBytes && manifest ? {
+        evidence: {
+          dir: evidenceDir,
+          manifestSha256: `sha256:${createHash("sha256").update(manifestBytes).digest("hex")}`,
+          files: manifest.files ?? [],
+        },
+      } : {}),
       session: req.sessionID,
       respondedAt: at,
     };

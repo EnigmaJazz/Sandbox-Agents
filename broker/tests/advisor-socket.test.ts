@@ -57,7 +57,7 @@ describe("advisor socket naming and sessions", () => {
 describe("advisor request binding", () => {
   test("the allowlist is exactly the worker operations", () => {
     expect([...ADVISOR_ALLOWED_OPERATIONS].sort()).toEqual(
-      ["advisorRead", "advisorRespond", "applyPatch", "destroyWorker", "diff", "ensureWorker", "exec", "grep", "listDir", "readFile", "resultDiff", "workerStatus", "writeFile"],
+      ["advisorRead", "advisorRespond", "applyPatch", "destroyWorker", "diff", "ensureWorker", "evidenceKeep", "exec", "grep", "listDir", "readFile", "resultDiff", "workerStatus", "writeFile"],
     );
   });
 
@@ -176,6 +176,7 @@ describe("BrokerServer advisor listener", () => {
 
       // The main socket cannot operate an advisor session.
       expect((await main.ask("f", "workerStatus", name1!))?.error?.message).toContain("advisor socket");
+      expect((await main.ask("g", "evidenceKeep", "ses_main", { requestId: "adv-0000000000000000", paths: [] }))?.error?.message).toContain("only on an advisor socket");
     } finally {
       one.close();
       two.close();

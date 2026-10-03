@@ -5,13 +5,14 @@
  * exclusive file links, so a second claim or response fails at the OS level.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ADVISOR_REQUEST_TTL_MS,
   buildAdvisorAskOp,
   buildAdvisorGetOp,
+  buildAdvisorEvidenceKeepOp,
   buildAdvisorListOp,
   buildAdvisorReadOp,
   buildAdvisorRespondOp,
@@ -20,8 +21,9 @@ import { ADVISOR_ALLOWED_OPERATIONS, refuseAdvisorSessionOnMain } from "../src/a
 import { defaultConfig } from "../src/config.ts";
 import type { OpContext } from "../src/service.ts";
 import { PolicyError } from "../src/policy.ts";
+import { OPERATIONS } from "../src/types.ts";
 import type { BrokerRequestEnvelope } from "../src/types.ts";
-import { ValidationError } from "../src/validation.ts";
+import { ALLOWED_PAYLOAD_KEYS, ValidationError } from "../src/validation.ts";
 
 const ORCH = "gentle-orchestrator";
 const ORCH_SESSION = "ses_orchestrator";
@@ -50,13 +52,33 @@ function setup() {
     ],
     readOnlyAgents: [ORCH],
   });
+  const workerFiles = new Map<string, Buffer>();
+  const symlinks = new Set<string>();
+  const failReads = new Set<string>();
+  const adapter = {
+    exec: async (_worker: string, argv: string[]) => {
+      const [command, ...args] = argv;
+      const path = args.at(-1)!;
+      const key = path.startsWith(".advisor/") ? path.slice(".advisor/".length) : path;
+      if (command === "git") return { status: 0, stdout: `${"a".repeat(40)}\n`, stderr: "", timedOut: false };
+      if (command === "realpath") return { status: 0, stdout: `${path.includes("..") ? "/work/secret" : `/work/.advisor/${key}`}\n`, stderr: "", timedOut: false };
+      if (command === "stat") return { status: 0, stdout: `${symlinks.has(key) ? "symbolic link" : "regular file"}\n`, stderr: "", timedOut: false };
+      if (command === "base64") return failReads.has(key)
+        ? { status: 1, stdout: "", stderr: "read failed", timedOut: false }
+        : { status: 0, stdout: (workerFiles.get(key) ?? Buffer.alloc(0)).toString("base64"), stderr: "", timedOut: false };
+      return { status: 1, stdout: "", stderr: "unsupported", timedOut: false };
+    },
+  };
   const ctx = {
     config,
+    adapter,
     store: {
       get: (id: string) =>
         id === ORCH_SESSION || id === OTHER_SESSION
           ? { sessionID: id, state: "HOST_READ_ONLY", agent: id === ORCH_SESSION ? ORCH : "general", createdAt: "", updatedAt: "" }
-          : undefined,
+          : id === ADVISOR_A || id === ADVISOR_B
+            ? { sessionID: id, state: "SANDBOX_ACTIVE", workerName: `worker-${id}`, projectID: "repo", baselineRef: "refs/opencode-sandbox/baseline/pinned", createdAt: "", updatedAt: "" }
+            : undefined,
     },
   } as unknown as OpContext;
   let now = 1_800_000_000_000;
@@ -69,10 +91,11 @@ function setup() {
       advisorList: buildAdvisorListOp,
       advisorRead: buildAdvisorReadOp,
       advisorRespond: buildAdvisorRespondOp,
+      evidenceKeep: buildAdvisorEvidenceKeepOp,
     };
     return (await builders[op]!(ctx, clock.now)(req)) as any;
   };
-  return { root, projectPath, otherPath, config, call, clock };
+  return { root, projectPath, otherPath, config, call, clock, workerFiles, symlinks, failReads };
 }
 
 const advice = (projectDir: string, extra: Record<string, unknown> = {}) => ({
@@ -84,6 +107,93 @@ const advice = (projectDir: string, extra: Record<string, unknown> = {}) => ({
   selection: { rule: "default-rotate" },
   question: "What is wrong or missing in this approach?",
   ...extra,
+});
+
+describe("evidenceKeep wiring", () => {
+  test("registers an advisor-only operation with only requestId and paths", () => {
+    expect(OPERATIONS).toContain("evidenceKeep");
+    expect(ALLOWED_PAYLOAD_KEYS.evidenceKeep).toEqual(["requestId", "paths"]);
+    expect(ADVISOR_ALLOWED_OPERATIONS.has("evidenceKeep")).toBe(true);
+  });
+});
+
+describe("evidenceKeep", () => {
+  async function newClaim(s: ReturnType<typeof setup>): Promise<string> {
+    const asked = await s.call("advisorAsk", ORCH_SESSION, advice(s.projectPath));
+    await s.call("advisorRead", ADVISOR_A, { id: asked.id });
+    return asked.id;
+  }
+
+  test("refuses paths outside the worker .advisor directory", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/../secret"] })).rejects.toThrow();
+  });
+
+  test("refuses a final-component symlink", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    s.symlinks.add("link");
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/link"] })).rejects.toThrow("unsymlinked regular file");
+  });
+
+  test("refuses more than 32 paths before copying", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: Array(33).fill(".advisor/a") })).rejects.toThrow("at most 32");
+  });
+
+  test("refuses a file over 1 MiB", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    s.workerFiles.set("large", Buffer.alloc(1024 * 1024 + 1));
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/large"] })).rejects.toThrow("exceeds 1048576 bytes");
+  });
+
+  test("refuses a cumulative set over 8 MiB", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    for (let i = 0; i < 9; i++) s.workerFiles.set(`f${i}`, Buffer.alloc(1024 * 1024));
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: Array.from({ length: 9 }, (_, i) => `.advisor/f${i}`) })).rejects.toThrow("set exceeds 8388608 bytes");
+  });
+
+  test("refuses a non-claiming advisor", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    await expect(s.call("evidenceKeep", ADVISOR_B, { requestId: id, paths: [] })).rejects.toThrow("claimed by another advisor");
+  });
+
+  test("refuses evidence after response exists", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    await s.call("advisorRespond", ADVISOR_A, { id, status: "submitted", verdict: "done" });
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [] })).rejects.toThrow("after the request was answered");
+  });
+
+  test("publishes one manifest with hashes of copied bytes and refuses a second call", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    const bytes = Buffer.from([0xff, 0x00, 0x81]);
+    s.workerFiles.set("binary", bytes);
+    const kept = await s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/binary"] });
+    const evidenceDir = join(s.config.stateDir, "advisor", "repo", "requests", "evidence", id);
+    const manifest = JSON.parse(readFileSync(join(evidenceDir, "manifest.json"), "utf8"));
+    expect(readFileSync(join(evidenceDir, "binary"))).toEqual(bytes);
+    expect(manifest.files[0].sha256).toBe(`sha256:${await import("node:crypto").then(({ createHash }) => createHash("sha256").update(bytes).digest("hex"))}`);
+    expect(kept.evidence.manifestSha256).toStartWith("sha256:");
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/binary"] })).rejects.toThrow("already kept");
+    await s.call("advisorRespond", ADVISOR_A, { id, status: "submitted", verdict: "done" });
+    expect((await s.call("advisorGet", ORCH_SESSION, { projectDir: s.projectPath, id })).evidence).toEqual(kept.evidence);
+  });
+
+  test("a partial copy failure leaves no published evidence directory", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    s.workerFiles.set("first", Buffer.from("ok"));
+    s.failReads.add("second");
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/first", ".advisor/second"] })).rejects.toThrow("read failed");
+    expect(existsSync(join(s.config.stateDir, "advisor", "repo", "requests", "evidence", id))).toBe(false);
+  });
 });
 
 describe("asking", () => {
@@ -257,7 +367,7 @@ describe("socket wiring", () => {
   });
 
   test("the main socket refuses the advisor-only operations", () => {
-    for (const operation of ["advisorRead", "advisorRespond"]) {
+    for (const operation of ["advisorRead", "advisorRespond", "evidenceKeep"]) {
       const req = { version: 1, id: "x", operation, sessionID: "ses_abc" } as BrokerRequestEnvelope;
       expect(() => refuseAdvisorSessionOnMain(req)).toThrow(PolicyError);
     }

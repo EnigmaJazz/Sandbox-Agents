@@ -107,7 +107,8 @@ export type Operation =
   | "advisorGet"
   | "advisorList"
   | "advisorRead"
-  | "advisorRespond";
+  | "advisorRespond"
+  | "evidenceKeep";
 
 /** Every Operation that exists in the protocol. Immutable; unknown ops fail closed. */
 export const OPERATIONS: readonly Operation[] = [
@@ -171,6 +172,7 @@ export const OPERATIONS: readonly Operation[] = [
   "advisorList",
   "advisorRead",
   "advisorRespond",
+  "evidenceKeep",
 ];
 
 /** Worker policy fields the LLM must NEVER be able to supply (§7, §11). */
