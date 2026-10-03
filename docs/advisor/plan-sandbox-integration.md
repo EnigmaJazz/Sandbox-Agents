@@ -74,9 +74,40 @@ files, so they must be reliable first.
   `{commit}` (a full SHA reachable in the project) or `{worktree}`. The value is resolved once
   with `rev-parse --verify <x>^{commit}` and returned as `{commit, tree, source, resultRef?, headSha}`.
 - **`resultDiff {ref}`** returns a bounded diff, reusing the apply-preview truncation.
-- **`evidenceKeep {requestId, paths[]}`** copies only from `/work/.advisor/` (no symlinks; count
-  and size capped). Files go to `<stateDir>/advisor/<project>/evidence/<id>/` with
-  `manifest.json` (snapshot identity plus a SHA-256 per file).
+- **`evidenceKeep {requestId, paths[]}` wiring:** add `evidenceKeep` to the `Operation` union and
+  `OPERATIONS` array in `broker/src/types.ts`, add its `ALLOWED_PAYLOAD_KEYS` entry, add it to both
+  `ADVISOR_ALLOWED_OPERATIONS` and `ADVISOR_ONLY_OPERATIONS`, and add a `server.ts` dispatch case.
+  Without all four wiring points, the call fails validation before any handler runs.
+- **Containment (new worker-side check; do not reuse broker validators):** paths are worker-relative
+  under `.advisor/`. Inside the worker, canonicalise each path with argv `realpath -e -- <path>` and
+  require the result to be under `/work/.advisor/`. Reject a final component that is a symlink,
+  determined with `stat` without `-L` (which reports the link itself, not its target).
+  `assertSandboxPath` is lexical, host-blind, and rejects absolute paths; `resolveProjectRelativePath`
+  performs host realpath. Neither checks containment in the advisor worker, so neither is reusable.
+- **Integrity and residual TOCTOU:** the broker computes every SHA-256 over the exact bytes it
+  received, in one read; never trust a worker-supplied size or hash. A worker can still swap a file
+  between canonicalisation and read. Accept this residual race: the worker is the advisor's own
+  isolated sandbox and cannot reach beyond its own `/work`; do not claim a stronger guarantee.
+- **Claim and lifecycle:** validate `requestId` with the existing id rule; derive the project from the
+  broker-assigned session, never the payload; require the claim to name the calling session. Fail
+  closed if the claim is absent, the request is expired, or the id names no request in that project.
+  Refuse evidence once `<id>.response.json` exists.
+- **Bounded copy:** refuse more than 32 paths before copying; abort an individual file that crosses
+  1 MiB and the set at 8 MiB cumulative. Use a binary-safe read path (not `readFile`, which refuses
+  non-UTF-8) and count only bytes actually received.
+- **Publication:** copy to `evidence/.tmp-<id>-<rand>`, write `manifest.json` last from the
+  broker-computed hashes, then publish the complete directory atomically after an existence check.
+  Remove staging on any failure. Refuse a second `evidenceKeep` for the request; never merge or
+  overwrite.
+- **Snapshot identity:** `manifest.json` carries the worker's pinned snapshot identity, not the
+  request's. Evidence is written after the snapshot and does not attest to its content. Binding
+  `request.snapshot` to the worker's pinned snapshot is separate follow-up work.
+- **Read surface and digest:** add `evidence` to `StoredResponse` and `view()`. `advisorRespond` reads
+  the stored manifest digest rather than accepting it in the payload; keep
+  `ALLOWED_PAYLOAD_KEYS.advisorRespond` unchanged. Use `sha256:`-prefixed digests everywhere;
+  harmonise §3's per-file unprefixed form.
+- **Permissions:** explicitly `chmodSync` directories to 0700 and files to 0600 after each create
+  and copy; do not rely on create modes because umask masks them.
 - **Tests:** refused refs (`HEAD~1`, arbitrary, another project's); the pinned commit stays
   stable when the ref moves; a working-tree snapshot with uncommitted changes gets a distinct
   commit; evidence path, symlink and size refusals; manifest hashes.

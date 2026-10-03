@@ -29,6 +29,44 @@ adjudication; they never get authority to issue keys. Plan:
   - The main socket refuses any `advisor-*` session id.
   - Disconnect reaps the advisor session through the existing disconnect clean-up.
 - [ ] **A2 — Snapshot pinning, identity, evidence export.** See the plan.
+  - **Advisor dispatch (pre-code):** `advisor-security`, model `opencode-go/deepseek-v4.1-flash`.
+    Question: “What is wrong or missing in this approach, what should change before implementation,
+    and what evidence supports that?” Frozen evidence: `docs/advisor/plan-sandbox-integration.md`
+    (### A2 item 3), `docs/advisor/interface-contract.md` §3, `broker/src/advisor-records.ts`,
+    `broker/src/advisor-socket.ts`, and `broker/src/validation.ts`.
+  - **Answer summary:**
+    1. Three wiring points were missing: `Operation` union and `OPERATIONS` array
+       (`types.ts:34-110`, `:113-174`; rejected at `validation.ts:1177-1179`), an
+       `ALLOWED_PAYLOAD_KEYS.evidenceKeep` entry (`validation.ts:1039-1042`), and a `server.ts:558`
+       dispatch case. Without them validation rejects every call before a handler runs.
+    2. The named validators cannot enforce worker containment or symlink rules:
+       `assertSandboxPath` is lexical, host-blind, and rejects absolute paths (`validation.ts:159-180`);
+       `resolveProjectRelativePath` performs host realpath (`:471-516`). No existing operation lstat-
+       checks worker paths; `readFile` uses `stat -L` and `copyOut` uses `cat`, both following links
+       (`service.ts:974`, `:996`, `:1189-1192`).
+    3. The broker must hash exact received bytes in a single unsymlinked read and never trust a
+       worker-supplied size or hash; `service.ts:1008-1012` shows the existing check-then-read gap.
+    4. Claim authorization must mirror existing checks (`advisor-records.ts:52`, `:256-260`, `:494`,
+       `:500`, `:556-560`). Refuse `evidenceKeep` after a response exists, or the response-time
+       manifest hash can diverge from what `advisorGet` later surfaces.
+    5. Publish the file set as one unit: `publishExclusive` is per-file (`advisor-records.ts:198-212`),
+       so partial failure leaves a partial directory. Stage, write manifest last, publish atomically,
+       and refuse a second `evidenceKeep`.
+    6. Enforce path count up front and size while copying. `readFile` refuses non-UTF-8
+       (`service.ts:1015-1019`), rejecting legitimate binary evidence.
+    7. The snapshot-identity claim is unsupported: evidence follows the snapshot and nothing compares
+       `request.snapshot` with the worker's pinned snapshot (`service.ts:686-700`, `:745-776`;
+       `advisor-socket.ts:85-92`).
+    8. The read surface is unwired: `view()` has no evidence field (`advisor-records.ts:383-424`),
+       `StoredResponse` has none (`:103-111`), and `advisorRespond` must read the stored digest, not
+       accept one in its payload (`validation.ts:1031`).
+    9. Apply permissions with explicit `chmodSync`; umask masks create modes
+       (`advisor-records.ts:186-196`; precedent `service.ts:1049-1060`, `:1206-1208`).
+  - **Could not verify:** `msb copy` symlink semantics, whether `outputMaxBytes` bounds `copyOut`,
+    actual `contentMaxBytes`/`pathMaxBytes` defaults, and A6 (the advisor MCP server and its
+    `evidence_keep` tool), which does not exist yet.
+  - **Effect:** consequential findings resolved before coding; the A2 plan was revised first. This is
+    advisory evidence only, not an approval.
 - [x] **A3 — Advisory records.** Split into:
   - [x] **A3a — Store, lifecycle and pre-code advice.**
   - [x] **A3b — Review-lens requests.** The broker reads `target`, `order`, both subject hashes and the `lens-context` text from gentle-ai for an external-lens lineage, and validates responses against the cached reviewer schema, including the `subject_hash` match and the `inspection.paths` coverage.
