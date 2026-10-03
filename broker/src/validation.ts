@@ -1002,6 +1002,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   gitPush: ["projectDir", "remote", "setUpstream", "allowProtectedBranch"],
   ghIssueCreate: ["projectDir", "repo", "title", "body"],
   sandboxResult: ["projectDir", "sandboxSessionID", "compareSandboxSessionID"],
+  resultDiff: ["ref"],
   sandboxResultInstall: ["projectDir", "sandboxSessionID", "expectedResultCommit"],
   hostSystemSummary: [],
   hostMemory: [],

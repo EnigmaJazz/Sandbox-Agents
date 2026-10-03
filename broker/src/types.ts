@@ -102,6 +102,7 @@ export type Operation =
   | "policy"
   | "registerProject"
   // External advisors (advisor-records.ts): evidence records, never authority.
+  | "resultDiff"
   | "advisorAsk"
   | "advisorGet"
   | "advisorList"
@@ -164,6 +165,7 @@ export const OPERATIONS: readonly Operation[] = [
   "copyIn",
   "policy",
   "registerProject",
+  "resultDiff",
   "advisorAsk",
   "advisorGet",
   "advisorList",
@@ -226,6 +228,10 @@ export interface BrokerResponseEnvelope {
 // ---------------------------------------------------------------------------
 // Per-operation payloads (validated by validation.ts against exact key sets)
 // ---------------------------------------------------------------------------
+
+export interface ResultDiffPayload {
+  ref: string;
+}
 
 export interface EnsureWorkerPayload {
   /** Project directory (from ToolContext.directory); mapped to a projectID via the trusted allowlist. */

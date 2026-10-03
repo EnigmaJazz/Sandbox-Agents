@@ -90,6 +90,7 @@ import {
   buildPlanDocAppendOp,
   buildPrepareResultOp,
   buildReadFileOp,
+  buildResultDiffOp,
   buildRegisterProjectOp,
   buildSandboxResultInstallOp,
   buildSandboxResultOp,
@@ -468,8 +469,10 @@ export class BrokerServer {
       const result = await this.withSessionLock(envelope.sessionID, () =>
         this.dispatch(envelope, sendProgress),
       );
-      // Touch for meaningful ops only (state.ts filters workerStatus/policy)
-      try { this.ctx.store.touch(envelope.sessionID, { lastOperation: envelope.operation }, envelope.operation); } catch {}
+      // resultDiff is a strict read and must not create/touch session state.
+      if (envelope.operation !== "resultDiff") {
+        try { this.ctx.store.touch(envelope.sessionID, { lastOperation: envelope.operation }, envelope.operation); } catch {}
+      }
 
       this.respond(socket, { version: 1, id: envelope.id, ok: true, result });
       this.logger.log({
@@ -609,6 +612,8 @@ export class BrokerServer {
         return buildGitPushOp(this.ctx)(req);
       case "ghIssueCreate":
         return buildGhIssueCreateOp(this.ctx)(req);
+      case "resultDiff":
+        return buildResultDiffOp(this.ctx)(req);
       case "sandboxResult":
         return buildSandboxResultOp(this.ctx)(req);
       case "sandboxResultInstall":

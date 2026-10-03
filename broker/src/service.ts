@@ -2540,6 +2540,69 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
  * broker-resolved result refs. Read-only: no working-tree, index, or ref
  * mutation, and no worker activation.
  */
+export function buildResultDiffOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as { ref?: unknown };
+    // Reuse ensureWorker's exact result-ref shape validation; never accept a raw Git revision.
+    const selection = snapshotFromPayload({ resultRef: payload.ref });
+    if (!("resultRef" in selection)) throw new ValidationError("ref must be a sandbox result ref");
+    const ref = selection.resultRef;
+    const projectID = ctx.config.advisorProjects
+      .filter((id) => req.sessionID.startsWith(`advisor-${id}-`))
+      .sort((a, b) => b.length - a.length)
+      .find((id) => {
+        const nonce = req.sessionID.slice(`advisor-${id}-`.length);
+        return nonce.length === 16 && [...nonce].every((c) => "0123456789abcdef".includes(c));
+      });
+    if (!projectID) throw new PolicyError("resultDiff is available only to a registered advisor session");
+    const project = ctx.config.projects.find((entry) => entry.id === projectID);
+    if (!project) throw new StateError("advisor project is not registered");
+
+    const sessionID = ref.slice(RESULT_REF_PREFIX.length + 1);
+    const record = recordOr404(ctx.store, sessionID);
+    if (!RESULT_READABLE_STATES.includes(record.state) || record.resultRef !== ref) {
+      throw new StateError(`cannot read result: sandbox session ${sessionID} has no resolvable B→C result`);
+    }
+    if (record.projectID !== projectID) {
+      throw new StateError(`cannot read result: sandbox session ${sessionID} is not bound to this project`);
+    }
+    const baseline = record.baselineRef ?? baselineRef(sessionID);
+    const cwd = project.path;
+    const git = async (argv: string[], what: string) => {
+      const result = await ctx.git.spawn(argv, { cwd, timeoutMs: 60_000, maxOutputBytes: GIT_OUTPUT_MAX_BYTES });
+      if (result.timedOut || result.status !== 0) {
+        throw new StateError(`${what}: ${result.stderr.trim().slice(0, 500)}`);
+      }
+      return result.stdout;
+    };
+    const commit = (await git(buildResultCommitArgv(ref), "cannot resolve result ref")).trim();
+    if (!/^[0-9a-f]{40}$/.test(commit)) throw new StateError("cannot resolve result ref: malformed commit identity");
+    const baselineCommit = (await git(buildResultCommitArgv(baseline), "cannot resolve result baseline")).trim();
+    if (!/^[0-9a-f]{40}$/.test(baselineCommit)) {
+      throw new StateError("cannot resolve result baseline: malformed commit identity");
+    }
+    const rawDiff = await git(buildResultPatchArgv(baseline, ref), "cannot read result diff");
+    if (Buffer.byteLength(rawDiff, "utf8") >= GIT_OUTPUT_MAX_BYTES) {
+      throw new StateError("cannot read result diff: output reached the git output cap");
+    }
+    const preview = buildApplyPreview(rawDiff);
+    return {
+      ref,
+      baseline,
+      result: ref,
+      commit,
+      diff: preview.preview,
+      truncated: preview.previewTruncated,
+      totalLines: preview.totalLines,
+      truncation: {
+        helper: "buildApplyPreview",
+        maxLines: APPLY_PREVIEW_MAX_LINES,
+        maxBytes: GIT_OUTPUT_MAX_BYTES,
+      },
+    };
+  };
+}
+
 export function buildSandboxResultOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const payload = payloadOf(req) as {

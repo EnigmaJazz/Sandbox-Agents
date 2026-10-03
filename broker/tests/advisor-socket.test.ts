@@ -57,7 +57,7 @@ describe("advisor socket naming and sessions", () => {
 describe("advisor request binding", () => {
   test("the allowlist is exactly the worker operations", () => {
     expect([...ADVISOR_ALLOWED_OPERATIONS].sort()).toEqual(
-      ["advisorRead", "advisorRespond", "applyPatch", "destroyWorker", "diff", "ensureWorker", "exec", "grep", "listDir", "readFile", "workerStatus", "writeFile"],
+      ["advisorRead", "advisorRespond", "applyPatch", "destroyWorker", "diff", "ensureWorker", "exec", "grep", "listDir", "readFile", "resultDiff", "workerStatus", "writeFile"],
     );
   });
 

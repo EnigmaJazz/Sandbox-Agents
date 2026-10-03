@@ -37,6 +37,7 @@ export const ADVISOR_ALLOWED_OPERATIONS: ReadonlySet<string> = new Set([
   "listDir",
   "grep",
   "diff",
+  "resultDiff",
   // A3a: read one advisory request (claims it), answer it once.
   "advisorRead",
   "advisorRespond",
