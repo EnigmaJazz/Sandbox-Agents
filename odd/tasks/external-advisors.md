@@ -67,6 +67,22 @@ adjudication; they never get authority to issue keys. Plan:
     `evidence_keep` tool), which does not exist yet.
   - **Effect:** consequential findings resolved before coding; the A2 plan was revised first. This is
     advisory evidence only, not an approval.
+  - **Post-code dispatch #1** — step `post-code`; advisor `advisor-security`; model
+    `opencode-go/deepseek-v4.1-flash`; frozen evidence `04322bd`. Found D1–D5: manifest identity
+    was worker-controlled HEAD; the size cap had no overflow signal; an evidence/response race;
+    non-exclusive publication; and intermediate symlinks were accepted. All were resolved before
+    the native review. Advisory evidence, not an approval.
+  - **Post-code dispatch #2 (verification)** — step `post-code`; advisor `advisor-security`; model
+    `opencode-go/deepseek-v4.1-flash`; frozen evidence `4b51e2e`. Verified D1, D2, D3 and D5
+    implemented and effective; D2 additionally confirmed `msb.ts:70-73` accumulates whole chunks,
+    so capped reads cannot be mistaken for a short prefix. D4's premise did not hold: `withSessionLock`
+    and the same-session claim rule serialize the operation, so the loser refuses at the earlier
+    guard and reservation is redundant defence-in-depth, not a live-defect fix. Also noted three
+    minor defects and two indistinct tests. Advisory evidence, not an approval.
+  - **Correction dispatch** — step `post-code`; advisor `advisor-security`; model
+    `opencode-go/deepseek-v4.1-flash`; frozen evidence: correction working tree after `4b51e2e`
+    verification (not yet committed). This correction resolves the three minors, the two test-honesty
+    points, and adds `baselineRef` coverage. Advisory evidence, not an approval.
 - [x] **A3 — Advisory records.** Split into:
   - [x] **A3a — Store, lifecycle and pre-code advice.**
   - [x] **A3b — Review-lens requests.** The broker reads `target`, `order`, both subject hashes and the `lens-context` text from gentle-ai for an external-lens lineage, and validates responses against the cached reviewer schema, including the `subject_hash` match and the `inspection.paths` coverage.

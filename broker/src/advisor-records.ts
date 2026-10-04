@@ -584,9 +584,10 @@ export function buildAdvisorEvidenceKeepOp(ctx: OpContext, now: Clock = Date.now
     const observedTree = await ctx.adapter.exec(session.workerName, ["git", "-C", "/work", "rev-parse", "--verify", "HEAD^{tree}"], { timeoutMs: 30_000, maxOutputBytes: 4096 });
     const observedCommit = observedHead.stdout.trim();
     const observedTreeSha = observedTree.stdout.trim();
-    if (observedHead.status !== 0 || observedTree.status !== 0 || !/^[0-9a-f]{40}$/.test(observedCommit) || !/^[0-9a-f]{40}$/.test(observedTreeSha)) {
-      throw new PolicyError("advisor worker observed HEAD identity is unavailable");
-    }
+    // Worker HEAD is informational; broker-pinned identity and hashed bytes remain authoritative.
+    const observedWorkerHead = observedHead.status === 0 && observedTree.status === 0 && /^[0-9a-f]{40}$/.test(observedCommit) && /^[0-9a-f]{40}$/.test(observedTreeSha)
+      ? { commit: observedCommit, tree: observedTreeSha }
+      : null;
     const evidenceRoot = privateDir(join(requestDir, "evidence"));
     const finalDir = join(evidenceRoot, id);
     if (existsSync(finalDir)) throw new PolicyError("evidence was already kept for this request");
@@ -601,9 +602,11 @@ export function buildAdvisorEvidenceKeepOp(ctx: OpContext, now: Clock = Date.now
         if (!path.startsWith(".advisor/") || path.includes("\0")) throw new ValidationError("evidence paths must be under .advisor/");
         // No symlink components, anywhere: canonical equality with the lexically expected path rejects them all.
         const components = path.split("/");
+        // Canonical equality is the traversal guarantee; this explicit check is belt-and-braces for a clearer refusal.
         if (components.includes("..")) throw new ValidationError("evidence paths must not contain '..'");
         const relative = posix.normalize(path);
         if (!relative.startsWith(".advisor/") || relative === ".advisor/" || relative.startsWith("../")) throw new ValidationError("evidence paths must be under .advisor/");
+        if (relative === ".advisor/manifest.json") throw new ValidationError("evidence path 'manifest.json' is reserved");
         const expectedPath = `/work/${relative}`;
         const canonical = await ctx.adapter.exec(session.workerName, ["realpath", "-e", "--", expectedPath], { timeoutMs: 30_000, maxOutputBytes: 4096 });
         if (canonical.status !== 0) throw new PolicyError(`evidence path cannot be canonicalized: ${path}`);
@@ -641,7 +644,7 @@ export function buildAdvisorEvidenceKeepOp(ctx: OpContext, now: Clock = Date.now
         requestId: id,
         // Evidence is collected after the pinned snapshot and is not reproducible from its commit.
         snapshot: { commit, tree },
-        observedWorkerHead: { commit: observedCommit, tree: observedTreeSha },
+        observedWorkerHead,
         evidenceTiming: "post-snapshot",
         files: manifestFiles,
       };
@@ -650,6 +653,7 @@ export function buildAdvisorEvidenceKeepOp(ctx: OpContext, now: Clock = Date.now
       writeFileSync(manifestPath, manifestBytes, { mode: 0o600, flag: "wx" });
       chmodSync(manifestPath, 0o600);
       if (existsSync(finalDir)) throw new PolicyError("evidence was already kept for this request");
+      // Current session locking and same-session claim serialize this path, so the earlier finalDir guard wins; retain the reservation as defense-in-depth.
       try {
         mkdirSync(reservationDir, { mode: 0o700 });
         reserved = true;

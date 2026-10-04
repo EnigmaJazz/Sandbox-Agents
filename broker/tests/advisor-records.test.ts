@@ -37,7 +37,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function setup() {
+function setup(options: { snapshotIdentity?: boolean; baselineResolves?: boolean; workerHeadAvailable?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "advisor-records-"));
   roots.push(root);
   const projectPath = join(root, "repo");
@@ -63,7 +63,10 @@ function setup() {
       const path = args.at(-1)!;
       const advisorIndex = path.indexOf(".advisor/");
       const key = advisorIndex >= 0 ? path.slice(advisorIndex + ".advisor/".length) : path;
-      if (command === "git") return { status: 0, stdout: `${"b".repeat(40)}\n`, stderr: "", timedOut: false };
+      if (command === "git") {
+        const available = options.workerHeadAvailable !== false;
+        return { status: available ? 0 : 1, stdout: available ? `${"b".repeat(40)}\n` : "", stderr: "", timedOut: false };
+      }
       if (command === "realpath") {
         const components = key.split("/");
         const linked = components.findIndex((part) => symlinks.has(part));
@@ -87,13 +90,17 @@ function setup() {
   const ctx = {
     config,
     adapter,
-    git: { spawn: async () => ({ status: 0, stdout: `${"c".repeat(40)}\n`, stderr: "", timedOut: false }), runnerMode: "real" },
+    git: { spawn: async (argv: string[]) => {
+      const resolves = options.baselineResolves !== false;
+      const isTree = argv.includes("^{tree}");
+      return { status: resolves ? 0 : 1, stdout: resolves ? `${(isTree ? "d" : "c").repeat(40)}\n` : "", stderr: "", timedOut: false };
+    }, runnerMode: "real" },
     store: {
       get: (id: string) =>
         id === ORCH_SESSION || id === OTHER_SESSION
           ? { sessionID: id, state: "HOST_READ_ONLY", agent: id === ORCH_SESSION ? ORCH : "general", createdAt: "", updatedAt: "" }
           : id === ADVISOR_A || id === ADVISOR_B
-            ? { sessionID: id, state: "SANDBOX_ACTIVE", workerName: `worker-${id}`, projectID: "repo", baselineRef: "refs/opencode-sandbox/baseline/pinned", snapshotIdentity: { commit: "c".repeat(40), tree: "d".repeat(40), source: "worktree", headSha: "e".repeat(40) }, createdAt: "", updatedAt: "" }
+            ? { sessionID: id, state: "SANDBOX_ACTIVE", workerName: `worker-${id}`, projectID: "repo", baselineRef: "refs/opencode-sandbox/baseline/pinned", ...(options.snapshotIdentity === false ? {} : { snapshotIdentity: { commit: "c".repeat(40), tree: "d".repeat(40), source: "worktree", headSha: "e".repeat(40) } }), createdAt: "", updatedAt: "" }
             : undefined,
     },
   } as unknown as OpContext;
@@ -202,6 +209,40 @@ describe("evidenceKeep", () => {
     await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [] })).rejects.toThrow("after the request was answered");
   });
 
+  test("records unavailable observed worker HEAD without refusing evidence", async () => {
+    const s = setup({ workerHeadAvailable: false });
+    const id = await newClaim(s);
+    await s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [] });
+    const evidenceDir = join(s.config.stateDir, "advisor", "repo", "requests", "evidence", id);
+    const manifest = JSON.parse(readFileSync(join(evidenceDir, "manifest.json"), "utf8"));
+    expect(manifest.snapshot).toEqual({ commit: "c".repeat(40), tree: "d".repeat(40) });
+    expect(manifest.observedWorkerHead).toBeNull();
+  });
+
+  test("resolves the pinned manifest identity from baselineRef when snapshotIdentity is absent", async () => {
+    const s = setup({ snapshotIdentity: false });
+    const id = await newClaim(s);
+    await s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [] });
+    const evidenceDir = join(s.config.stateDir, "advisor", "repo", "requests", "evidence", id);
+    const manifest = JSON.parse(readFileSync(join(evidenceDir, "manifest.json"), "utf8"));
+    expect(manifest.snapshot).toEqual({ commit: "c".repeat(40), tree: "d".repeat(40) });
+  });
+
+  test("fails closed when baselineRef cannot resolve and publishes nothing", async () => {
+    const s = setup({ snapshotIdentity: false, baselineResolves: false });
+    const id = await newClaim(s);
+    const evidenceDir = join(s.config.stateDir, "advisor", "repo", "requests", "evidence", id);
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [] })).rejects.toBeInstanceOf(PolicyError);
+    expect(existsSync(evidenceDir)).toBe(false);
+  });
+
+  test("reserves manifest.json and refuses it as an evidence path", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    s.workerFiles.set("manifest.json", Buffer.from("worker-controlled"));
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/manifest.json"] })).rejects.toBeInstanceOf(ValidationError);
+  });
+
   test("publishes one manifest with hashes of copied bytes and refuses a second call", async () => {
     const s = setup();
     const id = await newClaim(s);
@@ -223,6 +264,7 @@ describe("evidenceKeep", () => {
     expect((await s.call("advisorGet", ORCH_SESSION, { projectDir: s.projectPath, id })).evidence).toEqual(kept.evidence);
   });
 
+  // Observable outcome only: the pre-existing path guard normally wins before reservation.
   test("a concurrent second call receives PolicyError and cannot replace evidence", async () => {
     const s = setup();
     const id = await newClaim(s);

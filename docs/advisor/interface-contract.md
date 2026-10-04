@@ -69,7 +69,7 @@ It returns `{ id, thread, status: "pending" }`.
 {
   "id": "…", "kind": "…", "binding": { … }, "thread": "…", "parentId": null,
   "status": "pending" | "claimed" | "submitted" | "declined" | "expired",
-  "snapshot": { "commit": "<40-hex>", "tree": "<40-hex>", "source": "worktree|resultRef|commit", "resultRef": null },
+  "snapshot": { "worktree": true } | { "commit": "<40-hex>" } | { "resultRef": "refs/opencode-sandbox/result/<sid>" },
   "selection": { "rule": "…", "requestedHost": "claude|agy|rotate", "resolvedHost": "claude|agy",
                  "override": null | { "host": "agy", "reason": "<text>" } },   // set by advisor-open if the user overrides
   "group": null | "<id>",
@@ -84,8 +84,11 @@ It returns `{ id, thread, status: "pending" }`.
 }
 ```
 
-The stored `manifest.json` records `snapshot: { commit, tree }` from the broker-pinned session
-identity, plus `observedWorkerHead: { commit, tree }` as informational worker state and
+`advisorGet.snapshot` returns the request's original selection (`worktree`, `commit` or
+`resultRef`); it is not the resolved pinned identity. Binding `request.snapshot` to that identity
+remains deferred follow-up work. The stored `manifest.json` separately records
+`snapshot: { commit, tree }` from the broker-pinned session identity, plus
+`observedWorkerHead: { commit, tree } | null` as informational worker state and
 `evidenceTiming: "post-snapshot"`. Evidence is created after snapshotting; it is not reproducible
 from the snapshot commit and does not attest to that commit's contents. A worker HEAD mismatch does
 not replace or invalidate the broker-pinned identity.
