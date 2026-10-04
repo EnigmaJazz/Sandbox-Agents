@@ -5,7 +5,7 @@
  * exclusive file links, so a second claim or response fails at the OS level.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -57,6 +57,7 @@ function setup(setupOptions: { snapshotIdentity?: boolean; baselineResolves?: bo
   const failReads = new Set<string>();
   let onBase64Read: (() => Promise<void>) | undefined;
   const readCaps: number[] = [];
+  const directories = new Set<string>();
   const adapter = {
     exec: async (_worker: string, argv: string[], options?: { maxOutputBytes?: number }) => {
       const [command, ...args] = argv;
@@ -75,7 +76,7 @@ function setup(setupOptions: { snapshotIdentity?: boolean; baselineResolves?: bo
           : `/work/.advisor/${key}`;
         return { status: 0, stdout: `${canonical}\n`, stderr: "", timedOut: false };
       }
-      if (command === "stat") return { status: 0, stdout: `${symlinks.has(key) ? "symbolic link" : "regular file"}\n`, stderr: "", timedOut: false };
+      if (command === "stat") return { status: 0, stdout: `${symlinks.has(key) ? "symbolic link" : directories.has(key) ? "directory" : "regular file"}\n`, stderr: "", timedOut: false };
       if (command === "base64") {
         if (onBase64Read) await onBase64Read();
         if (failReads.has(key)) return { status: 1, stdout: "", stderr: "read failed", timedOut: false };
@@ -118,7 +119,7 @@ function setup(setupOptions: { snapshotIdentity?: boolean; baselineResolves?: bo
     };
     return (await builders[op]!(ctx, clock.now)(req)) as any;
   };
-  return { root, projectPath, otherPath, config, call, clock, workerFiles, symlinks, failReads, readCaps, setOnBase64Read: (fn?: () => Promise<void>) => { onBase64Read = fn; } };
+  return { root, projectPath, otherPath, config, call, clock, workerFiles, symlinks, directories, failReads, readCaps, setOnBase64Read: (fn?: () => Promise<void>) => { onBase64Read = fn; } };
 }
 
 const advice = (projectDir: string, extra: Record<string, unknown> = {}) => ({
@@ -178,15 +179,34 @@ describe("evidenceKeep", () => {
     const s = setup();
     const id = await newClaim(s);
     s.workerFiles.set("large", Buffer.alloc(1024 * 1024 + 1));
-    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/large"] })).rejects.toThrow("may be truncated");
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/large"] })).rejects.toThrow("exceeds 1048576 bytes");
   });
 
-  test("uses an exact encoded-output cap and refuses truncated output", async () => {
+  test("accepts a file of exactly 1 MiB and refuses truncated output above it", async () => {
     const s = setup();
     const id = await newClaim(s);
+    s.workerFiles.set("exact", Buffer.alloc(1024 * 1024));
     s.workerFiles.set("large", Buffer.alloc(1024 * 1024 + 1));
-    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/large"] })).rejects.toThrow("may be truncated");
-    expect(s.readCaps).toEqual([Math.ceil((1024 * 1024) / 3) * 4]);
+    s.workerFiles.set("truncated", Buffer.alloc(1024 * 1024 + 3));
+    await s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/exact"] });
+    expect(s.readCaps).toEqual([Math.ceil((1024 * 1024) / 3) * 4 + 1]);
+    const nextId = await newClaim(s);
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: nextId, paths: [".advisor/large"] })).rejects.toThrow("exceeds 1048576 bytes");
+    const finalId = await newClaim(s);
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: finalId, paths: [".advisor/truncated"] })).rejects.toThrow("may be truncated");
+  });
+
+  test("refuses duplicate paths after normalization", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/a/./file", ".advisor/a/file"] })).rejects.toThrow("unique");
+  });
+
+  test("refuses a directory as non-regular evidence", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    s.directories.add("folder");
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/folder"] })).rejects.toThrow("regular file");
   });
 
   test("refuses a cumulative set over 8 MiB", async () => {
@@ -301,6 +321,25 @@ describe("evidenceKeep", () => {
     const evidenceDir = join(s.config.stateDir, "advisor", "repo", "requests", "evidence", id);
     await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/during"] })).rejects.toThrow("after the request was answered");
     expect(existsSync(evidenceDir)).toBe(false);
+  });
+
+  test("aborts an overlong evidence operation and cleans staging", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    s.workerFiles.set("slow", Buffer.from("evidence"));
+    s.setOnBase64Read(async () => s.clock.advance(120_001));
+    const evidenceRoot = join(s.config.stateDir, "advisor", "repo", "requests", "evidence");
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/slow"] })).rejects.toBeInstanceOf(PolicyError);
+    expect(readdirSync(evidenceRoot)).toEqual([]);
+  });
+
+  test("turns a malformed stored evidence manifest into a PolicyError response refusal", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    await s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [] });
+    const manifestPath = join(s.config.stateDir, "advisor", "repo", "requests", "evidence", id, "manifest.json");
+    writeFileSync(manifestPath, "{ truncated");
+    await expect(s.call("advisorRespond", ADVISOR_A, { id, status: "submitted", verdict: "done" })).rejects.toBeInstanceOf(PolicyError);
   });
 
   test("a partial copy failure leaves no published evidence directory", async () => {

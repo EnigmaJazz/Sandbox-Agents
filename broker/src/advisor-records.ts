@@ -538,6 +538,7 @@ export function buildAdvisorReadOp(ctx: OpContext, now: Clock = Date.now) {
 const MAX_KEPT_PATHS = 32;
 const MAX_KEPT_FILE_BYTES = 1024 * 1024;
 const MAX_KEPT_TOTAL_BYTES = 8 * 1024 * 1024;
+const MAX_EVIDENCE_KEEP_DURATION_MS = 120_000;
 
 export function buildAdvisorEvidenceKeepOp(ctx: OpContext, now: Clock = Date.now) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
@@ -549,6 +550,12 @@ export function buildAdvisorEvidenceKeepOp(ctx: OpContext, now: Clock = Date.now
     }
     if (p.paths.length > MAX_KEPT_PATHS) throw new ValidationError(`evidenceKeep accepts at most ${MAX_KEPT_PATHS} paths`);
     const paths = p.paths as string[];
+    const operationStartedAt = now();
+    const checkDeadline = () => {
+      if (now() - operationStartedAt > MAX_EVIDENCE_KEEP_DURATION_MS) {
+        throw new PolicyError("evidenceKeep operation deadline exceeded");
+      }
+    };
     const requestDir = requestsDir(ctx, projectId);
     const request = loadRequest(requestDir, id);
     const session = ctx.store.get(req.sessionID);
@@ -572,16 +579,23 @@ export function buildAdvisorEvidenceKeepOp(ctx: OpContext, now: Clock = Date.now
       const project = ctx.config.projects.find((entry) => entry.id === projectId);
       if (!project) throw new PolicyError("broker-pinned snapshot project is unavailable");
       const env = { GIT_DIR: join(project.path, ".git") };
+      checkDeadline();
       const resolved = await ctx.git.spawn(["git", "rev-parse", "--verify", `${session.baselineRef}^{commit}`], { env, cwd: project.path });
+      checkDeadline();
       if (resolved.status !== 0 || !/^[0-9a-f]{40}$/.test(resolved.stdout.trim())) throw new PolicyError("broker-pinned snapshot identity is unavailable");
       commit = resolved.stdout.trim();
+      checkDeadline();
       const resolvedTree = await ctx.git.spawn(["git", "rev-parse", "--verify", `${commit}^{tree}`], { env, cwd: project.path });
+      checkDeadline();
       if (resolvedTree.status !== 0 || !/^[0-9a-f]{40}$/.test(resolvedTree.stdout.trim())) throw new PolicyError("broker-pinned snapshot identity is unavailable");
       tree = resolvedTree.stdout.trim();
     }
     if (!/^[0-9a-f]{40}$/.test(commit) || !/^[0-9a-f]{40}$/.test(tree)) throw new PolicyError("broker-pinned snapshot identity is unavailable");
+    checkDeadline();
     const observedHead = await ctx.adapter.exec(session.workerName, ["git", "-C", "/work", "rev-parse", "--verify", "HEAD"], { timeoutMs: 30_000, maxOutputBytes: 4096 });
+    checkDeadline();
     const observedTree = await ctx.adapter.exec(session.workerName, ["git", "-C", "/work", "rev-parse", "--verify", "HEAD^{tree}"], { timeoutMs: 30_000, maxOutputBytes: 4096 });
+    checkDeadline();
     const observedCommit = observedHead.stdout.trim();
     const observedTreeSha = observedTree.stdout.trim();
     // Worker HEAD is informational; broker-pinned identity and hashed bytes remain authoritative.
@@ -608,23 +622,27 @@ export function buildAdvisorEvidenceKeepOp(ctx: OpContext, now: Clock = Date.now
         if (!relative.startsWith(".advisor/") || relative === ".advisor/" || relative.startsWith("../")) throw new ValidationError("evidence paths must be under .advisor/");
         if (relative === ".advisor/manifest.json") throw new ValidationError("evidence path 'manifest.json' is reserved");
         const expectedPath = `/work/${relative}`;
+        checkDeadline();
         const canonical = await ctx.adapter.exec(session.workerName, ["realpath", "-e", "--", expectedPath], { timeoutMs: 30_000, maxOutputBytes: 4096 });
+        checkDeadline();
         if (canonical.status !== 0) throw new PolicyError(`evidence path cannot be canonicalized: ${path}`);
         const workerPath = canonical.stdout.trim();
         if (workerPath !== expectedPath) throw new ValidationError("evidence path contains a symlink or escapes /work/.advisor/");
         if (seen.has(workerPath)) throw new ValidationError("evidence paths must be unique");
         seen.add(workerPath);
         const stat = await ctx.adapter.exec(session.workerName, ["stat", "-c", "%F", "--", expectedPath], { timeoutMs: 30_000, maxOutputBytes: 4096 });
-        if (stat.status !== 0 || stat.stdout.trim() !== "regular file" && stat.stdout.trim() !== "regular empty file") {
+        checkDeadline();
+        if (stat.status !== 0 || (stat.stdout.trim() !== "regular file" && stat.stdout.trim() !== "regular empty file")) {
           throw new ValidationError(`evidence path must be a regular file: ${path}`);
         }
         // This one base64 read is binary-safe. A worker can still swap the file between
         // canonicalisation and read; accepted because it is the advisor's isolated sandbox.
-        const encodedCap = Math.ceil(MAX_KEPT_FILE_BYTES / 3) * 4;
+        const encodedCap = Math.ceil(MAX_KEPT_FILE_BYTES / 3) * 4 + 1;
         const encoded = await ctx.adapter.exec(session.workerName, ["base64", "-w", "0", "--", expectedPath], {
           timeoutMs: 30_000,
           maxOutputBytes: encodedCap,
         });
+        checkDeadline();
         if (encoded.status !== 0) throw new PolicyError(`evidence read failed: ${path}`);
         if (Buffer.byteLength(encoded.stdout) >= encodedCap) throw new ValidationError(`evidence output reached the ${encodedCap}-byte cap and may be truncated: ${path}`);
         const bytes = Buffer.from(encoded.stdout.replace(/\s+/g, ""), "base64");
@@ -713,7 +731,14 @@ export function buildAdvisorRespondOp(ctx: OpContext, now: Clock = Date.now) {
     const evidenceDir = join(dir, "evidence", id);
     const manifestPath = join(evidenceDir, "manifest.json");
     const manifestBytes = existsSync(manifestPath) ? readFileSync(manifestPath) : undefined;
-    const manifest = manifestBytes ? JSON.parse(manifestBytes.toString("utf8")) as { files?: Array<{ path: string; sha256: string }> } : undefined;
+    let manifest: { files?: Array<{ path: string; sha256: string }> } | undefined;
+    if (manifestBytes) {
+      try {
+        manifest = JSON.parse(manifestBytes.toString("utf8")) as { files?: Array<{ path: string; sha256: string }> };
+      } catch {
+        throw new PolicyError("stored evidence manifest is malformed");
+      }
+    }
     const stored: StoredResponse = {
       status,
       verdict,

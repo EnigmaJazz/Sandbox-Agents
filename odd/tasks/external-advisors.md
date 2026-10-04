@@ -174,3 +174,19 @@ The security core (A1, A3, A4) is complete. Remaining: A2 (snapshot pinning and 
   - `R3-ensureWorker-snapshot-return-inconsistent` (reliability, WARNING, `broker/src/service.ts:505`) — `ensureWorker` returns a `snapshot` identity on a new worker but omits it on reuse.
   - `R4-001` (resilience, WARNING, `broker/src/service.ts:324`) — a repeat call omitting `snapshot` defaults to worktree, so a session pinned to a commit/resultRef is refused rather than reused.
 - **Sandbox invocation constraint:** run from the project root with `bun --cwd broker test`; never change cwd. At the root, `bun --version` reports 1.3.14; `bun test` and `printenv` from `broker/` return ENOENT. Root-causing the cwd behaviour is planned as a separate unit.
+
+### A2c review and bounded correction
+
+- **Four-lens review:** APPROVED with authority burned; lineage `review-7c30251f6a95caef`; target `sha256:09f1d05d…`. The approval is consumed; advisory evidence is not approval authority for this correction.
+- **Advisories** (each id is scoped by the review lineage above because ids collide across reviews):
+  - `R2-001` — fixed: exactly 1 MiB is accepted.
+  - `R3-SIZE-OFFBYONE` — fixed: encoded cap has the one-byte overflow signal.
+  - `R4-encoded-cap-boundary` — fixed: exact 1 MiB is accepted; the retained decoded-byte guard refuses larger files, including 1 MiB + 1 whose base64 length is unchanged.
+  - `R3-RESPOND-MANIFEST-PARSE` — fixed: malformed stored manifests become `PolicyError`.
+  - `R2-002` — fixed: grouped regular-file predicate preserves behavior and clarifies precedence.
+  - `R3-BOUNDARY-COVERAGE` — fixed: duplicate normalized paths and directories are tested as refusals.
+  - `R4-evidencekeep-no-aggregate-deadline` — fixed: one 120-second operation deadline retains per-call timeouts and cleans staging/reservation on failure.
+  - `R4-evidence-stranded-state` — remains open and out of scope; crash recovery/sweeping needs a separate recovery design.
+- **Correction dispatch** — step `post-code`; this bounded correction implements the seven items above and updates A2 item 3's exact-size contract. Advisory evidence, not approval.
+- **TDD evidence:** RED observed `712 pass`, `3 fail`, `Ran 715 tests across 49 files`; failures exposed the exact-size boundary, aggregate deadline, and malformed-manifest parse. GREEN observed `715 pass`, `0 fail`, `3254 expect() calls`, `Ran 715 tests across 49 files. [3.09s]`.
+- **Build:** `bun build broker/src/main.ts --target=bun --outfile /tmp/a2c-adv.js` bundled 25 modules; output `a2c-adv.js 0.29 MB (entry point)`.

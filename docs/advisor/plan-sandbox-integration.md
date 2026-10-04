@@ -94,10 +94,14 @@ files, so they must be reliable first.
   broker-assigned session, never the payload; require the claim to name the calling session. Fail
   closed if the claim is absent, the request is expired, or the id names no request in that project.
   Refuse evidence once `<id>.response.json` exists.
-- **Bounded copy:** refuse more than 32 paths before copying; abort an individual file that crosses
-  1 MiB and the set at 8 MiB cumulative. Set the output cap to the exact base64 length of 1 MiB and
-  refuse output reaching that cap because msb may have truncated it; never decode a possibly
-  truncated prefix. Use a binary-safe read path and count only bytes actually received.
+- **Bounded copy:** refuse more than 32 paths before copying; accept files up to and including
+  1 MiB and refuse anything larger; cap the set at 8 MiB cumulative. Set the output cap to
+  `ceil(1 MiB / 3) × 4 + 1` bytes and refuse output reaching that cap because msb may have
+  truncated it; never decode a possibly truncated prefix. The exact 1 MiB base64 output is
+  1,398,104 bytes, below the 1,398,105-byte cap. Base64 encodes 1 MiB + 1 to the same 1,398,104
+  bytes, so after decoding the broker must retain the explicit decoded-byte check and refuse
+  anything over 1 MiB. Larger inputs whose encoded output reaches the cap are refused as possibly
+  truncated. Use a binary-safe read path and count only bytes actually received.
 - **Publication:** copy to `evidence/.tmp-<id>-<rand>`, write `manifest.json` last from the
   broker-computed hashes, reserve the request destination exclusively, then publish the complete
   directory atomically. Remove staging and the reservation on any failure. Refuse a second
