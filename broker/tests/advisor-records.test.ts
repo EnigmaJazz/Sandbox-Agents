@@ -37,7 +37,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function setup(options: { snapshotIdentity?: boolean; baselineResolves?: boolean; workerHeadAvailable?: boolean } = {}) {
+function setup(setupOptions: { snapshotIdentity?: boolean; baselineResolves?: boolean; workerHeadAvailable?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "advisor-records-"));
   roots.push(root);
   const projectPath = join(root, "repo");
@@ -64,8 +64,8 @@ function setup(options: { snapshotIdentity?: boolean; baselineResolves?: boolean
       const advisorIndex = path.indexOf(".advisor/");
       const key = advisorIndex >= 0 ? path.slice(advisorIndex + ".advisor/".length) : path;
       if (command === "git") {
-        const available = options.workerHeadAvailable !== false;
-        return { status: available ? 0 : 1, stdout: available ? `${"b".repeat(40)}\n` : "", stderr: "", timedOut: false };
+        const unavailableHead = setupOptions.workerHeadAvailable === false && argv.includes("HEAD");
+        return { status: unavailableHead ? 1 : 0, stdout: unavailableHead ? "" : `${"b".repeat(40)}\n`, stderr: "", timedOut: false };
       }
       if (command === "realpath") {
         const components = key.split("/");
@@ -91,16 +91,16 @@ function setup(options: { snapshotIdentity?: boolean; baselineResolves?: boolean
     config,
     adapter,
     git: { spawn: async (argv: string[]) => {
-      const resolves = options.baselineResolves !== false;
-      const isTree = argv.includes("^{tree}");
-      return { status: resolves ? 0 : 1, stdout: resolves ? `${(isTree ? "d" : "c").repeat(40)}\n` : "", stderr: "", timedOut: false };
+      const resolves = setupOptions.baselineResolves !== false;
+      const isTree = argv.some((argument) => argument.endsWith("^{tree}"));
+      return { status: resolves ? 0 : 1, stdout: resolves ? `${(isTree ? "f" : "c").repeat(40)}\n` : "", stderr: "", timedOut: false };
     }, runnerMode: "real" },
     store: {
       get: (id: string) =>
         id === ORCH_SESSION || id === OTHER_SESSION
           ? { sessionID: id, state: "HOST_READ_ONLY", agent: id === ORCH_SESSION ? ORCH : "general", createdAt: "", updatedAt: "" }
           : id === ADVISOR_A || id === ADVISOR_B
-            ? { sessionID: id, state: "SANDBOX_ACTIVE", workerName: `worker-${id}`, projectID: "repo", baselineRef: "refs/opencode-sandbox/baseline/pinned", ...(options.snapshotIdentity === false ? {} : { snapshotIdentity: { commit: "c".repeat(40), tree: "d".repeat(40), source: "worktree", headSha: "e".repeat(40) } }), createdAt: "", updatedAt: "" }
+            ? { sessionID: id, state: "SANDBOX_ACTIVE", workerName: `worker-${id}`, projectID: "repo", baselineRef: "refs/opencode-sandbox/baseline/pinned", ...(setupOptions.snapshotIdentity === false ? {} : { snapshotIdentity: { commit: "c".repeat(40), tree: "d".repeat(40), source: "worktree", headSha: "e".repeat(40) } }), createdAt: "", updatedAt: "" }
             : undefined,
     },
   } as unknown as OpContext;
@@ -225,7 +225,7 @@ describe("evidenceKeep", () => {
     await s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [] });
     const evidenceDir = join(s.config.stateDir, "advisor", "repo", "requests", "evidence", id);
     const manifest = JSON.parse(readFileSync(join(evidenceDir, "manifest.json"), "utf8"));
-    expect(manifest.snapshot).toEqual({ commit: "c".repeat(40), tree: "d".repeat(40) });
+    expect(manifest.snapshot).toEqual({ commit: "c".repeat(40), tree: "f".repeat(40) });
   });
 
   test("fails closed when baselineRef cannot resolve and publishes nothing", async () => {
