@@ -55,29 +55,45 @@ function setup() {
   const workerFiles = new Map<string, Buffer>();
   const symlinks = new Set<string>();
   const failReads = new Set<string>();
+  let onBase64Read: (() => Promise<void>) | undefined;
+  const readCaps: number[] = [];
   const adapter = {
-    exec: async (_worker: string, argv: string[]) => {
+    exec: async (_worker: string, argv: string[], options?: { maxOutputBytes?: number }) => {
       const [command, ...args] = argv;
       const path = args.at(-1)!;
-      const key = path.startsWith(".advisor/") ? path.slice(".advisor/".length) : path;
-      if (command === "git") return { status: 0, stdout: `${"a".repeat(40)}\n`, stderr: "", timedOut: false };
-      if (command === "realpath") return { status: 0, stdout: `${path.includes("..") ? "/work/secret" : `/work/.advisor/${key}`}\n`, stderr: "", timedOut: false };
+      const advisorIndex = path.indexOf(".advisor/");
+      const key = advisorIndex >= 0 ? path.slice(advisorIndex + ".advisor/".length) : path;
+      if (command === "git") return { status: 0, stdout: `${"b".repeat(40)}\n`, stderr: "", timedOut: false };
+      if (command === "realpath") {
+        const components = key.split("/");
+        const linked = components.findIndex((part) => symlinks.has(part));
+        const canonical = path.includes("..") ? "/work/secret" : linked >= 0
+          ? `/work/.advisor/${["target", ...components.slice(linked + 1)].join("/")}`
+          : `/work/.advisor/${key}`;
+        return { status: 0, stdout: `${canonical}\n`, stderr: "", timedOut: false };
+      }
       if (command === "stat") return { status: 0, stdout: `${symlinks.has(key) ? "symbolic link" : "regular file"}\n`, stderr: "", timedOut: false };
-      if (command === "base64") return failReads.has(key)
-        ? { status: 1, stdout: "", stderr: "read failed", timedOut: false }
-        : { status: 0, stdout: (workerFiles.get(key) ?? Buffer.alloc(0)).toString("base64"), stderr: "", timedOut: false };
+      if (command === "base64") {
+        if (onBase64Read) await onBase64Read();
+        if (failReads.has(key)) return { status: 1, stdout: "", stderr: "read failed", timedOut: false };
+        const encoded = (workerFiles.get(key) ?? Buffer.alloc(0)).toString("base64");
+        const cap = options?.maxOutputBytes ?? encoded.length;
+        readCaps.push(cap);
+        return { status: 0, stdout: encoded.slice(0, cap), stderr: "", timedOut: false };
+      }
       return { status: 1, stdout: "", stderr: "unsupported", timedOut: false };
     },
   };
   const ctx = {
     config,
     adapter,
+    git: { spawn: async () => ({ status: 0, stdout: `${"c".repeat(40)}\n`, stderr: "", timedOut: false }), runnerMode: "real" },
     store: {
       get: (id: string) =>
         id === ORCH_SESSION || id === OTHER_SESSION
           ? { sessionID: id, state: "HOST_READ_ONLY", agent: id === ORCH_SESSION ? ORCH : "general", createdAt: "", updatedAt: "" }
           : id === ADVISOR_A || id === ADVISOR_B
-            ? { sessionID: id, state: "SANDBOX_ACTIVE", workerName: `worker-${id}`, projectID: "repo", baselineRef: "refs/opencode-sandbox/baseline/pinned", createdAt: "", updatedAt: "" }
+            ? { sessionID: id, state: "SANDBOX_ACTIVE", workerName: `worker-${id}`, projectID: "repo", baselineRef: "refs/opencode-sandbox/baseline/pinned", snapshotIdentity: { commit: "c".repeat(40), tree: "d".repeat(40), source: "worktree", headSha: "e".repeat(40) }, createdAt: "", updatedAt: "" }
             : undefined,
     },
   } as unknown as OpContext;
@@ -95,7 +111,7 @@ function setup() {
     };
     return (await builders[op]!(ctx, clock.now)(req)) as any;
   };
-  return { root, projectPath, otherPath, config, call, clock, workerFiles, symlinks, failReads };
+  return { root, projectPath, otherPath, config, call, clock, workerFiles, symlinks, failReads, readCaps, setOnBase64Read: (fn?: () => Promise<void>) => { onBase64Read = fn; } };
 }
 
 const advice = (projectDir: string, extra: Record<string, unknown> = {}) => ({
@@ -134,7 +150,15 @@ describe("evidenceKeep", () => {
     const s = setup();
     const id = await newClaim(s);
     s.symlinks.add("link");
-    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/link"] })).rejects.toThrow("unsymlinked regular file");
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/link"] })).rejects.toThrow("symlink");
+  });
+
+  test("refuses a symlink directory component", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    s.symlinks.add("nested");
+    s.workerFiles.set("nested/file", Buffer.from("evidence"));
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/nested/file"] })).rejects.toThrow();
   });
 
   test("refuses more than 32 paths before copying", async () => {
@@ -147,13 +171,21 @@ describe("evidenceKeep", () => {
     const s = setup();
     const id = await newClaim(s);
     s.workerFiles.set("large", Buffer.alloc(1024 * 1024 + 1));
-    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/large"] })).rejects.toThrow("exceeds 1048576 bytes");
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/large"] })).rejects.toThrow("may be truncated");
+  });
+
+  test("uses an exact encoded-output cap and refuses truncated output", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    s.workerFiles.set("large", Buffer.alloc(1024 * 1024 + 1));
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/large"] })).rejects.toThrow("may be truncated");
+    expect(s.readCaps).toEqual([Math.ceil((1024 * 1024) / 3) * 4]);
   });
 
   test("refuses a cumulative set over 8 MiB", async () => {
     const s = setup();
     const id = await newClaim(s);
-    for (let i = 0; i < 9; i++) s.workerFiles.set(`f${i}`, Buffer.alloc(1024 * 1024));
+    for (let i = 0; i < 9; i++) s.workerFiles.set(`f${i}`, Buffer.alloc(1024 * 1024 - 1));
     await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: Array.from({ length: 9 }, (_, i) => `.advisor/f${i}`) })).rejects.toThrow("set exceeds 8388608 bytes");
   });
 
@@ -178,12 +210,55 @@ describe("evidenceKeep", () => {
     const kept = await s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/binary"] });
     const evidenceDir = join(s.config.stateDir, "advisor", "repo", "requests", "evidence", id);
     const manifest = JSON.parse(readFileSync(join(evidenceDir, "manifest.json"), "utf8"));
+    expect(manifest.snapshot).toEqual({ commit: "c".repeat(40), tree: "d".repeat(40) });
+    expect(manifest.observedWorkerHead).toEqual({ commit: "b".repeat(40), tree: "b".repeat(40) });
+    expect(statSync(evidenceDir).mode & 0o777).toBe(0o700);
+    expect(statSync(join(evidenceDir, "binary")).mode & 0o777).toBe(0o600);
+    expect(statSync(join(evidenceDir, "manifest.json")).mode & 0o777).toBe(0o600);
     expect(readFileSync(join(evidenceDir, "binary"))).toEqual(bytes);
     expect(manifest.files[0].sha256).toBe(`sha256:${await import("node:crypto").then(({ createHash }) => createHash("sha256").update(bytes).digest("hex"))}`);
     expect(kept.evidence.manifestSha256).toStartWith("sha256:");
-    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/binary"] })).rejects.toThrow("already kept");
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/binary"] })).rejects.toBeInstanceOf(PolicyError);
     await s.call("advisorRespond", ADVISOR_A, { id, status: "submitted", verdict: "done" });
     expect((await s.call("advisorGet", ORCH_SESSION, { projectDir: s.projectPath, id })).evidence).toEqual(kept.evidence);
+  });
+
+  test("a concurrent second call receives PolicyError and cannot replace evidence", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    s.workerFiles.set("parallel", Buffer.from("evidence"));
+    const payload = { requestId: id, paths: [".advisor/parallel"] };
+    let readers = 0;
+    let releaseReaders!: () => void;
+    const bothReading = new Promise<void>((resolve) => { releaseReaders = resolve; });
+    s.setOnBase64Read(async () => {
+      readers += 1;
+      if (readers === 2) releaseReaders();
+      await bothReading;
+    });
+    const results = await Promise.allSettled([
+      s.call("evidenceKeep", ADVISOR_A, payload),
+      s.call("evidenceKeep", ADVISOR_A, payload),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((result) => result.status === "rejected") as PromiseRejectedResult;
+    expect(rejected.reason).toBeInstanceOf(PolicyError);
+  });
+
+  test("rolls back publication if a response appears during evidence copying", async () => {
+    const s = setup();
+    const id = await newClaim(s);
+    s.workerFiles.set("during", Buffer.from("evidence"));
+    let responded = false;
+    s.setOnBase64Read(async () => {
+      if (!responded) {
+        responded = true;
+        await s.call("advisorRespond", ADVISOR_A, { id, status: "submitted", verdict: "done" });
+      }
+    });
+    const evidenceDir = join(s.config.stateDir, "advisor", "repo", "requests", "evidence", id);
+    await expect(s.call("evidenceKeep", ADVISOR_A, { requestId: id, paths: [".advisor/during"] })).rejects.toThrow("after the request was answered");
+    expect(existsSync(evidenceDir)).toBe(false);
   });
 
   test("a partial copy failure leaves no published evidence directory", async () => {

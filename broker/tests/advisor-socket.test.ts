@@ -221,6 +221,7 @@ describe("BrokerServer advisor listener", () => {
       const requestId = (asked as unknown as { result: { id: string } }).result.id;
 
       expect((await sendAs(main, "steal", "advisorRead", "ses_orch", { id: requestId }))?.error?.message).toContain("only on an advisor socket");
+      expect((await sendAs(advisor, "keep-dispatch", "evidenceKeep", "advisor", { requestId: "adv-0000000000000000", paths: [] }))?.error?.message).toContain("not found");
       const read = await sendAs(advisor, "read", "advisorRead", "advisor", { id: requestId });
       expect(read?.ok).toBe(true);
       const answered = await sendAs(advisor, "answer", "advisorRespond", "advisor", { id: requestId, status: "submitted", verdict: "Add a rollback step." });

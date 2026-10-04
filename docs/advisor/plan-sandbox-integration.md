@@ -79,11 +79,13 @@ files, so they must be reliable first.
   `ADVISOR_ALLOWED_OPERATIONS` and `ADVISOR_ONLY_OPERATIONS`, and add a `server.ts` dispatch case.
   Without all four wiring points, the call fails validation before any handler runs.
 - **Containment (new worker-side check; do not reuse broker validators):** paths are worker-relative
-  under `.advisor/`. Inside the worker, canonicalise each path with argv `realpath -e -- <path>` and
-  require the result to be under `/work/.advisor/`. Reject a final component that is a symlink,
-  determined with `stat` without `-L` (which reports the link itself, not its target).
-  `assertSandboxPath` is lexical, host-blind, and rejects absolute paths; `resolveProjectRelativePath`
-  performs host realpath. Neither checks containment in the advisor worker, so neither is reusable.
+  under `.advisor/`. Lexically normalize the supplied relative path and reject any `..` component;
+  build the expected absolute path under `/work/.advisor/`, canonicalise it with argv
+  `realpath -e -- <expected-path>`, and require the canonical result to equal the expected path.
+  **No symlink components, anywhere.** Keep `stat` only to reject non-regular final files; canonical
+  equality is what rejects every symlink component. `assertSandboxPath` is lexical, host-blind, and
+  rejects absolute paths; `resolveProjectRelativePath` performs host realpath. Neither checks worker
+  containment, so neither is reusable.
 - **Integrity and residual TOCTOU:** the broker computes every SHA-256 over the exact bytes it
   received, in one read; never trust a worker-supplied size or hash. A worker can still swap a file
   between canonicalisation and read. Accept this residual race: the worker is the advisor's own
@@ -93,15 +95,20 @@ files, so they must be reliable first.
   closed if the claim is absent, the request is expired, or the id names no request in that project.
   Refuse evidence once `<id>.response.json` exists.
 - **Bounded copy:** refuse more than 32 paths before copying; abort an individual file that crosses
-  1 MiB and the set at 8 MiB cumulative. Use a binary-safe read path (not `readFile`, which refuses
-  non-UTF-8) and count only bytes actually received.
+  1 MiB and the set at 8 MiB cumulative. Set the output cap to the exact base64 length of 1 MiB and
+  refuse output reaching that cap because msb may have truncated it; never decode a possibly
+  truncated prefix. Use a binary-safe read path and count only bytes actually received.
 - **Publication:** copy to `evidence/.tmp-<id>-<rand>`, write `manifest.json` last from the
-  broker-computed hashes, then publish the complete directory atomically after an existence check.
-  Remove staging on any failure. Refuse a second `evidenceKeep` for the request; never merge or
-  overwrite.
-- **Snapshot identity:** `manifest.json` carries the worker's pinned snapshot identity, not the
-  request's. Evidence is written after the snapshot and does not attest to its content. Binding
-  `request.snapshot` to the worker's pinned snapshot is separate follow-up work.
+  broker-computed hashes, reserve the request destination exclusively, then publish the complete
+  directory atomically. Remove staging and the reservation on any failure. Refuse a second
+  `evidenceKeep` for the request; never merge or overwrite. Re-check for `<id>.response.json` after
+  publication; if it appeared during the copy, remove the published directory and refuse.
+- **Snapshot identity:** `manifest.json` carries the broker-pinned session identity (from
+  `snapshotIdentity`, or by resolving the session's `baselineRef` host-side), not worker `HEAD` and
+  not the request's. The worker's observed HEAD/tree is recorded separately for information; a HEAD
+  mismatch is not a refusal. Evidence is a post-snapshot artifact and cannot be reproduced from the
+  snapshot commit or attest to its content. Binding `request.snapshot` to the worker's pinned
+  snapshot is separate follow-up work.
 - **Read surface and digest:** add `evidence` to `StoredResponse` and `view()`. `advisorRespond` reads
   the stored manifest digest rather than accepting it in the payload; keep
   `ALLOWED_PAYLOAD_KEYS.advisorRespond` unchanged. Use `sha256:`-prefixed digests everywhere;

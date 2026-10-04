@@ -33,7 +33,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { isExternalLensLineage } from "./advisor-lineages.ts";
 import { validateReviewerResult } from "./advisor-reviewer-result.ts";
 import { PolicyError } from "./policy.ts";
@@ -562,57 +562,87 @@ export function buildAdvisorEvidenceKeepOp(ctx: OpContext, now: Clock = Date.now
     if (!claim) throw new PolicyError("advisory request is not claimed; read it first");
     if (claim.session !== req.sessionID) throw new PolicyError("advisory request is claimed by another advisor");
 
-    const snapshotCommit = await ctx.adapter.exec(session.workerName, ["git", "-C", "/work", "rev-parse", "--verify", "HEAD"], { timeoutMs: 30_000, maxOutputBytes: 4096 });
-    const snapshotTree = await ctx.adapter.exec(session.workerName, ["git", "-C", "/work", "rev-parse", "--verify", "HEAD^{tree}"], { timeoutMs: 30_000, maxOutputBytes: 4096 });
-    const commit = snapshotCommit.stdout.trim();
-    const tree = snapshotTree.stdout.trim();
-    if (snapshotCommit.status !== 0 || snapshotTree.status !== 0 || !/^[0-9a-f]{40}$/.test(commit) || !/^[0-9a-f]{40}$/.test(tree)) {
-      throw new PolicyError("advisor worker pinned snapshot identity is unavailable");
+    const snapshotIdentity = (session as typeof session & {
+      snapshotIdentity?: { commit: string; tree: string };
+    }).snapshotIdentity;
+    let commit = snapshotIdentity?.commit;
+    let tree = snapshotIdentity?.tree;
+    if (!commit || !tree) {
+      if (!session.baselineRef || !ctx.git?.spawn) throw new PolicyError("broker-pinned snapshot identity is unavailable");
+      const project = ctx.config.projects.find((entry) => entry.id === projectId);
+      if (!project) throw new PolicyError("broker-pinned snapshot project is unavailable");
+      const env = { GIT_DIR: join(project.path, ".git") };
+      const resolved = await ctx.git.spawn(["git", "rev-parse", "--verify", `${session.baselineRef}^{commit}`], { env, cwd: project.path });
+      if (resolved.status !== 0 || !/^[0-9a-f]{40}$/.test(resolved.stdout.trim())) throw new PolicyError("broker-pinned snapshot identity is unavailable");
+      commit = resolved.stdout.trim();
+      const resolvedTree = await ctx.git.spawn(["git", "rev-parse", "--verify", `${commit}^{tree}`], { env, cwd: project.path });
+      if (resolvedTree.status !== 0 || !/^[0-9a-f]{40}$/.test(resolvedTree.stdout.trim())) throw new PolicyError("broker-pinned snapshot identity is unavailable");
+      tree = resolvedTree.stdout.trim();
+    }
+    if (!/^[0-9a-f]{40}$/.test(commit) || !/^[0-9a-f]{40}$/.test(tree)) throw new PolicyError("broker-pinned snapshot identity is unavailable");
+    const observedHead = await ctx.adapter.exec(session.workerName, ["git", "-C", "/work", "rev-parse", "--verify", "HEAD"], { timeoutMs: 30_000, maxOutputBytes: 4096 });
+    const observedTree = await ctx.adapter.exec(session.workerName, ["git", "-C", "/work", "rev-parse", "--verify", "HEAD^{tree}"], { timeoutMs: 30_000, maxOutputBytes: 4096 });
+    const observedCommit = observedHead.stdout.trim();
+    const observedTreeSha = observedTree.stdout.trim();
+    if (observedHead.status !== 0 || observedTree.status !== 0 || !/^[0-9a-f]{40}$/.test(observedCommit) || !/^[0-9a-f]{40}$/.test(observedTreeSha)) {
+      throw new PolicyError("advisor worker observed HEAD identity is unavailable");
     }
     const evidenceRoot = privateDir(join(requestDir, "evidence"));
     const finalDir = join(evidenceRoot, id);
     if (existsSync(finalDir)) throw new PolicyError("evidence was already kept for this request");
     const stageDir = privateDir(join(evidenceRoot, `.tmp-${id}-${randomBytes(6).toString("hex")}`));
+    const reservationDir = join(evidenceRoot, `.reserve-${id}`);
+    let reserved = false;
     const manifestFiles: Array<{ path: string; sha256: string }> = [];
     const seen = new Set<string>();
     let totalBytes = 0;
     try {
       for (const path of paths) {
         if (!path.startsWith(".advisor/") || path.includes("\0")) throw new ValidationError("evidence paths must be under .advisor/");
-        // Broker path validators are host-side/lexical and cannot establish worker containment.
-        const canonical = await ctx.adapter.exec(session.workerName, ["realpath", "-e", "--", path], { timeoutMs: 30_000, maxOutputBytes: 4096 });
+        // No symlink components, anywhere: canonical equality with the lexically expected path rejects them all.
+        const components = path.split("/");
+        if (components.includes("..")) throw new ValidationError("evidence paths must not contain '..'");
+        const relative = posix.normalize(path);
+        if (!relative.startsWith(".advisor/") || relative === ".advisor/" || relative.startsWith("../")) throw new ValidationError("evidence paths must be under .advisor/");
+        const expectedPath = `/work/${relative}`;
+        const canonical = await ctx.adapter.exec(session.workerName, ["realpath", "-e", "--", expectedPath], { timeoutMs: 30_000, maxOutputBytes: 4096 });
         if (canonical.status !== 0) throw new PolicyError(`evidence path cannot be canonicalized: ${path}`);
         const workerPath = canonical.stdout.trim();
-        if (!workerPath.startsWith("/work/.advisor/") || workerPath === "/work/.advisor/") throw new ValidationError("evidence path escapes /work/.advisor/");
+        if (workerPath !== expectedPath) throw new ValidationError("evidence path contains a symlink or escapes /work/.advisor/");
         if (seen.has(workerPath)) throw new ValidationError("evidence paths must be unique");
         seen.add(workerPath);
-        const stat = await ctx.adapter.exec(session.workerName, ["stat", "-c", "%F", "--", path], { timeoutMs: 30_000, maxOutputBytes: 4096 });
+        const stat = await ctx.adapter.exec(session.workerName, ["stat", "-c", "%F", "--", expectedPath], { timeoutMs: 30_000, maxOutputBytes: 4096 });
         if (stat.status !== 0 || stat.stdout.trim() !== "regular file" && stat.stdout.trim() !== "regular empty file") {
-          throw new ValidationError(`evidence path must be an unsymlinked regular file: ${path}`);
+          throw new ValidationError(`evidence path must be a regular file: ${path}`);
         }
         // This one base64 read is binary-safe. A worker can still swap the file between
         // canonicalisation and read; accepted because it is the advisor's isolated sandbox.
-        const encoded = await ctx.adapter.exec(session.workerName, ["base64", "-w", "0", "--", path], {
+        const encodedCap = Math.ceil(MAX_KEPT_FILE_BYTES / 3) * 4;
+        const encoded = await ctx.adapter.exec(session.workerName, ["base64", "-w", "0", "--", expectedPath], {
           timeoutMs: 30_000,
-          maxOutputBytes: Math.ceil(MAX_KEPT_FILE_BYTES / 3) * 4 + 8,
+          maxOutputBytes: encodedCap,
         });
         if (encoded.status !== 0) throw new PolicyError(`evidence read failed: ${path}`);
+        if (Buffer.byteLength(encoded.stdout) >= encodedCap) throw new ValidationError(`evidence output reached the ${encodedCap}-byte cap and may be truncated: ${path}`);
         const bytes = Buffer.from(encoded.stdout.replace(/\s+/g, ""), "base64");
         if (bytes.length > MAX_KEPT_FILE_BYTES) throw new ValidationError(`evidence file exceeds ${MAX_KEPT_FILE_BYTES} bytes: ${path}`);
         totalBytes += bytes.length;
         if (totalBytes > MAX_KEPT_TOTAL_BYTES) throw new ValidationError(`evidence set exceeds ${MAX_KEPT_TOTAL_BYTES} bytes`);
-        const relative = workerPath.slice("/work/.advisor/".length);
-        const destination = join(stageDir, relative);
+        const evidenceRelative = relative.slice(".advisor/".length);
+        const destination = join(stageDir, evidenceRelative);
         privateDir(join(destination, ".."));
         writeFileSync(destination, bytes, { mode: 0o600, flag: "wx" });
         chmodSync(destination, 0o600);
         const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-        manifestFiles.push({ path: relative, sha256: digest });
+        manifestFiles.push({ path: evidenceRelative, sha256: digest });
       }
       const manifest = {
         schema: "advisor-evidence/v1",
         requestId: id,
+        // Evidence is collected after the pinned snapshot and is not reproducible from its commit.
         snapshot: { commit, tree },
+        observedWorkerHead: { commit: observedCommit, tree: observedTreeSha },
+        evidenceTiming: "post-snapshot",
         files: manifestFiles,
       };
       const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
@@ -620,12 +650,26 @@ export function buildAdvisorEvidenceKeepOp(ctx: OpContext, now: Clock = Date.now
       writeFileSync(manifestPath, manifestBytes, { mode: 0o600, flag: "wx" });
       chmodSync(manifestPath, 0o600);
       if (existsSync(finalDir)) throw new PolicyError("evidence was already kept for this request");
+      try {
+        mkdirSync(reservationDir, { mode: 0o700 });
+        reserved = true;
+        chmodSync(reservationDir, 0o700);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new PolicyError("evidence was already kept for this request");
+        throw error;
+      }
       renameSync(stageDir, finalDir);
+      if (existsSync(join(requestDir, `${id}.response.json`))) {
+        rmSync(finalDir, { recursive: true, force: true });
+        throw new PolicyError("evidence cannot be kept after the request was answered");
+      }
       const manifestSha256 = `sha256:${createHash("sha256").update(manifestBytes).digest("hex")}`;
       return { requestId: id, evidence: { dir: finalDir, manifestSha256, files: manifestFiles } };
     } catch (error) {
       rmSync(stageDir, { recursive: true, force: true });
       throw error;
+    } finally {
+      if (reserved) rmSync(reservationDir, { recursive: true, force: true });
     }
   };
 }

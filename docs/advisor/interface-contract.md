@@ -79,10 +79,16 @@ It returns `{ id, thread, status: "pending" }`.
     "findings": [ … ],             // pre-code-advice: free-form; review-lens: gentle-ai reviewer schema
     "reviewerResult": { … }        // review-lens: the exact JSON that will be relayed
   },
-  "evidence": { "dir": "<broker state path>", "manifestSha256": "sha256:…", "files": [ { "path": "…", "sha256": "sha256:…" } ] }, // manifest snapshot identity is the worker's pinned snapshot, not the request's
+  "evidence": { "dir": "<broker state path>", "manifestSha256": "sha256:…", "files": [ { "path": "…", "sha256": "sha256:…" } ] }, // manifest snapshot is broker-pinned; worker HEAD is informational
   "review": { "lineage": "…", "target": "…", "lens": "…", "order": 0, "subjectHash": "sha256:…" }  // review-lens only
 }
 ```
+
+The stored `manifest.json` records `snapshot: { commit, tree }` from the broker-pinned session
+identity, plus `observedWorkerHead: { commit, tree }` as informational worker state and
+`evidenceTiming: "post-snapshot"`. Evidence is created after snapshotting; it is not reproducible
+from the snapshot commit and does not attest to that commit's contents. A worker HEAD mismatch does
+not replace or invalidate the broker-pinned identity.
 
 ### `host_review_start` (existing): extra option
 
