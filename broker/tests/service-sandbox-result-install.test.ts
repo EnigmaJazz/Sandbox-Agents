@@ -334,7 +334,12 @@ describe("sandboxResultInstall — commit binding (preview == installed)", () =>
   });
 
   test("refuses a second install request with a different stored installedCommit", async () => {
-    const { calls, spawn } = spawnStub([]);
+    // Without the stored-marker guard, the valid result ref below matches the request and this install would succeed.
+    const { calls, spawn } = spawnStub([
+      { match: isRevParse, result: ok({ stdout: `${COMMIT_7}\n` }) },
+      { match: isNameOnly, result: ok({ stdout: "a.ts\0" }) },
+      { match: isRaw, result: ok({ stdout: ":100644 100644 1111111 2222222 M\ta.ts\n" }) },
+    ]);
     const ctx = makeCtx(spawn, {
       "session-1": readableRecord("session-1", { state: "HOST_READ_ONLY", agent: ORCHESTRATOR }),
       "worker-7": readableRecord("worker-7", { installedCommit: OTHER_COMMIT }),

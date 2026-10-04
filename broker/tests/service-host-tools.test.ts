@@ -436,6 +436,10 @@ describe("host git/GH handlers", () => {
       config,
       store: {
         get: () => record,
+        touch: (_sessionID, patch = {}) => {
+          Object.assign(record, patch);
+          return record;
+        },
         transition: (_sessionID, from, to, patch = {}) => {
           if (record.state !== from) throw new Error(`expected ${from}, got ${record.state}`);
           Object.assign(record, patch, { state: to });

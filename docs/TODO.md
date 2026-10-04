@@ -120,6 +120,10 @@ All Tier 1 items are implemented and committed.
 25. **`R4-004` (lineage `review-0b6b4d6bbfad13d3`)** — **OPEN / advisory from approved review**; owner **A**. The deadline-cleanup test is vacuous: it advances the clock during the read, before staging/reservation, so the cleanup assertion cannot fail. Move clock advancement after staging/reservation and prove cleanup. Provider classification: advisory.
 26. **`R4-005` (lineage `review-0b6b4d6bbfad13d3`)** — **OPEN / advisory from approved review**; owner **A**. Malformed-manifest refusal is terminal and has no repair path. Decide whether recoverability is needed. Provider classification: advisory.
 
+27. **Partial result-install crash recovery** — **OPEN / recovery design needed; unaddressed by this change**; owner **A**. If install terminates after one or more `git restore`/`rm` calls succeed but before `installedCommit` is persisted (`broker/src/service.ts:2823–2844`), a retry sees no marker and re-runs the full install over paths already modified by the first attempt. Design a durable in-progress/recovery protocol that distinguishes a complete install from a partial one; no code fix was made in this change. This is the install-side crash window, separate from the commit-intent recovery added here.
+
+28. **Commit-path symlink/submodule rejection** — **OPEN / possibly pre-existing question, not established as a regression**; owner **A**. Determine whether `host_git_commit` should refuse symlink or submodule changes. Current `buildGitCommitOp` at `broker/src/service.ts:2498–2546` derives paths with `changedPathsBetween` and applies `checkProtectedPaths`, but does not inspect raw change modes/kinds; unlike `buildSandboxResultInstallOp` at `broker/src/service.ts:2770–2787`, it has no explicit symlink/submodule rejection. The pre-change behavior cannot be established from the available evidence, so treat this as a possibly pre-existing gap and decide policy before changing behavior.
+
 ## Completed
 
 - **Request-line cap (Tier 2 item 13):** complete in `9c44aa9`; see `odd/tasks/request-line-cap.md`.

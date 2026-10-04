@@ -2552,6 +2552,53 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
         steps: [],
       };
     }
+    if (resultRecord.pendingCommit) {
+      if (resultRecord.pendingCommit.resultCommit !== resultCommit) {
+        throw new StateError("cannot commit: pending commit intent no longer matches the result ref");
+      }
+      const headResult = await runHostStep(ctx, ["git", "rev-parse", "HEAD"], projectRoot);
+      const head = headResult.stdout.trim().toLowerCase();
+      if (headResult.status !== 0 || !/^[0-9a-f]{40}$/.test(head)) {
+        throw new StateError("cannot commit: pending commit HEAD could not be determined");
+      }
+      const parentResult = await runHostStep(ctx, ["git", "rev-parse", "HEAD^"], projectRoot);
+      const parent = parentResult.stdout.trim().toLowerCase();
+      if (
+        parentResult.status !== 0 ||
+        !/^[0-9a-f]{40}$/.test(parent) ||
+        parent !== resultRecord.pendingCommit.parentCommit
+      ) {
+        throw new StateError("cannot commit: pending commit state is ambiguous; refusing to create another commit");
+      }
+      const treeResult = await runHostStep(
+        ctx,
+        ["git", "diff", "--quiet", resultCommit, "HEAD", "--", ...changed],
+        projectRoot,
+      );
+      if (treeResult.status !== 0) {
+        throw new StateError("cannot commit: HEAD does not carry the pending result; refusing to create another commit");
+      }
+      ctx.store.transition(resultSessionID, resultRecord.state, "RETAINED", {
+        installedCommit: resultCommit,
+        committedCommit: head,
+        pendingCommit: undefined,
+      });
+      return {
+        committed: false,
+        alreadyCommitted: true,
+        committedCommit: head,
+        paths: changed,
+        steps: [],
+      };
+    }
+    const parentResult = await runHostStep(ctx, ["git", "rev-parse", "HEAD"], projectRoot);
+    const parentCommit = parentResult.stdout.trim().toLowerCase();
+    if (parentResult.status !== 0 || !/^[0-9a-f]{40}$/.test(parentCommit)) {
+      throw new StateError("cannot commit: current HEAD could not be recorded before commit");
+    }
+    ctx.store.touch(resultSessionID, {
+      pendingCommit: { resultCommit, parentCommit },
+    });
     const steps = buildGitCommitArgv({
       paths: changed,
       message: payload.message as string,

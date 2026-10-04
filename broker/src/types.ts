@@ -573,6 +573,8 @@ export interface SessionRecord {
   resultRef?: string;
   /** Exact result-ref commit installed into the host worktree. */
   installedCommit?: string;
+  /** Host commit intent persisted before git commit; recovers an interrupted transition. */
+  pendingCommit?: { resultCommit: string; parentCommit: string };
   /** Host commit created from this result; enables retry-safe commit responses. */
   committedCommit?: string;
   error?: string;

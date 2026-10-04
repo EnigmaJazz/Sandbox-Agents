@@ -246,6 +246,7 @@ describe("gitCommit cross-session applied result", () => {
     expect(result.committed).toBe(true);
     expect(result.alreadyCommitted).toBe(false);
     expect(records["worker-7"]?.state).toBe("RETAINED");
+    expect(records["worker-7"]?.installedCommit).toBe(installedCommit);
     expect(records["worker-7"]?.committedCommit).toBe(committedCommit);
 
     const retry = (await op(request({
@@ -254,6 +255,46 @@ describe("gitCommit cross-session applied result", () => {
       sandboxSessionID: "worker-7",
     }))) as { committed?: boolean; alreadyCommitted?: boolean };
     expect(retry.alreadyCommitted).toBe(true);
+    expect(calls.filter((call) => call[1] === "commit")).toHaveLength(1);
+  });
+
+  test("does not create a second commit when the first RETAINED transition is lost", async () => {
+    const installedCommit = "0123456789abcdef0123456789abcdef01234567";
+    const committedCommit = "abcdef0123456789abcdef0123456789abcdef01";
+    const baseCommit = "1111111111111111111111111111111111111111";
+    const calls: string[][] = [];
+    let commitRan = false;
+    const spawn: OpContext["git"]["spawn"] = async (argv) => {
+      calls.push(argv);
+      let stdout = "";
+      if (argv.includes("--name-only")) stdout = "a.ts\0";
+      else if (argv[1] === "rev-parse" && argv[3]?.includes("result/") && argv[3]?.endsWith("^{commit}")) stdout = `${installedCommit}\n`;
+      else if (argv[1] === "rev-parse" && argv[2] === "HEAD^") stdout = `${baseCommit}\n`;
+      else if (argv[1] === "commit") commitRan = true;
+      else if (argv[1] === "rev-parse" && argv[2] === "HEAD") stdout = `${commitRan ? committedCommit : baseCommit}\n`;
+      else if (argv[1] === "diff" && argv[2] === "--quiet") return { status: 0, stdout: "", stderr: "", timedOut: false };
+      return { status: 0, stdout, stderr: "", timedOut: false };
+    };
+    const records: Record<string, SessionRecord> = {
+      "session-1": orchestratorRecord,
+      "worker-7": appliedResultRecord("worker-7", { state: "RESULT_READY", installedCommit }),
+    };
+    const ctx = makeCtx(spawn, records);
+    const originalTransition = ctx.store.transition.bind(ctx.store);
+    let loseFirstTransition = true;
+    ctx.store.transition = (...args) => {
+      if (loseFirstTransition) {
+        loseFirstTransition = false;
+        throw new Error("simulated crash before RETAINED persistence");
+      }
+      return originalTransition(...args);
+    };
+    const op = buildGitCommitOp(ctx);
+    const req = request({ projectDir: projectRoot, message: "fix: delegated", sandboxSessionID: "worker-7" });
+    await expect(op(req)).rejects.toThrow("simulated crash");
+    const retry = (await op(req)) as { alreadyCommitted?: boolean; committedCommit?: string };
+    expect(retry.alreadyCommitted).toBe(true);
+    expect(retry.committedCommit).toBe(committedCommit);
     expect(calls.filter((call) => call[1] === "commit")).toHaveLength(1);
   });
 
