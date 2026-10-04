@@ -2397,7 +2397,8 @@ const RESULT_INSTALL_POLICY: ResultRefPolicy = {
 
 /**
  * Resolve a session's durable B→C result refs. Shared by the commit op
- * (`APPLIED` only) and the read op (any state with a durable result). The
+ * (an `APPLIED` result or an installed result whose recorded commit is present)
+ * and the read op (any state with a durable result). The
  * identifier is a session id (validated as a git ref component), never an
  * arbitrary commit/tree/branch/path: the broker derives the refs from its own
  * persisted record, requires the record to be in the sandbox result namespace
@@ -2413,7 +2414,11 @@ function resolveResultRefs(
   const { states, prefix, applied } = policy;
   if (sandboxSessionID === undefined) {
     const record = recordOr404(ctx.store, callerSessionID);
-    if (!states.includes(record.state) || !record.resultRef) {
+    const commitEligible =
+      applied &&
+      Boolean(record.installedCommit) &&
+      (record.state === "RESULT_READY" || record.state === "RETAINED");
+    if ((!states.includes(record.state) && !commitEligible) || !record.resultRef) {
       throw new StateError(
         applied
           ? `${prefix}: no applied B→C result for this session`
@@ -2439,7 +2444,9 @@ function resolveResultRefs(
   // anything that could traverse or name an outside ref before any lookup.
   assertRefComponent(sandboxSessionID);
   const record = recordOr404(ctx.store, sandboxSessionID);
-  if (!states.includes(record.state) || !record.resultRef) {
+  const commitEligible = applied && Boolean(record.installedCommit) &&
+    (record.state === "RESULT_READY" || record.state === "RETAINED");
+  if ((!states.includes(record.state) && !commitEligible) || !record.resultRef) {
     throw new StateError(
       applied
         ? `${prefix}: sandbox session ${sandboxSessionID} has no applied B→C result`
@@ -2463,9 +2470,9 @@ function resolveResultRefs(
 }
 
 /**
- * Resolve the applied B→C result to commit. The result is the caller's own
- * applied result unless `sandboxSessionID` names the (delegated) session whose
- * result should be committed instead.
+ * Resolve a commit-eligible B→C result. The result is the caller's own applied
+ * or recorded-installed result unless `sandboxSessionID` names the delegated
+ * session whose result should be committed instead.
  */
 function resolveCommitResult(
   ctx: OpContext,
@@ -2503,6 +2510,26 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
       projectID,
       payload.sandboxSessionID,
     );
+    const resultSessionID = (payload.sandboxSessionID ?? req.sessionID) as string;
+    const resultRecord = recordOr404(ctx.store, resultSessionID);
+    const resolvedResult = await runHostStep(
+      ctx,
+      buildResultCommitArgv(result),
+      projectRoot,
+      60_000,
+    );
+    const resultCommit = resolvedResult.stdout.trim().toLowerCase();
+    if (resolvedResult.status !== 0 || !/^[0-9a-f]{40}$/.test(resultCommit)) {
+      throw new StateError("cannot commit: result ref commit could not be resolved");
+    }
+    if (
+      resultRecord.installedCommit &&
+      resultRecord.installedCommit !== resultCommit
+    ) {
+      throw new StateError(
+        "cannot commit: installed result commit no longer matches the result ref",
+      );
+    }
     const changed = await changedPathsBetween(ctx, projectID, baseline, result);
     if (changed.length === 0) {
       throw new StateError("refusing to commit: the B→C result is empty");
@@ -2516,6 +2543,15 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
         `refusing to commit protected paths (S17): ${rejected.join(", ")}`,
       );
     }
+    if (resultRecord.committedCommit) {
+      return {
+        committed: false,
+        alreadyCommitted: true,
+        committedCommit: resultRecord.committedCommit,
+        paths: changed,
+        steps: [],
+      };
+    }
     const steps = buildGitCommitArgv({
       paths: changed,
       message: payload.message as string,
@@ -2528,7 +2564,22 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
         throw new MsbError(`git commit failed (${argv[1]}): ${step.stderr}`);
       }
     }
-    return { committed: true, paths: changed, steps: results };
+    const committedHead = await runHostStep(ctx, ["git", "rev-parse", "HEAD"], projectRoot);
+    const committedCommit = committedHead.stdout.trim().toLowerCase();
+    if (committedHead.status !== 0 || !/^[0-9a-f]{40}$/.test(committedCommit)) {
+      throw new StateError("git commit succeeded but its committed HEAD could not be recorded");
+    }
+    ctx.store.transition(resultSessionID, resultRecord.state, "RETAINED", {
+      installedCommit: resultCommit,
+      committedCommit,
+    });
+    return {
+      committed: true,
+      alreadyCommitted: false,
+      committedCommit,
+      paths: changed,
+      steps: results,
+    };
   };
 }
 
@@ -2680,6 +2731,21 @@ export function buildSandboxResultInstallOp(ctx: OpContext): OpHandler {
       payload.sandboxSessionID,
       RESULT_INSTALL_POLICY,
     );
+    const resultSessionID = (payload.sandboxSessionID ?? req.sessionID) as string;
+    const resultRecord = recordOr404(ctx.store, resultSessionID);
+    if (resultRecord.installedCommit !== undefined) {
+      if (resultRecord.installedCommit !== expectedResultCommit) {
+        throw new StateError(
+          "cannot install result: stored installed commit does not match the requested result commit",
+        );
+      }
+      return {
+        installed: true,
+        alreadyInstalled: true,
+        resultRef: result,
+        resultCommit: expectedResultCommit,
+      };
+    }
     const resolvedCommit = await runHostStep(
       ctx,
       buildResultCommitArgv(result),
@@ -2775,8 +2841,10 @@ export function buildSandboxResultInstallOp(ctx: OpContext): OpHandler {
         );
       }
     }
+    ctx.store.touch(resultSessionID, { installedCommit: expectedResultCommit });
     return {
       installed: true,
+      alreadyInstalled: false,
       resultRef: result,
       resultCommit,
       paths: changed,

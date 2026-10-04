@@ -82,7 +82,14 @@ function makeCtx(
   });
   return {
     config,
-    store: { get: (sessionID: string) => records[sessionID] },
+    store: {
+      get: (sessionID: string) => records[sessionID],
+      touch: (sessionID: string, patch: Partial<SessionRecord>) => {
+        const next = { ...records[sessionID]!, ...patch };
+        records[sessionID] = next;
+        return next;
+      },
+    },
     adapter: {},
     budget: {},
     resources: {},
@@ -293,20 +300,47 @@ describe("sandboxResultInstall — commit binding (preview == installed)", () =>
     expect(calls.some(isRm)).toBe(false);
   });
 
-  test("installs when expectedResultCommit matches the resolved result commit", async () => {
+  test("installs when expectedResultCommit matches and persists installedCommit", async () => {
     const { calls, spawn } = spawnStub([
       { match: isRevParse, result: ok({ stdout: `${COMMIT_7}\n` }) },
       { match: isNameOnly, result: ok({ stdout: "a.ts\u0000" }) },
       { match: isRaw, result: ok({ stdout: ":100644 100644 1111111 2222222 M\ta.ts\n" }) },
     ]);
-    const ctx = makeCtx(spawn, record7());
+    const records = record7();
+    const ctx = makeCtx(spawn, records);
     const result = (await buildSandboxResultInstallOp(ctx)(installRequest())) as {
       installed: boolean;
       resultCommit: string;
     };
     expect(result.installed).toBe(true);
     expect(result.resultCommit).toBe(COMMIT_7);
+    expect(records["worker-7"]?.installedCommit).toBe(COMMIT_7);
     expect(calls).toContainEqual(["git", "rev-parse", "--verify", `${RESULT_7}^{commit}`]);
+  });
+
+  test("returns alreadyInstalled without touching the worktree when commit matches", async () => {
+    const { calls, spawn } = spawnStub([]);
+    const ctx = makeCtx(spawn, {
+      "session-1": readableRecord("session-1", { state: "HOST_READ_ONLY", agent: ORCHESTRATOR }),
+      "worker-7": readableRecord("worker-7", { installedCommit: COMMIT_7 }),
+    });
+    const result = (await buildSandboxResultInstallOp(ctx)(installRequest())) as {
+      alreadyInstalled: boolean;
+    };
+    expect(result.alreadyInstalled).toBe(true);
+    expect(calls.some(isRestore)).toBe(false);
+    expect(calls.some(isRm)).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("refuses a second install request with a different stored installedCommit", async () => {
+    const { calls, spawn } = spawnStub([]);
+    const ctx = makeCtx(spawn, {
+      "session-1": readableRecord("session-1", { state: "HOST_READ_ONLY", agent: ORCHESTRATOR }),
+      "worker-7": readableRecord("worker-7", { installedCommit: OTHER_COMMIT }),
+    });
+    await expect(buildSandboxResultInstallOp(ctx)(installRequest())).rejects.toThrow(StateError);
+    expect(calls).toHaveLength(0);
   });
 
   test("refuses an install with no expectedResultCommit", async () => {
@@ -505,7 +539,14 @@ function makeLiveCtx(
   });
   return {
     config,
-    store: { get: (sessionID: string) => records[sessionID] },
+    store: {
+      get: (sessionID: string) => records[sessionID],
+      touch: (sessionID: string, patch: Partial<SessionRecord>) => {
+        const next = { ...records[sessionID]!, ...patch };
+        records[sessionID] = next;
+        return next;
+      },
+    },
     adapter: {},
     budget: {},
     resources: {},

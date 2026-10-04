@@ -434,7 +434,14 @@ describe("host git/GH handlers", () => {
     };
     return {
       config,
-      store: { get: () => record },
+      store: {
+        get: () => record,
+        transition: (_sessionID, from, to, patch = {}) => {
+          if (record.state !== from) throw new Error(`expected ${from}, got ${record.state}`);
+          Object.assign(record, patch, { state: to });
+          return record;
+        },
+      },
       sddRuntime: makeRuntime(),
       pool: { allocations: [] },
       hostRead: { has: () => false },
@@ -454,6 +461,12 @@ describe("host git/GH handlers", () => {
       calls.push(argv);
       for (const [pattern, result] of rules) {
         if (pattern.test(argv.join(" "))) return { ...result, timedOut: false };
+      }
+      if (argv.join(" ") === "git rev-parse HEAD") {
+        return { status: 0, stdout: "abcdef0123456789abcdef0123456789abcdef01\n", stderr: "", timedOut: false };
+      }
+      if (argv[1] === "rev-parse" && argv[2] === "--verify") {
+        return { status: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "", timedOut: false };
       }
       return { status: 0, stdout: "", stderr: "", timedOut: false };
     };

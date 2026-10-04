@@ -55,7 +55,26 @@ function makeCtx(
   });
   return {
     config,
-    store: { get: (sessionID: string) => records[sessionID] },
+    store: {
+      get: (sessionID: string) => records[sessionID],
+      touch: (sessionID: string, patch: Partial<SessionRecord>) => {
+        const next = { ...records[sessionID]!, ...patch };
+        records[sessionID] = next;
+        return next;
+      },
+      transition: (
+        sessionID: string,
+        from: SessionRecord["state"],
+        to: SessionRecord["state"],
+        patch: Partial<SessionRecord> = {},
+      ) => {
+        const current = records[sessionID]!;
+        if (current.state !== from) throw new Error(`expected ${from}, got ${current.state}`);
+        const next = { ...current, ...patch, state: to };
+        records[sessionID] = next;
+        return next;
+      },
+    },
     adapter: {},
     budget: {},
     resources: {},
@@ -74,6 +93,12 @@ function spawnStub(
     calls.push(argv);
     for (const [pattern, result] of rules) {
       if (pattern.test(argv.join(" "))) return { ...result, timedOut: false };
+    }
+    if (argv.join(" ") === "git rev-parse HEAD") {
+      return { status: 0, stdout: "abcdef0123456789abcdef0123456789abcdef01\n", stderr: "", timedOut: false };
+    }
+    if (argv[1] === "rev-parse" && argv[2] === "--verify") {
+      return { status: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "", timedOut: false };
     }
     return { status: 0, stdout: "", stderr: "", timedOut: false };
   };
@@ -135,7 +160,7 @@ describe("gitCommit cross-session applied result", () => {
       buildGitCommitOp(ctx)(
         request({ projectDir: projectRoot, message: "m", sandboxSessionID: "worker-7" }),
       ),
-    ).rejects.toThrow(StateError);
+    ).rejects.toThrow("cannot commit: sandbox session worker-7 has no applied B→C result");
     expect(calls).toHaveLength(0);
   });
 
@@ -194,6 +219,63 @@ describe("gitCommit cross-session applied result", () => {
       ),
     ).rejects.toThrow(StateError);
     expect(calls.some((c) => c[1] === "commit")).toBe(false);
+  });
+
+  test("commits an installed RESULT_READY result and returns alreadyCommitted on retry", async () => {
+    const installedCommit = "0123456789abcdef0123456789abcdef01234567";
+    const committedCommit = "abcdef0123456789abcdef0123456789abcdef01";
+    const { calls, spawn } = spawnStub([
+      [NAME_ONLY, { status: 0, stdout: "a.ts\u0000", stderr: "" }],
+      [/rev-parse --verify.*result/, { status: 0, stdout: `${installedCommit}\n`, stderr: "" }],
+      [/rev-parse HEAD/, { status: 0, stdout: `${committedCommit}\n`, stderr: "" }],
+    ]);
+    const records: Record<string, SessionRecord> = {
+      "session-1": orchestratorRecord,
+      "worker-7": appliedResultRecord("worker-7", {
+        state: "RESULT_READY",
+        installedCommit,
+      }),
+    };
+    const ctx = makeCtx(spawn, records);
+    const op = buildGitCommitOp(ctx);
+    const result = (await op(request({
+      projectDir: projectRoot,
+      message: "fix: delegated",
+      sandboxSessionID: "worker-7",
+    }))) as { committed?: boolean; alreadyCommitted?: boolean };
+    expect(result.committed).toBe(true);
+    expect(result.alreadyCommitted).toBe(false);
+    expect(records["worker-7"]?.state).toBe("RETAINED");
+    expect(records["worker-7"]?.committedCommit).toBe(committedCommit);
+
+    const retry = (await op(request({
+      projectDir: projectRoot,
+      message: "fix: delegated",
+      sandboxSessionID: "worker-7",
+    }))) as { committed?: boolean; alreadyCommitted?: boolean };
+    expect(retry.alreadyCommitted).toBe(true);
+    expect(calls.filter((call) => call[1] === "commit")).toHaveLength(1);
+  });
+
+  test("refuses an installed result whose result ref no longer matches installedCommit", async () => {
+    const { calls, spawn } = spawnStub([
+      [/rev-parse --verify.*result/, { status: 0, stdout: "ffffffffffffffffffffffffffffffffffffffff\n", stderr: "" }],
+    ]);
+    const ctx = makeCtx(spawn, {
+      "session-1": orchestratorRecord,
+      "worker-7": appliedResultRecord("worker-7", {
+        state: "RESULT_READY",
+        installedCommit: "0123456789abcdef0123456789abcdef01234567",
+      }),
+    });
+    await expect(
+      buildGitCommitOp(ctx)(request({
+        projectDir: projectRoot,
+        message: "m",
+        sandboxSessionID: "worker-7",
+      })),
+    ).rejects.toThrow(StateError);
+    expect(calls.some((call) => call[1] === "commit")).toBe(false);
   });
 
   test("refuses an empty resolved result", async () => {

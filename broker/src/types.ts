@@ -571,6 +571,10 @@ export interface SessionRecord {
   agent?: string;
   baselineRef?: string;
   resultRef?: string;
+  /** Exact result-ref commit installed into the host worktree. */
+  installedCommit?: string;
+  /** Host commit created from this result; enables retry-safe commit responses. */
+  committedCommit?: string;
   error?: string;
   /** Set by the idle reaper when it released this session's worker. */
   reapedAt?: string;

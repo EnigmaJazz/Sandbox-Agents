@@ -190,3 +190,9 @@ The security core (A1, A3, A4) is complete. Remaining: A2 (snapshot pinning and 
 - **Correction dispatch** — step `post-code`; this bounded correction implements the seven items above and updates A2 item 3's exact-size contract. Advisory evidence, not approval.
 - **TDD evidence:** RED observed `712 pass`, `3 fail`, `Ran 715 tests across 49 files`; failures exposed the exact-size boundary, aggregate deadline, and malformed-manifest parse. GREEN observed `715 pass`, `0 fail`, `3254 expect() calls`, `Ran 715 tests across 49 files. [3.09s]`.
 - **Build:** `bun build broker/src/main.ts --target=bun --outfile /tmp/a2c-adv.js` bundled 25 modules; output `a2c-adv.js 0.29 MB (entry point)`.
+
+### Install-vs-commit pre-code advice (advisory evidence)
+
+- **Dispatch:** step `pre-code`; advisor `advisor-integration-pre`; model `opencode-go/deepseek-v4.1-flash`; approved lineage `review-0b6b4d6bbfad13d3` supplies five independent Tier 4 follow-ups.
+- **Findings:** the install/commit gap is caused by accepting only `APPLIED` at commit while install leaves the record unchanged. The bundle-GC caveat is incorrect: successful preparation removes it after durable-ref publication, and install retry uses derived refs with `git restore`. Preserve the distinct `APPLIED` semantics because approved apply enforces full S16 divergence and protected-path plus symlink/submodule rejection; install checks target-path divergence, intentionally exposes S17 to approval, and discard accepts only `RESULT_READY`/`RETAINED`. The five advisories concern soft/possibly too-short aggregate deadlines, wall-clock rollback, vacuous deadline-cleanup coverage, and terminal malformed-manifest refusal; they are separately queued in `docs/TODO.md` Tier 4.
+- **Evidence status:** advisory evidence only, not approval.
