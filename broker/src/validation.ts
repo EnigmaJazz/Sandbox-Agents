@@ -1000,7 +1000,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
     "untrackedScope", "expectedUntrackedInventory", "intendedUntracked", "focus", "policy",
   ],
   gitCommit: ["projectDir", "message", "sandboxSessionID"],
-  gitClearCommitIntent: [],
+  gitClearCommitIntent: ["projectDir", "sandboxSessionID"],
   gitPush: ["projectDir", "remote", "setUpstream", "allowProtectedBranch"],
   ghIssueCreate: ["projectDir", "repo", "title", "body"],
   sandboxResult: ["projectDir", "sandboxSessionID", "compareSandboxSessionID"],

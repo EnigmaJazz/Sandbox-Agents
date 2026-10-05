@@ -2934,12 +2934,15 @@ function assertResultDeleteTargetsContained(projectRoot: string, paths: readonly
 /** Clear one session's pending host-commit intent after explicit approval. */
 export function buildGitClearCommitIntentOp(ctx: OpContext): OpHandler {
   return async (req) => {
-    payloadOf(req);
+    const payload = payloadOf(req) as { projectDir?: unknown; sandboxSessionID?: unknown };
     authorizeHostDispatch(ctx, "gitClearCommitIntent", req.sessionID, req.agent);
-    const record = recordOr404(ctx.store, req.sessionID);
+    const { projectID } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    resolveCommitResult(ctx, req.sessionID, projectID, payload.sandboxSessionID);
+    const sessionID = (payload.sandboxSessionID ?? req.sessionID) as string;
+    const record = recordOr404(ctx.store, sessionID);
     const intent = record.pendingCommit;
     if (!intent) throw new StateError("cannot clear commit intent: session has no pending commit intent");
-    ctx.store.touch(req.sessionID, { pendingCommit: undefined });
+    ctx.store.touch(sessionID, { pendingCommit: undefined });
     return { cleared: true, resultCommit: intent.resultCommit, parentCommit: intent.parentCommit };
   };
 }

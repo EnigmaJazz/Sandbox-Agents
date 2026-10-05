@@ -109,34 +109,38 @@ function spawnStub(
 const NAME_ONLY = /diff --name-only/;
 
 describe("gitClearCommitIntent", () => {
-  test("clears and reports only the pending intent fields", async () => {
-    const intent = {
-      resultCommit: "0123456789abcdef0123456789abcdef01234567",
-      parentCommit: "abcdef0123456789abcdef0123456789abcdef01",
-    };
-    const original = appliedResultRecord("session-1", {
-      agent: ORCHESTRATOR,
+  test("clears a cross-session wedge without changing commit markers or state", async () => {
+    const intent = { resultCommit: "0123456789abcdef0123456789abcdef01234567", parentCommit: "abcdef0123456789abcdef0123456789abcdef01" };
+    const original = appliedResultRecord("worker-7", {
       pendingCommit: intent,
-      installedCommit: "1111111111111111111111111111111111111111",
-      committedCommit: "2222222222222222222222222222222222222222",
+      installedCommit: "0123456789abcdef0123456789abcdef01234567",
+      committedCommit: undefined,
     });
-    const records = { "session-1": original };
-    const ctx = makeCtx(async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }), records);
+    const records = { "session-1": orchestratorRecord, "worker-7": original };
+    const { spawn } = spawnStub([[NAME_ONLY, { status: 0, stdout: "a.ts\u0000", stderr: "" }]]);
+    const ctx = makeCtx(spawn, records);
     const result = await buildGitClearCommitIntentOp(ctx)({
-      ...request({}), operation: "gitClearCommitIntent",
+      ...request({ projectDir: projectRoot, sandboxSessionID: "worker-7" }), operation: "gitClearCommitIntent",
     }) as { cleared: boolean; resultCommit: string; parentCommit: string };
 
     expect(result).toEqual({ cleared: true, ...intent });
-    expect(records["session-1"]).toEqual({ ...original, pendingCommit: undefined });
+    expect(records["session-1"]).toEqual(orchestratorRecord);
+    expect(records["worker-7"]).toEqual({ ...original, pendingCommit: undefined });
+    await expect(buildGitCommitOp(ctx)(request({ projectDir: projectRoot, message: "fix: recover", sandboxSessionID: "worker-7" })))
+      .resolves.toMatchObject({ committed: true });
   });
 
   test("refuses when the session has no pending intent", async () => {
-    const ctx = makeCtx(async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }), {
-      "session-1": appliedResultRecord("session-1", { agent: ORCHESTRATOR }),
-    });
+    const ctx = makeCtx(async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }), { "session-1": orchestratorRecord, "worker-7": appliedResultRecord("worker-7") });
     await expect(buildGitClearCommitIntentOp(ctx)({
-      ...request({}), operation: "gitClearCommitIntent",
+      ...request({ projectDir: projectRoot, sandboxSessionID: "worker-7" }), operation: "gitClearCommitIntent",
     })).rejects.toThrow("no pending commit intent");
+  });
+
+  test("refuses a target result bound to another project", async () => {
+    const ctx = makeCtx(async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }), { "session-1": orchestratorRecord, "worker-7": appliedResultRecord("worker-7", { projectID: "other", pendingCommit: { resultCommit: "r", parentCommit: "p" } }) });
+    await expect(buildGitClearCommitIntentOp(ctx)({ ...request({ projectDir: projectRoot, sandboxSessionID: "worker-7" }), operation: "gitClearCommitIntent" })).rejects.toThrow("not bound to this project");
+    expect(ctx.store.get("worker-7")?.pendingCommit).toBeDefined();
   });
 
   test("rejects caller-supplied path or state fields", async () => {
@@ -161,7 +165,7 @@ describe("gitClearCommitIntent", () => {
       parentCommit: "abcdef0123456789abcdef0123456789abcdef01",
     };
     expect(OPERATIONS).toContain("gitClearCommitIntent");
-    expect(ALLOWED_PAYLOAD_KEYS.gitClearCommitIntent).toEqual([]);
+    expect(ALLOWED_PAYLOAD_KEYS.gitClearCommitIntent).toEqual(["projectDir", "sandboxSessionID"]);
     expect(HOST_MUTATION_OPERATIONS).toContain("gitClearCommitIntent");
     expect(ADVISOR_ALLOWED_OPERATIONS.has("gitClearCommitIntent")).toBe(false);
     expect(new HostToolPolicy([ORCHESTRATOR]).decide("gitClearCommitIntent", "worker-agent").allowed).toBe(false);
@@ -170,7 +174,7 @@ describe("gitClearCommitIntent", () => {
       "session-1": appliedResultRecord("session-1", { agent: "worker-agent", pendingCommit: intent }),
     });
     await expect(buildGitClearCommitIntentOp(ctx)({
-      ...request({}), operation: "gitClearCommitIntent",
+      ...request({ projectDir: projectRoot }), operation: "gitClearCommitIntent",
     })).rejects.toThrow("orchestrator-only");
     expect(ctx.store.get("session-1")?.pendingCommit).toEqual(intent);
   });
@@ -190,7 +194,7 @@ describe("gitClearCommitIntent", () => {
     });
     await expect(buildGitCommitOp(ctx)(request({ projectDir: projectRoot, message: "fix: recover" })))
       .rejects.toThrow("pending commit state is ambiguous");
-    await buildGitClearCommitIntentOp(ctx)({ ...request({}), operation: "gitClearCommitIntent" });
+    await buildGitClearCommitIntentOp(ctx)({ ...request({ projectDir: projectRoot }), operation: "gitClearCommitIntent" });
     const result = await buildGitCommitOp(ctx)(request({ projectDir: projectRoot, message: "fix: recover" }));
     expect(result).toMatchObject({ committed: true, alreadyCommitted: false });
     expect(calls.some((argv) => argv[1] === "commit")).toBe(true);
