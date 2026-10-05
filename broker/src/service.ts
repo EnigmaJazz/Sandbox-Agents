@@ -2931,6 +2931,19 @@ export function buildSandboxResultInstallOp(ctx: OpContext): OpHandler {
 }
 
 function assertResultDeleteTargetsContained(projectRoot: string, paths: readonly string[]): void { for (const path of paths) { const target = resolve(projectRoot, path); let parentRealPath: string; try { parentRealPath = realpathSync(dirname(target)); } catch { throw new StateError(`cannot install result: result-delete-parent-unavailable: cannot resolve parent for ${path}`); } if (!isWithin(projectRoot, parentRealPath)) throw new StateError(`cannot install result: result-delete-parent-escape: resolved parent for ${path} is outside the project`); try { if (!lstatSync(target).isFile()) throw new StateError(`cannot install result: result-delete-not-regular-file: ${path}`); } catch (error) { if (error instanceof StateError) throw error; if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new StateError(`cannot install result: result-delete-target-unavailable: cannot inspect ${path}`); } } }
+/** Clear one session's pending host-commit intent after explicit approval. */
+export function buildGitClearCommitIntentOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    payloadOf(req);
+    authorizeHostDispatch(ctx, "gitClearCommitIntent", req.sessionID, req.agent);
+    const record = recordOr404(ctx.store, req.sessionID);
+    const intent = record.pendingCommit;
+    if (!intent) throw new StateError("cannot clear commit intent: session has no pending commit intent");
+    ctx.store.touch(req.sessionID, { pendingCommit: undefined });
+    return { cleared: true, resultCommit: intent.resultCommit, parentCommit: intent.parentCommit };
+  };
+}
+
 /**
  * Guarded push: the broker resolves branch/upstream/ahead itself and refuses
  * every unsafe condition BEFORE spawning the push.

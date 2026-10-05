@@ -757,6 +757,28 @@ export default function sandboxToolsPlugin() {
         },
       }),
 
+      host_git_clear_commit_intent: tool({
+        description:
+          "Clear only a pending host-commit intent for the current session (orchestrator-only; requires human approval). " +
+          "Refuses when no intent exists, and reports the result commit and recorded parent that were cleared. " +
+          "Does not alter the session state, installed/committed markers, working tree, index, or refs. Returns JSON.",
+        args: {},
+        execute: async (_args, ctx) => {
+          await ctx.ask({
+            permission: "host_git_clear_commit_intent",
+            patterns: ["*"],
+            always: [],
+            metadata: {
+              summary: `Clear the pending host-commit intent for session ${ctx.sessionID}`,
+              sessionID: ctx.sessionID,
+            },
+          });
+          const c = await client();
+          const result = await c.request("gitClearCommitIntent", ctx.sessionID, {}, ctx.agent);
+          return JSON.stringify(result, null, 2);
+        },
+      }),
+
       host_git_push: tool({
         description:
           "Push the current branch with the broker-resolved remote/branch (orchestrator-only " +

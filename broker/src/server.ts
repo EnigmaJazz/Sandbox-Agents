@@ -81,6 +81,7 @@ import {
   buildGrepOp,
   buildGhIssueCreateOp,
   buildGitCommitOp,
+  buildGitClearCommitIntentOp,
   buildGitPushOp,
   buildHostOp,
   buildKeepResultOp,
@@ -609,6 +610,8 @@ export class BrokerServer {
         return buildReviewLensContextOp(this.ctx)(req);
       case "gitCommit":
         return buildGitCommitOp(this.ctx)(req);
+      case "gitClearCommitIntent":
+        return buildGitClearCommitIntentOp(this.ctx)(req);
       case "gitPush":
         return buildGitPushOp(this.ctx)(req);
       case "ghIssueCreate":

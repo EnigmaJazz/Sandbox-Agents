@@ -80,6 +80,7 @@ export type Operation =
   | "reviewRecover"
   // Host git/GH mutations: fixed argv, orchestrator-only (§31).
   | "gitCommit"
+  | "gitClearCommitIntent"
   | "gitPush"
   | "ghIssueCreate"
   // §8 structured read-only host API (never mutation)
@@ -150,6 +151,7 @@ export const OPERATIONS: readonly Operation[] = [
   "reviewCaptureValidation",
   "reviewValidate",
   "reviewRecover",
+  "gitClearCommitIntent",
   "hostSystemSummary",
   "hostMemory",
   "hostDiskUsage",

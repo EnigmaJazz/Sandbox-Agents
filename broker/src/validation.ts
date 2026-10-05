@@ -823,6 +823,7 @@ export const HOST_READ_OPERATIONS: readonly string[] = [
 export const HOST_MUTATION_OPERATIONS: readonly string[] = [
   "sddArchiveCompose",
   "gitCommit",
+  "gitClearCommitIntent",
   "gitPush",
   "ghIssueCreate",
   "registerProject",
@@ -999,6 +1000,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
     "untrackedScope", "expectedUntrackedInventory", "intendedUntracked", "focus", "policy",
   ],
   gitCommit: ["projectDir", "message", "sandboxSessionID"],
+  gitClearCommitIntent: [],
   gitPush: ["projectDir", "remote", "setUpstream", "allowProtectedBranch"],
   ghIssueCreate: ["projectDir", "repo", "title", "body"],
   sandboxResult: ["projectDir", "sandboxSessionID", "compareSandboxSessionID"],

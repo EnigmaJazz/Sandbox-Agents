@@ -206,7 +206,7 @@ collapses that map to a single `deny`.
 ### ASK (mutations)
 
 - `sandbox_apply` (`sandbox-permissions.jsonc:62`)
-- Host mutations: `host_git_commit`, `host_git_push`, `host_gh_issue_create`,
+- Host mutations: `host_git_commit`, `host_git_clear_commit_intent`, `host_git_push`, `host_gh_issue_create`,
   `host_plan_append`, `host_register_project`, `host_review_start`,
   `host_review_capture_result`, `host_review_capture_unachievable`,
   `host_review_acknowledge_approved`, `host_review_capture_correction_plan`,
@@ -276,6 +276,7 @@ independently gates their operations.
 | Tool | Read-only / mutation | Fragment permission | Agent(s) permitted per code | Evidence (file:line) |
 |---|---|---|---|---|
 | `host_git_commit` | mutation | ask | `gentle-orchestrator` only (broker `readOnlyAgents`) | plugin `sandbox-tools.ts:931`; op `gitCommit` `service.ts:1826`; mutation list `validation.ts:767`; fragment `sandbox-permissions.jsonc:90` |
+| `host_git_clear_commit_intent` | mutation | ask | `gentle-orchestrator` only (broker `readOnlyAgents`) | plugin `sandbox-tools.ts`; op `gitClearCommitIntent` `service.ts`; mutation list `validation.ts`; permission fragment entry required |
 | `host_git_push` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:949`; op `gitPush` `service.ts:1874`; `validation.ts:768`; fragment `sandbox-permissions.jsonc:91` |
 
 ### 5b. host review
@@ -806,6 +807,7 @@ says "Do not weaken"; the fragment's own `{ "allow": [], "deny": [ … ] }` shap
 "host_sdd_attempt_grant": "deny",
 "host_sdd_attempt_settle": "deny",
 "host_git_commit": "ask",
+"host_git_clear_commit_intent": "ask",
 "host_git_push": "ask",
 "host_gh_issue_create": "ask",
 "host_plan_append": "ask",

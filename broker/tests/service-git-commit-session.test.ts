@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config.ts";
-import { buildGitCommitOp, type OpContext } from "../src/service.ts";
+import { buildGitClearCommitIntentOp, buildGitCommitOp, type OpContext } from "../src/service.ts";
+import { ADVISOR_ALLOWED_OPERATIONS } from "../src/advisor-socket.ts";
 import { StateError } from "../src/state.ts";
-import { ValidationError } from "../src/validation.ts";
-import type { BrokerRequestEnvelope, SessionRecord } from "../src/types.ts";
+import { ALLOWED_PAYLOAD_KEYS, HOST_MUTATION_OPERATIONS, HostToolPolicy, ValidationError } from "../src/validation.ts";
+import { OPERATIONS, type BrokerRequestEnvelope, type SessionRecord } from "../src/types.ts";
 
 const ORCHESTRATOR = "gentle-orchestrator";
 const projectRoot = process.cwd();
@@ -106,6 +107,95 @@ function spawnStub(
 }
 
 const NAME_ONLY = /diff --name-only/;
+
+describe("gitClearCommitIntent", () => {
+  test("clears and reports only the pending intent fields", async () => {
+    const intent = {
+      resultCommit: "0123456789abcdef0123456789abcdef01234567",
+      parentCommit: "abcdef0123456789abcdef0123456789abcdef01",
+    };
+    const original = appliedResultRecord("session-1", {
+      agent: ORCHESTRATOR,
+      pendingCommit: intent,
+      installedCommit: "1111111111111111111111111111111111111111",
+      committedCommit: "2222222222222222222222222222222222222222",
+    });
+    const records = { "session-1": original };
+    const ctx = makeCtx(async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }), records);
+    const result = await buildGitClearCommitIntentOp(ctx)({
+      ...request({}), operation: "gitClearCommitIntent",
+    }) as { cleared: boolean; resultCommit: string; parentCommit: string };
+
+    expect(result).toEqual({ cleared: true, ...intent });
+    expect(records["session-1"]).toEqual({ ...original, pendingCommit: undefined });
+  });
+
+  test("refuses when the session has no pending intent", async () => {
+    const ctx = makeCtx(async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }), {
+      "session-1": appliedResultRecord("session-1", { agent: ORCHESTRATOR }),
+    });
+    await expect(buildGitClearCommitIntentOp(ctx)({
+      ...request({}), operation: "gitClearCommitIntent",
+    })).rejects.toThrow("no pending commit intent");
+  });
+
+  test("rejects caller-supplied path or state fields", async () => {
+    const ctx = makeCtx(async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }), {
+      "session-1": appliedResultRecord("session-1", {
+        agent: ORCHESTRATOR,
+        pendingCommit: {
+          resultCommit: "0123456789abcdef0123456789abcdef01234567",
+          parentCommit: "abcdef0123456789abcdef0123456789abcdef01",
+        },
+      }),
+    });
+    await expect(buildGitClearCommitIntentOp(ctx)({
+      ...request({ path: "/tmp/state.json" }), operation: "gitClearCommitIntent",
+    })).rejects.toThrow("unexpected field 'path'");
+    expect(ctx.store.get("session-1")?.pendingCommit).toBeDefined();
+  });
+
+  test("authorizes only orchestrators and classifies the operation as a mutation", async () => {
+    const intent = {
+      resultCommit: "0123456789abcdef0123456789abcdef01234567",
+      parentCommit: "abcdef0123456789abcdef0123456789abcdef01",
+    };
+    expect(OPERATIONS).toContain("gitClearCommitIntent");
+    expect(ALLOWED_PAYLOAD_KEYS.gitClearCommitIntent).toEqual([]);
+    expect(HOST_MUTATION_OPERATIONS).toContain("gitClearCommitIntent");
+    expect(ADVISOR_ALLOWED_OPERATIONS.has("gitClearCommitIntent")).toBe(false);
+    expect(new HostToolPolicy([ORCHESTRATOR]).decide("gitClearCommitIntent", "worker-agent").allowed).toBe(false);
+    expect(new HostToolPolicy([ORCHESTRATOR]).decide("gitClearCommitIntent", ORCHESTRATOR).allowed).toBe(true);
+    const ctx = makeCtx(async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }), {
+      "session-1": appliedResultRecord("session-1", { agent: "worker-agent", pendingCommit: intent }),
+    });
+    await expect(buildGitClearCommitIntentOp(ctx)({
+      ...request({}), operation: "gitClearCommitIntent",
+    })).rejects.toThrow("orchestrator-only");
+    expect(ctx.store.get("session-1")?.pendingCommit).toEqual(intent);
+  });
+
+  test("clearing an ambiguous intent lets the next commit attempt proceed", async () => {
+    const intent = {
+      resultCommit: "0123456789abcdef0123456789abcdef01234567",
+      parentCommit: "abcdef0123456789abcdef0123456789abcdef01",
+    };
+    const { calls, spawn } = spawnStub([
+      [NAME_ONLY, { status: 0, stdout: "a.ts\u0000", stderr: "" }],
+      [/git rev-parse HEAD\^$/, { status: 0, stdout: "3333333333333333333333333333333333333333\n", stderr: "" }],
+      [/git rev-parse HEAD$/, { status: 0, stdout: "4444444444444444444444444444444444444444\n", stderr: "" }],
+    ]);
+    const ctx = makeCtx(spawn, {
+      "session-1": appliedResultRecord("session-1", { agent: ORCHESTRATOR, pendingCommit: intent }),
+    });
+    await expect(buildGitCommitOp(ctx)(request({ projectDir: projectRoot, message: "fix: recover" })))
+      .rejects.toThrow("pending commit state is ambiguous");
+    await buildGitClearCommitIntentOp(ctx)({ ...request({}), operation: "gitClearCommitIntent" });
+    const result = await buildGitCommitOp(ctx)(request({ projectDir: projectRoot, message: "fix: recover" }));
+    expect(result).toMatchObject({ committed: true, alreadyCommitted: false });
+    expect(calls.some((argv) => argv[1] === "commit")).toBe(true);
+  });
+});
 
 describe("gitCommit cross-session applied result", () => {
   test("commits exactly the explicit sandboxSessionID's applied result paths", async () => {
