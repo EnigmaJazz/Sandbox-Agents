@@ -240,7 +240,13 @@ export const DEFAULT_PROTECTED_SECURITY_FILES: string[] = [
 ];
 
 /** Orchestrator read-only agents (orchestrator-readonly R2). */
-export const DEFAULT_READ_ONLY_AGENTS: string[] = ["gentle-orchestrator"];
+export const DEFAULT_READ_ONLY_AGENTS: string[] = [
+  "gentle-orchestrator",
+  "pm-odd",
+  "pm-systematic",
+  "pm-sdd",
+  "pm-probe",
+];
 
 /** Role-model defaults per capability-model §6 (model-policy independence). */
 export const DEFAULT_ROLE_MODELS: RoleModelsConfig = {

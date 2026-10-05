@@ -35,6 +35,9 @@ import {
 
 const ORCHESTRATOR = "gentle-orchestrator";
 const ORCHESTRATOR_ALT = "gentle-orchestrator-alt";
+const PM_AGENTS = ["pm-odd", "pm-systematic", "pm-sdd"] as const;
+const PROBE_AGENT = "pm-probe";
+const HOST_IDENTITIES = [ORCHESTRATOR, ...PM_AGENTS, PROBE_AGENT] as const;
 
 function freshStore(): { store: SessionStore; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), "session-binding-"));
@@ -129,6 +132,122 @@ describe("host-authoritative session→agent binding", () => {
     expect(pluginSource).toContain("BIND_SESSION_AGENT_OPERATION");
     expect(pluginSource).not.toContain("host_bind_session_agent");
     expect(pluginSource).not.toContain("sandbox_bind_session_agent");
+  });
+});
+
+describe("PM host identity policy", () => {
+  test("broker and plugin default identity lists stay identical", () => {
+    const pluginSource = readFileSync(
+      new URL("../../opencode/plugins/sandbox-tools.ts", import.meta.url),
+      "utf8",
+    );
+    const pluginList = pluginSource.match(/const READ_ONLY_AGENTS: readonly string\[\] = (\[[^\]]*\])/s)?.[1]
+      ?.match(/"([^"]+)"/g)
+      ?.map((entry) => entry.slice(1, -1));
+    expect(pluginList).toEqual(HOST_IDENTITIES);
+    expect(defaultConfig().readOnlyAgents).toEqual(HOST_IDENTITIES);
+  });
+
+  test.each(PM_AGENTS)("%s receives PM mutations but not registerProject", (agent) => {
+    const { store, dir } = freshStore();
+    try {
+      const ctx = bindingCtx(store, [...HOST_IDENTITIES]);
+      bindSessionAgent(ctx, "pm-session", { agent });
+      expect(authorizeHostDispatch(ctx, "gitCommit", "pm-session")).toBe("mutation");
+      expect(authorizeHostDispatch(ctx, "reviewStart", "pm-session")).toBe("mutation");
+      expect(() => authorizeHostDispatch(ctx, "registerProject", "pm-session")).toThrow(PolicyError);
+      expect(authorizeHostDispatch(ctx, "reviewStatus", "pm-session")).toBe("read");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("pm-probe receives only reviewStart and gitCommit mutations", () => {
+    const { store, dir } = freshStore();
+    try {
+      const ctx = bindingCtx(store, [...HOST_IDENTITIES]);
+      bindSessionAgent(ctx, "probe-session", { agent: PROBE_AGENT });
+      for (const operation of ["reviewStart", "gitCommit"]) {
+        expect(authorizeHostDispatch(ctx, operation, "probe-session")).toBe("mutation");
+      }
+      for (const operation of HOST_MUTATION_OPERATIONS.filter((name) => !["reviewStart", "gitCommit"].includes(name))) {
+        expect(() => authorizeHostDispatch(ctx, operation, "probe-session")).toThrow(PolicyError);
+      }
+      expect(authorizeHostDispatch(ctx, "reviewStatus", "probe-session")).toBe("read");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test.each(HOST_IDENTITIES)("%s cannot enter a worker and cannot authorize an unbound session", async (agent) => {
+    const { store, dir } = freshStore();
+    try {
+      const ctx = bindingCtx(store, [...HOST_IDENTITIES]);
+      const ensureCtx = { config: ctx.config, store } as unknown as OpContext;
+      await expect(
+        buildEnsureWorkerOp(ensureCtx)({
+          version: 1,
+          id: `ensure-${agent}`,
+          operation: "ensureWorker",
+          sessionID: `unbound-${agent}`,
+          agent,
+          payload: { projectDir: dir },
+        }),
+      ).rejects.toThrow(PolicyError);
+      expect(store.get(`unbound-${agent}`)).toBeUndefined();
+      expect(() => authorizeHostDispatch(ctx, "gitCommit", `unbound-${agent}`, agent)).toThrow(PolicyError);
+      expect(authorizeHostDispatch(ctx, "reviewStatus", `unbound-${agent}`, agent)).toBe("read");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test.each(HOST_IDENTITIES)("%s binding is first-writer-wins", (agent) => {
+    const { store, dir } = freshStore();
+    try {
+      const ctx = bindingCtx(store, [...HOST_IDENTITIES]);
+      bindSessionAgent(ctx, `first-${agent}`, { agent });
+      const replacement = agent === ORCHESTRATOR ? "pm-odd" : ORCHESTRATOR;
+      expect(() => bindSessionAgent(ctx, `first-${agent}`, { agent: replacement })).toThrow(PolicyError);
+      expect(store.get(`first-${agent}`)?.agent).toBe(agent);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("sandbox plugin guards every mutation and read surface with the identity list", () => {
+    const pluginSource = readFileSync(
+      new URL("../../opencode/plugins/sandbox-tools.ts", import.meta.url),
+      "utf8",
+    );
+    for (const tool of ["sandbox_read", "sandbox_list", "sandbox_grep", "sandbox_write", "sandbox_edit", "sandbox_apply_patch", "sandbox_bash", "sandbox_diff", "sandbox_finish", "sandbox_apply", "sandbox_copy_out", "sandbox_copy_in", "sandbox_discard"]) {
+      expect(pluginSource).toContain(`assertNotOrchestrator(ctx.agent, "${tool}")`);
+    }
+    expect(pluginSource).toContain("READ_ONLY_AGENTS.includes(agent)");
+  });
+
+  test.each(HOST_IDENTITIES)("%s host binding comes only from allowed chat.params fields", (agent) => {
+    expect(hostSessionBinding({ sessionID: `session-${agent}`, agent }, [agent])).toEqual({
+      sessionID: `session-${agent}`,
+      agent,
+    });
+    expect(hostSessionBinding({ sessionID: `session-${agent}`, agent }, [])).toBeNull();
+    expect(hostSessionBinding({ sessionID: `session-${agent}`, agent: "request-envelope" }, [agent])).toBeNull();
+  });
+
+  test("a worker-lifecycle session can never acquire a privileged binding", () => {
+    const { store, dir } = freshStore();
+    try {
+      const ctx = bindingCtx(store, [...HOST_IDENTITIES]);
+      store.touch("unnamed-active", { state: "SANDBOX_ACTIVE", workerName: "worker-1" });
+      expect(() => bindSessionAgent(ctx, "unnamed-active", { agent: "pm-odd" })).toThrow(PolicyError);
+      store.touch("terminal-worker", { state: "REJECTED", workerLifecycleEntered: true });
+      expect(() => bindSessionAgent(ctx, "terminal-worker", { agent: "pm-sdd" })).toThrow(PolicyError);
+      store.touch("named-worker", { state: "SANDBOX_ACTIVE", agent: "general", workerName: "worker-2" });
+      expect(() => bindSessionAgent(ctx, "named-worker", { agent: "pm-systematic" })).toThrow(PolicyError);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

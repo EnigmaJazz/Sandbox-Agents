@@ -570,6 +570,8 @@ export interface SessionRecord {
   projectID?: string;
   workerName?: string;
   workerState?: WorkerState;
+  /** Durable evidence that this session entered the worker lifecycle, including after worker teardown. */
+  workerLifecycleEntered?: boolean;
   agent?: string;
   baselineRef?: string;
   resultRef?: string;

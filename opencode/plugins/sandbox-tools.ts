@@ -61,7 +61,13 @@ import {
 import { applyTargetedEdit } from "./lib/sandbox-edit-core.ts";
 import { buildLegacySddTools, legacySddToolsEnabled } from "./lib/legacy-sdd-tools.ts";
 
-const READ_ONLY_AGENTS: readonly string[] = ["gentle-orchestrator"];
+const READ_ONLY_AGENTS: readonly string[] = [
+  "gentle-orchestrator",
+  "pm-odd",
+  "pm-systematic",
+  "pm-sdd",
+  "pm-probe",
+];
 
 function assertNotOrchestrator(agent: string | undefined, toolName: string): void {
   if (agent && READ_ONLY_AGENTS.includes(agent)) {

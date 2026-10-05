@@ -234,6 +234,17 @@ export function bindSessionAgent(
     (payload as { agent?: unknown } | undefined)?.agent,
   );
   const existing = ctx.store.get(sessionID);
+  if (
+    existing &&
+    (existing.workerLifecycleEntered === true ||
+      existing.workerName !== undefined ||
+      existing.workerState !== undefined ||
+      ["CREATING_SANDBOX", "SANDBOX_ACTIVE", "RESULT_READY", "APPLY_PENDING", "APPLIED", "RETAINED", "REJECTED"].includes(existing.state))
+  ) {
+    throw new PolicyError(
+      `session ${sessionID} entered the worker lifecycle and cannot be bound to a host mutation identity`,
+    );
+  }
   if (existing?.agent !== undefined && existing.agent !== agent) {
     throw new PolicyError(
       `session ${sessionID} is already bound to "${existing.agent}"; the first host-authoritative binding wins`,
@@ -305,6 +316,7 @@ export function buildEnsureWorkerOp(ctx: OpContext): (req: BrokerRequestEnvelope
     const record = ctx.store.touch(req.sessionID, {
       projectID,
       agent: req.agent,
+      workerLifecycleEntered: true,
       lastOperation: "ensureWorker",
     }, "ensureWorker");
 

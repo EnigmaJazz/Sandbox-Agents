@@ -819,7 +819,7 @@ export const HOST_READ_OPERATIONS: readonly string[] = [
   "advisorList",
 ];
 
-/** Host mutations: `gentle-orchestrator` only, fragment `ask` + in-tool `ctx.ask`. */
+/** Host mutation names; HOST_MUTATION_IDENTITY_OPERATIONS grants each identity its explicit subset. */
 export const HOST_MUTATION_OPERATIONS: readonly string[] = [
   "sddArchiveCompose",
   "gitCommit",
@@ -861,14 +861,22 @@ export interface HostToolDecision {
  * the trusted `readOnlyAgents` allowlist (config); the caller passes the
  * broker-derived trusted agent, never a raw envelope claim.
  */
-export class HostToolPolicy {
-  private readonly orchestratorAgents: readonly string[];
+export const HOST_MUTATION_IDENTITY_OPERATIONS: Readonly<Record<string, readonly string[]>> = {
+  "gentle-orchestrator": HOST_MUTATION_OPERATIONS,
+  "pm-odd": HOST_MUTATION_OPERATIONS.filter((operation) => operation !== "registerProject"),
+  "pm-systematic": HOST_MUTATION_OPERATIONS.filter((operation) => operation !== "registerProject"),
+  "pm-sdd": HOST_MUTATION_OPERATIONS.filter((operation) => operation !== "registerProject"),
+  "pm-probe": ["reviewStart", "gitCommit"],
+};
 
-  constructor(orchestratorAgents: readonly string[]) {
-    if (!Array.isArray(orchestratorAgents)) {
+export class HostToolPolicy {
+  private readonly authorizedAgents: readonly string[];
+
+  constructor(authorizedAgents: readonly string[]) {
+    if (!Array.isArray(authorizedAgents)) {
       throw new ValidationError("host tool policy requires an orchestrator agent allowlist");
     }
-    this.orchestratorAgents = [...orchestratorAgents];
+    this.authorizedAgents = [...authorizedAgents];
   }
 
   access(operation: unknown): HostToolAccess {
@@ -880,7 +888,11 @@ export class HostToolPolicy {
     if (access === "read") {
       return { allowed: true, access, reasonCode: "HOST_READ_OPEN" };
     }
-    if (typeof trustedAgent === "string" && this.orchestratorAgents.includes(trustedAgent)) {
+    if (
+      typeof trustedAgent === "string" &&
+      this.authorizedAgents.includes(trustedAgent) &&
+      (HOST_MUTATION_IDENTITY_OPERATIONS[trustedAgent] ?? []).includes(String(operation))
+    ) {
       return { allowed: true, access, reasonCode: "HOST_MUTATION_ORCHESTRATOR" };
     }
     return {
