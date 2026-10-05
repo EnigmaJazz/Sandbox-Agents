@@ -13,7 +13,7 @@ All Tier 1 items are implemented and committed.
 3. **`writeFile` mode and ownership reset** — **COMPLETE**; see Completed.
 
 
-## Tier 2 — blocks other work (13 items)
+## Tier 2 — blocks other work (14 items)
 
 1. **Host review pipeline tools P-1–P-4** (`host_git_range_materialize`, `host_review_pipeline_run`, `host_review_artifact_write`, optional `host_git_read`) — **OPEN / proposed**; owner **A**. Build the fixed-argv, bounded, shared-materialization/execution/artifact surface. Tier 2 because reviewers currently lack the diff and packaged pipeline cannot run. Source: `docs/PLAN.md:37–106` ("Brief — host review pipeline tools").
 2. **Project `.git` read-write + `.codegraph` create/grant coverage** — **OPEN**; owner **A**. Add the registration/profile create-and-grant path, including linked worktree `.git` metadata. Tier 2 because projects/worktrees cannot be safely registered with the required index and git access. Source: `odd/tasks/register-project-profile-grants.md:87–111,193–201`; `docs/TODO.md` (prior item 27, line 71, consolidated here).
@@ -38,6 +38,7 @@ All Tier 1 items are implemented and committed.
 
 
 13. **Mandatory interim advisory lane** — **OPEN / workflow compliance gap**; owner **A**. The lane is now running: A2c (`04322bd`) received pre-code advice from `advisor-security` and two post-code advisory passes, all recorded in `odd/tasks/external-advisors.md`. Earlier units `a81532d`, `1c4af4b`, `d9f8bf9`, A2a (`1b3d246`) and A2b (`deecdeb`) remain without advisor records.
+14. **PM-layer host-mutation identities** — **OPEN**; owner **A**, **U** for manual review and installation. Extend the host-resolved identity allowlist for `pm-odd`, `pm-systematic`, `pm-sdd`, and temporary `pm-probe`, preserving sandbox exclusion and existing per-operation authorization. Tier 2 because the workflow side's PM rollout is blocked until PM sessions can run the required host mutations safely. Remove `pm-probe` once the workflow side reports its probe closed. Source: `docs/handovers/2026-10-04-pm-layer-agent-sandbox-integration.md`; tracker: `odd/tasks/pm-layer-identities.md`.
 
 ## Planned upgrades (plans in `docs/upgrades/`)
 

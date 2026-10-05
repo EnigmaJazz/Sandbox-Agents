@@ -105,3 +105,36 @@ named error rather than truncating.
 
 New write roots are new privacy surface — keep them to the two ignore-verified directories and
 never inside tracked source. Silent truncation is worse than failure: cap and fail closed.
+
+## Planned change — PM-layer host-mutation identities
+
+The workflow-side PM rollout requires host mutations to be authorized for `pm-odd`, `pm-systematic`, `pm-sdd`, and the temporary `pm-probe`, in addition to `gentle-orchestrator`. Extend the host-resolved identity allowlist without changing the rule that PMs cannot enter the sandbox. Remove `pm-probe` after the workflow side reports its probe closed.
+
+### Identity source and operation boundary
+
+Prefer one configured identity source consumed by both `opencode/plugins/sandbox-tools.ts` and `broker/src/config.ts`, preventing the plugin and broker from drifting. If a shared source is impractical, keep the two constants and add a test that fails when they differ. Preserve existing per-operation authorization. As an optional refinement, the implementation may keep `registerProject` restricted to `gentle-orchestrator`, while allowing PMs to run the other host mutations; a flat identity allowlist is acceptable because workflow-side `opencode.json` also enforces this split.
+
+The relevant existing paths are `READ_ONLY_AGENTS` in `opencode/plugins/sandbox-tools.ts:64`, `DEFAULT_READ_ONLY_AGENTS` in `broker/src/config.ts:243`, and `authorizeHostDispatch`, `bindSessionAgent`, and `assertBindableAgent` in `broker/src/service.ts`, plus `shouldRefuseEnsureWorker` in `broker/src/role-policy.ts`.
+
+### Invariants
+
+Broker and plugin tests must cover all six invariants for each new identity (`pm-odd`, `pm-systematic`, `pm-sdd`, and `pm-probe`):
+
+1. A PM never enters the sandbox: `ensureWorker` refuses allowlisted identities, and `sandbox_*` mutation tools refuse them.
+2. Binding is host-resolved from `chat.params` hook input only, never from a tool argument or request envelope.
+3. First writer wins: a session bound to one identity is never rebound.
+4. Unknown sessions fail closed: no binding means no mutation.
+5. Reads remain open to every agent.
+6. A worker can never become a PM, including as a child of a PM session.
+
+### Probe plan
+
+After install, obtain observed results—not inferences—for each open question:
+
+1. For a child session created by the Task tool, does `chat.params` fire with the subagent's own name and bind that child, carry the parent's name, or not fire?
+2. Does a PM binding remain valid on a session resumed with the Task tool's `task_id`?
+3. Does `opencode/plugins/reviewer-relay-transport.ts` deliver review context when its dispatching session is a depth-1 subagent?
+4. What does a PM receive from `sandbox_read`, `sandbox_list`, `sandbox_grep`, and `sandbox_diff`, which call `assertNotOrchestrator`; if refused, which read surface should the PM use instead?
+5. Is any broker or plugin behavior sensitive to session depth or walking `parentID`, given the workflow side will raise `subagent_depth` from 3 to 4?
+
+This is a design record, not evidence that implementation or probes have completed. S17 broker/plugin changes remain behind the existing manual owner-review and exact-byte installation gate. If an installed file changes, update installer and rollback lists. The contract returned to the workflow side must state authorized identities and any per-operation limits, all five observed answers, and required restarts (`sandbox-broker.service`, `secure-opencode.service`). The workflow side owns `opencode.json`, PM prompts, routing guard, and verifier. This change does not alter the advisor relay or interface contract, worker roles, sandbox isolation, or review-lens transport beyond probe 3.
