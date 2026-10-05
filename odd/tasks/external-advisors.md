@@ -196,3 +196,23 @@ The security core (A1, A3, A4) is complete. Remaining: A2 (snapshot pinning and 
 - **Dispatch:** step `pre-code`; advisor `advisor-integration-pre`; model `opencode-go/deepseek-v4.1-flash`; approved lineage `review-0b6b4d6bbfad13d3` supplies five independent Tier 4 follow-ups.
 - **Findings:** the install/commit gap is caused by accepting only `APPLIED` at commit while install leaves the record unchanged. The bundle-GC caveat is incorrect: successful preparation removes it after durable-ref publication, and install retry uses derived refs with `git restore`. Preserve the distinct `APPLIED` semantics because approved apply enforces full S16 divergence and protected-path plus symlink/submodule rejection; install checks target-path divergence, intentionally exposes S17 to approval, and discard accepts only `RESULT_READY`/`RETAINED`. The five advisories concern soft/possibly too-short aggregate deadlines, wall-clock rollback, vacuous deadline-cleanup coverage, and terminal malformed-manifest refusal; they are separately queued in `docs/TODO.md` Tier 4.
 - **Evidence status:** advisory evidence only, not approval.
+
+## Review and transaction records — 2026-10-05
+
+### Approved review `review-d3fe4f7569bce69e`
+
+- **Outcome:** approved and acknowledged; authority burned. The reviewed candidate ends at commit `d6532ca`, which is now the last-reviewed boundary. These records do not authorize reopening or repeating review on that candidate.
+- **Resolved findings:** `R3-clear-intent-cross-session` (CRITICAL) was fixed in `d6532ca` and validated by the targeted validator. The risk lens returned no findings.
+- **Provider-designated non-blocking advisories — separate later work:**
+  - `R4-2` (WARNING), `broker/src/service.ts:2834–2836`: after `installedCommit` is set, worktree divergence from the result ref causes every install attempt to throw a stale-marker error. No recovery is named and no operation clears a stale `installedCommit`. Same class as the commit-side wedge fixed by `gitClearCommitIntent`; requires a design, not a patch.
+  - `R4-1` (WARNING), `broker/src/service.ts:2566–2569`: the retry branch with `HEAD` still at the recorded parent commits again without the `git diff --quiet` result-carriage proof used by the advanced-HEAD branch. A changed worktree or index between attempts can therefore be committed as mutated session-result content.
+  - `R4-3` (WARNING): the documented `host_git_clear_commit_intent` recovery depended on its `ask` permission entry, but the permission fragment was outside the reviewed paths. The user has since added the config entry, so the configuration gap is closed; the tool will not appear to an already-running OpenCode session until it is restarted.
+  - `R2-DOCEVIDENCE` (WARNING), `docs/config-manifest-host-tools.md:279,810`: bare filenames violate the Evidence column's `file:line` form, and the note that the permission-fragment entry is “required” contradicts the permission-map entry at line 810. Documentation-accuracy defect.
+  - `R2-IIFE` (SUGGESTION), `broker/src/service.ts:2606–2613`: `retryParentCommit ?? await (async () => {...})()` relies on `??` short-circuiting; a plain `if` would make retry control flow explicit.
+  - `R4-4` (SUGGESTION), `broker/src/service.ts:2941`: clearing commit intent does not coordinate with in-flight `gitCommit`. A clear between intent persistence and `RETAINED`, followed by broker death before `committedCommit` persists, can cause a duplicate commit. The tool description and refusal do not state “stop the broker first.”
+- Each advisory above is recorded as separate later work, not a blocker and never a reason to re-run the review on this candidate.
+
+### Earlier escalated lineage `review-88492e954baf961b`
+
+- **Outcome:** issued no approval; it is not reviewed and did not advance the boundary. Its transaction later vanished from `.git/gentle-ai/review-transactions/v2/`: the lineage had been created and admitted three lens results, then both its directory and `review-state.json` were absent while thirteen sibling lineages remained. The loss of three admitted results forced a split re-review. Cause is unestablished; this is recorded as an integration defect, not attributed to a mechanism without evidence.
+- The approved boundary is therefore `d6532ca` from `review-d3fe4f7569bce69e`, not this earlier escalated lineage.
