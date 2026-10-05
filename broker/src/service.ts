@@ -2552,8 +2552,10 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
         steps: [],
       };
     }
+    let retryParentCommit: string | undefined;
     if (resultRecord.pendingCommit) {
-      if (resultRecord.pendingCommit.resultCommit !== resultCommit) {
+      const intent = resultRecord.pendingCommit;
+      if (intent.resultCommit !== resultCommit) {
         throw new StateError("cannot commit: pending commit intent no longer matches the result ref");
       }
       const headResult = await runHostStep(ctx, ["git", "rev-parse", "HEAD"], projectRoot);
@@ -2561,41 +2563,53 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
       if (headResult.status !== 0 || !/^[0-9a-f]{40}$/.test(head)) {
         throw new StateError("cannot commit: pending commit HEAD could not be determined");
       }
-      const parentResult = await runHostStep(ctx, ["git", "rev-parse", "HEAD^"], projectRoot);
+      if (head === intent.parentCommit) {
+        // The prior git commit did not advance HEAD; retry the commit below.
+        retryParentCommit = head;
+      } else {
+        const parentResult = await runHostStep(ctx, ["git", "rev-parse", "HEAD^"], projectRoot);
+        const parent = parentResult.stdout.trim().toLowerCase();
+        if (
+          parentResult.status !== 0 ||
+          !/^[0-9a-f]{40}$/.test(parent) ||
+          parent !== intent.parentCommit
+        ) {
+          throw new StateError(
+            "cannot commit: pending commit state is ambiguous; stop the broker and follow the exact pendingCommit recovery procedure in docs/TODO.md",
+          );
+        }
+        const treeResult = await runHostStep(
+          ctx,
+          ["git", "diff", "--quiet", resultCommit, "HEAD", "--", ...changed],
+          projectRoot,
+        );
+        if (treeResult.status !== 0) {
+          throw new StateError(
+            "cannot commit: HEAD does not carry the pending result; stop the broker and follow the pendingCommit recovery procedure in docs/TODO.md",
+          );
+        }
+        ctx.store.transition(resultSessionID, resultRecord.state, "RETAINED", {
+          installedCommit: resultCommit,
+          committedCommit: head,
+          pendingCommit: undefined,
+        });
+        return {
+          committed: false,
+          alreadyCommitted: true,
+          committedCommit: head,
+          paths: changed,
+          steps: [],
+        };
+      }
+    }
+    const parentCommit = retryParentCommit ?? await (async () => {
+      const parentResult = await runHostStep(ctx, ["git", "rev-parse", "HEAD"], projectRoot);
       const parent = parentResult.stdout.trim().toLowerCase();
-      if (
-        parentResult.status !== 0 ||
-        !/^[0-9a-f]{40}$/.test(parent) ||
-        parent !== resultRecord.pendingCommit.parentCommit
-      ) {
-        throw new StateError("cannot commit: pending commit state is ambiguous; refusing to create another commit");
+      if (parentResult.status !== 0 || !/^[0-9a-f]{40}$/.test(parent)) {
+        throw new StateError("cannot commit: current HEAD could not be recorded before commit");
       }
-      const treeResult = await runHostStep(
-        ctx,
-        ["git", "diff", "--quiet", resultCommit, "HEAD", "--", ...changed],
-        projectRoot,
-      );
-      if (treeResult.status !== 0) {
-        throw new StateError("cannot commit: HEAD does not carry the pending result; refusing to create another commit");
-      }
-      ctx.store.transition(resultSessionID, resultRecord.state, "RETAINED", {
-        installedCommit: resultCommit,
-        committedCommit: head,
-        pendingCommit: undefined,
-      });
-      return {
-        committed: false,
-        alreadyCommitted: true,
-        committedCommit: head,
-        paths: changed,
-        steps: [],
-      };
-    }
-    const parentResult = await runHostStep(ctx, ["git", "rev-parse", "HEAD"], projectRoot);
-    const parentCommit = parentResult.stdout.trim().toLowerCase();
-    if (parentResult.status !== 0 || !/^[0-9a-f]{40}$/.test(parentCommit)) {
-      throw new StateError("cannot commit: current HEAD could not be recorded before commit");
-    }
+      return parent;
+    })();
     ctx.store.touch(resultSessionID, {
       pendingCommit: { resultCommit, parentCommit },
     });
@@ -2619,6 +2633,7 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
     ctx.store.transition(resultSessionID, resultRecord.state, "RETAINED", {
       installedCommit: resultCommit,
       committedCommit,
+      pendingCommit: undefined,
     });
     return {
       committed: true,
@@ -2780,18 +2795,13 @@ export function buildSandboxResultInstallOp(ctx: OpContext): OpHandler {
     );
     const resultSessionID = (payload.sandboxSessionID ?? req.sessionID) as string;
     const resultRecord = recordOr404(ctx.store, resultSessionID);
-    if (resultRecord.installedCommit !== undefined) {
-      if (resultRecord.installedCommit !== expectedResultCommit) {
-        throw new StateError(
-          "cannot install result: stored installed commit does not match the requested result commit",
-        );
-      }
-      return {
-        installed: true,
-        alreadyInstalled: true,
-        resultRef: result,
-        resultCommit: expectedResultCommit,
-      };
+    if (
+      resultRecord.installedCommit !== undefined &&
+      resultRecord.installedCommit !== expectedResultCommit
+    ) {
+      throw new StateError(
+        "cannot install result: stored installed commit does not match the requested result commit",
+      );
     }
     const resolvedCommit = await runHostStep(
       ctx,
@@ -2813,6 +2823,24 @@ export function buildSandboxResultInstallOp(ctx: OpContext): OpHandler {
     const changed = await changedPathsBetween(ctx, projectID, baseline, result);
     if (changed.length === 0) {
       throw new StateError("cannot install result: the B→C result is empty");
+    }
+    if (resultRecord.installedCommit !== undefined) {
+      const worktreeProof = await runHostStep(
+        ctx,
+        ["git", "diff", "--quiet", result, "--", ...changed],
+        projectRoot,
+      );
+      if (worktreeProof.status !== 0) {
+        throw new StateError(
+          "cannot install result: stored installed marker is stale; worktree does not match the result ref",
+        );
+      }
+      return {
+        installed: true,
+        alreadyInstalled: true,
+        resultRef: result,
+        resultCommit,
+      };
     }
     const rawChanges = await rawChangesBetween(ctx, projectID, baseline, result);
     const rawPaths = rawChanges.map((change) => change.path).sort();

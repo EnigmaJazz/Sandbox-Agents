@@ -248,6 +248,7 @@ describe("gitCommit cross-session applied result", () => {
     expect(records["worker-7"]?.state).toBe("RETAINED");
     expect(records["worker-7"]?.installedCommit).toBe(installedCommit);
     expect(records["worker-7"]?.committedCommit).toBe(committedCommit);
+    expect(records["worker-7"]?.pendingCommit).toBeUndefined();
 
     const retry = (await op(request({
       projectDir: projectRoot,
@@ -256,6 +257,42 @@ describe("gitCommit cross-session applied result", () => {
     }))) as { committed?: boolean; alreadyCommitted?: boolean };
     expect(retry.alreadyCommitted).toBe(true);
     expect(calls.filter((call) => call[1] === "commit")).toHaveLength(1);
+  });
+
+  test("retries a failed commit when HEAD remains at the recorded parent", async () => {
+    const installedCommit = "0123456789abcdef0123456789abcdef01234567";
+    const parentCommit = "1111111111111111111111111111111111111111";
+    const committedCommit = "abcdef0123456789abcdef0123456789abcdef01";
+    let commitAttempts = 0;
+    let commitSucceeded = false;
+    const calls: string[][] = [];
+    const spawn: OpContext["git"]["spawn"] = async (argv) => {
+      calls.push(argv);
+      let stdout = "";
+      let status = 0;
+      if (argv.includes("--name-only")) stdout = "a.ts\0";
+      else if (argv[1] === "rev-parse" && argv[3]?.includes("result/") && argv[3]?.endsWith("^{commit}")) stdout = `${installedCommit}\n`;
+      else if (argv[1] === "rev-parse" && argv[2] === "HEAD") stdout = `${commitSucceeded ? committedCommit : parentCommit}\n`;
+      else if (argv[1] === "commit") {
+        commitAttempts += 1;
+        if (commitAttempts === 1) status = 1;
+        else commitSucceeded = true;
+      }
+      return { status, stdout, stderr: status ? "temporary hook failure" : "", timedOut: false };
+    };
+    const records: Record<string, SessionRecord> = {
+      "session-1": orchestratorRecord,
+      "worker-7": appliedResultRecord("worker-7", { state: "RESULT_READY", installedCommit }),
+    };
+    const op = buildGitCommitOp(makeCtx(spawn, records));
+    const req = request({ projectDir: projectRoot, message: "fix: delegated", sandboxSessionID: "worker-7" });
+    await expect(op(req)).rejects.toThrow("temporary hook failure");
+    expect(records["worker-7"]?.pendingCommit).toEqual({ resultCommit: installedCommit, parentCommit });
+    const retry = (await op(req)) as { committed?: boolean; committedCommit?: string };
+    expect(retry.committed).toBe(true);
+    expect(retry.committedCommit).toBe(committedCommit);
+    expect(commitAttempts).toBe(2);
+    expect(records["worker-7"]?.pendingCommit).toBeUndefined();
   });
 
   test("does not create a second commit when the first RETAINED transition is lost", async () => {
@@ -296,6 +333,33 @@ describe("gitCommit cross-session applied result", () => {
     expect(retry.alreadyCommitted).toBe(true);
     expect(retry.committedCommit).toBe(committedCommit);
     expect(calls.filter((call) => call[1] === "commit")).toHaveLength(1);
+    expect(records["worker-7"]?.pendingCommit).toBeUndefined();
+  });
+
+  test("fails closed when HEAD advanced without the pending result proof", async () => {
+    const installedCommit = "0123456789abcdef0123456789abcdef01234567";
+    const parentCommit = "1111111111111111111111111111111111111111";
+    const advancedHead = "abcdef0123456789abcdef0123456789abcdef01";
+    const { calls, spawn } = spawnStub([
+      [NAME_ONLY, { status: 0, stdout: "a.ts\0", stderr: "" }],
+      [/rev-parse --verify.*result/, { status: 0, stdout: `${installedCommit}\n`, stderr: "" }],
+      [/rev-parse HEAD\^/, { status: 0, stdout: `${parentCommit}\n`, stderr: "" }],
+      [/rev-parse HEAD$/, { status: 0, stdout: `${advancedHead}\n`, stderr: "" }],
+      [/diff --quiet/, { status: 1, stdout: "", stderr: "" }],
+    ]);
+    const records: Record<string, SessionRecord> = {
+      "session-1": orchestratorRecord,
+      "worker-7": appliedResultRecord("worker-7", {
+        state: "RESULT_READY",
+        installedCommit,
+        pendingCommit: { resultCommit: installedCommit, parentCommit },
+      }),
+    };
+    await expect(buildGitCommitOp(makeCtx(spawn, records))(
+      request({ projectDir: projectRoot, message: "fix: delegated", sandboxSessionID: "worker-7" }),
+    )).rejects.toThrow(/ambiguous|does not carry/);
+    expect(calls.some((call) => call[1] === "commit")).toBe(false);
+    expect(records["worker-7"]?.pendingCommit).toBeDefined();
   });
 
   test("refuses an installed result whose result ref no longer matches installedCommit", async () => {

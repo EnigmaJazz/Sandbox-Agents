@@ -318,8 +318,13 @@ describe("sandboxResultInstall — commit binding (preview == installed)", () =>
     expect(calls).toContainEqual(["git", "rev-parse", "--verify", `${RESULT_7}^{commit}`]);
   });
 
-  test("returns alreadyInstalled without touching the worktree when commit matches", async () => {
-    const { calls, spawn } = spawnStub([]);
+  test("returns alreadyInstalled only after verifying the result ref and worktree", async () => {
+    const { calls, spawn } = spawnStub([
+      { match: isRevParse, result: ok({ stdout: `${COMMIT_7}\n` }) },
+      { match: isNameOnly, result: ok({ stdout: "a.ts\0" }) },
+      { match: isRaw, result: ok({ stdout: ":100644 100644 1111111 2222222 M\\ta.ts\\n" }) },
+      { match: isWorkingTreeDiff, result: ok() },
+    ]);
     const ctx = makeCtx(spawn, {
       "session-1": readableRecord("session-1", { state: "HOST_READ_ONLY", agent: ORCHESTRATOR }),
       "worker-7": readableRecord("worker-7", { installedCommit: COMMIT_7 }),
@@ -328,9 +333,26 @@ describe("sandboxResultInstall — commit binding (preview == installed)", () =>
       alreadyInstalled: boolean;
     };
     expect(result.alreadyInstalled).toBe(true);
+    expect(calls).toContainEqual(["git", "rev-parse", "--verify", `${RESULT_7}^{commit}`]);
+    expect(calls).toContainEqual(["git", "diff", "--quiet", RESULT_7, "--", "a.ts"]);
     expect(calls.some(isRestore)).toBe(false);
     expect(calls.some(isRm)).toBe(false);
-    expect(calls).toHaveLength(0);
+  });
+
+  test("refuses cached installation when the worktree no longer matches the result", async () => {
+    const { calls, spawn } = spawnStub([
+      { match: isRevParse, result: ok({ stdout: `${COMMIT_7}\n` }) },
+      { match: isNameOnly, result: ok({ stdout: "a.ts\0" }) },
+      { match: isRaw, result: ok({ stdout: ":100644 100644 1111111 2222222 M\\ta.ts\\n" }) },
+      { match: isWorkingTreeDiff, result: { status: 1, stdout: "", stderr: "" } },
+    ]);
+    const ctx = makeCtx(spawn, {
+      "session-1": readableRecord("session-1", { state: "HOST_READ_ONLY", agent: ORCHESTRATOR }),
+      "worker-7": readableRecord("worker-7", { installedCommit: COMMIT_7 }),
+    });
+    await expect(buildSandboxResultInstallOp(ctx)(installRequest())).rejects.toThrow(/worktree.*result|result.*worktree/);
+    expect(calls.some(isRestore)).toBe(false);
+    expect(calls.some(isRm)).toBe(false);
   });
 
   test("refuses a second install request with a different stored installedCommit", async () => {
