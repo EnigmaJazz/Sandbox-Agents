@@ -26,15 +26,22 @@ source "$SCRIPT_DIR/secure-launcher.conf"
 
 STATE_DIR="${BROKER_STATE_DIR:-$HOME/.local/state/opencode-sandbox}"
 JOURNAL="$STATE_DIR/install-journal.tsv"
-mkdir -p "$STATE_DIR"
-chmod 700 "$STATE_DIR"
 
 APPLY=0
+VERIFY=0
 case "${1:-}" in
   --apply) APPLY=1 ;;
+  --verify) VERIFY=1 ;;
   --dry-run|"") ;;
-  *) echo "usage: $0 [--dry-run|--apply]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--dry-run|--apply|--verify]" >&2; exit 2 ;;
 esac
+
+# Verification must not create or modify even the installer state directory.
+if [[ "$VERIFY" != "1" ]]; then
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR"
+fi
+DRIFT=0
 
 log() {
   echo "[install] $*"
@@ -57,6 +64,19 @@ backup() { # file -> creates file.bak-<ts> if it exists and no bak yet
 
 install_file() { # src dest mode
   local src="$1" dest="$2" mode="$3"
+  if [[ "$VERIFY" == "1" ]]; then
+    if [[ ! -f "$dest" ]]; then
+      log "drift $dest: absent"
+      DRIFT=1
+    elif ! cmp -s "$src" "$dest"; then
+      log "drift $dest: content differs"
+      DRIFT=1
+    elif [[ "$(stat -c '%a' "$dest")" != "${mode#0}" ]]; then
+      log "drift $dest: mode differs"
+      DRIFT=1
+    fi
+    return 0
+  fi
   if [[ -f "$dest" ]] && ! cmp -s "$src" "$dest"; then
     backup "$dest"
   fi
@@ -71,22 +91,34 @@ install_file() { # src dest mode
 NONO_DEST="$HOME/.config/nono/profiles/opencode-secure.json"
 NONO_SOURCE="$REPO_ROOT/nono/profile/opencode-secure.json"
 log "step 1: nono profile"
-if [[ "$APPLY" == "1" ]]; then
-  "$NONO_BIN" profile validate "$REPO_ROOT/nono/profile/opencode-secure.json" >/dev/null
-fi
-if [[ -L "$NONO_DEST" ]] && [[ "$(readlink "$NONO_DEST")" == "$NONO_SOURCE" ]]; then
-  log "already linked $NONO_DEST -> $NONO_SOURCE"
+if [[ "$VERIFY" == "1" ]]; then
+  if [[ ! -e "$NONO_DEST" && ! -L "$NONO_DEST" ]]; then
+    log "drift $NONO_DEST: absent"
+    DRIFT=1
+  elif [[ ! -L "$NONO_DEST" ]] || [[ "$(readlink "$NONO_DEST")" != "$NONO_SOURCE" ]]; then
+    log "drift $NONO_DEST: content differs (expected symlink to repo profile)"
+    DRIFT=1
+  else
+    log "verified $NONO_DEST (expected symlink)"
+  fi
 else
-  if [[ -f "$NONO_DEST" && ! -L "$NONO_DEST" ]]; then
-    backup "$NONO_DEST"
-  fi
-  log "link $NONO_SOURCE -> $NONO_DEST (symlink; not a copy)"
   if [[ "$APPLY" == "1" ]]; then
-    mkdir -p "$(dirname "$NONO_DEST")"
-    rm -f "$NONO_DEST"
-    ln -s "$NONO_SOURCE" "$NONO_DEST"
+    "$NONO_BIN" profile validate "$REPO_ROOT/nono/profile/opencode-secure.json" >/dev/null
   fi
-  journal "symlink" "$NONO_SOURCE" "$NONO_DEST" ""
+  if [[ -L "$NONO_DEST" ]] && [[ "$(readlink "$NONO_DEST")" == "$NONO_SOURCE" ]]; then
+    log "already linked $NONO_DEST -> $NONO_SOURCE"
+  else
+    if [[ -f "$NONO_DEST" && ! -L "$NONO_DEST" ]]; then
+      backup "$NONO_DEST"
+    fi
+    log "link $NONO_SOURCE -> $NONO_DEST (symlink; not a copy)"
+    if [[ "$APPLY" == "1" ]]; then
+      mkdir -p "$(dirname "$NONO_DEST")"
+      rm -f "$NONO_DEST"
+      ln -s "$NONO_SOURCE" "$NONO_DEST"
+    fi
+    journal "symlink" "$NONO_SOURCE" "$NONO_DEST" ""
+  fi
 fi
 
 # --- 2. opencode config fragment merge --------------------------------------
@@ -111,7 +143,7 @@ install_file "$REPO_ROOT/systemd-user/sandbox-broker.service" "$UNIT_DEST" 0644
 # Operational policy (git mode, worker disk, project registry) — loaded via
 # EnvironmentFile because systemd Environment= cannot hold JSON values.
 ENV_DEST="$HOME/.config/opencode-sandbox/broker.env"
-mkdir -p "$(dirname "$ENV_DEST")"
+if [[ "$VERIFY" != "1" ]]; then mkdir -p "$(dirname "$ENV_DEST")"; fi
 install_file "$REPO_ROOT/systemd-user/broker.env" "$ENV_DEST" 0644
 if [[ "$APPLY" == "1" ]]; then
   log "unit + env copied; enable manually with: systemctl --user daemon-reload && systemctl --user enable --now sandbox-broker"
@@ -120,12 +152,20 @@ fi
 # --- 4. opencode plugins -----------------------------------------------------
 log "step 4: opencode plugins (sandbox-tools, routing-guard, lib)"
 PLUGIN_DEST="$HOME/.config/opencode/plugins"
-mkdir -p "$PLUGIN_DEST/lib"
+if [[ "$VERIFY" != "1" ]]; then mkdir -p "$PLUGIN_DEST/lib"; fi
 for f in sandbox-tools.ts routing-guard.ts lib/broker-client.ts lib/reviewer-relay-core.ts lib/session-agent-binding.ts reviewer-relay-transport.ts lib/host-tool-approval.ts lib/apply-preview-guard.ts lib/sandbox-edit-core.ts lib/legacy-sdd-tools.ts; do
   install_file "$REPO_ROOT/opencode/plugins/$f" "$PLUGIN_DEST/$f" 0644
 done
 
 # --- summary -----------------------------------------------------------------
+if [[ "$VERIFY" == "1" ]]; then
+  if [[ "$DRIFT" == "1" ]]; then
+    log "verification failed: installed files differ from repository"
+    exit 1
+  fi
+  log "verification passed: installed files match repository"
+  exit 0
+fi
 log "done."
 if [[ "$APPLY" != "1" ]]; then
   log "dry-run — nothing was installed. Re-run with --apply ONLY after manual review."
