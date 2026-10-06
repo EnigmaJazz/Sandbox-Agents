@@ -42,6 +42,9 @@ if [[ "$VERIFY" != "1" ]]; then
   chmod 700 "$STATE_DIR"
 fi
 DRIFT=0
+VERIFIED_COUNT=0
+VERIFY_EXPECTED_DESTINATIONS=()
+VERIFY_ENUM_DIRS=()
 
 log() {
   echo "[install] $*"
@@ -65,8 +68,15 @@ backup() { # file -> creates file.bak-<ts> if it exists and no bak yet
 install_file() { # src dest mode
   local src="$1" dest="$2" mode="$3"
   if [[ "$VERIFY" == "1" ]]; then
-    if [[ ! -f "$dest" ]]; then
+    VERIFY_EXPECTED_DESTINATIONS+=("$dest")
+    if [[ -L "$dest" || -d "$dest" ]]; then
+      log "drift $dest: type differs (expected regular file)"
+      DRIFT=1
+    elif [[ ! -e "$dest" ]]; then
       log "drift $dest: absent"
+      DRIFT=1
+    elif [[ ! -f "$dest" ]]; then
+      log "drift $dest: type differs (expected regular file)"
       DRIFT=1
     elif ! cmp -s "$src" "$dest"; then
       log "drift $dest: content differs"
@@ -74,6 +84,8 @@ install_file() { # src dest mode
     elif [[ "$(stat -c '%a' "$dest")" != "${mode#0}" ]]; then
       log "drift $dest: mode differs"
       DRIFT=1
+    else
+      VERIFIED_COUNT=$((VERIFIED_COUNT + 1))
     fi
     return 0
   fi
@@ -92,13 +104,18 @@ NONO_DEST="$HOME/.config/nono/profiles/opencode-secure.json"
 NONO_SOURCE="$REPO_ROOT/nono/profile/opencode-secure.json"
 log "step 1: nono profile"
 if [[ "$VERIFY" == "1" ]]; then
+  VERIFY_EXPECTED_DESTINATIONS+=("$NONO_DEST")
   if [[ ! -e "$NONO_DEST" && ! -L "$NONO_DEST" ]]; then
     log "drift $NONO_DEST: absent"
     DRIFT=1
-  elif [[ ! -L "$NONO_DEST" ]] || [[ "$(readlink "$NONO_DEST")" != "$NONO_SOURCE" ]]; then
-    log "drift $NONO_DEST: content differs (expected symlink to repo profile)"
+  elif [[ ! -L "$NONO_DEST" ]]; then
+    log "drift $NONO_DEST: type differs (expected symlink)"
+    DRIFT=1
+  elif [[ "$(readlink "$NONO_DEST")" != "$NONO_SOURCE" ]]; then
+    log "drift $NONO_DEST: link target differs"
     DRIFT=1
   else
+    VERIFIED_COUNT=$((VERIFIED_COUNT + 1))
     log "verified $NONO_DEST (expected symlink)"
   fi
 else
@@ -157,13 +174,53 @@ for f in sandbox-tools.ts routing-guard.ts lib/broker-client.ts lib/reviewer-rel
   install_file "$REPO_ROOT/opencode/plugins/$f" "$PLUGIN_DEST/$f" 0644
 done
 
+verify_stale_destinations() {
+  local directory candidate expected expected_dest
+  local nullglob_was_set=0 dotglob_was_set=0
+  shopt -q nullglob && nullglob_was_set=1
+  shopt -q dotglob && dotglob_was_set=1
+  shopt -s nullglob dotglob
+  for directory in "${VERIFY_ENUM_DIRS[@]}"; do
+    if [[ ! -d "$directory" || -L "$directory" || ! -r "$directory" ]]; then
+      log "drift $directory: cannot enumerate destination directory safely"
+      DRIFT=1
+      continue
+    fi
+    local -a entries=("$directory"/*)
+    for candidate in "${entries[@]}"; do
+      expected=0
+      for expected_dest in "${VERIFY_EXPECTED_DESTINATIONS[@]}"; do
+        if [[ "$candidate" == "$expected_dest" ]]; then expected=1; break; fi
+      done
+      if [[ "$expected" == "1" ]]; then continue; fi
+      if [[ -d "$candidate" && ! -L "$candidate" && "$candidate" == "$PLUGIN_DEST/lib" ]]; then continue; fi
+      log "drift $candidate: stale installed destination"
+      DRIFT=1
+    done
+  done
+  if [[ "$nullglob_was_set" == "0" ]]; then shopt -u nullglob; fi
+  if [[ "$dotglob_was_set" == "0" ]]; then shopt -u dotglob; fi
+}
+
 # --- summary -----------------------------------------------------------------
 if [[ "$VERIFY" == "1" ]]; then
+  VERIFY_ENUM_DIRS=(
+    "$(dirname "$NONO_DEST")"
+    "$(dirname "$UNIT_DEST")"
+    "$(dirname "$ENV_DEST")"
+    "$PLUGIN_DEST"
+    "$PLUGIN_DEST/lib"
+  )
+  verify_stale_destinations
+  if [[ "${#VERIFY_EXPECTED_DESTINATIONS[@]}" -eq 0 ]]; then
+    log "verification failed: no installed destinations were enumerated"
+    exit 1
+  fi
   if [[ "$DRIFT" == "1" ]]; then
     log "verification failed: installed files differ from repository"
     exit 1
   fi
-  log "verification passed: installed files match repository"
+  log "verification passed: $VERIFIED_COUNT installed files verified; config fragment excluded (manual merge; no installed counterpart)"
   exit 0
 fi
 log "done."

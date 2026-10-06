@@ -28,6 +28,24 @@ const pluginFiles = [
     .map((entry) => `lib/${entry.name}`),
 ];
 
+function snapshotTree(root: string): string[] {
+  const entries: string[] = [];
+  const visit = (path: string) => {
+    const stat = lstatSync(path);
+    const relative = path.slice(root.length) || ".";
+    if (stat.isSymbolicLink()) {
+      entries.push(`${relative}:link:${readlinkSync(path)}:${stat.mode & 0o777}`);
+    } else if (stat.isDirectory()) {
+      entries.push(`${relative}:directory:${stat.mode & 0o777}`);
+      for (const child of readdirSync(path).sort()) visit(resolve(path, child));
+    } else {
+      entries.push(`${relative}:file:${stat.mode & 0o777}:${readFileSync(path).toString("base64")}`);
+    }
+  };
+  visit(root);
+  return entries.sort();
+}
+
 function fixture() {
   const home = mkdtempSync(resolve(tmpdir(), "install-user-files-verify-"));
   tempDirs.push(home);
@@ -81,7 +99,65 @@ describe("install-user-files --verify", () => {
     const result = run();
     expect(result.status).not.toBe(0);
     expect(result.stdout).toContain(`${target}: content differs`);
-    expect(result.stdout).not.toContain("drifted without secrets");
+  });
+
+  test("classifies a directory in a regular-file slot as a type mismatch", () => {
+    const { home, run } = fixture();
+    const target = resolve(home, ".config/systemd/user/sandbox-broker.service");
+    rmSync(target);
+    mkdirSync(target);
+    const result = run();
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toContain(`${target}: type differs (expected regular file)`);
+  });
+
+  test("rejects a symlink in a regular-file slot even when bytes match", () => {
+    const { home, run } = fixture();
+    const target = resolve(home, ".config/opencode-sandbox/broker.env");
+    const linkedCopy = resolve(home, "broker.env-link-target");
+    copyFileSync(target, linkedCopy);
+    rmSync(target);
+    symlinkSync(linkedCopy, target);
+    const result = run();
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toContain(`${target}: type differs (expected regular file)`);
+  });
+
+  test("reports nono profile regular-file drift instead of accepting it", () => {
+    const { home, nonoDest, run } = fixture();
+    rmSync(nonoDest);
+    copyFileSync(resolve(repoRoot, "nono/profile/opencode-secure.json"), nonoDest);
+    const result = run();
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toContain(`${nonoDest}: type differs (expected symlink)`);
+  });
+
+  test("reports a nono profile symlink with the wrong target", () => {
+    const { home, nonoDest, run } = fixture();
+    const wrongTarget = resolve(home, "wrong-profile.json");
+    writeFileSync(wrongTarget, "{}\\n");
+    rmSync(nonoDest);
+    symlinkSync(wrongTarget, nonoDest);
+    const result = run();
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toContain(`${nonoDest}: link target differs`);
+  });
+
+  test("reports a stale installed destination not listed by the installer", () => {
+    const { home, run } = fixture();
+    const target = resolve(home, ".config/opencode/plugins/retired-plugin.ts");
+    writeFileSync(target, "stale plugin\\n");
+    const result = run();
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toContain(`${target}: stale installed destination`);
+  });
+
+  test("reports a verified count and the manual config merge exclusion", () => {
+    const { run } = fixture();
+    const result = run();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("verification passed: 13 installed files verified");
+    expect(result.stdout).toContain("config fragment excluded (manual merge; no installed counterpart)");
   });
 
   test("names a mode difference and returns non-zero", () => {
@@ -93,20 +169,14 @@ describe("install-user-files --verify", () => {
     expect(result.stdout).toContain(`${target}: mode differs`);
   });
 
-  test("does not write while reporting drift", () => {
-    const { home, stateDir, nonoDest, run } = fixture();
+  test("does not mutate any deployed destination while reporting drift", () => {
+    const { home, stateDir, run } = fixture();
     const target = resolve(home, ".config/opencode-sandbox/broker.env");
     writeFileSync(target, "drift marker\n");
-    const before = {
-      content: readFileSync(target, "utf8"),
-      mode: lstatSync(target).mode & 0o777,
-      nonoLink: readlinkSync(nonoDest),
-    };
+    const before = snapshotTree(home);
     const result = run();
     expect(result.status).not.toBe(0);
-    expect(readFileSync(target, "utf8")).toBe(before.content);
-    expect(lstatSync(target).mode & 0o777).toBe(before.mode);
-    expect(readlinkSync(nonoDest)).toBe(before.nonoLink);
+    expect(snapshotTree(home)).toEqual(before);
     expect(() => lstatSync(stateDir)).toThrow();
   });
 });
