@@ -56,9 +56,14 @@ fi
 DRIFT=0
 VERIFIED_COUNT=0
 VERIFY_EXPECTED_DESTINATIONS=()
+VERIFY_STALE_CHECK_SKIPPED=0
 
 log() {
-  echo "[install] $*"
+  if [[ "$*" == error:* ]]; then
+    printf '[install] %s\n' "$*" >&2
+  else
+    printf '[install] %s\n' "$*"
+  fi
 }
 
 journal() { # action kind source dest
@@ -72,7 +77,7 @@ prune_destination_backups() { # destination [protected backup]
   directory="$(dirname "$destination")"
   name="$(basename "$destination")"
   if ! output="$(find "$directory" -maxdepth 1 -type f -regextype posix-extended -regex ".*/${name//./\\.}\\.bak-[0-9]{14}" -printf '%f\n' 2>&1)"; then
-    log "error: cannot list installer backups for $destination: $output" >&2
+    log "error: cannot list installer backups for $destination: $output"
     return 1
   fi
   local -a backups=()
@@ -87,7 +92,7 @@ prune_destination_backups() { # destination [protected backup]
       if rm -- "$backup_path"; then
         log "deleted old backup $backup_path"
       else
-        log "error: cannot remove installer backup $backup_path" >&2
+        log "error: cannot remove installer backup $backup_path"
         return 1
       fi
     fi
@@ -131,7 +136,7 @@ count_all_backups() {
     directory="$(dirname "$destination")"
     name="$(basename "$destination")"
     if ! output="$(find "$directory" -maxdepth 1 -type f -regextype posix-extended -regex ".*/${name//./\\.}\\.bak-[0-9]{14}" -printf x 2>&1)"; then
-      log "error: cannot list installer backups for $destination: $output" >&2
+      log "error: cannot list installer backups for $destination: $output"
       return 1
     fi
     count=$((count + ${#output}))
@@ -258,9 +263,14 @@ done
 
 verify_stale_destinations() {
   local timestamp action source destination detail expected expected_dest
-  if [[ ! -f "$JOURNAL" || -L "$JOURNAL" || ! -r "$JOURNAL" ]]; then
-    log "stale destination check unavailable: install journal is missing or unreadable"
+  if [[ ! -e "$JOURNAL" && ! -L "$JOURNAL" ]]; then
+    VERIFY_STALE_CHECK_SKIPPED=1
+    log "stale destination check skipped: install journal is absent"
     return 0
+  fi
+  if [[ -L "$JOURNAL" || ! -f "$JOURNAL" || ! -r "$JOURNAL" ]]; then
+    log "error: install journal is unusable: $JOURNAL"
+    return 1
   fi
   while IFS=$'\t' read -r timestamp action source destination detail; do
     [[ "$action" == "file" || "$action" == "symlink" ]] || continue
@@ -283,8 +293,12 @@ verify_stale_destinations() {
 
 # --- summary -----------------------------------------------------------------
 if [[ "$VERIFY" == "1" ]]; then
-  verify_stale_destinations
-  BACKUP_COUNT="$(count_all_backups)"
+  if ! verify_stale_destinations; then
+    exit 1
+  fi
+  if ! BACKUP_COUNT="$(count_all_backups)"; then
+    exit 1
+  fi
   if [[ "${#VERIFY_EXPECTED_DESTINATIONS[@]}" -eq 0 ]]; then
     log "verification failed: no installed destinations were enumerated"
     exit 1
@@ -292,6 +306,11 @@ if [[ "$VERIFY" == "1" ]]; then
   if [[ "$DRIFT" == "1" ]]; then
     log "verification failed: installed files differ from repository"
     exit 1
+  fi
+  if [[ "$VERIFY_STALE_CHECK_SKIPPED" == "1" ]]; then
+    # Exit 2 distinguishes a fresh-install journal absence from full verification.
+    log "verification incomplete: $VERIFIED_COUNT installed files verified; $BACKUP_COUNT installer backups; stale destination check skipped (install journal is absent); config fragment excluded (manual merge; no installed counterpart)"
+    exit 2
   fi
   log "verification passed: $VERIFIED_COUNT installed files verified; $BACKUP_COUNT installer backups; config fragment excluded (manual merge; no installed counterpart)"
   exit 0

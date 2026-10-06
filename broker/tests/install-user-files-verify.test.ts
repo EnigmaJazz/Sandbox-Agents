@@ -93,11 +93,50 @@ afterEach(() => {
 });
 
 describe("install-user-files --verify", () => {
-  test("returns zero when every installed counterpart matches", () => {
-    const { run } = fixture();
+  test("returns zero when every installed counterpart matches and the journal is available", () => {
+    const { home, journal, run } = fixture();
+    journal("file", "sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
     const result = run();
     expect(result.status).toBe(0);
     expect(result.stdout).not.toContain("drift");
+  });
+
+  test("reports a skipped stale check and returns the documented distinct status when the journal is absent", () => {
+    const { run } = fixture();
+    const result = run();
+    expect(result.status).toBe(2);
+    expect(result.stdout).toContain("stale destination check skipped: install journal is absent");
+    expect(result.stdout).not.toContain("verification passed");
+  });
+
+  test("fails closed when the journal exists but is unusable", () => {
+    const { stateDir, run } = fixture();
+    mkdirSync(stateDir, { recursive: true });
+    mkdirSync(resolve(stateDir, "install-journal.tsv"));
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("error: install journal is unusable");
+    expect(result.stdout).not.toContain("verification passed");
+  });
+
+  test("fails closed when the install journal is a symlink", () => {
+    const { stateDir, run } = fixture();
+    mkdirSync(stateDir, { recursive: true });
+    const journal = resolve(stateDir, "install-journal.tsv");
+    writeFileSync(resolve(stateDir, "journal-target.tsv"), "");
+    symlinkSync(resolve(stateDir, "journal-target.tsv"), journal);
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("error: install journal is unusable");
+  });
+
+  test("fails closed when backup counting fails during verification", () => {
+    const { home, journal, run } = fixture();
+    journal("file", "sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
+    const result = run("--verify", { PATH: `${commandShim(home, "find")}:${process.env.PATH}` });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("error: cannot list installer backups");
+    expect(result.stdout).not.toContain("verification passed");
   });
 
   test("names an absent installed file and returns non-zero", () => {
@@ -171,7 +210,8 @@ describe("install-user-files --verify", () => {
   });
 
   test("does not report an unmanaged file in a destination directory", () => {
-    const { home, run } = fixture();
+    const { home, journal, run } = fixture();
+    journal("file", "sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
     const target = resolve(home, ".config/opencode/plugins/unmanaged-plugin.ts");
     writeFileSync(target, "owned by another installer\\n");
     const result = run();
@@ -180,7 +220,8 @@ describe("install-user-files --verify", () => {
   });
 
   test("does not report installer backup artifacts", () => {
-    const { home, run } = fixture();
+    const { home, journal, run } = fixture();
+    journal("file", "sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
     const target = resolve(home, ".config/opencode/plugins/sandbox-tools.ts.bak-20260101000000");
     writeFileSync(target, "installer backup\\n");
     const result = run();
@@ -189,7 +230,8 @@ describe("install-user-files --verify", () => {
   });
 
   test("does not report directories in destination directories", () => {
-    const { home, run } = fixture();
+    const { home, journal, run } = fixture();
+    journal("file", "sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
     const target = resolve(home, ".config/opencode/plugins/unmanaged-directory");
     mkdirSync(target);
     const result = run();
@@ -198,7 +240,8 @@ describe("install-user-files --verify", () => {
   });
 
   test("reports a verified count and the manual config merge exclusion", () => {
-    const { run } = fixture();
+    const { home, journal, run } = fixture();
+    journal("file", "sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
     const result = run();
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("verification passed: 13 installed files verified");
@@ -228,7 +271,8 @@ describe("install-user-files --verify", () => {
   });
 
   test("verify reports the installer backup count in its pass line", () => {
-    const { home, run } = fixture();
+    const { home, journal, run } = fixture();
+    journal("file", "sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
     const target = resolve(home, ".config/opencode/plugins/sandbox-tools.ts");
     for (const stamp of ["20260101000000", "20260102000000"]) {
       writeFileSync(`${target}.bak-${stamp}`, "backup\n");
@@ -277,6 +321,7 @@ describe("install-user-files --verify", () => {
     const result = run("--prune-backups", { PATH: `${commandShim(home, "find")}:${process.env.PATH}` });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("error: cannot list installer backups");
+    expect(result.stdout).not.toContain("error: cannot list installer backups");
   });
 
   test("fails closed when an installer backup cannot be removed", () => {
