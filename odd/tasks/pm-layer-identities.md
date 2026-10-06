@@ -99,6 +99,12 @@ Documentation preparation is limited to `odd/tasks/pm-layer-identities.md`, `doc
 - [x] T5 live-evidence portion — five answers recorded below as live observations after installation; T5.3 full context delivery remains untested.
 - [x] Update this tracker with the implementation and live evidence; tracker commit `e0bbd40`.
 
+## Review disposition
+
+The PM-layer identity change was approved and acknowledged with authority burned under lineage `review-f08baf883fae880d`, for candidate `685e394..444d1e1`; the last-reviewed boundary is `444d1e1`. The eleven provider-designated, non-blocking advisories are recorded in `docs/TODO.md` Tier 4 and are separate later work, not grounds to rerun or reopen review on this candidate. The risk lens returned no findings and confirmed the identity×operation matrix, broker-side `registerProject` restriction, lifecycle guard, drift test, coverage of all six invariants, and minimal `pm-probe` scope.
+
+Outstanding work remains explicit: T3's six-invariant coverage is partial as described above; T5.3 full reviewer-relay context delivery remains untested; and `pm-probe` removal awaits the workflow side reporting its probe closed, followed by the verification in the Contract statement.
+
 ## Evidence
 
 - Source contract and original requirements: `docs/handovers/2026-10-04-pm-layer-agent-sandbox-integration.md`.
