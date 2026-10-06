@@ -44,7 +44,6 @@ fi
 DRIFT=0
 VERIFIED_COUNT=0
 VERIFY_EXPECTED_DESTINATIONS=()
-VERIFY_ENUM_DIRS=()
 
 log() {
   echo "[install] $*"
@@ -175,42 +174,32 @@ for f in sandbox-tools.ts routing-guard.ts lib/broker-client.ts lib/reviewer-rel
 done
 
 verify_stale_destinations() {
-  local directory candidate expected expected_dest
-  local nullglob_was_set=0 dotglob_was_set=0
-  shopt -q nullglob && nullglob_was_set=1
-  shopt -q dotglob && dotglob_was_set=1
-  shopt -s nullglob dotglob
-  for directory in "${VERIFY_ENUM_DIRS[@]}"; do
-    if [[ ! -d "$directory" || -L "$directory" || ! -r "$directory" ]]; then
-      log "drift $directory: cannot enumerate destination directory safely"
-      DRIFT=1
-      continue
-    fi
-    local -a entries=("$directory"/*)
-    for candidate in "${entries[@]}"; do
-      expected=0
-      for expected_dest in "${VERIFY_EXPECTED_DESTINATIONS[@]}"; do
-        if [[ "$candidate" == "$expected_dest" ]]; then expected=1; break; fi
-      done
-      if [[ "$expected" == "1" ]]; then continue; fi
-      if [[ -d "$candidate" && ! -L "$candidate" && "$candidate" == "$PLUGIN_DEST/lib" ]]; then continue; fi
-      log "drift $candidate: stale installed destination"
-      DRIFT=1
+  local timestamp action source destination detail expected expected_dest
+  if [[ ! -f "$JOURNAL" || -L "$JOURNAL" || ! -r "$JOURNAL" ]]; then
+    log "stale destination check unavailable: install journal is missing or unreadable"
+    return 0
+  fi
+  while IFS=$'\t' read -r timestamp action source destination detail; do
+    [[ "$action" == "file" || "$action" == "symlink" ]] || continue
+    case "$destination" in
+      "$HOME/.config/nono/profiles/"*|"$HOME/.config/systemd/user/"*|"$HOME/.config/opencode-sandbox/"*|"$PLUGIN_DEST/"*) ;;
+      *) continue ;;
+    esac
+    expected=0
+    for expected_dest in "${VERIFY_EXPECTED_DESTINATIONS[@]}"; do
+      if [[ "$destination" == "$expected_dest" ]]; then expected=1; break; fi
     done
-  done
-  if [[ "$nullglob_was_set" == "0" ]]; then shopt -u nullglob; fi
-  if [[ "$dotglob_was_set" == "0" ]]; then shopt -u dotglob; fi
+    [[ "$expected" == "1" ]] && continue
+    [[ "$destination" == *.bak-* ]] && continue
+    [[ -e "$destination" || -L "$destination" ]] || continue
+    [[ -d "$destination" ]] && continue
+    log "drift $destination: stale installed destination"
+    DRIFT=1
+  done <"$JOURNAL"
 }
 
 # --- summary -----------------------------------------------------------------
 if [[ "$VERIFY" == "1" ]]; then
-  VERIFY_ENUM_DIRS=(
-    "$(dirname "$NONO_DEST")"
-    "$(dirname "$UNIT_DEST")"
-    "$(dirname "$ENV_DEST")"
-    "$PLUGIN_DEST"
-    "$PLUGIN_DEST/lib"
-  )
   verify_stale_destinations
   if [[ "${#VERIFY_EXPECTED_DESTINATIONS[@]}" -eq 0 ]]; then
     log "verification failed: no installed destinations were enumerated"

@@ -64,11 +64,19 @@ function fixture() {
     install(`opencode/plugins/${file}`, resolve(home, ".config/opencode/plugins", file));
   }
   const stateDir = resolve(home, ".state-that-must-not-be-created");
+  const journal = (action: string, source: string, destination: string) => {
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(
+      resolve(stateDir, "install-journal.tsv"),
+      `2026-01-01T00:00:00+00:00\t${action}\t${source}\t${destination}\t\n`,
+      { flag: "a" },
+    );
+  };
   const run = () => spawnSync("bash", [installer, "--verify"], {
     encoding: "utf8",
     env: { ...process.env, HOME: home, BROKER_STATE_DIR: stateDir },
   });
-  return { home, stateDir, nonoDest, run };
+  return { home, stateDir, nonoDest, journal, run };
 }
 
 afterEach(() => {
@@ -143,13 +151,41 @@ describe("install-user-files --verify", () => {
     expect(result.stdout).toContain(`${nonoDest}: link target differs`);
   });
 
-  test("reports a stale installed destination not listed by the installer", () => {
-    const { home, run } = fixture();
+  test("reports a journaled destination no longer listed by the installer", () => {
+    const { home, journal, run } = fixture();
     const target = resolve(home, ".config/opencode/plugins/retired-plugin.ts");
     writeFileSync(target, "stale plugin\\n");
+    journal("file", "retired-plugin.ts", target);
     const result = run();
     expect(result.status).not.toBe(0);
     expect(result.stdout).toContain(`${target}: stale installed destination`);
+  });
+
+  test("does not report an unmanaged file in a destination directory", () => {
+    const { home, run } = fixture();
+    const target = resolve(home, ".config/opencode/plugins/unmanaged-plugin.ts");
+    writeFileSync(target, "owned by another installer\\n");
+    const result = run();
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain(target);
+  });
+
+  test("does not report installer backup artifacts", () => {
+    const { home, run } = fixture();
+    const target = resolve(home, ".config/opencode/plugins/sandbox-tools.ts.bak-20260101000000");
+    writeFileSync(target, "installer backup\\n");
+    const result = run();
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain(target);
+  });
+
+  test("does not report directories in destination directories", () => {
+    const { home, run } = fixture();
+    const target = resolve(home, ".config/opencode/plugins/unmanaged-directory");
+    mkdirSync(target);
+    const result = run();
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain(target);
   });
 
   test("reports a verified count and the manual config merge exclusion", () => {
