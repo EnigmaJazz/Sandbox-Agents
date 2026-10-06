@@ -72,11 +72,20 @@ function fixture() {
       { flag: "a" },
     );
   };
-  const run = () => spawnSync("bash", [installer, "--verify"], {
+  const run = (mode: string | string[] = "--verify", extraEnv: Record<string, string> = {}) => spawnSync("bash", [installer, ...(Array.isArray(mode) ? mode : [mode])], {
     encoding: "utf8",
-    env: { ...process.env, HOME: home, BROKER_STATE_DIR: stateDir },
+    env: { ...process.env, HOME: home, BROKER_STATE_DIR: stateDir, ...extraEnv },
   });
   return { home, stateDir, nonoDest, journal, run };
+}
+
+function commandShim(home: string, command: string): string {
+  const bin = resolve(home, "command-shims");
+  mkdirSync(bin, { recursive: true });
+  const path = resolve(bin, command);
+  writeFileSync(path, "#!/bin/sh\\nexit 1\\n");
+  chmodSync(path, 0o755);
+  return bin;
 }
 
 afterEach(() => {
@@ -209,10 +218,85 @@ describe("install-user-files --verify", () => {
     const { home, stateDir, run } = fixture();
     const target = resolve(home, ".config/opencode-sandbox/broker.env");
     writeFileSync(target, "drift marker\n");
+    const backup = `${target}.bak-20260101000000`;
+    writeFileSync(backup, "old version\n");
     const before = snapshotTree(home);
     const result = run();
     expect(result.status).not.toBe(0);
     expect(snapshotTree(home)).toEqual(before);
     expect(() => lstatSync(stateDir)).toThrow();
+  });
+
+  test("verify reports the installer backup count in its pass line", () => {
+    const { home, run } = fixture();
+    const target = resolve(home, ".config/opencode/plugins/sandbox-tools.ts");
+    for (const stamp of ["20260101000000", "20260102000000"]) {
+      writeFileSync(`${target}.bak-${stamp}`, "backup\n");
+    }
+    const result = run();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("verification passed: 13 installed files verified; 2 installer backups");
+  });
+
+  test("--prune-backups keeps three newest backups per managed destination", () => {
+    const { home, run } = fixture();
+    const first = resolve(home, ".config/opencode/plugins/sandbox-tools.ts");
+    const second = resolve(home, ".config/systemd/user/sandbox-broker.service");
+    for (const [dest, stamps] of [[first, ["20260101000000", "20260102000000", "20260103000000", "20260104000000"]], [second, ["20260101000000", "20260102000000", "20260103000000", "20260104000000"]]] as const) {
+      for (const stamp of stamps) writeFileSync(`${dest}.bak-${stamp}`, "backup\n");
+    }
+    const unmanaged = resolve(home, ".config/opencode/plugins/unmanaged.ts.bak-20260101000000");
+    writeFileSync(unmanaged, "unmanaged\n");
+    const result = run("--prune-backups");
+    expect(result.status).toBe(0);
+    for (const dest of [first, second]) {
+      expect(readdirSync(resolve(dest, ".." )).filter((name) => name.startsWith(`${dest.split("/").at(-1)}.bak-`))).toHaveLength(3);
+      expect(result.stdout).toContain(`${dest}.bak-20260101`);
+    }
+    expect(readFileSync(unmanaged, "utf8")).toBe("unmanaged\n");
+  });
+
+  test("retention never removes the backup just created by the installer", () => {
+    const { home, run } = fixture();
+    const target = resolve(home, ".config/opencode/plugins/sandbox-tools.ts");
+    writeFileSync(target, "outdated plugin\n");
+    for (const stamp of ["20200101000000", "20210101000000", "20220101000000", "20230101000000"]) {
+      writeFileSync(`${target}.bak-${stamp}`, "old backup\n");
+    }
+    const result = run("--dry-run");
+    expect(result.status).toBe(0);
+    const backups = readdirSync(resolve(target, "..")).filter((name) => name.startsWith("sandbox-tools.ts.bak-"));
+    expect(backups).toHaveLength(3);
+    const created = backups.find((name) => !name.endsWith("20200101000000") && !name.endsWith("20210101000000") && !name.endsWith("20220101000000") && !name.endsWith("20230101000000"));
+    expect(created).toBeDefined();
+    expect(result.stdout).toContain(`backed up ${target} -> ${resolve(target, "..")}/${created}`);
+  });
+
+  test("fails closed when a managed backup directory cannot be listed", () => {
+    const { home, run } = fixture();
+    const result = run("--prune-backups", { PATH: `${commandShim(home, "find")}:${process.env.PATH}` });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("error: cannot list installer backups");
+  });
+
+  test("fails closed when an installer backup cannot be removed", () => {
+    const { home, run } = fixture();
+    const target = resolve(home, ".config/opencode/plugins/sandbox-tools.ts");
+    for (const stamp of ["20200101000000", "20210101000000", "20220101000000", "20230101000000"]) {
+      writeFileSync(`${target}.bak-${stamp}`, "old backup\n");
+    }
+    const result = run("--prune-backups", { PATH: `${commandShim(home, "rm")}:${process.env.PATH}` });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("error: cannot remove installer backup");
+  });
+
+  test("refuses verify combined with explicit backup pruning", () => {
+    const { home, run } = fixture();
+    const target = resolve(home, ".config/opencode/plugins/sandbox-tools.ts.bak-20260101000000");
+    writeFileSync(target, "backup\n");
+    const before = snapshotTree(home);
+    const result = run(["--verify", "--prune-backups"]);
+    expect(result.status).not.toBe(0);
+    expect(snapshotTree(home)).toEqual(before);
   });
 });

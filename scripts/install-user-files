@@ -29,15 +29,27 @@ JOURNAL="$STATE_DIR/install-journal.tsv"
 
 APPLY=0
 VERIFY=0
-case "${1:-}" in
-  --apply) APPLY=1 ;;
-  --verify) VERIFY=1 ;;
-  --dry-run|"") ;;
-  *) echo "usage: $0 [--dry-run|--apply|--verify]" >&2; exit 2 ;;
-esac
+PRUNE_BACKUPS=0
+for argument in "$@"; do
+  case "$argument" in
+    --apply) APPLY=1 ;;
+    --verify) VERIFY=1 ;;
+    --prune-backups) PRUNE_BACKUPS=1 ;;
+    --dry-run) ;;
+    *) echo "usage: $0 [--dry-run|--apply|--verify|--prune-backups]" >&2; exit 2 ;;
+  esac
+done
+if [[ "$VERIFY" == "1" && "$PRUNE_BACKUPS" == "1" ]]; then
+  echo "[install] backup pruning is not allowed in verify mode" >&2
+  exit 2
+fi
+if [[ "$PRUNE_BACKUPS" == "1" && "$APPLY" == "1" ]]; then
+  echo "[install] --prune-backups cannot be combined with --apply" >&2
+  exit 2
+fi
 
-# Verification must not create or modify even the installer state directory.
-if [[ "$VERIFY" != "1" ]]; then
+# Verification and explicit pruning must not create or modify installer state.
+if [[ "$VERIFY" != "1" && "$PRUNE_BACKUPS" != "1" ]]; then
   mkdir -p "$STATE_DIR"
   chmod 700 "$STATE_DIR"
 fi
@@ -55,6 +67,33 @@ journal() { # action kind source dest
   fi
 }
 
+prune_destination_backups() { # destination [protected backup]
+  local destination="$1" protected="${2:-}" directory name output
+  directory="$(dirname "$destination")"
+  name="$(basename "$destination")"
+  if ! output="$(find "$directory" -maxdepth 1 -type f -regextype posix-extended -regex ".*/${name//./\\.}\\.bak-[0-9]{14}" -printf '%f\n' 2>&1)"; then
+    log "error: cannot list installer backups for $destination: $output" >&2
+    return 1
+  fi
+  local -a backups=()
+  if [[ -n "$output" ]]; then
+    mapfile -t backups < <(printf '%s\n' "$output" | sort -r)
+  fi
+  local retained=0 backup_path
+  for backup_path in "${backups[@]}"; do
+    backup_path="$directory/$backup_path"
+    retained=$((retained + 1))
+    if (( retained > 3 )) && [[ "$backup_path" != "$protected" ]]; then
+      if rm -- "$backup_path"; then
+        log "deleted old backup $backup_path"
+      else
+        log "error: cannot remove installer backup $backup_path" >&2
+        return 1
+      fi
+    fi
+  done
+}
+
 backup() { # file -> creates file.bak-<ts> if it exists and no bak yet
   local f="$1"
   [[ -f "$f" ]] || return 0
@@ -62,7 +101,51 @@ backup() { # file -> creates file.bak-<ts> if it exists and no bak yet
   [[ -e "$bak" ]] && return 0
   cp -p "$f" "$bak"
   log "backed up $f -> $bak"
+  prune_destination_backups "$f" "$bak"
 }
+
+managed_destinations() {
+  local root="$HOME/.config/opencode/plugins"
+  printf '%s\n' \
+    "$HOME/.config/nono/profiles/opencode-secure.json" \
+    "$HOME/.config/systemd/user/sandbox-broker.service" \
+    "$HOME/.config/opencode-sandbox/broker.env" \
+    "$root/sandbox-tools.ts" "$root/routing-guard.ts" \
+    "$root/lib/broker-client.ts" "$root/lib/reviewer-relay-core.ts" \
+    "$root/lib/session-agent-binding.ts" "$root/reviewer-relay-transport.ts" \
+    "$root/lib/host-tool-approval.ts" "$root/lib/apply-preview-guard.ts" \
+    "$root/lib/sandbox-edit-core.ts" "$root/lib/legacy-sdd-tools.ts"
+}
+
+prune_all_backups() {
+  local destination failed=0
+  while IFS= read -r destination; do
+    prune_destination_backups "$destination" || failed=1
+  done < <(managed_destinations)
+  return "$failed"
+}
+
+count_all_backups() {
+  local destination directory name output count=0
+  while IFS= read -r destination; do
+    directory="$(dirname "$destination")"
+    name="$(basename "$destination")"
+    if ! output="$(find "$directory" -maxdepth 1 -type f -regextype posix-extended -regex ".*/${name//./\\.}\\.bak-[0-9]{14}" -printf x 2>&1)"; then
+      log "error: cannot list installer backups for $destination: $output" >&2
+      return 1
+    fi
+    count=$((count + ${#output}))
+  done < <(managed_destinations)
+  printf '%s' "$count"
+}
+
+if [[ "$PRUNE_BACKUPS" == "1" ]]; then
+  if prune_all_backups; then
+    log "backup pruning complete"
+    exit 0
+  fi
+  exit 1
+fi
 
 install_file() { # src dest mode
   local src="$1" dest="$2" mode="$3"
@@ -201,6 +284,7 @@ verify_stale_destinations() {
 # --- summary -----------------------------------------------------------------
 if [[ "$VERIFY" == "1" ]]; then
   verify_stale_destinations
+  BACKUP_COUNT="$(count_all_backups)"
   if [[ "${#VERIFY_EXPECTED_DESTINATIONS[@]}" -eq 0 ]]; then
     log "verification failed: no installed destinations were enumerated"
     exit 1
@@ -209,7 +293,7 @@ if [[ "$VERIFY" == "1" ]]; then
     log "verification failed: installed files differ from repository"
     exit 1
   fi
-  log "verification passed: $VERIFIED_COUNT installed files verified; config fragment excluded (manual merge; no installed counterpart)"
+  log "verification passed: $VERIFIED_COUNT installed files verified; $BACKUP_COUNT installer backups; config fragment excluded (manual merge; no installed counterpart)"
   exit 0
 fi
 log "done."
