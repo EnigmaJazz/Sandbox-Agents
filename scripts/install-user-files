@@ -73,10 +73,11 @@ journal() { # action kind source dest
 }
 
 prune_destination_backups() { # destination [protected backup]
-  local destination="$1" protected="${2:-}" directory name output
+  local destination="$1" protected="${2:-}" directory name escaped_name output
   directory="$(dirname "$destination")"
   name="$(basename "$destination")"
-  if ! output="$(find "$directory" -maxdepth 1 -type f -regextype posix-extended -regex ".*/${name//./\\.}\\.bak-[0-9]{14}" -printf '%f\n' 2>&1)"; then
+  escaped_name="$(printf '%s' "$name" | sed 's/[][\\.^$*+?{}|()]/\\&/g')"
+  if ! output="$(find "$directory" -maxdepth 1 -type f -regextype posix-extended -regex ".*/${escaped_name}\\.bak-[0-9]{14}$" -printf '%f\n' 2>&1)"; then
     log "error: cannot list installer backups for $destination: $output"
     return 1
   fi
@@ -131,11 +132,12 @@ prune_all_backups() {
 }
 
 count_all_backups() {
-  local destination directory name output count=0
+  local destination directory name escaped_name output count=0
   while IFS= read -r destination; do
     directory="$(dirname "$destination")"
     name="$(basename "$destination")"
-    if ! output="$(find "$directory" -maxdepth 1 -type f -regextype posix-extended -regex ".*/${name//./\\.}\\.bak-[0-9]{14}" -printf x 2>&1)"; then
+    escaped_name="$(printf '%s' "$name" | sed 's/[][\\.^$*+?{}|()]/\\&/g')"
+    if ! output="$(find "$directory" -maxdepth 1 -type f -regextype posix-extended -regex ".*/${escaped_name}\\.bak-[0-9]{14}$" -printf x 2>&1)"; then
       log "error: cannot list installer backups for $destination: $output"
       return 1
     fi

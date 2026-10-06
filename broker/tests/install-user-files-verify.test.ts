@@ -282,6 +282,23 @@ describe("install-user-files --verify", () => {
     expect(result.stdout).toContain("verification passed: 13 installed files verified; 2 installer backups");
   });
 
+  test("backup enumeration uses escaped, end-anchored installer names", () => {
+    const source = readFileSync(installer, "utf8");
+    expect(source.match(/-regex "[^"]*\$"/g) ?? []).toHaveLength(2);
+    expect(source).toContain('escaped_name="$(printf \'%s\' "$name" | sed');
+  });
+
+  test("backup counting and pruning ignore names that extend a managed backup prefix", () => {
+    const { home, journal, run } = fixture();
+    journal("file", "sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
+    const target = resolve(home, ".config/opencode/plugins/sandbox-tools.ts");
+    writeFileSync(`${target}.bak-20260101000000`, "backup\n");
+    writeFileSync(`${target}.bak-20260102000000-extra`, "unmanaged\n");
+    expect(run().stdout).toContain("1 installer backups");
+    expect(run("--prune-backups").status).toBe(0);
+    expect(readFileSync(`${target}.bak-20260102000000-extra`, "utf8")).toBe("unmanaged\n");
+  });
+
   test("--prune-backups keeps three newest backups per managed destination", () => {
     const { home, run } = fixture();
     const first = resolve(home, ".config/opencode/plugins/sandbox-tools.ts");
