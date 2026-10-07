@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
@@ -77,6 +78,21 @@ function fixture() {
     env: { ...process.env, HOME: home, BROKER_STATE_DIR: stateDir, ...extraEnv },
   });
   return { home, stateDir, nonoDest, journal, run };
+}
+
+function applyInstaller(home: string): string {
+  const path = resolve(home, `install-user-files-${randomUUID()}`);
+  const source = readFileSync(installer, "utf8")
+    .replace(
+      'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+      `SCRIPT_DIR="${resolve(repoRoot, "scripts")}"`,
+    )
+    .replace(
+      'source "$SCRIPT_DIR/secure-launcher.conf"',
+      'source "$SCRIPT_DIR/secure-launcher.conf"\nNONO_BIN="/bin/true"',
+    );
+  writeFileSync(path, source, { mode: 0o755 });
+  return path;
 }
 
 function commandShim(home: string, command: string): string {
@@ -330,6 +346,17 @@ describe("install-user-files --verify", () => {
     expect(result.stdout).toContain("dry-run — nothing was installed");
   });
 
+  test("refuses dry-run combined with apply without mutating files", () => {
+    const { home, stateDir, run } = fixture();
+    const runner = applyInstaller(home);
+    const before = snapshotTree(home);
+    const result = run(["--dry-run", "--apply"], {}, runner);
+    expect(result.status, result.stderr).toBe(2);
+    expect(result.stderr).toContain("[install] --dry-run cannot be combined with --apply");
+    expect(snapshotTree(home)).toEqual(before);
+    expect(lstatSync(stateDir, { throwIfNoEntry: false })).toBeUndefined();
+  });
+
   test("dry-run backup pruning reports deletions without deleting backups", () => {
     const { home, run } = fixture();
     const target = resolve(home, ".config/opencode/plugins/sandbox-tools.ts");
@@ -351,24 +378,15 @@ describe("install-user-files --verify", () => {
     for (const stamp of ["20200101000000", "20210101000000", "20220101000000", "20230101000000"]) {
       writeFileSync(`${target}.bak-${stamp}`, "old backup\n");
     }
-    const applyInstaller = resolve(repoRoot, "scripts/install-user-files.test-runner");
-    const source = readFileSync(installer, "utf8").replace(
-      'source "$SCRIPT_DIR/secure-launcher.conf"',
-      'source "$SCRIPT_DIR/secure-launcher.conf"\nNONO_BIN="/bin/true"',
-    );
-    writeFileSync(applyInstaller, source, { mode: 0o755 });
-    try {
-      const result = run("--apply", {}, applyInstaller);
-      expect(result.status).toBe(0);
-      const backups = readdirSync(resolve(target, "..")).filter((name) => name.startsWith("sandbox-tools.ts.bak-"));
-      expect(backups).toHaveLength(3);
-      const created = backups.find((name) => !["20200101000000", "20210101000000", "20220101000000", "20230101000000"].some((stamp) => name.endsWith(stamp)));
-      expect(created).toBeDefined();
-      expect(result.stdout).toContain(`backed up ${target} -> ${resolve(target, "..")}/${created}`);
-      expect(result.stdout).toContain(`deleted old backup ${target}.bak-20200101000000`);
-    } finally {
-      rmSync(applyInstaller, { force: true });
-    }
+    const runner = applyInstaller(home);
+    const result = run("--apply", {}, runner);
+    expect(result.status).toBe(0);
+    const backups = readdirSync(resolve(target, "..")).filter((name) => name.startsWith("sandbox-tools.ts.bak-"));
+    expect(backups).toHaveLength(3);
+    const created = backups.find((name) => !["20200101000000", "20210101000000", "20220101000000", "20230101000000"].some((stamp) => name.endsWith(stamp)));
+    expect(created).toBeDefined();
+    expect(result.stdout).toContain(`backed up ${target} -> ${resolve(target, "..")}/${created}`);
+    expect(result.stdout).toContain(`deleted old backup ${target}.bak-20200101000000`);
   });
 
   test("fails closed when a managed backup directory cannot be listed", () => {

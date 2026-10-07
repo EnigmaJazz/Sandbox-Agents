@@ -48,6 +48,10 @@ if [[ "$PRUNE_BACKUPS" == "1" && "$APPLY" == "1" ]]; then
   echo "[install] --prune-backups cannot be combined with --apply" >&2
   exit 2
 fi
+if [[ "$DRY_RUN" == "1" && "$APPLY" == "1" ]]; then
+  echo "[install] --dry-run cannot be combined with --apply" >&2
+  exit 2
+fi
 if [[ "$APPLY" != "1" && "$VERIFY" != "1" && "$PRUNE_BACKUPS" != "1" ]]; then
   DRY_RUN=1
 fi
