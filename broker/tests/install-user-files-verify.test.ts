@@ -72,7 +72,7 @@ function fixture() {
       { flag: "a" },
     );
   };
-  const run = (mode: string | string[] = "--verify", extraEnv: Record<string, string> = {}) => spawnSync("bash", [installer, ...(Array.isArray(mode) ? mode : [mode])], {
+  const run = (mode: string | string[] = "--verify", extraEnv: Record<string, string> = {}, script = installer) => spawnSync("bash", [script, ...(Array.isArray(mode) ? mode : [mode])], {
     encoding: "utf8",
     env: { ...process.env, HOME: home, BROKER_STATE_DIR: stateDir, ...extraEnv },
   });
@@ -317,20 +317,58 @@ describe("install-user-files --verify", () => {
     expect(readFileSync(unmanaged, "utf8")).toBe("unmanaged\n");
   });
 
-  test("retention never removes the backup just created by the installer", () => {
+  test("dry-run installs create no backup and remove no old backup", () => {
+    const { home, run } = fixture();
+    const target = resolve(home, ".config/opencode/plugins/sandbox-tools.ts");
+    writeFileSync(target, "outdated plugin\n");
+    const existing = `${target}.bak-20200101000000`;
+    writeFileSync(existing, "old backup\n");
+    const before = snapshotTree(home);
+    const result = run("--dry-run");
+    expect(result.status).toBe(0);
+    expect(snapshotTree(home)).toEqual(before);
+    expect(result.stdout).toContain("dry-run — nothing was installed");
+  });
+
+  test("dry-run backup pruning reports deletions without deleting backups", () => {
+    const { home, run } = fixture();
+    const target = resolve(home, ".config/opencode/plugins/sandbox-tools.ts");
+    for (const stamp of ["20200101000000", "20210101000000", "20220101000000", "20230101000000"]) {
+      writeFileSync(`${target}.bak-${stamp}`, "old backup\n");
+    }
+    const before = snapshotTree(home);
+    const result = run(["--dry-run", "--prune-backups"]);
+    expect(result.status).toBe(0);
+    expect(snapshotTree(home)).toEqual(before);
+    expect(result.stdout).toContain(`would delete old backup ${target}.bak-20200101000000`);
+    expect(result.stdout).toContain("backup pruning complete");
+  });
+
+  test("apply backs up changed files, prunes old backups, and protects its new backup", () => {
     const { home, run } = fixture();
     const target = resolve(home, ".config/opencode/plugins/sandbox-tools.ts");
     writeFileSync(target, "outdated plugin\n");
     for (const stamp of ["20200101000000", "20210101000000", "20220101000000", "20230101000000"]) {
       writeFileSync(`${target}.bak-${stamp}`, "old backup\n");
     }
-    const result = run("--dry-run");
-    expect(result.status).toBe(0);
-    const backups = readdirSync(resolve(target, "..")).filter((name) => name.startsWith("sandbox-tools.ts.bak-"));
-    expect(backups).toHaveLength(3);
-    const created = backups.find((name) => !name.endsWith("20200101000000") && !name.endsWith("20210101000000") && !name.endsWith("20220101000000") && !name.endsWith("20230101000000"));
-    expect(created).toBeDefined();
-    expect(result.stdout).toContain(`backed up ${target} -> ${resolve(target, "..")}/${created}`);
+    const applyInstaller = resolve(repoRoot, "scripts/install-user-files.test-runner");
+    const source = readFileSync(installer, "utf8").replace(
+      'source "$SCRIPT_DIR/secure-launcher.conf"',
+      'source "$SCRIPT_DIR/secure-launcher.conf"\nNONO_BIN="/bin/true"',
+    );
+    writeFileSync(applyInstaller, source, { mode: 0o755 });
+    try {
+      const result = run("--apply", {}, applyInstaller);
+      expect(result.status).toBe(0);
+      const backups = readdirSync(resolve(target, "..")).filter((name) => name.startsWith("sandbox-tools.ts.bak-"));
+      expect(backups).toHaveLength(3);
+      const created = backups.find((name) => !["20200101000000", "20210101000000", "20220101000000", "20230101000000"].some((stamp) => name.endsWith(stamp)));
+      expect(created).toBeDefined();
+      expect(result.stdout).toContain(`backed up ${target} -> ${resolve(target, "..")}/${created}`);
+      expect(result.stdout).toContain(`deleted old backup ${target}.bak-20200101000000`);
+    } finally {
+      rmSync(applyInstaller, { force: true });
+    }
   });
 
   test("fails closed when a managed backup directory cannot be listed", () => {

@@ -30,12 +30,13 @@ JOURNAL="$STATE_DIR/install-journal.tsv"
 APPLY=0
 VERIFY=0
 PRUNE_BACKUPS=0
+DRY_RUN=0
 for argument in "$@"; do
   case "$argument" in
     --apply) APPLY=1 ;;
     --verify) VERIFY=1 ;;
     --prune-backups) PRUNE_BACKUPS=1 ;;
-    --dry-run) ;;
+    --dry-run) DRY_RUN=1 ;;
     *) echo "usage: $0 [--dry-run|--apply|--verify|--prune-backups]" >&2; exit 2 ;;
   esac
 done
@@ -47,9 +48,12 @@ if [[ "$PRUNE_BACKUPS" == "1" && "$APPLY" == "1" ]]; then
   echo "[install] --prune-backups cannot be combined with --apply" >&2
   exit 2
 fi
+if [[ "$APPLY" != "1" && "$VERIFY" != "1" && "$PRUNE_BACKUPS" != "1" ]]; then
+  DRY_RUN=1
+fi
 
-# Verification and explicit pruning must not create or modify installer state.
-if [[ "$VERIFY" != "1" && "$PRUNE_BACKUPS" != "1" ]]; then
+# Only an applying install may create or modify installer state.
+if [[ "$APPLY" == "1" ]]; then
   mkdir -p "$STATE_DIR"
   chmod 700 "$STATE_DIR"
 fi
@@ -90,7 +94,9 @@ prune_destination_backups() { # destination [protected backup]
     backup_path="$directory/$backup_path"
     retained=$((retained + 1))
     if (( retained > 3 )) && [[ "$backup_path" != "$protected" ]]; then
-      if rm -- "$backup_path"; then
+      if [[ "$DRY_RUN" == "1" ]]; then
+        log "would delete old backup $backup_path"
+      elif rm -- "$backup_path"; then
         log "deleted old backup $backup_path"
       else
         log "error: cannot remove installer backup $backup_path"
@@ -178,7 +184,7 @@ install_file() { # src dest mode
     fi
     return 0
   fi
-  if [[ -f "$dest" ]] && ! cmp -s "$src" "$dest"; then
+  if [[ "$APPLY" == "1" && -f "$dest" ]] && ! cmp -s "$src" "$dest"; then
     backup "$dest"
   fi
   log "install $src -> $dest (mode $mode)"
@@ -214,7 +220,7 @@ else
   if [[ -L "$NONO_DEST" ]] && [[ "$(readlink "$NONO_DEST")" == "$NONO_SOURCE" ]]; then
     log "already linked $NONO_DEST -> $NONO_SOURCE"
   else
-    if [[ -f "$NONO_DEST" && ! -L "$NONO_DEST" ]]; then
+    if [[ "$APPLY" == "1" && -f "$NONO_DEST" && ! -L "$NONO_DEST" ]]; then
       backup "$NONO_DEST"
     fi
     log "link $NONO_SOURCE -> $NONO_DEST (symlink; not a copy)"
