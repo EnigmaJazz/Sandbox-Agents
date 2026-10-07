@@ -111,6 +111,29 @@ export type Operation =
   | "advisorRespond"
   | "evidenceKeep";
 
+/** Operations guarded at the broker sandbox-dispatch boundary. */
+export const SANDBOX_OPERATIONS = [
+  "ensureWorker",
+  "workerStatus",
+  "exec",
+  "readFile",
+  "writeFile",
+  "applyPatch",
+  "listDir",
+  "grep",
+  "diff",
+  "prepareResult",
+  "applyResult",
+  "discardResult",
+  "keepResult",
+  "destroyWorker",
+  "listWorkers",
+  "copyInInfo",
+  "copyIn",
+  "copyOutInfo",
+  "copyOut",
+] as const satisfies readonly Operation[];
+
 /** Every Operation that exists in the protocol. Immutable; unknown ops fail closed. */
 export const OPERATIONS: readonly Operation[] = [
   "ensureWorker",

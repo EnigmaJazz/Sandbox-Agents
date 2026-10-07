@@ -65,6 +65,7 @@ import { PolicyError } from "./policy.ts";
 import { PendingQueue, QueuedTimedOutError } from "./queue.ts";
 import { reapOnDisconnect, startReaper, type ReaperHandle } from "./reaper.ts";
 import { drainQueue } from "./service.ts";
+import { SANDBOX_OPERATIONS } from "./types.ts";
 import {
   buildApplyOp,
   buildApplyResultOp,
@@ -557,6 +558,16 @@ export class BrokerServer {
   /** Fail-closed dispatch: unknown operations and any error reject. */
   private async dispatch(req: BrokerRequestEnvelope, sendProgress?: (position: number) => void): Promise<unknown> {
     const op = req.operation as Operation;
+    if (op !== "ensureWorker" && SANDBOX_OPERATIONS.includes(op as (typeof SANDBOX_OPERATIONS)[number])) {
+      const agent = this.ctx.store.get(req.sessionID)?.agent;
+      const readOnly =
+        (this.ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? [];
+      if (agent && readOnly.includes(agent)) {
+        throw new PolicyError(
+          `orchestrator agent "${agent}" is not allowed to use sandbox operation "${op}" (orchestrator-readonly)`,
+        );
+      }
+    }
     switch (op) {
       case "ensureWorker":
         return buildEnsureWorkerOp(this.ctx)(req, sendProgress);

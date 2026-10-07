@@ -13,6 +13,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
+import { BrokerServer } from "../src/server.ts";
 import { PolicyError } from "../src/policy.ts";
 import {
   authorizeHostDispatch,
@@ -21,7 +22,7 @@ import {
   type OpContext,
 } from "../src/service.ts";
 import { SessionStore } from "../src/state.ts";
-import { OPERATIONS } from "../src/types.ts";
+import { OPERATIONS, SANDBOX_OPERATIONS } from "../src/types.ts";
 import {
   HOST_MUTATION_IDENTITY_OPERATIONS,
   HOST_MUTATION_OPERATIONS,
@@ -261,7 +262,7 @@ describe("PM host identity policy", () => {
     }
   });
 
-  test.each(HOST_IDENTITIES)("%s cannot enter a worker and cannot authorize an unbound session", async (agent) => {
+  test.each(HOST_IDENTITIES)("%s ensureWorker refusal has an identity-specific reason", async (agent) => {
     const { store, dir } = freshStore();
     try {
       const ctx = bindingCtx(store, [...HOST_IDENTITIES]);
@@ -275,10 +276,120 @@ describe("PM host identity policy", () => {
           agent,
           payload: { projectDir: dir },
         }),
-      ).rejects.toThrow(PolicyError);
+      ).rejects.toThrow(`orchestrator agent "${agent}" is not allowed to create a worker (orchestrator-readonly)`);
       expect(store.get(`unbound-${agent}`)).toBeUndefined();
       expect(() => authorizeHostDispatch(ctx, "gitCommit", `unbound-${agent}`, agent)).toThrow(PolicyError);
       expect(authorizeHostDispatch(ctx, "reviewStatus", `unbound-${agent}`, agent)).toBe("read");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("every sandbox dispatch refuses each bound allowlisted identity before handlers run", async () => {
+    const operations = [
+      "ensureWorker", "workerStatus", "exec", "readFile", "writeFile", "applyPatch",
+      "listDir", "grep", "diff", "prepareResult", "applyResult", "discardResult",
+      "keepResult", "destroyWorker", "listWorkers", "copyInInfo", "copyIn",
+      "copyOutInfo", "copyOut",
+    ] as const;
+    const dir = mkdtempSync(join(tmpdir(), "sandbox-dispatch-binding-"));
+    try {
+      const config = defaultConfig({
+        readOnlyAgents: [...HOST_IDENTITIES],
+        stateDir: dir,
+        projects: [{ id: "test-project", path: dir }],
+      });
+      const server = new BrokerServer(config);
+      const serverStore = (server as unknown as { ctx: { store: SessionStore } }).ctx.store;
+      expect(SANDBOX_OPERATIONS).toEqual([
+        "ensureWorker", "workerStatus", "exec", "readFile", "writeFile", "applyPatch",
+        "listDir", "grep", "diff", "prepareResult", "applyResult", "discardResult",
+        "keepResult", "destroyWorker", "listWorkers", "copyInInfo", "copyIn",
+        "copyOutInfo", "copyOut",
+      ]);
+      const dispatch = (server as unknown as {
+        dispatch(req: { version: number; id: string; operation: string; sessionID: string; payload: unknown }): Promise<unknown>;
+      }).dispatch.bind(server);
+
+      for (const agent of HOST_IDENTITIES) {
+        const sessionID = `bound-${agent}`;
+        serverStore.touch(sessionID, { agent });
+        for (const operation of operations) {
+          const req = {
+            version: 1,
+            id: `${operation}-${agent}`,
+            operation,
+            sessionID,
+            payload: operation === "ensureWorker" ? { projectDir: dir } : {},
+          };
+          await expect(dispatch(req)).rejects.toMatchObject({
+            code: "policy",
+            message: operation === "ensureWorker"
+              ? `orchestrator agent "${agent}" is not allowed to create a worker (orchestrator-readonly)`
+              : `orchestrator agent "${agent}" is not allowed to use sandbox operation "${operation}" (orchestrator-readonly)`,
+          });
+        }
+      }
+
+      serverStore.touch("ordinary-unbound");
+      for (const operation of operations) {
+        const req = {
+          version: 1,
+          id: `ordinary-${operation}`,
+          operation,
+          sessionID: "ordinary-unbound",
+          payload: operation === "ensureWorker" ? { projectDir: "/not-registered" } : {},
+        };
+        try {
+          await dispatch(req);
+        } catch (error) {
+          expect(String(error)).not.toContain("orchestrator-readonly");
+        }
+      }
+      await expect(dispatch({
+        version: 1,
+        id: "unbound-envelope-claim",
+        operation: "workerStatus",
+        sessionID: "unbound-envelope-claim",
+        agent: "pm-odd",
+        payload: {},
+      })).rejects.toMatchObject({ message: "unknown session unbound-envelope-claim" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an ordinary existing worker session is permitted through ensureWorker", async () => {
+    const { store, dir } = freshStore();
+    try {
+      const ctx = bindingCtx(store, [...HOST_IDENTITIES]);
+      const ensureCtx = {
+        config: { ...ctx.config, projects: [{ id: "ordinary-project", path: dir }] },
+        store,
+        git: {
+          spawn: async (argv: string[]) => ({
+            status: 0,
+            stdout: argv.includes("--format=%s") ? "ordinary baseline" : "a".repeat(40),
+            stderr: "",
+          }),
+        },
+      } as unknown as OpContext;
+      store.touch("ordinary-active", {
+        state: "SANDBOX_ACTIVE",
+        projectID: "ordinary-project",
+        baselineRef: "refs/baseline/ordinary-active",
+        workerName: "worker-ordinary",
+        workerState: "ACTIVE",
+      });
+      await expect(
+        buildEnsureWorkerOp(ensureCtx)({
+          version: 1,
+          id: "ensure-ordinary",
+          operation: "ensureWorker",
+          sessionID: "ordinary-active",
+          payload: { projectDir: dir },
+        }),
+      ).resolves.toMatchObject({ worker: "worker-ordinary", state: "SANDBOX_ACTIVE", reused: true });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
