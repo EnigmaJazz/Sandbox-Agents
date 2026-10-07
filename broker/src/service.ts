@@ -166,12 +166,12 @@ function payloadOf(req: BrokerRequestEnvelope): Payload {
  * session record's agent is trusted, so an unknown session fails closed.
  */
 export function authorizeHostDispatch(
-  ctx: Pick<OpContext, "store"> & { config: { readOnlyAgents?: readonly string[] } },
+  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> },
   operation: string,
   sessionID: string,
   _reqAgent?: string,
 ): HostToolAccess {
-  const policy = new HostToolPolicy(ctx.config.readOnlyAgents ?? []);
+  const policy = new HostToolPolicy(ctx.config.readOnlyAgents);
   const existing = ctx.store.get(sessionID);
   const trusted = existing?.agent;
   const decision = policy.decide(operation, trusted);
@@ -189,7 +189,7 @@ export function authorizeHostDispatch(
  * the binding can only ever record a host-authoritative orchestrator identity.
  */
 function assertBindableAgent(
-  config: { readOnlyAgents?: readonly string[] },
+  config: Pick<BrokerConfig, "readOnlyAgents">,
   agent: unknown,
 ): string {
   if (typeof agent !== "string" || agent.length === 0) {
@@ -198,7 +198,7 @@ function assertBindableAgent(
   if (agent.length > 128) {
     throw new ValidationError("bindSessionAgent agent exceeds 128 bytes");
   }
-  const allow = config.readOnlyAgents ?? [];
+  const allow = config.readOnlyAgents;
   if (!allow.includes(agent)) {
     throw new PolicyError(
       `session agent binding refused: "${agent}" is not a host-authoritative orchestrator identity`,
@@ -224,7 +224,7 @@ function assertBindableAgent(
  * orchestrator identity.
  */
 export function bindSessionAgent(
-  ctx: Pick<OpContext, "store"> & { config: { readOnlyAgents?: readonly string[] } },
+  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> },
   sessionID: string,
   payload: unknown,
 ): SessionRecord {
@@ -299,8 +299,7 @@ export function buildEnsureWorkerOp(ctx: OpContext): (req: BrokerRequestEnvelope
     // Orchestrator read-only: refuse before any touch/admission side effect (R2).
     const existing = ctx.store.get(req.sessionID);
     const trusted = existing?.agent ?? req.agent;
-    const readOnly =
-      (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? [];
+    const readOnly = ctx.config.readOnlyAgents;
     if (trusted && readOnly.includes(trusted)) {
       throw new PolicyError(
         `orchestrator agent "${trusted}" is not allowed to create a worker (orchestrator-readonly)`,
@@ -395,8 +394,7 @@ async function createWorkerForSession(
   // Orchestrator read-only: fail closed even for queued creations
   const existing2 = ctx.store.get(sessionID);
   const trusted2 = existing2?.agent ?? req.agent;
-  const ro2 =
-    (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? [];
+  const ro2 = ctx.config.readOnlyAgents;
   if (trusted2 && ro2.includes(trusted2)) {
     throw new PolicyError(
       `orchestrator agent "${trusted2}" is not allowed to create a worker (orchestrator-readonly)`,
@@ -2304,8 +2302,7 @@ export function buildPolicyOp(ctx: OpContext): OpHandler {
         maxApplyDiffLines: ctx.config.resource.maxApplyDiffLines,
       },
       network: ctx.config.network,
-      readOnlyAgents:
-        (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? [],
+      readOnlyAgents: ctx.config.readOnlyAgents,
       roleModels:
         (ctx.config as { roleModels?: Record<string, unknown> }).roleModels ??
         {},

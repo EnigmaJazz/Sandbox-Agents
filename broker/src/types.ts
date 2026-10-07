@@ -111,7 +111,13 @@ export type Operation =
   | "advisorRespond"
   | "evidenceKeep";
 
-/** Operations guarded at the broker sandbox-dispatch boundary. */
+/**
+ * Sandbox operation classification: bound-identity dispatch enforcement plus
+ * the specialized ensureWorker refusal for allowlisted envelope claims. Unbound
+ * sessions remain eligible subject to each handler's policy. metrics,
+ * sandboxResult, and sandboxResultInstall intentionally use separate dispatch
+ * cases and are not included here.
+ */
 export const SANDBOX_OPERATIONS = [
   "ensureWorker",
   "workerStatus",

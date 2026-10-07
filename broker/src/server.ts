@@ -271,6 +271,14 @@ export class BrokerServer {
     private readonly config: BrokerConfig,
     logger?: Logger,
   ) {
+    if (
+      !Array.isArray(config.readOnlyAgents) ||
+      config.readOnlyAgents.some((agent) => typeof agent !== "string" || agent.length === 0)
+    ) {
+      throw new TypeError(
+        "BrokerConfig.readOnlyAgents must be an array of non-empty agent names",
+      );
+    }
     this.logger =
       logger ?? new Logger({ file: config.logPath, toConsole: config.logPath === undefined });
     const store = new SessionStore(config.stateDir);
@@ -555,13 +563,18 @@ export class BrokerServer {
     };
   }
 
-  /** Fail-closed dispatch: unknown operations and any error reject. */
+  /**
+   * Enforce bound-identity restrictions for sandbox operations. ensureWorker
+   * also keeps its handler-level refusal for an allowlisted envelope claim
+   * before any store touch; unbound sessions remain eligible under handler policy.
+   * metrics, sandboxResult, and sandboxResultInstall intentionally use separate
+   * dispatch policy paths and are not members of SANDBOX_OPERATIONS.
+   */
   private async dispatch(req: BrokerRequestEnvelope, sendProgress?: (position: number) => void): Promise<unknown> {
     const op = req.operation as Operation;
     if (op !== "ensureWorker" && SANDBOX_OPERATIONS.includes(op as (typeof SANDBOX_OPERATIONS)[number])) {
       const agent = this.ctx.store.get(req.sessionID)?.agent;
-      const readOnly =
-        (this.ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? [];
+      const readOnly = this.ctx.config.readOnlyAgents;
       if (agent && readOnly.includes(agent)) {
         throw new PolicyError(
           `orchestrator agent "${agent}" is not allowed to use sandbox operation "${op}" (orchestrator-readonly)`,

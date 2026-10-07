@@ -285,13 +285,24 @@ describe("PM host identity policy", () => {
     }
   });
 
+  test("BrokerServer rejects malformed readOnlyAgents but accepts an explicit empty policy", () => {
+    const { dir } = freshStore();
+    try {
+      const malformed = {
+        ...defaultConfig({ stateDir: dir }),
+        readOnlyAgents: undefined,
+      } as unknown as ReturnType<typeof defaultConfig>;
+      expect(() => new BrokerServer(malformed)).toThrow(
+        "BrokerConfig.readOnlyAgents must be an array of non-empty agent names",
+      );
+      expect(() => new BrokerServer(defaultConfig({ stateDir: dir, readOnlyAgents: [] }))).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("every sandbox dispatch refuses each bound allowlisted identity before handlers run", async () => {
-    const operations = [
-      "ensureWorker", "workerStatus", "exec", "readFile", "writeFile", "applyPatch",
-      "listDir", "grep", "diff", "prepareResult", "applyResult", "discardResult",
-      "keepResult", "destroyWorker", "listWorkers", "copyInInfo", "copyIn",
-      "copyOutInfo", "copyOut",
-    ] as const;
+    const operations = SANDBOX_OPERATIONS;
     const dir = mkdtempSync(join(tmpdir(), "sandbox-dispatch-binding-"));
     try {
       const config = defaultConfig({
@@ -331,29 +342,59 @@ describe("PM host identity policy", () => {
         }
       }
 
-      serverStore.touch("ordinary-unbound");
-      for (const operation of operations) {
-        const req = {
-          version: 1,
-          id: `ordinary-${operation}`,
-          operation,
-          sessionID: "ordinary-unbound",
-          payload: operation === "ensureWorker" ? { projectDir: "/not-registered" } : {},
-        };
-        try {
-          await dispatch(req);
-        } catch (error) {
-          expect(String(error)).not.toContain("orchestrator-readonly");
-        }
-      }
+      await expect(dispatch({
+        version: 1,
+        id: "absent-session",
+        operation: "workerStatus",
+        sessionID: "absent-session",
+        payload: {},
+      })).rejects.toMatchObject({ message: "unknown session absent-session" });
+
+      serverStore.touch("identity-less-session");
+      await expect(dispatch({
+        version: 1,
+        id: "identity-less-session",
+        operation: "workerStatus",
+        sessionID: "identity-less-session",
+        payload: {},
+      })).resolves.toMatchObject({
+        sessionID: "identity-less-session",
+        state: "HOST_READ_ONLY",
+        worker: null,
+        workerState: null,
+      });
+
+      serverStore.touch("ordinary-identified-session", {
+        agent: "general",
+        state: "SANDBOX_ACTIVE",
+        workerName: "worker-general",
+        workerState: "ACTIVE",
+      });
+      await expect(dispatch({
+        version: 1,
+        id: "ordinary-identified-session",
+        operation: "workerStatus",
+        sessionID: "ordinary-identified-session",
+        payload: {},
+      })).resolves.toMatchObject({
+        sessionID: "ordinary-identified-session",
+        state: "SANDBOX_ACTIVE",
+        worker: "worker-general",
+        workerState: "ACTIVE",
+      });
+
       await expect(dispatch({
         version: 1,
         id: "unbound-envelope-claim",
-        operation: "workerStatus",
+        operation: "ensureWorker",
         sessionID: "unbound-envelope-claim",
         agent: "pm-odd",
-        payload: {},
-      })).rejects.toMatchObject({ message: "unknown session unbound-envelope-claim" });
+        payload: { projectDir: dir },
+      })).rejects.toMatchObject({
+        code: "policy",
+        message: 'orchestrator agent "pm-odd" is not allowed to create a worker (orchestrator-readonly)',
+      });
+      expect(serverStore.get("unbound-envelope-claim")).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
