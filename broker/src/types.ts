@@ -112,33 +112,85 @@ export type Operation =
   | "evidenceKeep";
 
 /**
- * Sandbox operation classification: bound-identity dispatch enforcement plus
- * the specialized ensureWorker refusal for allowlisted envelope claims. Unbound
- * sessions remain eligible subject to each handler's policy. metrics,
- * sandboxResult, and sandboxResultInstall intentionally use separate dispatch
- * cases and are not included here.
+ * Exhaustive guard-policy partition. Labels follow the current dispatch case
+ * and handler behavior; this map does not prove handler code matches its label.
  */
-export const SANDBOX_OPERATIONS = [
-  "ensureWorker",
-  "workerStatus",
-  "exec",
-  "readFile",
-  "writeFile",
-  "applyPatch",
-  "listDir",
-  "grep",
-  "diff",
-  "prepareResult",
-  "applyResult",
-  "discardResult",
-  "keepResult",
-  "destroyWorker",
-  "listWorkers",
-  "copyInInfo",
-  "copyIn",
-  "copyOutInfo",
-  "copyOut",
-] as const satisfies readonly Operation[];
+export type SandboxGuardClass =
+  | "sandbox-dispatch-guard"
+  | "sandbox-handler-guard"
+  | "exempt-from-sandbox-guard";
+
+export const SANDBOX_GUARD_CLASS = {
+  ensureWorker: "sandbox-handler-guard",
+  workerStatus: "sandbox-dispatch-guard",
+  exec: "sandbox-dispatch-guard",
+  readFile: "sandbox-dispatch-guard",
+  writeFile: "sandbox-dispatch-guard",
+  applyPatch: "sandbox-dispatch-guard",
+  listDir: "sandbox-dispatch-guard",
+  grep: "sandbox-dispatch-guard",
+  diff: "sandbox-dispatch-guard",
+  prepareResult: "sandbox-dispatch-guard",
+  applyResult: "sandbox-dispatch-guard",
+  discardResult: "sandbox-dispatch-guard",
+  keepResult: "sandbox-dispatch-guard",
+  destroyWorker: "sandbox-dispatch-guard",
+  listWorkers: "sandbox-dispatch-guard",
+  metrics: "exempt-from-sandbox-guard",
+  sddStatus: "exempt-from-sandbox-guard",
+  sddContinue: "exempt-from-sandbox-guard",
+  sddArchiveCompose: "exempt-from-sandbox-guard",
+  sddTaskResult: "exempt-from-sandbox-guard",
+  reviewAssess: "exempt-from-sandbox-guard",
+  reviewModeStatus: "exempt-from-sandbox-guard",
+  reviewStatus: "exempt-from-sandbox-guard",
+  reviewLensContext: "exempt-from-sandbox-guard",
+  sddAttemptGrant: "exempt-from-sandbox-guard",
+  planDocAppend: "exempt-from-sandbox-guard",
+  sandboxResult: "exempt-from-sandbox-guard",
+  sandboxResultInstall: "exempt-from-sandbox-guard",
+  bindSessionAgent: "exempt-from-sandbox-guard",
+  reviewStart: "exempt-from-sandbox-guard",
+  reviewCaptureResult: "exempt-from-sandbox-guard",
+  reviewCaptureUnachievable: "exempt-from-sandbox-guard",
+  reviewAcknowledgeApproved: "exempt-from-sandbox-guard",
+  reviewCaptureCorrectionPlan: "exempt-from-sandbox-guard",
+  reviewCaptureRefuter: "exempt-from-sandbox-guard",
+  reviewCaptureValidation: "exempt-from-sandbox-guard",
+  reviewValidate: "exempt-from-sandbox-guard",
+  reviewRecover: "exempt-from-sandbox-guard",
+  gitCommit: "exempt-from-sandbox-guard",
+  gitClearCommitIntent: "exempt-from-sandbox-guard",
+  gitPush: "exempt-from-sandbox-guard",
+  ghIssueCreate: "exempt-from-sandbox-guard",
+  hostSystemSummary: "exempt-from-sandbox-guard",
+  hostMemory: "exempt-from-sandbox-guard",
+  hostDiskUsage: "exempt-from-sandbox-guard",
+  hostNetworkListeners: "exempt-from-sandbox-guard",
+  hostProcessList: "exempt-from-sandbox-guard",
+  hostServiceStatus: "exempt-from-sandbox-guard",
+  hostServiceLogs: "exempt-from-sandbox-guard",
+  hostTailscaleStatus: "exempt-from-sandbox-guard",
+  hostDockerList: "exempt-from-sandbox-guard",
+  hostDockerLogs: "exempt-from-sandbox-guard",
+  copyOutInfo: "sandbox-dispatch-guard",
+  copyOut: "sandbox-dispatch-guard",
+  copyInInfo: "sandbox-dispatch-guard",
+  copyIn: "sandbox-dispatch-guard",
+  policy: "exempt-from-sandbox-guard",
+  registerProject: "exempt-from-sandbox-guard",
+  resultDiff: "exempt-from-sandbox-guard",
+  advisorAsk: "exempt-from-sandbox-guard",
+  advisorGet: "exempt-from-sandbox-guard",
+  advisorList: "exempt-from-sandbox-guard",
+  advisorRead: "exempt-from-sandbox-guard",
+  advisorRespond: "exempt-from-sandbox-guard",
+  evidenceKeep: "exempt-from-sandbox-guard",
+} as const satisfies Record<Operation, SandboxGuardClass>;
+
+export const SANDBOX_OPERATIONS: readonly Operation[] = Object.entries(SANDBOX_GUARD_CLASS)
+  .filter(([, guardClass]) => guardClass === "sandbox-dispatch-guard")
+  .map(([operation]) => operation as Operation);
 
 /** Every Operation that exists in the protocol. Immutable; unknown ops fail closed. */
 export const OPERATIONS: readonly Operation[] = [

@@ -146,6 +146,11 @@ These are **live observations after installation**, with evidence and inference 
 - **2026-10-07 dispatch follow-up verification:** RED was the new all-operation dispatch test failing because an operation returned successfully instead of the expected identity refusal; the initial fixture timed out once while its ordinary ensureWorker positive control attempted actual worker creation, then was bounded to an unregistered project path. GREEN with the fixed fixture: `782 pass, 0 fail, 3567 expect() calls; Ran 782 tests across 50 files. [4.48s]`. Command: `bun --cwd broker test --reporter=dot`.
 - **Reviewability receipt for this follow-up:** authored line and patch-byte measurement are reported in the session result. The patch-byte measurement attempt may be refused by the sandbox argv policy; no unmeasured byte count is claimed.
 
+## Follow-up finding — operation admission remains separate from exhaustive dispatch guards
+
+- **Observed (2026-10-07, recorded only):** the `Operation` union includes `gitCommit`, `gitPush`, and `ghIssueCreate` (`broker/src/types.ts:82-85` at HEAD `093d03d`), and `BrokerServer.dispatch` has corresponding cases (`broker/src/server.ts:635-642` at that HEAD), but the `OPERATIONS` literal omits all three (`broker/src/types.ts:144-207` at that HEAD). `parseRequest` only checks that `req.operation` is a string and casts it to `Operation`; it does not validate membership in `OPERATIONS` (`broker/src/server.ts:553-559` at that HEAD).
+- **Disposition:** pre-existing admission gap, separate from the sandbox-guard partition and exhaustive dispatch switch. Recorded for follow-up; no admission behavior changed in this unit.
+
 ## Next step
 
 The broker-side all-operation refusal finding is closed in source and regression coverage; owner review and manual application remain required because the implementation touches S17 `broker/src/**`. The separate plugin-layer runtime identity coverage and post-install checks from the earlier `pm-probe` removal remain outside this follow-up.

@@ -612,6 +612,17 @@ export class BrokerServer {
         return buildDestroyWorkerOp(this.ctx)(req);
       case "listWorkers":
         return buildListWorkersOp(this.ctx)(req);
+      case "hostSystemSummary":
+      case "hostMemory":
+      case "hostDiskUsage":
+      case "hostNetworkListeners":
+      case "hostProcessList":
+      case "hostServiceStatus":
+      case "hostServiceLogs":
+      case "hostTailscaleStatus":
+      case "hostDockerList":
+      case "hostDockerLogs":
+        return buildHostOp(this.ctx)(req);
       case "metrics":
         return buildMetricsOp(this.ctx)(req);
       case "sddStatus":
@@ -692,8 +703,10 @@ export class BrokerServer {
         return buildAdvisorRespondOp(this.ctx)(req);
       case "evidenceKeep":
         return buildAdvisorEvidenceKeepOp(this.ctx)(req);
-      default:
-        return buildHostOp(this.ctx)(req);
+      default: {
+        const exhaustive: never = op;
+        throw new ValidationError(`unsupported operation '${exhaustive}'`);
+      }
     }
   }
 

@@ -41,6 +41,14 @@ const ORCHESTRATOR_ALT = "gentle-orchestrator-alt";
 const PM_AGENTS = ["pm-odd", "pm-systematic", "pm-sdd"] as const;
 const HOST_IDENTITIES = [ORCHESTRATOR, ...PM_AGENTS] as const;
 
+// Independent review fixture: never derive this list from production guard policy.
+const EXPECTED_SANDBOX_OPERATIONS = [
+  "ensureWorker", "workerStatus", "exec", "readFile", "writeFile", "applyPatch",
+  "listDir", "grep", "diff", "prepareResult", "applyResult", "discardResult",
+  "keepResult", "destroyWorker", "listWorkers", "copyInInfo", "copyIn",
+  "copyOutInfo", "copyOut",
+] as const;
+
 function freshStore(): { store: SessionStore; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), "session-binding-"));
   return { store: new SessionStore(dir), dir };
@@ -295,6 +303,16 @@ describe("PM host identity policy", () => {
       expect(() => new BrokerServer(malformed)).toThrow(
         "BrokerConfig.readOnlyAgents must be an array of non-empty agent names",
       );
+      expect(() => new BrokerServer({
+        ...defaultConfig({ stateDir: dir }),
+        readOnlyAgents: ["general", 1],
+      } as unknown as ReturnType<typeof defaultConfig>)).toThrow(
+        "BrokerConfig.readOnlyAgents must be an array of non-empty agent names",
+      );
+      expect(() => new BrokerServer({
+        ...defaultConfig({ stateDir: dir }),
+        readOnlyAgents: ["general", ""],
+      })).toThrow("BrokerConfig.readOnlyAgents must be an array of non-empty agent names");
       expect(() => new BrokerServer(defaultConfig({ stateDir: dir, readOnlyAgents: [] }))).not.toThrow();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -302,7 +320,7 @@ describe("PM host identity policy", () => {
   });
 
   test("every sandbox dispatch refuses each bound allowlisted identity before handlers run", async () => {
-    const operations = SANDBOX_OPERATIONS;
+    const operations = EXPECTED_SANDBOX_OPERATIONS;
     const dir = mkdtempSync(join(tmpdir(), "sandbox-dispatch-binding-"));
     try {
       const config = defaultConfig({
@@ -312,12 +330,9 @@ describe("PM host identity policy", () => {
       });
       const server = new BrokerServer(config);
       const serverStore = (server as unknown as { ctx: { store: SessionStore } }).ctx.store;
-      expect(SANDBOX_OPERATIONS).toEqual([
-        "ensureWorker", "workerStatus", "exec", "readFile", "writeFile", "applyPatch",
-        "listDir", "grep", "diff", "prepareResult", "applyResult", "discardResult",
-        "keepResult", "destroyWorker", "listWorkers", "copyInInfo", "copyIn",
-        "copyOutInfo", "copyOut",
-      ]);
+      expect([...SANDBOX_OPERATIONS].sort()).toEqual(
+        EXPECTED_SANDBOX_OPERATIONS.filter((operation) => operation !== "ensureWorker").sort(),
+      );
       const dispatch = (server as unknown as {
         dispatch(req: { version: number; id: string; operation: string; sessionID: string; payload: unknown }): Promise<unknown>;
       }).dispatch.bind(server);
@@ -395,6 +410,31 @@ describe("PM host identity policy", () => {
         message: 'orchestrator agent "pm-odd" is not allowed to create a worker (orchestrator-readonly)',
       });
       expect(serverStore.get("unbound-envelope-claim")).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a bound allowlisted identity reaches an exempt host-read dispatch", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sandbox-dispatch-exempt-"));
+    try {
+      const server = new BrokerServer(defaultConfig({
+        readOnlyAgents: [...HOST_IDENTITIES],
+        stateDir: dir,
+        projects: [{ id: "test-project", path: dir }],
+      }));
+      const serverStore = (server as unknown as { ctx: { store: SessionStore } }).ctx.store;
+      serverStore.touch("bound-exempt", { agent: ORCHESTRATOR });
+      const dispatch = (server as unknown as {
+        dispatch(req: { version: number; id: string; operation: string; sessionID: string; payload: unknown }): Promise<unknown>;
+      }).dispatch.bind(server);
+      await expect(dispatch({
+        version: 1,
+        id: "exempt-metrics",
+        operation: "metrics",
+        sessionID: "bound-exempt",
+        payload: {},
+      })).resolves.toBeDefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
