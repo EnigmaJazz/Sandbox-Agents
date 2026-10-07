@@ -114,6 +114,8 @@ const JSON_ESCAPE_WORST_CASE = 6;
 const REQUEST_ENVELOPE_ALLOWANCE = 64 * 1024;
 /** Bytes of an oversize line kept to recover its request id. */
 const OVERSIZE_ID_PREFIX_BYTES = 512;
+/** 128 chars is over 4x the longest Operation name (27 chars). */
+const MAX_OPERATION_NAME_LENGTH = 128;
 const OVERSIZE_ID_RE = /"id"\s*:\s*"([A-Za-z0-9-]{1,128})"/;
 
 /**
@@ -552,6 +554,9 @@ export class BrokerServer {
     }
     if (typeof req.operation !== "string") {
       throw new ValidationError("missing operation");
+    }
+    if (req.operation.length > MAX_OPERATION_NAME_LENGTH) {
+      throw new ValidationError("operation name exceeds 128 characters");
     }
     return {
       version: 1,

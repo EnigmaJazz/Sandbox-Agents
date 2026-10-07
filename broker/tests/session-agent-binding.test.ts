@@ -58,6 +58,64 @@ function bindingCtx(store: SessionStore, readOnlyAgents: string[] = [ORCHESTRATO
   return { config: defaultConfig({ readOnlyAgents }), store };
 }
 
+describe("main socket operation admission", () => {
+  test("returns bounded operation errors and keeps the connection usable", async () => {
+    const root = mkdtempSync(join(tmpdir(), "operation-admission-"));
+    const socketPath = join(root, "broker.sock");
+    const server = new BrokerServer(defaultConfig({ stateDir: join(root, "state"), socketPath }));
+    await server.start();
+
+    const replies = new Map<string, { id: string; ok?: boolean; result?: unknown; error?: { code: string; message: string } }>();
+    let rx = "";
+    const socket = await Bun.connect({
+      unix: socketPath,
+      socket: {
+        data(_socket, data) {
+          rx += data.toString("utf8");
+          let newline: number;
+          while ((newline = rx.indexOf("\n")) !== -1) {
+            const response = JSON.parse(rx.slice(0, newline));
+            replies.set(response.id, response);
+            rx = rx.slice(newline + 1);
+          }
+        },
+      },
+    });
+    const ask = async (request: unknown, responseID: string) => {
+      socket.write(`${JSON.stringify(request)}\n`);
+      for (let attempt = 0; attempt < 200 && !replies.has(responseID); attempt++) await Bun.sleep(10);
+      return replies.get(responseID);
+    };
+
+    try {
+      const unknown = await ask({ version: 1, id: "unknown-operation", operation: "notAnOperation", sessionID: "socket-test" }, "unknown-operation");
+      expect(unknown).toMatchObject({
+        version: 1,
+        id: "unknown-operation",
+        ok: false,
+        error: { code: "validation", message: "unsupported operation 'notAnOperation'" },
+      });
+
+      const oversizedValue = "x".repeat(129);
+      const oversized = await ask({ version: 1, id: "oversized-operation", operation: oversizedValue, sessionID: "socket-test" }, "0");
+      expect(oversized).toMatchObject({
+        version: 1,
+        id: "0",
+        ok: false,
+        error: { code: "validation", message: "operation name exceeds 128 characters" },
+      });
+      expect(JSON.stringify(oversized)).not.toContain(oversizedValue);
+
+      const allowed = await ask({ version: 1, id: "after-rejection", operation: "metrics", sessionID: "socket-test" }, "after-rejection");
+      expect(allowed).toMatchObject({ version: 1, id: "after-rejection", ok: true });
+    } finally {
+      socket.end();
+      server.shutdown();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("host-authoritative session→agent binding", () => {
   test("the binding establishes orchestrator identity for host mutations", () => {
     const { store, dir } = freshStore();

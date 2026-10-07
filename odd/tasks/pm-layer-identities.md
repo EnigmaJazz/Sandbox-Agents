@@ -155,6 +155,13 @@ These are **live observations after installation**, with evidence and inference 
 
 The broker-side all-operation refusal finding is closed in source and regression coverage; owner review and manual application remain required because the implementation touches S17 `broker/src/**`. The separate plugin-layer runtime identity coverage and post-install checks from the earlier `pm-probe` removal remain outside this follow-up.
 
+## Operation-name admission — 2026-10-07
+
+- **Observed:** `parseRequest` now rejects operation names longer than 128 characters with the fixed validation message `operation name exceeds 128 characters`, before the value can reach dispatch or operation/error logging. The bound is shared by the main and advisor sockets because both route through `parseRequest`.
+- **Derivation:** the longest member of the `Operation` union is `reviewCaptureCorrectionPlan` at 27 characters; 128 allows more than 4× headroom. Admission intentionally checks length only, not `OPERATIONS` membership: `gitCommit`, `gitPush`, and `ghIssueCreate` remain routed union operations although omitted from that literal.
+- **Observed:** an unknown operation sent through the main socket reaches dispatch and returns a validation error envelope; it is not a thrown client-side exception. This replaces the previous host-read `state` error with `validation`. Whether any external client depended on the old code is **not established**.
+- **Verification:** socket regression covers the unknown-operation envelope, the fixed oversized-name response without echo, and a successful `metrics` request on the same connection after rejection. RED: `784 pass`, `1 fail`, `3562 expect() calls`, `Ran 785 tests across 50 files. [6.74s]`; it reached dispatch and logged/echoed the 129-character value. GREEN: `785 pass`, `0 fail`, `3564 expect() calls`, `Ran 785 tests across 50 files. [4.58s]`.
+
 ## Dispatch-contract hardening — 2026-10-07
 
 - **Observed:** required `BrokerConfig.readOnlyAgents` is now consumed directly by dispatch, `buildEnsureWorkerOp`, queued `createWorkerForSession`, `buildPolicyOp`, `authorizeHostDispatch`, and `assertBindableAgent`; the optional casts/fallbacks no longer weaken those consumers. Constructor validation rejects a missing/non-array/malformed list. An explicit empty list remains valid and means no agent is allowlisted; its policy meaning is unchanged.
