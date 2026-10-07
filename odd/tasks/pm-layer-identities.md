@@ -6,11 +6,11 @@ Authorize the workflow-side project-manager (PM) agents to run the host mutation
 
 ## Problem
 
-The host-mutation identity allowlist currently names only `gentle-orchestrator`. The workflow-side design moves work-unit coordination and host mutations to `pm-odd`, `pm-systematic`, and `pm-sdd`; a temporary `pm-probe` is also needed for the workflow-side go/no-go probe. Without extending the host-resolved identity allowlist, PM host mutations are refused. Allowlist changes must preserve sandbox separation, trusted session binding, and read access for every agent.
+The host-mutation identity allowlist was extended for workflow-side `pm-odd`, `pm-systematic`, and `pm-sdd`, and temporarily included `pm-probe` for the workflow-side go/no-go probe. The workflow side has now closed that probe (reported as the condition for this removal). This change removes `pm-probe` from the plugin and broker identity lists and the broker mutation map. A lingering session record bearing that name is no longer allowlisted and is denied mutations; it does not inherit another identity's rights. Allowlist changes must preserve sandbox separation, trusted session binding, and read access for every agent.
 
 ## Scope
 
-- Extend the host-mutation identity allowlist to `gentle-orchestrator`, `pm-odd`, `pm-systematic`, `pm-sdd`, and temporary `pm-probe`.
+- The final host-mutation identity allowlist is `gentle-orchestrator`, `pm-odd`, `pm-systematic`, and `pm-sdd`; `pm-probe` was temporary and is removed after the workflow side closed its probe.
 - Prefer one configured list read by broker and plugin. If a shared source is impractical, retain two constants and test that they remain identical.
 - Review the named identity paths: `opencode/plugins/sandbox-tools.ts:64` (`READ_ONLY_AGENTS`), `broker/src/config.ts:243` (`DEFAULT_READ_ONLY_AGENTS`), `authorizeHostDispatch`, `bindSessionAgent`, and `assertBindableAgent` in `broker/src/service.ts`, and `shouldRefuseEnsureWorker` in `broker/src/role-policy.ts`.
 - Preserve the existing per-operation authorization. Optional refinement, at the implementer's discretion: keep `registerProject` limited to `gentle-orchestrator` while PMs receive the remaining host mutations. A flat identity list is acceptable because workflow-side `opencode.json` permissions also enforce this split.
@@ -98,12 +98,13 @@ Documentation preparation is limited to `odd/tasks/pm-layer-identities.md`, `doc
 - [x] T4 — installer and rollback lists needed no change because `sandbox-tools.ts` was already listed in both.
 - [x] T5 live-evidence portion — five answers recorded below as live observations after installation; T5.3 full context delivery remains untested.
 - [x] Update this tracker with the implementation and live evidence; tracker commit `e0bbd40`.
+- [x] Remove temporary `pm-probe` after workflow-side closure and add regression coverage for stale-session denial and envelope/tool-argument identity spoofing.
 
 ## Review disposition
 
 The PM-layer identity change was approved and acknowledged with authority burned under lineage `review-f08baf883fae880d`, for candidate `685e394..444d1e1`; the last-reviewed boundary is `444d1e1`. The eleven provider-designated, non-blocking advisories are recorded in `docs/TODO.md` Tier 4 and are separate later work, not grounds to rerun or reopen review on this candidate. The risk lens returned no findings and confirmed the identity×operation matrix, broker-side `registerProject` restriction, lifecycle guard, drift test, coverage of all six invariants, and minimal `pm-probe` scope.
 
-Outstanding work remains explicit: T3's six-invariant coverage is partial as described above; T5.3 full reviewer-relay context delivery remains untested; and `pm-probe` removal awaits the workflow side reporting its probe closed, followed by the verification in the Contract statement.
+Outstanding work remains explicit: T3's six-invariant coverage is partial as described above; T5.3 full reviewer-relay context delivery remains untested; and removal verification is partial. This change tests repository-default broker policy, confirms that `pm-probe` is absent from the mutation map, checks plugin/broker identity-list parity, and proves a stale `pm-probe` session is denied. After installation, the effective broker policy and installed plugin bytes still need checking. A live refusal from a previously bound `pm-probe` session requires a running stack and is not established by these unit tests.
 
 ## Evidence
 
@@ -128,11 +129,11 @@ These are **live observations after installation**, with evidence and inference 
 
 ## Contract statement
 
-- **Identities permitted to run host mutations, with per-operation limits:** `gentle-orchestrator` — every `HOST_MUTATION_OPERATIONS` entry. `pm-odd`, `pm-systematic`, and `pm-sdd` — every such entry except `registerProject`. `pm-probe` — exactly `reviewStart` and `gitCommit`. Enforced broker-side in `HOST_MUTATION_IDENTITY_OPERATIONS`.
+- **Identities permitted to run host mutations, with per-operation limits:** `gentle-orchestrator` — every `HOST_MUTATION_OPERATIONS` entry. `pm-odd`, `pm-systematic`, and `pm-sdd` — every such entry except `registerProject`. The temporary `pm-probe` entry is removed. Enforced broker-side in `HOST_MUTATION_IDENTITY_OPERATIONS`.
 - The five answers above are recorded as observed results. Not observed: the bound identity echo on a permitted call, which of the two resume mechanisms applies, full review-relay context delivery, and the pending integration checks listed under Progress.
 - **Required restarts:** `sandbox-broker.service` and `secure-opencode.service`.
-- **`pm-probe` removal:** remove only after the workflow side reports its probe closed; verify removal against effective broker policy, installed plugin bytes, and refusal of mutations from a previously bound probe session.
+- **`pm-probe` removal verification:** this change covers repository-default broker policy and a stale-record unit test. Effective broker policy and installed plugin bytes can be verified after installation. A live refusal from a previously bound probe session requires a running stack and remains outstanding.
 
 ## Next step
 
-Complete the pending runtime and integration checks; remove `pm-probe` only after the workflow side reports its probe closed, verifying effective broker policy, installed plugin bytes, and refusal of mutations from a previously bound probe session.
+Complete the pending runtime and integration checks. For `pm-probe` removal, verify effective broker policy and installed plugin bytes after installation; use a running stack to observe refusal from a previously bound probe session.

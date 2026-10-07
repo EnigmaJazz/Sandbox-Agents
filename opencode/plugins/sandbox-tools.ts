@@ -66,7 +66,6 @@ const READ_ONLY_AGENTS: readonly string[] = [
   "pm-odd",
   "pm-systematic",
   "pm-sdd",
-  "pm-probe",
 ];
 
 function assertNotOrchestrator(agent: string | undefined, toolName: string): void {

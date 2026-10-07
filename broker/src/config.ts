@@ -245,7 +245,6 @@ export const DEFAULT_READ_ONLY_AGENTS: string[] = [
   "pm-odd",
   "pm-systematic",
   "pm-sdd",
-  "pm-probe",
 ];
 
 /** Role-model defaults per capability-model §6 (model-policy independence). */

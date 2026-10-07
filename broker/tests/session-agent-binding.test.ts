@@ -23,8 +23,10 @@ import {
 import { SessionStore } from "../src/state.ts";
 import { OPERATIONS } from "../src/types.ts";
 import {
+  HOST_MUTATION_IDENTITY_OPERATIONS,
   HOST_MUTATION_OPERATIONS,
   HOST_READ_OPERATIONS,
+  HostToolPolicy,
   hostToolAccess,
   ValidationError,
 } from "../src/validation.ts";
@@ -36,8 +38,7 @@ import {
 const ORCHESTRATOR = "gentle-orchestrator";
 const ORCHESTRATOR_ALT = "gentle-orchestrator-alt";
 const PM_AGENTS = ["pm-odd", "pm-systematic", "pm-sdd"] as const;
-const PROBE_AGENT = "pm-probe";
-const HOST_IDENTITIES = [ORCHESTRATOR, ...PM_AGENTS, PROBE_AGENT] as const;
+const HOST_IDENTITIES = [ORCHESTRATOR, ...PM_AGENTS] as const;
 
 function freshStore(): { store: SessionStore; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), "session-binding-"));
@@ -62,6 +63,80 @@ describe("host-authoritative session→agent binding", () => {
       expect(
         authorizeHostDispatch(ctx, "reviewAcknowledgeApproved", "s1", "general"),
       ).toBe("mutation");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("request-envelope agent claims cannot override the broker session identity", () => {
+    const { store, dir } = freshStore();
+    try {
+      const ctx = bindingCtx(store, [...HOST_IDENTITIES]);
+      bindSessionAgent(ctx, "envelope-orchestrator", { agent: ORCHESTRATOR });
+      bindSessionAgent(ctx, "envelope-pm", { agent: "pm-odd" });
+      const orchestratorRequest = { agent: "pm-odd" };
+      const pmRequest = { agent: ORCHESTRATOR };
+
+      expect(authorizeHostDispatch(ctx, "registerProject", "envelope-orchestrator", orchestratorRequest.agent)).toBe("mutation");
+      expect(new HostToolPolicy([...HOST_IDENTITIES]).decide("registerProject", store.get("envelope-orchestrator")?.agent)).toEqual({
+        allowed: true,
+        access: "mutation",
+        reasonCode: "HOST_MUTATION_ORCHESTRATOR",
+      });
+      expect(() => authorizeHostDispatch(ctx, "registerProject", "envelope-pm", pmRequest.agent)).toThrow(
+        'host mutation tool "registerProject" is orchestrator-only (HOST_MUTATION_NOT_ORCHESTRATOR)',
+      );
+      expect(new HostToolPolicy([...HOST_IDENTITIES]).decide("registerProject", store.get("envelope-pm")?.agent)).toEqual({
+        allowed: false,
+        access: "mutation",
+        reasonCode: "HOST_MUTATION_NOT_ORCHESTRATOR",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("tool-argument agent claims cannot override the broker session identity", () => {
+    const { store, dir } = freshStore();
+    try {
+      const ctx = bindingCtx(store, [...HOST_IDENTITIES]);
+      bindSessionAgent(ctx, "argument-orchestrator", { agent: ORCHESTRATOR });
+      bindSessionAgent(ctx, "argument-pm", { agent: "pm-odd" });
+      const forgedArgsForOrchestrator = { message: "commit", agent: "pm-odd" };
+      const forgedArgsForPm = { message: "commit", agent: ORCHESTRATOR };
+
+      expect(authorizeHostDispatch(ctx, "registerProject", "argument-orchestrator", forgedArgsForOrchestrator.agent)).toBe("mutation");
+      expect(() => authorizeHostDispatch(ctx, "registerProject", "argument-pm", forgedArgsForPm.agent)).toThrow(
+        'host mutation tool "registerProject" is orchestrator-only (HOST_MUTATION_NOT_ORCHESTRATOR)',
+      );
+      const pluginSource = readFileSync(
+        new URL("../../opencode/plugins/sandbox-tools.ts", import.meta.url),
+        "utf8",
+      );
+      const hostCommit = pluginSource.slice(
+        pluginSource.indexOf("host_git_commit: tool({"),
+        pluginSource.indexOf("host_git_clear_commit_intent: tool({"),
+      );
+      expect(hostCommit).toContain("}, ctx.agent)");
+      expect(hostCommit).not.toContain("args.agent");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unbound session remains denied when its request envelope claims an allowed identity", () => {
+    const { store, dir } = freshStore();
+    try {
+      const ctx = bindingCtx(store, [...HOST_IDENTITIES]);
+      const request = { agent: ORCHESTRATOR };
+      expect(() => authorizeHostDispatch(ctx, "gitCommit", "unbound-forged", request.agent)).toThrow(
+        'host mutation tool "gitCommit" is orchestrator-only (HOST_MUTATION_UNKNOWN_AGENT)',
+      );
+      expect(new HostToolPolicy([...HOST_IDENTITIES]).decide("gitCommit", store.get("unbound-forged")?.agent)).toEqual({
+        allowed: false,
+        access: "mutation",
+        reasonCode: "HOST_MUTATION_UNKNOWN_AGENT",
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -145,7 +220,9 @@ describe("PM host identity policy", () => {
       ?.match(/"([^"]+)"/g)
       ?.map((entry) => entry.slice(1, -1));
     expect(pluginList).toEqual(HOST_IDENTITIES);
+    expect(pluginList).not.toContain("pm-probe");
     expect(defaultConfig().readOnlyAgents).toEqual(HOST_IDENTITIES);
+    expect(defaultConfig().readOnlyAgents).not.toContain("pm-probe");
   });
 
   test.each(PM_AGENTS)("%s receives PM mutations but not registerProject", (agent) => {
@@ -162,17 +239,22 @@ describe("PM host identity policy", () => {
     }
   });
 
-  test("pm-probe receives only reviewStart and gitCommit mutations", () => {
+  test("a lingering pm-probe session is unknown and cannot inherit mutation rights", () => {
     const { store, dir } = freshStore();
     try {
       const ctx = bindingCtx(store, [...HOST_IDENTITIES]);
-      bindSessionAgent(ctx, "probe-session", { agent: PROBE_AGENT });
-      for (const operation of ["reviewStart", "gitCommit"]) {
-        expect(authorizeHostDispatch(ctx, operation, "probe-session")).toBe("mutation");
-      }
-      for (const operation of HOST_MUTATION_OPERATIONS.filter((name) => !["reviewStart", "gitCommit"].includes(name))) {
-        expect(() => authorizeHostDispatch(ctx, operation, "probe-session")).toThrow(PolicyError);
-      }
+      expect(HOST_MUTATION_IDENTITY_OPERATIONS["pm-probe"]).toBeUndefined();
+      store.touch("probe-session", { agent: "pm-probe" });
+      expect(new HostToolPolicy([...HOST_IDENTITIES]).decide("gitCommit", "pm-probe")).toEqual({
+        allowed: false,
+        access: "mutation",
+        reasonCode: "HOST_MUTATION_NOT_ORCHESTRATOR",
+      });
+      expect(() => authorizeHostDispatch(ctx, "gitCommit", "probe-session")).toThrow(
+        'host mutation tool "gitCommit" is orchestrator-only (HOST_MUTATION_NOT_ORCHESTRATOR)',
+      );
+      expect(() => bindSessionAgent(ctx, "new-probe-session", { agent: "pm-probe" })).toThrow(PolicyError);
+      expect(store.get("new-probe-session")).toBeUndefined();
       expect(authorizeHostDispatch(ctx, "reviewStatus", "probe-session")).toBe("read");
     } finally {
       rmSync(dir, { recursive: true, force: true });

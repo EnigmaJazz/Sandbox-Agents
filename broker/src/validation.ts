@@ -866,7 +866,6 @@ export const HOST_MUTATION_IDENTITY_OPERATIONS: Readonly<Record<string, readonly
   "pm-odd": HOST_MUTATION_OPERATIONS.filter((operation) => operation !== "registerProject"),
   "pm-systematic": HOST_MUTATION_OPERATIONS.filter((operation) => operation !== "registerProject"),
   "pm-sdd": HOST_MUTATION_OPERATIONS.filter((operation) => operation !== "registerProject"),
-  "pm-probe": ["reviewStart", "gitCommit"],
 };
 
 export class HostToolPolicy {
