@@ -441,15 +441,31 @@ export class BrokerServer {
   }
 
   private onData(socket: SocketLike, data: Buffer): void {
+    const maxLineBytes = maxRequestLineBytes(this.config.resource);
     let framer = this.framers.get(socket);
     if (!framer) {
-      framer = new RequestLineFramer(maxRequestLineBytes(this.config.resource));
+      framer = new RequestLineFramer(maxLineBytes);
       this.framers.set(socket, framer);
     }
-    for (const event of framer.push(data)) {
+    let events: FramedRequest[];
+    try {
+      events = framer.push(data);
+    } catch (err) {
+      this.framers.delete(socket);
+      this.logUnexpected(err);
+      // The framer may be partially mutated after an allocation failure; do not trust it or send a response.
+      try {
+        if (socket.end) socket.end();
+        else socket.close();
+      } catch {
+        try { socket.close(); } catch { /* best-effort terminal fallback */ }
+      }
+      return;
+    }
+    for (const event of events) {
       if (event.kind === "line") {
         void this.dispatchLine(socket, event.line).catch((err) => {
-          this.logUnexpected(err);
+          if (!(err instanceof UnexpectedRequestError)) this.logUnexpected(err);
           this.safeRespond(socket, this.safetyResponse(
             err instanceof UnexpectedRequestError ? err.envelope : undefined,
           ));
@@ -463,7 +479,7 @@ export class BrokerServer {
         ok: false,
         error: {
           code: "protocol",
-          message: `request line of ${event.bytes} bytes exceeds the ${maxRequestLineBytes(this.config.resource)}-byte cap`,
+          message: `request line of ${event.bytes} bytes exceeds the ${maxLineBytes}-byte cap`,
         },
       });
     }

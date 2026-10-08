@@ -209,31 +209,57 @@ describe("dispatch safety envelope", () => {
 });
 
 describe("fail-loud request processing", () => {
-  test("rethrows unexpected exceptions when enabled", async () => {
-    const root = mkdtempSync(join(tmpdir(), "dispatch-fail-loud-"));
-    const server = new BrokerServer(defaultConfig({ stateDir: root, failLoudUnexpectedErrors: true }));
-    const internals = server as unknown as {
-      sessionsBySocket: Map<object, Set<string>>;
-      onData(socket: { write(data: string | Uint8Array): number; close(): void }, data: Buffer): void;
-    };
-    internals.sessionsBySocket = new class extends Map<object, Set<string>> {
-      override set(): this { throw new Error("fail-loud injected exception"); }
-    }();
+  test("dispatchLine rejects only when fail-loud is enabled", async () => {
+    for (const failLoudUnexpectedErrors of [false, true]) {
+      const root = mkdtempSync(join(tmpdir(), "dispatch-fail-loud-"));
+      const server = new BrokerServer(defaultConfig({ stateDir: root, failLoudUnexpectedErrors }));
+      const internals = server as unknown as {
+        sessionsBySocket: Map<object, Set<string>>;
+        dispatchLine(socket: { write(data: string | Uint8Array): number; close(): void }, line: string): Promise<void>;
+      };
+      internals.sessionsBySocket = new class extends Map<object, Set<string>> {
+        override set(): this { throw new Error("fail-loud injected exception"); }
+      }();
+      const writes: string[] = [];
+      const socket = { write: (data: string | Uint8Array) => { writes.push(data.toString()); return data.length; }, close: () => {} };
+      try {
+        const request = JSON.stringify({ version: 1, id: "fail-loud-id", operation: "metrics", sessionID: "fail-loud-session" });
+        if (failLoudUnexpectedErrors) {
+          await expect(internals.dispatchLine(socket, request)).rejects.toMatchObject({ name: "UnexpectedRequestError" });
+          expect(writes).toHaveLength(0);
+        } else {
+          await expect(internals.dispatchLine(socket, request)).resolves.toBeUndefined();
+          expect(JSON.parse(writes[0]!)).toMatchObject({
+            id: "fail-loud-id",
+            ok: false,
+            error: { code: "internal", message: "unexpected broker error processing request" },
+          });
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("discards and closes a connection when its request framer throws", () => {
+    const root = mkdtempSync(join(tmpdir(), "request-framer-failure-"));
+    const server = new BrokerServer(defaultConfig({ stateDir: root }));
+    let closed = false;
     const writes: string[] = [];
-    const socket = { write: (data: string | Uint8Array) => { writes.push(data.toString()); return data.length; }, close: () => {} };
+    const socket = {
+      write: (data: string | Uint8Array) => { writes.push(data.toString()); return data.length; },
+      close: () => { closed = true; },
+    };
+    const internals = server as unknown as {
+      framers: Map<object, { push(data: Buffer): never }>;
+      onData(socket: typeof socket, data: Buffer): void;
+    };
+    internals.framers = new Map([[socket, { push: () => { throw new Error("framer allocation failure"); } }]]);
     try {
-      internals.onData(socket, Buffer.from(`${JSON.stringify({
-        version: 1,
-        id: "fail-loud-id",
-        operation: "metrics",
-        sessionID: "fail-loud-session",
-      })}\n`));
-      for (let attempt = 0; attempt < 200 && writes.length === 0; attempt++) await Bun.sleep(10);
-      expect(JSON.parse(writes[0]!)).toMatchObject({
-        id: "fail-loud-id",
-        ok: false,
-        error: { code: "internal", message: "unexpected broker error processing request" },
-      });
+      expect(() => internals.onData(socket, Buffer.from("request\\n"))).not.toThrow();
+      expect(internals.framers.has(socket)).toBe(false);
+      expect(closed).toBe(true);
+      expect(writes).toHaveLength(0);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
