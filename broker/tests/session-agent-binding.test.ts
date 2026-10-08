@@ -124,9 +124,117 @@ describe("main socket operation admission", () => {
 
       const allowed = await ask({ version: 1, id: "after-rejection", operation: "metrics", sessionID: "socket-test" }, "after-rejection");
       expect(allowed).toMatchObject({ version: 1, id: "after-rejection", ok: true });
+
+      const askRaw = async (line: string, expectedResponseID: string) => {
+        replies.delete(expectedResponseID);
+        socket.write(`${line}\n`);
+        for (let attempt = 0; attempt < 200 && !replies.has(expectedResponseID); attempt++) await Bun.sleep(10);
+        return replies.get(expectedResponseID);
+      };
+      const malformed = await askRaw("{", "0");
+      expect(malformed).toMatchObject({ id: "0", ok: false, error: { code: "validation" } });
+      expect(await ask({ version: 1, id: "after-malformed", operation: "metrics", sessionID: "socket-test" }, "after-malformed")).toMatchObject({ ok: true });
+
+      const nonObject = await askRaw("[]", "0");
+      expect(nonObject).toMatchObject({ id: "0", ok: false, error: { code: "validation" } });
+      expect(await ask({ version: 1, id: "after-non-object", operation: "metrics", sessionID: "socket-test" }, "after-non-object")).toMatchObject({ ok: true });
+
+      const unsupportedVersion = await askRaw(JSON.stringify({ version: 2, id: "valid-id", operation: "metrics", sessionID: "socket-test" }), "0");
+      expect(unsupportedVersion).toMatchObject({ id: "0", ok: false, error: { code: "validation" } });
+      expect(await ask({ version: 1, id: "after-version", operation: "metrics", sessionID: "socket-test" }, "after-version")).toMatchObject({ ok: true });
+
+      const invalidID = await askRaw(JSON.stringify({ version: 1, id: "bad id", operation: "metrics", sessionID: "socket-test" }), "0");
+      expect(invalidID).toMatchObject({ id: "0", ok: false, error: { code: "validation" } });
+      expect(await ask({ version: 1, id: "after-invalid-id", operation: "metrics", sessionID: "socket-test" }, "after-invalid-id")).toMatchObject({ ok: true });
     } finally {
       socket.end();
       server.shutdown();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("dispatch safety envelope", () => {
+  test("returns a fixed correlated internal error after an unexpected synchronous throw", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dispatch-safety-"));
+    const socketPath = join(root, "broker.sock");
+    const server = new BrokerServer(defaultConfig({
+      stateDir: join(root, "state"),
+      socketPath,
+      failLoudUnexpectedErrors: false,
+    }));
+    await server.start();
+
+    const replies = new Map<string, any>();
+    let rx = "";
+    const socket = await Bun.connect({
+      unix: socketPath,
+      socket: {
+        data(_socket, data) {
+          rx += data.toString("utf8");
+          let newline: number;
+          while ((newline = rx.indexOf("\n")) !== -1) {
+            const response = JSON.parse(rx.slice(0, newline));
+            replies.set(response.id, response);
+            rx = rx.slice(newline + 1);
+          }
+        },
+      },
+    });
+
+    try {
+      const internals = server as unknown as { sessionsBySocket: Map<object, Set<string>> };
+      internals.sessionsBySocket = new class extends Map<object, Set<string>> {
+        override set(): this { throw new Error("secret injected exception"); }
+      }();
+      socket.write(`${JSON.stringify({ version: 1, id: "safety-id", operation: "metrics", sessionID: "safety-test" })}\n`);
+      for (let attempt = 0; attempt < 200 && !replies.has("safety-id"); attempt++) await Bun.sleep(10);
+      expect(replies.get("safety-id")).toMatchObject({
+        id: "safety-id",
+        ok: false,
+        error: { code: "internal", message: "unexpected broker error processing request" },
+      });
+      expect(JSON.stringify(replies.get("safety-id"))).not.toContain("secret injected exception");
+
+      internals.sessionsBySocket = new Map();
+      socket.write(`${JSON.stringify({ version: 1, id: "safety-survives", operation: "metrics", sessionID: "safety-test" })}\n`);
+      for (let attempt = 0; attempt < 200 && !replies.has("safety-survives"); attempt++) await Bun.sleep(10);
+      expect(replies.get("safety-survives")).toMatchObject({ id: "safety-survives", ok: true });
+    } finally {
+      socket.end();
+      server.shutdown();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("fail-loud request processing", () => {
+  test("rethrows unexpected exceptions when enabled", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dispatch-fail-loud-"));
+    const server = new BrokerServer(defaultConfig({ stateDir: root, failLoudUnexpectedErrors: true }));
+    const internals = server as unknown as {
+      sessionsBySocket: Map<object, Set<string>>;
+      onData(socket: { write(data: string | Uint8Array): number; close(): void }, data: Buffer): void;
+    };
+    internals.sessionsBySocket = new class extends Map<object, Set<string>> {
+      override set(): this { throw new Error("fail-loud injected exception"); }
+    }();
+    const writes: string[] = [];
+    const socket = { write: (data: string | Uint8Array) => { writes.push(data.toString()); return data.length; }, close: () => {} };
+    try {
+      internals.onData(socket, Buffer.from(`${JSON.stringify({
+        version: 1,
+        id: "fail-loud-id",
+        operation: "metrics",
+        sessionID: "fail-loud-session",
+      })}\n`));
+      for (let attempt = 0; attempt < 200 && writes.length === 0; attempt++) await Bun.sleep(10);
+      expect(JSON.parse(writes[0]!)).toMatchObject({
+        id: "fail-loud-id",
+        ok: false,
+        error: { code: "internal", message: "unexpected broker error processing request" },
+      });
+    } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
@@ -388,6 +496,12 @@ describe("PM host identity policy", () => {
         readOnlyAgents: ["general", ""],
       })).toThrow("BrokerConfig.readOnlyAgents must be an array of non-empty agent names");
       expect(() => new BrokerServer(defaultConfig({ stateDir: dir, readOnlyAgents: [] }))).not.toThrow();
+      expect(() => new BrokerServer({
+        ...defaultConfig({ stateDir: dir }),
+        failLoudUnexpectedErrors: "yes",
+      } as unknown as ReturnType<typeof defaultConfig>)).toThrow(
+        "BrokerConfig.failLoudUnexpectedErrors must be a boolean",
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

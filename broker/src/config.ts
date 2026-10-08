@@ -179,6 +179,8 @@ export interface BrokerConfig {
    * touch/admission side effect.
    */
   readOnlyAgents: string[];
+  /** Rethrow unexpected request-processing failures after server-side logging. */
+  failLoudUnexpectedErrors: boolean;
   /**
    * Per-role model selection (role-model R4). Changing any entry affects only
    * that role's model — authorization outcomes are unchanged (policy independence).
@@ -336,6 +338,7 @@ export function defaultConfig(
     queueTimeoutMs: positiveIntEnv("BROKER_QUEUE_TIMEOUT_MS", 600_000),
     queueMaxLength: positiveIntEnv("BROKER_QUEUE_MAX_LENGTH", 32),
     readOnlyAgents: [...DEFAULT_READ_ONLY_AGENTS],
+    failLoudUnexpectedErrors: process.env.NODE_ENV === "test",
     roleModels: { ...DEFAULT_ROLE_MODELS },
     resource: {
       reserveCpuFraction: 0.25,

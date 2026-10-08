@@ -198,7 +198,15 @@ const REQUEST_ID_RE = /^[A-Za-z0-9-]{1,128}$/;
 
 interface SocketLike {
   write(data: string | Uint8Array): number;
+  end?(): void;
   close(): void;
+}
+
+class UnexpectedRequestError extends Error {
+  constructor(readonly envelope: BrokerRequestEnvelope | undefined, cause: unknown) {
+    super(cause instanceof Error ? cause.message : "unexpected broker error processing request");
+    this.name = "UnexpectedRequestError";
+  }
 }
 
 interface QueuedSocketWrite {
@@ -273,6 +281,9 @@ export class BrokerServer {
     private readonly config: BrokerConfig,
     logger?: Logger,
   ) {
+    if (typeof config.failLoudUnexpectedErrors !== "boolean") {
+      throw new TypeError("BrokerConfig.failLoudUnexpectedErrors must be a boolean");
+    }
     if (
       !Array.isArray(config.readOnlyAgents) ||
       config.readOnlyAgents.some((agent) => typeof agent !== "string" || agent.length === 0)
@@ -437,11 +448,16 @@ export class BrokerServer {
     }
     for (const event of framer.push(data)) {
       if (event.kind === "line") {
-        void this.dispatchLine(socket, event.line);
+        void this.dispatchLine(socket, event.line).catch((err) => {
+          this.logUnexpected(err);
+          this.safeRespond(socket, this.safetyResponse(
+            err instanceof UnexpectedRequestError ? err.envelope : undefined,
+          ));
+        });
         continue;
       }
       // Refuse this request alone; the connection carries other sessions' work.
-      this.respond(socket, {
+      this.safeRespond(socket, {
         version: 1,
         id: event.id ?? "0",
         ok: false,
@@ -455,56 +471,95 @@ export class BrokerServer {
 
   private async dispatchLine(socket: SocketLike, line: string): Promise<void> {
     const t0 = startTimer();
-    const parsed = this.parseRequest(line);
-    if ("error" in parsed) {
-      this.respond(socket, this.errorResponse(parsed.id ?? "0", parsed.error));
-      return;
-    }
-    let envelope = parsed.envelope;
-    // The connection, not the request, decides an advisor's session and agent.
+    let envelope: BrokerRequestEnvelope | undefined;
     try {
-      const advisor = this.advisorBindings.get(socket);
-      envelope = advisor ? bindAdvisorRequest(envelope, advisor) : refuseAdvisorSessionOnMain(envelope);
-    } catch (err) {
-      this.respond(socket, this.errorResponse(envelope.id, err));
-      this.logger.log({ sessionID: envelope.sessionID, operation: envelope.operation, result: "error", error: String((err as Error).message) });
-      return;
-    }
-    // Track the session on this socket so a close can cancel parked entries.
-    const sessions = this.sessionsBySocket.get(socket) ?? new Set<string>();
-    sessions.add(envelope.sessionID);
-    this.sessionsBySocket.set(socket, sessions);
-    try {
-      const sendProgress = (position: number) => {
-        this.respond(socket, { version: 1, id: envelope.id, progress: { queued: true, position } } as unknown as BrokerResponseEnvelope);
-      };
-      const result = await this.withSessionLock(envelope.sessionID, () =>
-        this.dispatch(envelope, sendProgress),
-      );
-      // resultDiff is a strict read and must not create/touch session state.
-      if (envelope.operation !== "resultDiff") {
-        try { this.ctx.store.touch(envelope.sessionID, { lastOperation: envelope.operation }, envelope.operation); } catch {}
+      const parsed = this.parseRequest(line);
+      if ("error" in parsed) {
+        this.respond(socket, this.errorResponse(parsed.id ?? "0", parsed.error));
+        return;
       }
+      envelope = parsed.envelope;
+      // The connection, not the request, decides an advisor's session and agent.
+      try {
+        const advisor = this.advisorBindings.get(socket);
+        envelope = advisor ? bindAdvisorRequest(envelope, advisor) : refuseAdvisorSessionOnMain(envelope);
+      } catch (err) {
+        this.respond(socket, this.errorResponse(envelope.id, err));
+        this.logger.log({ sessionID: envelope.sessionID, operation: envelope.operation, result: "error", error: String((err as Error).message) });
+        return;
+      }
+      // Track the session on this socket so a close can cancel parked entries.
+      const sessions = this.sessionsBySocket.get(socket) ?? new Set<string>();
+      sessions.add(envelope.sessionID);
+      this.sessionsBySocket.set(socket, sessions);
+      try {
+        const sendProgress = (position: number) => {
+          this.respond(socket, { version: 1, id: envelope!.id, progress: { queued: true, position } } as unknown as BrokerResponseEnvelope);
+        };
+        const result = await this.withSessionLock(envelope.sessionID, () =>
+          this.dispatch(envelope!, sendProgress),
+        );
+        // resultDiff is a strict read and must not create/touch session state.
+        if (envelope.operation !== "resultDiff") {
+          try { this.ctx.store.touch(envelope.sessionID, { lastOperation: envelope.operation }, envelope.operation); } catch {}
+        }
 
-      this.respond(socket, { version: 1, id: envelope.id, ok: true, result });
-      this.logger.log({
-        sessionID: envelope.sessionID,
-        agent: envelope.agent,
-        operation: envelope.operation,
-        result: "ok",
-        durationMs: durationMs(t0),
-      });
+        this.respond(socket, { version: 1, id: envelope.id, ok: true, result });
+        this.logger.log({
+          sessionID: envelope.sessionID,
+          agent: envelope.agent,
+          operation: envelope.operation,
+          result: "ok",
+          durationMs: durationMs(t0),
+        });
+      } catch (err) {
+        const error = toBrokerError(err);
+        this.respond(socket, { version: 1, id: envelope.id, ok: false, error });
+        this.logger.log({
+          sessionID: envelope.sessionID,
+          agent: envelope.agent,
+          operation: envelope.operation,
+          result: "error",
+          error: error.message,
+          durationMs: durationMs(t0),
+        });
+      }
     } catch (err) {
-      const error = toBrokerError(err);
-      this.respond(socket, { version: 1, id: envelope.id, ok: false, error });
-      this.logger.log({
-        sessionID: envelope.sessionID,
-        agent: envelope.agent,
-        operation: envelope.operation,
-        result: "error",
-        error: error.message,
-        durationMs: durationMs(t0),
-      });
+      this.logUnexpected(err);
+      if (this.config.failLoudUnexpectedErrors) {
+        throw new UnexpectedRequestError(envelope, err);
+      }
+      this.safeRespond(socket, this.safetyResponse(envelope));
+    }
+  }
+
+  private safetyResponse(envelope: BrokerRequestEnvelope | undefined): BrokerResponseEnvelope {
+    return {
+      version: 1,
+      id: envelope?.id ?? "0",
+      ok: false,
+      error: { code: "internal", message: "unexpected broker error processing request" },
+    };
+  }
+
+  private logUnexpected(err: unknown): void {
+    try {
+      this.logger.log({ operation: "request.processing", result: "error", error: String(err) });
+    } catch {
+      // Logging must not prevent a protocol-level failure response.
+    }
+  }
+
+  private safeRespond(socket: SocketLike, response: BrokerResponseEnvelope): void {
+    try {
+      this.respond(socket, response);
+    } catch {
+      try {
+        if (socket.end) socket.end();
+        else socket.close();
+      } catch {
+        try { socket.close(); } catch { /* best-effort terminal fallback */ }
+      }
     }
   }
 
