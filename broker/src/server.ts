@@ -455,13 +455,12 @@ export class BrokerServer {
 
   private async dispatchLine(socket: SocketLike, line: string): Promise<void> {
     const t0 = startTimer();
-    let envelope: BrokerRequestEnvelope;
-    try {
-      envelope = this.parseRequest(line);
-    } catch (err) {
-      this.respond(socket, this.errorResponse("0", err));
+    const parsed = this.parseRequest(line);
+    if ("error" in parsed) {
+      this.respond(socket, this.errorResponse(parsed.id ?? "0", parsed.error));
       return;
     }
+    let envelope = parsed.envelope;
     // The connection, not the request, decides an advisor's session and agent.
     try {
       const advisor = this.advisorBindings.get(socket);
@@ -534,37 +533,41 @@ export class BrokerServer {
     this.sessionsBySocket.delete(socket);
   }
 
-  private parseRequest(line: string): BrokerRequestEnvelope {
+  private parseRequest(line: string):
+    | { envelope: BrokerRequestEnvelope }
+    | { id?: string; error: unknown } {
     let raw: unknown;
     try {
       raw = JSON.parse(line);
     } catch {
-      throw new ValidationError("malformed JSON request");
+      return { error: new ValidationError("malformed JSON request") };
     }
     if (typeof raw !== "object" || raw === null) {
-      throw new ValidationError("request must be a JSON object");
+      return { error: new ValidationError("request must be a JSON object") };
     }
     const req = raw as Record<string, unknown>;
-    if (req.version !== 1) throw new ValidationError("unsupported protocol version");
+    if (req.version !== 1) return { error: new ValidationError("unsupported protocol version") };
     if (typeof req.id !== "string" || !REQUEST_ID_RE.test(req.id)) {
-      throw new ValidationError("invalid request id");
+      return { error: new ValidationError("invalid request id") };
     }
     if (typeof req.sessionID !== "string" || !SESSION_ID_RE.test(req.sessionID)) {
-      throw new ValidationError("invalid sessionID");
+      return { id: req.id, error: new ValidationError("invalid sessionID") };
     }
     if (typeof req.operation !== "string") {
-      throw new ValidationError("missing operation");
+      return { id: req.id, error: new ValidationError("missing operation") };
     }
     if (req.operation.length > MAX_OPERATION_NAME_LENGTH) {
-      throw new ValidationError("operation name exceeds 128 characters");
+      return { id: req.id, error: new ValidationError("operation name exceeds 128 characters") };
     }
     return {
-      version: 1,
-      id: req.id,
-      operation: req.operation as Operation,
-      sessionID: req.sessionID,
-      agent: typeof req.agent === "string" && req.agent.length <= 128 ? req.agent : undefined,
-      payload: req.payload,
+      envelope: {
+        version: 1,
+        id: req.id,
+        operation: req.operation as Operation,
+        sessionID: req.sessionID,
+        agent: typeof req.agent === "string" && req.agent.length <= 128 ? req.agent : undefined,
+        payload: req.payload,
+      },
     };
   }
 

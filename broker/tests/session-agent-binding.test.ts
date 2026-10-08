@@ -40,8 +40,6 @@ const ORCHESTRATOR = "gentle-orchestrator";
 const ORCHESTRATOR_ALT = "gentle-orchestrator-alt";
 const PM_AGENTS = ["pm-odd", "pm-systematic", "pm-sdd"] as const;
 const HOST_IDENTITIES = [ORCHESTRATOR, ...PM_AGENTS] as const;
-const PARSE_ERROR_RESPONSE_ID = "0";
-
 // Independent review fixture: never derive this list from production guard policy.
 const EXPECTED_SANDBOX_OPERATIONS = [
   "ensureWorker", "workerStatus", "exec", "readFile", "writeFile", "applyPatch",
@@ -97,13 +95,28 @@ describe("main socket operation admission", () => {
         error: { code: "validation", message: "unsupported operation 'notAnOperation'" },
       });
 
+      const invalidSession = await ask({ version: 1, id: "invalid-session", operation: "metrics", sessionID: "invalid session" }, "invalid-session");
+      expect(invalidSession).toMatchObject({
+        version: 1,
+        id: "invalid-session",
+        ok: false,
+        error: { code: "validation", message: "invalid sessionID" },
+      });
+
+      const invalidOperation = await ask({ version: 1, id: "invalid-operation", operation: 7, sessionID: "socket-test" }, "invalid-operation");
+      expect(invalidOperation).toMatchObject({
+        version: 1,
+        id: "invalid-operation",
+        ok: false,
+        error: { code: "validation", message: "missing operation" },
+      });
+
       const oversizedValue = "x".repeat(129);
-      // parseRequest failures use id "0" because the request id cannot be parsed; it is not the request id.
-      const oversized = await ask({ version: 1, id: "oversized-operation", operation: oversizedValue, sessionID: "socket-test" }, PARSE_ERROR_RESPONSE_ID);
+      const oversized = await ask({ version: 1, id: "oversized-operation", operation: oversizedValue, sessionID: "socket-test" }, "oversized-operation");
       expect(oversized).toBeDefined();
       expect(oversized).toMatchObject({
         version: 1,
-        id: "0",
+        id: "oversized-operation",
         ok: false,
         error: { code: "validation", message: "operation name exceeds 128 characters" },
       });

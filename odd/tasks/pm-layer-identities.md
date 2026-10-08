@@ -155,6 +155,15 @@ These are **live observations after installation**, with evidence and inference 
 
 The broker-side all-operation refusal finding is closed in source and regression coverage; owner review and manual application remain required because the implementation touches S17 `broker/src/**`. The separate plugin-layer runtime identity coverage and post-install checks from the earlier `pm-probe` removal remain outside this follow-up.
 
+## Parse-failure request correlation — 2026-10-08
+
+- **Observed:** `parseRequest` validates `id` against `REQUEST_ID_RE` before checking `sessionID`, `operation` type, and operation length. The previous parse-failure envelope discarded that already-validated id and always used `"0"`, unlike the framer's recoverable oversize correlation.
+- **Implementation:** `parseRequest` now returns a discriminated result: either `{ envelope }` or `{ id?, error }`. Failures before successful id validation omit `id`; each of the three checks after validation returns the validated id. This keeps protocol validation in one parser and makes the distinction explicit at the dispatch boundary. No response-path re-validation was added: `REQUEST_ID_RE` is authoritative at parsing, and only that validated string is propagated.
+- **Behavior preserved:** malformed JSON, non-object input, unsupported version, invalid request id, and unrecoverable framer oversize retain their existing `"0"` fallback behavior. The request-line framer is unchanged. The allowlist rejection remains in dispatch and continues to use the real envelope id.
+- **Tests:** socket assertions now verify that invalid `sessionID`, non-string `operation`, and an oversized operation each return the request's own id. Removed the false comment claiming the id could not be parsed. Advisor sockets share `dispatchLine` and therefore inherit this behavior without separate code changes.
+- **TDD evidence:** RED with the new socket checks failed because the invalid-session response was keyed under `"0"`, leaving no reply under `invalid-session`; suite summary was `784 pass`, `1 fail`, `3562 expect() calls`, `Ran 785 tests across 50 files. [6.69s]`. GREEN summary: `785 pass`, `0 fail`, `3567 expect() calls`, `Ran 785 tests across 50 files. [4.59s]`.
+- **Delivery:** `broker/src/**` is S17-protected; retain the sandbox result for owner review/manual application. Automatic application refusal must be recorded verbatim in the session result.
+
 ## Operation-name admission — 2026-10-07
 
 - **Observed:** `parseRequest` now rejects operation names longer than 128 characters with the fixed validation message `operation name exceeds 128 characters`, before the value can reach dispatch or operation/error logging. The bound is shared by the main and advisor sockets because both route through `parseRequest`.
