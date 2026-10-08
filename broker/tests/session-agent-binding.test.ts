@@ -40,6 +40,7 @@ const ORCHESTRATOR = "gentle-orchestrator";
 const ORCHESTRATOR_ALT = "gentle-orchestrator-alt";
 const PM_AGENTS = ["pm-odd", "pm-systematic", "pm-sdd"] as const;
 const HOST_IDENTITIES = [ORCHESTRATOR, ...PM_AGENTS] as const;
+const PARSE_ERROR_RESPONSE_ID = "0";
 
 // Independent review fixture: never derive this list from production guard policy.
 const EXPECTED_SANDBOX_OPERATIONS = [
@@ -81,10 +82,10 @@ describe("main socket operation admission", () => {
         },
       },
     });
-    const ask = async (request: unknown, responseID: string) => {
+    const ask = async (request: unknown, expectedResponseID: string) => {
       socket.write(`${JSON.stringify(request)}\n`);
-      for (let attempt = 0; attempt < 200 && !replies.has(responseID); attempt++) await Bun.sleep(10);
-      return replies.get(responseID);
+      for (let attempt = 0; attempt < 200 && !replies.has(expectedResponseID); attempt++) await Bun.sleep(10);
+      return replies.get(expectedResponseID);
     };
 
     try {
@@ -97,7 +98,9 @@ describe("main socket operation admission", () => {
       });
 
       const oversizedValue = "x".repeat(129);
-      const oversized = await ask({ version: 1, id: "oversized-operation", operation: oversizedValue, sessionID: "socket-test" }, "0");
+      // parseRequest failures use id "0" because the request id cannot be parsed; it is not the request id.
+      const oversized = await ask({ version: 1, id: "oversized-operation", operation: oversizedValue, sessionID: "socket-test" }, PARSE_ERROR_RESPONSE_ID);
+      expect(oversized).toBeDefined();
       expect(oversized).toMatchObject({
         version: 1,
         id: "0",
