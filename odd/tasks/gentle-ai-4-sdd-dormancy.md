@@ -85,6 +85,10 @@ Started 2026-10-02.
 - **T5 done and committed as `8152748`.** Added the OpenSpec read-only-history README; retained and marked tasks 5.1–5.6 superseded without checking them complete; updated both Tier 4 TODO entries; and marked pre-upgrade steps 3–5 done. Step 6 remains open and user-owned.
   - Checks: `bun --cwd broker test --reporter=dot` — 647 pass, 0 fail, 3,070 expect() calls, 45 files. Read back all changed files after editing.
 
+- **Pre-upgrade verification, 2026-10-09 (route: direct inline; docs only, no source change).** The 4.0.0 release binary was run from a scratch directory with an isolated home (checksum verified, nothing installed). Driven through the real broker code at `bf3c792`: detection resolves major 4 to dormant; all forwarded review flags exist and each subcommand's flag set equals 3.7.0's; an external-lens review ran to acknowledgement and `already_reviewed`; a CRITICAL finding gave `correction_required`; an oversized candidate was refused with no store created; stores are readable across versions in both directions. Not verifiable without the installed stack: the `asi-review-*` relay transport, a live `review recover`, and `sync` on the live configuration. Full table and the fish runbooks for upgrade and rollback: `docs/upgrades/gentle-ai-4.md`.
+  - The acceptance criterion "with a v4 binary each of the five operations refuses" is now observed at the resolution level (`resolveLegacySdd("auto", 4)` is dormant); the refusal through the running broker is an upgrade-day check.
+  - Checks: `scripts/install-user-files --verify` passed (13 files identical). No source changed; `cd broker && bun test` as a sanity check: 790 pass, 0 fail.
+
 ## Next step
 
-T5 is complete. Pre-upgrade step 6 (the rollback kit) remains open and user-owned in `docs/upgrades/gentle-ai-4.md`.
+Pre-upgrade work is complete. Upgrade day is user-owned: follow the runbook in `docs/upgrades/gentle-ai-4.md`, then record the result there and in `docs/TODO.md`.

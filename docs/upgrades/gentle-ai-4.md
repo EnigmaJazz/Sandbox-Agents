@@ -30,20 +30,101 @@ Reviewed 2026-10-01 against the v4.0.0 release notes and the tagged source (`ff7
    3. restore the `host_sdd_*` permissions;
    4. run that binary's `gentle-ai sync` to restore its managed assets.
 
-   Unverified risk: whether v3.7.0 can read review stores written by v4. Check with `review status` in a scratch repository before relying on rollback.
+   Store compatibility was verified on 2026-10-09 in both directions (see "Pre-upgrade verification" below): 3.7.0 reads an acknowledged and an in-progress (`correction_required`) store written by 4.0.0, and 4.0.0 reads an in-progress store written by 3.7.0.
 
-**Upgrade day (user, in order).** Do this before the OpenCode V2 migration (`docs/upgrades/opencode-v2.md`). V2 native review needs gentle-ai 4's V2 relay, and this upgrade is tested on the current V1 stack.
+**Pre-upgrade verification against the real 4.0.0 binary (2026-10-09)**
 
-1. Rollback kit in place; the broker and plugin from steps 1–5 are installed and verified on 3.7.0 with the switch still on.
-2. `brew upgrade gentle-ai` (or `go install github.com/gentleman-programming/gentle-ai/v4/cmd/gentle-ai@v4.0.0`; v3's self-update cannot cross to v4). Then `gentle-ai sync`. Sync exits non-zero if it can't detect OpenCode's version; treat that as a failure.
-3. Restart the broker and check its startup line reads `legacy SDD dormant (BROKER_LEGACY_SDD=auto, gentle-ai major 4)`. Reinstall the plugin without `OPENCODE_SANDBOX_LEGACY_SDD` and restart OpenCode.
-4. Verify:
-   - `gentle-ai review capabilities` reports contract `1.2.0`;
-   - every `host_sdd_*` call is refused with the dormancy message;
-   - a scratch-repository native review runs end to end through the relay (start → lens → capture → acknowledge → `assess` `already_reviewed`);
-   - `host_review_recover` executes a STATUS-returned recovery command;
-   - the two external-advisor experiments from 2026-10-01 (agentless collect, `lens-context`, parallel lenses, stale refusal, approval → acknowledgement → `assess`) still hold. Plan A's interface contract §4 was verified on 3.7.0 only.
-5. Record the result in this document and in `docs/TODO.md`, and tell workflow_optimisation (see the impact list below).
+The release binary was downloaded to a scratch directory, checked against the release `checksums.txt`, and run only with an isolated `HOME` in throwaway repositories. Nothing was installed and the real `~/.gentle-ai/state.json` was not modified. Review calls went through the real broker code (`SddRuntimeExecutor`, the `sdd-service.ts` review handlers, the advisor records and relay) at `bf3c792`, with the binary set to 4.0.0.
+
+| Check | Result |
+|---|---|
+| Version detection | **Pass.** `detectGentleAiMajor` returns 4 and `auto` resolves to dormant; it returns 3 and enabled for 3.7.0. `gentle-ai sdd-status` is an unknown command on 4.0.0. |
+| Capabilities | **Pass, with a correction to this document.** `review capabilities` reports schema `gentle-ai.review-integration.capabilities/v1.5`, contract `gentle-ai.review-integration/v1`, identical on 3.7.0 and 4.0.0. The "1.2.0" quoted earlier is the name of the release's provider-contract archive, not a value this command prints, so it is not something to check on upgrade day. |
+| Flag parity | **Pass.** For all 12 review subcommands the broker builds argv for, every forwarded flag exists in 4.0.0, and the 4.0.0 flag set of each subcommand is identical to 3.7.0's. (`acknowledge-approved --help` prints no flag list on either version; its four flags were exercised live instead.) |
+| Native lifecycle, external-lens path | **Pass.** Preflight STATUS → `reviewStart` with `externalLenses` and `consent: granted` → bound STATUS offers four agentless lens slots → free-form `inputJson` refused by the broker → four stored advisor responses relayed (preflight then capture each) → `approved` → `reviewAcknowledgeApproved` prints `gentle-ai.review-acknowledged/v1` → `reviewAssess` reports `review_due: false`, `already_reviewed`. |
+| Severe finding | **Pass.** A relayed CRITICAL finding closes the review as `correction_required`; lineage-bound STATUS then asks for the correction plan. |
+| Relay at most once | **Pass.** A second relay for a lens already captured is refused. |
+| Oversized candidate | **Pass.** A 12,000-line candidate is refused at START with `lens_context_budget_exceeded`, `mutation_outcome: not_started`, and no `.git/gentle-ai` store is created. |
+| `assess` tier | **Same on both.** The scratch candidate (an auth check plus a shell hook, 18 lines) is `high` / `high_risk` on 3.7.0 and 4.0.0. |
+| Store compatibility | **Pass, both directions.** See the rollback note above. |
+| `--target-evidence` | **Not required.** STATUS offers it on both versions and START succeeds without it on both. It only makes a stale refusal name its cause, so it stays in the flag-parity sweep (`docs/TODO.md`) and is not an upgrade blocker. |
+| Recovery command | **Not verified live.** The `review recover` flag set is identical to 3.7.0's and fully covered by `REVIEW_COMMANDS.reviewRecover` (18 of 18), but no recoverable store was constructed, so a STATUS-returned recovery command was not executed. |
+| Relay transport (`review opencode-transport`) | **Not verified here.** It needs the installed OpenCode stack; it is the first check on upgrade day. |
+
+Two behaviours observed on both versions, recorded so they are not mistaken for regressions on upgrade day:
+
+- A `--base-ref --committed-only` review is bound to the trees frozen at START. A later commit does not make a pending lens slot stale; the relay is still admitted for the frozen candidate, and the new commit shows up as a new range in `assess`.
+- After `correction_required` on a committed-only review, STATUS with only `--lineage` answers `empty_candidate_base_ref_required`. Re-enter with the capture's `status_continuation` (which carries the base ref), not a reconstructed command.
+
+**What `gentle-ai sync` writes for OpenCode on 4.0.0** (run in the isolated home only):
+
+- Agents: `gentle-orchestrator`, `gentle-ai-explore`, `gentle-ai-verify`, `gentle-ai-worker`, the three `jd-*` agents and the six `review-*` agents. No `sdd-*` agent remains. The three `gentle-ai-*` agents are new.
+- No name collides with our `asi-review-*` agents, and the provider's `review-*` names are unchanged.
+- It writes `gentle-orchestrator`'s `permission.task` allowlist. That list does not contain `asi-review-*` or any agent defined outside gentle-ai, so check it after sync on the real configuration (step 3 below).
+- The new agents are not in the broker's `readOnlyAgents`, so the broker treats them as ordinary sandbox workers. `gentle-ai-worker` is defined with only `task: deny`; whether it can edit on the host depends on the global permission map in the live `opencode.json`, which this repository does not own.
+
+**State on 2026-10-09, before the upgrade**
+
+- The broker runs from this checkout and was restarted at 08:17:35, after `bf3c792` (08:17:04). Its startup line reads `legacy SDD enabled (BROKER_LEGACY_SDD=auto, gentle-ai major 3)`.
+- `scripts/install-user-files --verify` passes: all 13 installed files, including every plugin file, are byte-identical to the repository. There is no pending install bundle; upgrade day needs no plugin reinstall.
+- `bf3c792` is the last natively reviewed boundary (`review-e88a985fad223e87`, approved and acknowledged).
+- The live `opencode.json` still carries `allow`/`ask`/`true` entries for the five dormant `host_sdd_*` tools in some agent blocks. They grant nothing once the tools are unregistered, but they belong to the workflow_optimisation cleanup below.
+- Known open, not blocking, and deliberately not fixed before the upgrade so the reviewed boundary does not move: advisories `R4-001`–`R4-004` of `review-e88a985fad223e87` (including the `end()` plus dead-flag teardown in `broker/src/server.ts`), the `SocketWriteQueue` state after an enqueue failure, the install-refusal message (Tier 3 item 9), and `R4-2` on `installedCommit` divergence.
+
+**Upgrade day (user, in order).** Do this before the OpenCode V2 migration (`docs/upgrades/opencode-v2.md`). V2 native review needs gentle-ai 4's V2 relay, and this upgrade is tested on the current V1 stack. Commands are for fish.
+
+0. **Baseline on 3.7.0.** Confirm nothing drifted since the state above, so a failure after the upgrade can be attributed to it.
+
+   ```fish
+   cd ~/agent-sandbox-integration; and git status --short; and git log --oneline -1
+   scripts/install-user-files --verify                      # expect: verification passed
+   test -x ~/.local/share/opencode-sandbox/gentle-ai-3.7.0; and echo "rollback binary present"
+   ```
+
+   If the broker source moved past the commit it was started on, restart it and run one native review on 3.7.0 first.
+
+1. **Upgrade and sync.**
+
+   ```fish
+   brew upgrade gentle-ai; and gentle-ai --version          # expect: gentle-ai 4.0.0
+   gentle-ai sync; and echo "sync ok"                       # a non-zero exit is a failure; stop here
+   ```
+
+   `brew upgrade` removes the 3.7.0 keg; the copy in `~/.local/share/opencode-sandbox/` is the rollback binary. v3's self-update cannot cross to v4.
+
+2. **Restart the broker and OpenCode.**
+
+   ```fish
+   systemctl --user restart sandbox-broker
+   journalctl --user -u sandbox-broker -n 20 --no-pager | rg "legacy SDD"
+   # expect: legacy SDD dormant (BROKER_LEGACY_SDD=auto, gentle-ai major 4)
+   ```
+
+   Then restart the secure OpenCode server the usual way. Leave `OPENCODE_SANDBOX_LEGACY_SDD` unset.
+
+3. **Check what sync changed.** In the live `opencode.json`, confirm `gentle-orchestrator`'s `permission.task` still allows the `asi-review-*` agents and the workflow_optimisation agents, and that the global `edit`/`write`/`bash` denies still apply to the new `gentle-ai-worker`. Run workflow_optimisation's verifier; expect it to complain about `host_sdd_*` grants until that repository is updated.
+
+4. **Verify in OpenCode** (each is a pass/fail):
+   - `host_sdd_status` is not offered as a tool; a direct broker `sddStatus` call is refused with "SDD retired in gentle-ai 4; this operation is dormant…".
+   - A native review of a small scratch commit runs end to end through the `asi-review-*` relay: start → four lenses → capture → acknowledge → `host_review_assess` reports `already_reviewed`. This is the one path the pre-upgrade checks could not cover.
+   - If a recoverable state ever appears, `host_review_recover` executes the STATUS-returned command unchanged.
+
+5. Record the result here and in `docs/TODO.md`, and tell workflow_optimisation.
+
+**Rollback (user).** No repository change is needed.
+
+```fish
+# 1. point the broker at the preserved binary: in ~/.config/opencode-sandbox/broker.env change the
+#    existing line to
+#    BROKER_GENTLE_AI_BINARY=/home/james/.local/share/opencode-sandbox/gentle-ai-3.7.0
+#    (scripts/install-user-files --verify will report broker.env as different while this is in place)
+systemctl --user restart sandbox-broker
+journalctl --user -u sandbox-broker -n 20 --no-pager | rg "legacy SDD"   # expect: enabled … major 3
+# 2. restore that version's managed assets
+~/.local/share/opencode-sandbox/gentle-ai-3.7.0 sync
+```
+
+Then, only if the SDD tools are wanted again: set `OPENCODE_SANDBOX_LEGACY_SDD=1` in the secure launcher's environment, restore the five `host_sdd_*` permission entries, and restart OpenCode. Review stores written by 4.0.0 stay readable (verified above). Note that anything on `PATH` calling plain `gentle-ai` (hooks, the Claude Code stop hook) still gets 4.0.0 until Homebrew is rolled back too.
 
 **workflow_optimisation impact (their repository; carry over by hand)**
 
