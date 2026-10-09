@@ -114,6 +114,8 @@ const JSON_ESCAPE_WORST_CASE = 6;
 const REQUEST_ENVELOPE_ALLOWANCE = 64 * 1024;
 /** Bytes of an oversize line kept to recover its request id. */
 const OVERSIZE_ID_PREFIX_BYTES = 512;
+/** Maximum time to wait for owed responses before forcing a framer-failed socket closed. */
+const FRAMER_FAILURE_DRAIN_TIMEOUT_MS = 5_000;
 /** 128 chars is over 4x the longest Operation name (27 chars). */
 const MAX_OPERATION_NAME_LENGTH = 128;
 const OVERSIZE_ID_RE = /"id"\s*:\s*"([A-Za-z0-9-]{1,128})"/;
@@ -222,6 +224,7 @@ interface QueuedSocketWrite {
 export class SocketWriteQueue {
   private readonly writes: QueuedSocketWrite[] = [];
   private onDrained?: () => void;
+  private terminationRequested = false;
 
   constructor(
     private readonly socket: SocketLike,
@@ -244,6 +247,8 @@ export class SocketWriteQueue {
   }
 
   terminate(onDrained: () => void): void {
+    if (this.terminationRequested) return;
+    this.terminationRequested = true;
     if (!this.hasPendingWrites) {
       onDrained();
       return;
@@ -253,9 +258,9 @@ export class SocketWriteQueue {
 
   private notifyDrained(): void {
     if (this.hasPendingWrites || !this.onDrained) return;
-    const onDrained = this.onDrained;
+    const deferredTermination = this.onDrained;
     this.onDrained = undefined;
-    onDrained();
+    deferredTermination();
   }
 
   private flush(): void {
@@ -305,6 +310,7 @@ export class BrokerServer {
   constructor(
     private readonly config: BrokerConfig,
     logger?: Logger,
+    private readonly options: { framerFailureDrainTimeoutMs?: number } = {},
   ) {
     if (typeof config.failLoudUnexpectedErrors !== "boolean") {
       throw new TypeError("BrokerConfig.failLoudUnexpectedErrors must be a boolean");
@@ -370,10 +376,7 @@ export class BrokerServer {
         },
         data: (socket, data: Buffer) => this.onData(socket as unknown as SocketLike, data),
         drain: (socket) => {
-          const target = socket as unknown as SocketLike;
-          const queue = this.socketWrites.get(target);
-          // A dead socket may drain only bytes already owed before termination.
-          if (!this.deadSockets.has(target) || queue?.hasPendingWrites) queue?.drain();
+          this.drainSocketWrites(socket as unknown as SocketLike);
         },
         close: (socket) => {
           this.onSocketClose(socket as unknown as SocketLike);
@@ -419,9 +422,7 @@ export class BrokerServer {
           },
           data: (socket, data: Buffer) => this.onData(socket as unknown as SocketLike, data),
           drain: (socket) => {
-            const target = socket as unknown as SocketLike;
-            const queue = this.socketWrites.get(target);
-            if (!this.deadSockets.has(target) || queue?.hasPendingWrites) queue?.drain();
+            this.drainSocketWrites(socket as unknown as SocketLike);
           },
           close: (socket) => this.onSocketClose(socket as unknown as SocketLike),
           error: (socket, err) => {
@@ -474,6 +475,12 @@ export class BrokerServer {
     }
   }
 
+  private drainSocketWrites(socket: SocketLike): void {
+    const queue = this.socketWrites.get(socket);
+    // A dead socket may drain only bytes already owed before termination.
+    if (!this.deadSockets.has(socket) || queue?.hasPendingWrites) queue?.drain();
+  }
+
   private onData(socket: SocketLike, data: Buffer): void {
     if (this.deadSockets.has(socket)) return;
     const maxLineBytes = maxRequestLineBytes(this.config.resource);
@@ -490,19 +497,33 @@ export class BrokerServer {
       this.framers.delete(socket);
       this.logUnexpected(err);
       // The framer may be partially mutated after an allocation failure; do not trust it or send a response.
-      const endSocket = () => {
+      let terminated = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const terminateOnce = (action: () => void) => {
+        if (terminated) return;
+        terminated = true;
+        if (timeout) clearTimeout(timeout);
+        action();
+      };
+      const endSocket = () => terminateOnce(() => {
         try {
           if (socket.end) socket.end();
           else socket.close();
         } catch {
-          if (socket.end) {
-            try { socket.close(); } catch { /* best-effort terminal fallback */ }
-          }
+          try { socket.close(); } catch { /* best-effort terminal fallback */ }
         }
-      };
+      });
+      const forceCloseSocket = () => terminateOnce(() => {
+        try { socket.close(); } catch { /* best-effort forced close */ }
+      });
       const queue = this.socketWrites.get(socket);
-      if (queue) queue.terminate(endSocket);
-      else endSocket();
+      if (queue?.hasPendingWrites) {
+        timeout = setTimeout(forceCloseSocket, this.options.framerFailureDrainTimeoutMs ?? FRAMER_FAILURE_DRAIN_TIMEOUT_MS);
+        timeout.unref?.();
+        queue.terminate(endSocket);
+      } else {
+        endSocket();
+      }
       return;
     }
     for (const event of events) {

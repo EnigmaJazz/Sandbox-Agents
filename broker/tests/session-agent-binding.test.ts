@@ -424,6 +424,97 @@ describe("fail-loud request processing", () => {
     }
   });
 
+  test("forces a stalled framer-failed socket closed after the drain deadline", async () => {
+    const root = mkdtempSync(join(tmpdir(), "request-framer-stall-"));
+    const server = new BrokerServer(defaultConfig({ stateDir: root }), undefined, { framerFailureDrainTimeoutMs: 20 });
+    let writeCalls = 0;
+    let allowWrite = false;
+    let ended = 0;
+    let closed = 0;
+    const socket = {
+      write: (data: string | Uint8Array) => {
+        writeCalls++;
+        return allowWrite ? data.length : 0;
+      },
+      end: () => { ended++; },
+      close: () => { closed++; },
+    };
+    const internals = server as unknown as {
+      framers: Map<object, { push(data: Buffer): never }>;
+      socketWrites: Map<object, SocketWriteQueue>;
+      respond(socket: typeof socket, response: { id: string }): void;
+      onData(socket: typeof socket, data: Buffer): void;
+    };
+    internals.framers = new Map([[socket, { push: () => { throw new Error("framer allocation failure"); } }]]);
+    try {
+      internals.respond(socket, { id: "owed-stalled-response" });
+      const queue = internals.socketWrites.get(socket)!;
+      internals.onData(socket, Buffer.from("request\\n"));
+      expect(ended).toBe(0);
+      expect(closed).toBe(0);
+      expect(queue.hasPendingWrites).toBe(true);
+      const writesBeforeTimeout = writeCalls;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(closed).toBe(1);
+      expect(ended).toBe(0);
+      expect(queue.hasPendingWrites).toBe(true);
+      expect(writeCalls).toBe(writesBeforeTimeout);
+      allowWrite = true;
+      queue.drain();
+      expect(ended).toBe(0);
+      expect(closed).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a drain before the deadline ends once and cancels forced close", async () => {
+    const root = mkdtempSync(join(tmpdir(), "request-framer-drain-deadline-"));
+    const server = new BrokerServer(defaultConfig({ stateDir: root }), undefined, { framerFailureDrainTimeoutMs: 20 });
+    let allowWrite = false;
+    let ended = 0;
+    let closed = 0;
+    const socket = {
+      write: (data: string | Uint8Array) => allowWrite ? data.length : 0,
+      end: () => { ended++; },
+      close: () => { closed++; },
+    };
+    const internals = server as unknown as {
+      framers: Map<object, { push(data: Buffer): never }>;
+      socketWrites: Map<object, SocketWriteQueue>;
+      respond(socket: typeof socket, response: { id: string }): void;
+      onData(socket: typeof socket, data: Buffer): void;
+    };
+    internals.framers = new Map([[socket, { push: () => { throw new Error("framer allocation failure"); } }]]);
+    try {
+      internals.respond(socket, { id: "owed-drained-response" });
+      internals.onData(socket, Buffer.from("request\\n"));
+      allowWrite = true;
+      internals.socketWrites.get(socket)?.drain();
+      expect(ended).toBe(1);
+      expect(closed).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(ended).toBe(1);
+      expect(closed).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("SocketWriteQueue termination is idempotent", () => {
+    let allowWrite = false;
+    let first = 0;
+    let second = 0;
+    const queue = new SocketWriteQueue({ write: (data) => allowWrite ? data.length : 0 }, () => {});
+    queue.enqueue("owed");
+    queue.terminate(() => { first++; });
+    queue.terminate(() => { second++; });
+    allowWrite = true;
+    queue.drain();
+    expect(first).toBe(1);
+    expect(second).toBe(0);
+  });
+
   test("ignores data delivered after a framer failure", () => {
     const root = mkdtempSync(join(tmpdir(), "request-framer-dead-socket-"));
     const server = new BrokerServer(defaultConfig({ stateDir: root }));

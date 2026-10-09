@@ -53,5 +53,11 @@ Also recorded while here: the project's `broker/tsconfig.json` sets `erasableSyn
 - **T2 — Unit B:** Added a per-socket dead marker, terminal queue callback, drain-before-end teardown, dead-socket checks, and the enqueue-before-map-store fix. TDD RED was observed on the focused file: **38 pass / 4 fail**; failures were the changed end-vs-close expectation, loss of the owed queue, second framer creation for late data, and stale queue installation after enqueue throws. GREEN focused result: **43 pass / 0 fail / 255 expect() calls**. Full suite: **796 pass / 0 fail / 3612 expect() calls / 50 files**. Build `bun build src/main.ts` from `broker`: completed successfully (exit 0).
 - The existing framer-failure test intentionally changes its expectation: `end()` must be called and `close()` must not be called when `end` exists. An additional test proves `close()` remains the fallback when `end` is absent. The owed-write test asserts the response frame is written before `end`; the late-data test asserts no second framer creation or additional write; the queue-store test asserts a throwing first enqueue leaves no queue in `socketWrites`.
 
+## R4-STALL-1 — bounded framer-failure teardown
+
+- **R4-STALL-1 (WARNING, introduced by Unit B):** An owed response could keep a framer-failed socket open indefinitely if the peer never drained. Teardown now waits at most 5000 ms by default, then calls `close()` directly; a normal drain still ends gracefully. Tests inject a 20 ms deadline.
+- The terminal action is once-guarded, and the queue accepts only its first `terminate` callback. Timeout handles are unref'd and cleared when either terminal path wins. Main and advisor drain handlers share one dead-socket guard helper.
+- **R4-DISCARD-2 (known boundary, unchanged):** A socket write failure discards all pending frames on that connection. This pre-existing behavior remains out of scope.
+
 ## Next step
 T3 — Unit C.
