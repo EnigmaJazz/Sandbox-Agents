@@ -60,5 +60,13 @@ Also recorded while here: the project's `broker/tsconfig.json` sets `erasableSyn
 - The terminal action is once-guarded, and the queue accepts only its first `terminate` callback. Timeout handles are unref'd and cleared when either terminal path wins. Main and advisor drain handlers share one dead-socket guard helper.
 - **R4-DISCARD-2 (known boundary, unchanged):** A socket write failure discards all pending frames on that connection. This pre-existing behavior remains out of scope.
 
+## R4-stdout-sink-coupling — stdout sink independence
+
+- **R4-stdout-sink-coupling (WARNING, introduced by Unit C):** `Logger` now attaches one shared `process.stdout` error listener for active console loggers, latches stdout failures, attempts the file sink before stdout, and isolates each sink so one failure cannot skip the other. Both already-dead sinks count one dropped log line, not two.
+- The file path is retained as a private readonly field. Reopening a dead file stream or stdout sink is not implemented; the broker must restart to reopen either dead sink. This is the current, intentional recovery boundary.
+- TDD RED: focused logging tests reported **4 pass / 2 fail / 13 expect() calls**. The synchronous case repeated the failed stdout write and counted both lines as dropped; the asynchronous event threw because no stdout error listener existed.
+- TDD GREEN: focused logging tests reported **6 pass / 0 fail / 18 expect() calls**. The sync regression test verifies one stdout write attempt and both durable JSONL records; the async test emits `process.stdout`'s `error` event and verifies the counter, latch, and fixed fallback.
+- Full-suite baseline observed before edits: **803 pass / 0 fail / 3637 expect() calls / 51 files**. Final full suite: **805 pass / 0 fail / 3645 expect() calls / 51 files**. `bun build src/main.ts` from `broker` succeeded.
+
 ## Next step
-T3 — Unit C.
+Owner review and manual application; `broker/src/**` remains S17.

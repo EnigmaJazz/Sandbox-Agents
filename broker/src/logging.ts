@@ -38,20 +38,39 @@ export function redact(text: string): string {
 }
 
 export class Logger {
+  private static readonly stdoutLoggers = new Set<Logger>();
+  private static readonly handleStdoutError = (): void => {
+    for (const logger of Logger.stdoutLoggers) logger.handleStdoutError();
+  };
+
+  private readonly file: string | undefined;
   private readonly stream: WriteStream;
   private readonly toConsole: boolean;
+  // Reopening a dead sink requires a broker restart; no retry path is implemented.
   private streamDead = false;
+  private stdoutDead = false;
   private fallbackWritten = false;
   private droppedLogLineCount = 0;
   private readonly handleStreamError = (): void => {
+    if (this.streamDead) return;
     this.streamDead = true;
+    this.markDropped();
+  };
+  private readonly handleStdoutError = (): void => {
+    if (this.stdoutDead) return;
+    this.stdoutDead = true;
     this.markDropped();
   };
 
   constructor(opts: { file?: string; toConsole?: boolean } = {}) {
+    this.file = opts.file;
     this.toConsole = opts.toConsole ?? true;
-    this.stream = opts.file ? createWriteStream(opts.file, { flags: "a", mode: 0o600 }) : null as unknown as WriteStream;
+    this.stream = this.file ? createWriteStream(this.file, { flags: "a", mode: 0o600 }) : null as unknown as WriteStream;
     if (this.stream) this.stream.on("error", this.handleStreamError);
+    if (this.toConsole) {
+      Logger.stdoutLoggers.add(this);
+      if (Logger.stdoutLoggers.size === 1) process.stdout.on("error", Logger.handleStdoutError);
+    }
   }
 
   get droppedLogLines(): number {
@@ -59,26 +78,47 @@ export class Logger {
   }
 
   log(entry: Omit<LogEntry, "ts">): void {
+    let line: string;
     try {
-      const line = JSON.stringify({
+      line = JSON.stringify({
         ...entry,
         error: entry.error ? redact(entry.error) : undefined,
         ts: new Date().toISOString(),
       });
-      if (this.toConsole) process.stdout.write(`${line}\n`);
-      if (this.stream) {
-        if (this.streamDead) this.markDropped();
-        else {
-          try {
-            this.stream.write(`${line}\n`);
-          } catch (err) {
-            this.streamDead = true;
-            throw err;
-          }
-        }
-      }
     } catch {
       this.markDropped();
+      return;
+    }
+
+    let dropped = false;
+    const markLineDropped = (): void => {
+      if (dropped) return;
+      dropped = true;
+      this.markDropped();
+    };
+
+    if (this.stream) {
+      if (this.streamDead) markLineDropped();
+      else {
+        try {
+          this.stream.write(`${line}\n`);
+        } catch {
+          this.streamDead = true;
+          markLineDropped();
+        }
+      }
+    }
+
+    if (this.toConsole) {
+      if (this.stdoutDead) markLineDropped();
+      else {
+        try {
+          process.stdout.write(`${line}\n`);
+        } catch {
+          this.stdoutDead = true;
+          markLineDropped();
+        }
+      }
     }
   }
 
@@ -106,6 +146,10 @@ export class Logger {
   }
 
   close(): void {
+    if (this.toConsole) {
+      Logger.stdoutLoggers.delete(this);
+      if (Logger.stdoutLoggers.size === 0) process.stdout.off("error", Logger.handleStdoutError);
+    }
     if (this.stream) {
       this.stream.once("close", () => this.stream.off("error", this.handleStreamError));
       this.stream.end();

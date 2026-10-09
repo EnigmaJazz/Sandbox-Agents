@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { once } from "node:events";
 import type { WriteStream } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,6 +34,62 @@ describe("Logger failure accounting", () => {
       expect(fallback[0]).not.toContain('"operation":"metrics"');
     } finally {
       stream.write = originalStreamWrite;
+      process.stderr.write = originalStderrWrite;
+      await closeLogger(logger, stream, root);
+    }
+  });
+
+  test("continues file logging after a synchronous stdout failure", async () => {
+    const root = mkdtempSync(join(tmpdir(), "logger-stdout-sync-failure-"));
+    const file = join(root, "broker.jsonl");
+    const logger = new Logger({ file });
+    const stream = (logger as unknown as { stream: WriteStream }).stream;
+    await once(stream, "open");
+    const originalStdoutWrite = process.stdout.write;
+    let calls = 0;
+    process.stdout.write = (() => {
+      calls += 1;
+      if (calls === 1) throw new Error("stdout unavailable");
+      return true;
+    }) as typeof process.stdout.write;
+    let closed = false;
+    try {
+      logger.log({ operation: "first", result: "ok" });
+      logger.log({ operation: "second", result: "ok" });
+      expect(logger.droppedLogLines).toBe(2);
+      expect(calls).toBe(1);
+      const streamClosed = once(stream, "close");
+      logger.close();
+      await streamClosed;
+      closed = true;
+      const lines = readFileSync(file, "utf8").trim().split("\n");
+      expect(lines).toHaveLength(2);
+      expect(lines.map((line) => JSON.parse(line).operation)).toEqual(["first", "second"]);
+    } finally {
+      process.stdout.write = originalStdoutWrite;
+      if (!closed) await closeLogger(logger, stream, root);
+      else rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("latches asynchronous stdout errors", async () => {
+    const root = mkdtempSync(join(tmpdir(), "logger-stdout-async-failure-"));
+    const file = join(root, "broker.jsonl");
+    const logger = new Logger({ file });
+    const stream = (logger as unknown as { stream: WriteStream }).stream;
+    await once(stream, "open");
+    const originalStdoutWrite = process.stdout.write;
+    const originalStderrWrite = process.stderr.write;
+    const fallback: string[] = [];
+    process.stdout.write = (() => true) as typeof process.stdout.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => { fallback.push(chunk.toString()); return true; }) as typeof process.stderr.write;
+    try {
+      expect(() => process.stdout.emit("error", new Error("stdout unavailable"))).not.toThrow();
+      expect(logger.droppedLogLines).toBe(1);
+      expect((logger as unknown as { stdoutDead: boolean }).stdoutDead).toBe(true);
+      expect(fallback).toContain('{"event":"logger_sink_failure","error":"logging sink failed"}\n');
+    } finally {
+      process.stdout.write = originalStdoutWrite;
       process.stderr.write = originalStderrWrite;
       await closeLogger(logger, stream, root);
     }
