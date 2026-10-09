@@ -47,5 +47,11 @@ Also recorded while here: the project's `broker/tsconfig.json` sets `erasableSyn
 ## Route and trigger evidence
 `route: delegated`; specialist `general` (sandbox writer); trigger: secure policy — every project mutation and execution is delegated, no inline mutation route exists. Record actual Task dispatch and result per unit before marking it complete.
 
+## Outcomes
+
+- **T1 — Unit A:** Completed in the prior work unit. Its full-suite baseline is recorded as **792 pass / 0 fail** in the handoff. Before Unit B edits, this worker observed the focused `session-agent-binding.test.ts` baseline: **39 pass / 0 fail**.
+- **T2 — Unit B:** Added a per-socket dead marker, terminal queue callback, drain-before-end teardown, dead-socket checks, and the enqueue-before-map-store fix. TDD RED was observed on the focused file: **38 pass / 4 fail**; failures were the changed end-vs-close expectation, loss of the owed queue, second framer creation for late data, and stale queue installation after enqueue throws. GREEN focused result: **43 pass / 0 fail / 255 expect() calls**. Full suite: **796 pass / 0 fail / 3612 expect() calls / 50 files**. Build `bun build src/main.ts` from `broker`: completed successfully (exit 0).
+- The existing framer-failure test intentionally changes its expectation: `end()` must be called and `close()` must not be called when `end` exists. An additional test proves `close()` remains the fallback when `end` is absent. The owed-write test asserts the response frame is written before `end`; the late-data test asserts no second framer creation or additional write; the queue-store test asserts a throwing first enqueue leaves no queue in `socketWrites`.
+
 ## Next step
-Unit A (T1).
+T3 — Unit C.

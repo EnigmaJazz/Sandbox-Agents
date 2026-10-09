@@ -221,6 +221,7 @@ interface QueuedSocketWrite {
 /** Per-connection FIFO: never write a later frame until its predecessor drains. */
 export class SocketWriteQueue {
   private readonly writes: QueuedSocketWrite[] = [];
+  private onDrained?: () => void;
 
   constructor(
     private readonly socket: SocketLike,
@@ -242,6 +243,21 @@ export class SocketWriteQueue {
     this.flush();
   }
 
+  terminate(onDrained: () => void): void {
+    if (!this.hasPendingWrites) {
+      onDrained();
+      return;
+    }
+    this.onDrained = onDrained;
+  }
+
+  private notifyDrained(): void {
+    if (this.hasPendingWrites || !this.onDrained) return;
+    const onDrained = this.onDrained;
+    this.onDrained = undefined;
+    onDrained();
+  }
+
   private flush(): void {
     while (this.writes.length > 0) {
       const write = this.writes[0]!;
@@ -256,9 +272,14 @@ export class SocketWriteQueue {
         this.writes.shift();
       } catch (error) {
         this.writes.length = 0;
-        this.onFailure(error, write.id);
+        try {
+          this.onFailure(error, write.id);
+        } finally {
+          this.notifyDrained();
+        }
         return;
       }
+      this.notifyDrained();
     }
   }
 }
@@ -272,6 +293,7 @@ export class BrokerServer {
   private readonly activeLocks = new Map<string, number>();
   private readonly framers = new WeakMap<SocketLike, RequestLineFramer>();
   private readonly socketWrites = new WeakMap<SocketLike, SocketWriteQueue>();
+  private readonly deadSockets = new WeakSet<SocketLike>();
   /** Sessions each socket has dispatched requests for (disconnect cleanup). */
   private readonly sessionsBySocket = new WeakMap<SocketLike, Set<string>>();
   /** Advisor connections and the one session each is bound to (advisor-socket.ts). */
@@ -347,7 +369,12 @@ export class BrokerServer {
           /* nothing per-connection */
         },
         data: (socket, data: Buffer) => this.onData(socket as unknown as SocketLike, data),
-        drain: (socket) => this.socketWrites.get(socket as unknown as SocketLike)?.drain(),
+        drain: (socket) => {
+          const target = socket as unknown as SocketLike;
+          const queue = this.socketWrites.get(target);
+          // A dead socket may drain only bytes already owed before termination.
+          if (!this.deadSockets.has(target) || queue?.hasPendingWrites) queue?.drain();
+        },
         close: (socket) => {
           this.onSocketClose(socket as unknown as SocketLike);
         },
@@ -391,7 +418,11 @@ export class BrokerServer {
             this.logger.log({ operation: "advisor.connect", sessionID, result: "ok" });
           },
           data: (socket, data: Buffer) => this.onData(socket as unknown as SocketLike, data),
-          drain: (socket) => this.socketWrites.get(socket as unknown as SocketLike)?.drain(),
+          drain: (socket) => {
+            const target = socket as unknown as SocketLike;
+            const queue = this.socketWrites.get(target);
+            if (!this.deadSockets.has(target) || queue?.hasPendingWrites) queue?.drain();
+          },
           close: (socket) => this.onSocketClose(socket as unknown as SocketLike),
           error: (socket, err) => {
             this.logger.log({ operation: "advisor.connection", result: "error", error: String(err?.message ?? err) });
@@ -444,6 +475,7 @@ export class BrokerServer {
   }
 
   private onData(socket: SocketLike, data: Buffer): void {
+    if (this.deadSockets.has(socket)) return;
     const maxLineBytes = maxRequestLineBytes(this.config.resource);
     let framer = this.framers.get(socket);
     if (!framer) {
@@ -454,14 +486,23 @@ export class BrokerServer {
     try {
       events = framer.push(data);
     } catch (err) {
+      this.deadSockets.add(socket);
       this.framers.delete(socket);
       this.logUnexpected(err);
       // The framer may be partially mutated after an allocation failure; do not trust it or send a response.
-      try {
-        socket.close();
-      } catch {
-        try { if (socket.end) socket.end(); else socket.close(); } catch { /* best-effort terminal fallback */ }
-      }
+      const endSocket = () => {
+        try {
+          if (socket.end) socket.end();
+          else socket.close();
+        } catch {
+          if (socket.end) {
+            try { socket.close(); } catch { /* best-effort terminal fallback */ }
+          }
+        }
+      };
+      const queue = this.socketWrites.get(socket);
+      if (queue) queue.terminate(endSocket);
+      else endSocket();
       return;
     }
     for (const event of events) {
@@ -475,6 +516,7 @@ export class BrokerServer {
         continue;
       }
       // Refuse this request alone; the connection carries other sessions' work.
+      if (this.deadSockets.has(socket)) return;
       this.safeRespond(socket, {
         version: 1,
         id: event.id ?? "0",
@@ -596,6 +638,7 @@ export class BrokerServer {
   }
 
   private safeRespond(socket: SocketLike, response: BrokerResponseEnvelope): void {
+    if (this.deadSockets.has(socket)) return;
     try {
       this.respond(socket, response);
     } catch {
@@ -827,8 +870,10 @@ export class BrokerServer {
   }
 
   private respond(socket: SocketLike, resp: BrokerResponseEnvelope): void {
+    if (this.deadSockets.has(socket)) return;
     const data = `${JSON.stringify(resp)}\n`;
     let queue = this.socketWrites.get(socket);
+    const newQueue = !queue;
     if (!queue) {
       queue = new SocketWriteQueue(socket, (err, id) => {
         console.warn("broker response write failed", {
@@ -838,10 +883,10 @@ export class BrokerServer {
         // Closing fails all pending client requests promptly with unavailable.
         socket.close();
       });
-      this.socketWrites.set(socket, queue);
     }
     const expectedBytes = Buffer.byteLength(data);
     const writtenBytes = queue.enqueue(data, resp.id);
+    if (newQueue) this.socketWrites.set(socket, queue);
     if (writtenBytes < expectedBytes) {
       console.warn("broker response write was short", {
         id: resp.id,
