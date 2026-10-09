@@ -691,6 +691,7 @@ export interface MetricsRecord {
   workersActive: number;
   workersMax: number;
   sessionsByState: Record<string, number>;
+  droppedLogLines: number;
   budgetExhausted: boolean;
 }
 

@@ -2275,6 +2275,7 @@ export function buildMetricsOp(ctx: OpContext): OpHandler {
       workersActive: ctx.pool.allocations.length,
       workersMax: ctx.budget.maxWorkers,
       sessionsByState,
+      droppedLogLines: ctx.logger.droppedLogLines,
       budgetExhausted:
         checkAdmission(ctx.pool, ctx.budget, {}).allowed === false,
     };
