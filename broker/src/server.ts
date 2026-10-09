@@ -493,8 +493,13 @@ export class BrokerServer {
     let finalWritten = false;
     const writeFinal = (response: BrokerResponseEnvelope) => {
       if (finalWritten) return;
-      this.respond(socket, response);
       finalWritten = true;
+      // This guarantees at most one final-response attempt, not one successful write: a partial write cannot be retracted.
+      try {
+        this.respond(socket, response);
+      } catch (err) {
+        try { this.logUnexpected(err); } catch { /* Logging must not escape after the response attempt. */ }
+      }
     };
     try {
       const parsed = this.parseRequest(line);
@@ -557,6 +562,7 @@ export class BrokerServer {
       }
     } catch (err) {
       this.logUnexpected(err);
+      // Fail-loud surfaces unexpected errors only if no final response was emitted; once it is on the wire, protocol integrity takes precedence over rejection.
       if (this.config.failLoudUnexpectedErrors && !finalWritten) {
         throw new UnexpectedRequestError(envelope, err);
       }

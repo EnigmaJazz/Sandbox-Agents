@@ -290,6 +290,58 @@ describe("fail-loud request processing", () => {
     }
   });
 
+  test("contains a response write failure without a second attempt in fail-loud mode", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dispatch-write-failure-"));
+    const server = new BrokerServer(defaultConfig({ stateDir: root, failLoudUnexpectedErrors: true }));
+    const internals = server as unknown as {
+      logger: { log(entry: { operation?: string }): void };
+      respond(socket: object, response: { id: string }): void;
+      dispatchLine(socket: { write(data: string | Uint8Array): number; close(): void }, line: string): Promise<void>;
+    };
+    const attempts: string[] = [];
+    internals.logger = { log: () => {} };
+    internals.respond = (_socket, response) => {
+      attempts.push(JSON.stringify(response));
+      throw new Error("response write failed before writing");
+    };
+    const socket = { write: (data: string | Uint8Array) => data.length, close: () => {} };
+    try {
+      const request = JSON.stringify({ version: 1, id: "write-failure-id", operation: "metrics", sessionID: "write-failure-session" });
+      await expect(internals.dispatchLine(socket, request)).resolves.toBeUndefined();
+      expect(attempts).toHaveLength(1);
+      expect(JSON.parse(attempts[0]!)).toMatchObject({ id: "write-failure-id", ok: true });
+      expect(attempts.filter((attempt) => JSON.parse(attempt).id === "write-failure-id")).toHaveLength(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("does not fail loud when logging fails after the final response attempt", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dispatch-final-log-failure-"));
+    const server = new BrokerServer(defaultConfig({ stateDir: root, failLoudUnexpectedErrors: true }));
+    const internals = server as unknown as {
+      logger: { log(entry: { operation?: string }): void };
+      respond(socket: { write(data: string | Uint8Array): number; close(): void }, response: { id: string }): void;
+      dispatchLine(socket: { write(data: string | Uint8Array): number; close(): void }, line: string): Promise<void>;
+    };
+    internals.logger = { log: (entry) => { if (entry.operation === "request.processing") throw new Error("unexpected-error logger failed"); } };
+    const writes: string[] = [];
+    const socket = { write: (data: string | Uint8Array) => { writes.push(data.toString()); return data.length; }, close: () => {} };
+    const originalRespond = internals.respond;
+    internals.respond = (target, response) => {
+      originalRespond.call(server, target, response);
+      throw new Error("write completion callback failed");
+    };
+    try {
+      const request = JSON.stringify({ version: 1, id: "final-log-failure-id", operation: "metrics", sessionID: "final-log-failure-session" });
+      await expect(internals.dispatchLine(socket, request)).resolves.toBeUndefined();
+      expect(writes).toHaveLength(1);
+      expect(JSON.parse(writes[0]!)).toMatchObject({ id: "final-log-failure-id", ok: true });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("discards and closes a connection when its request framer throws", () => {
     const root = mkdtempSync(join(tmpdir(), "request-framer-failure-"));
     const server = new BrokerServer(defaultConfig({ stateDir: root }));
