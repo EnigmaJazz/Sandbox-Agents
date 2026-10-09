@@ -209,35 +209,84 @@ describe("dispatch safety envelope", () => {
 });
 
 describe("fail-loud request processing", () => {
-  test("dispatchLine rejects only when fail-loud is enabled", async () => {
-    for (const failLoudUnexpectedErrors of [false, true]) {
-      const root = mkdtempSync(join(tmpdir(), "dispatch-fail-loud-"));
-      const server = new BrokerServer(defaultConfig({ stateDir: root, failLoudUnexpectedErrors }));
-      const internals = server as unknown as {
-        sessionsBySocket: Map<object, Set<string>>;
-        dispatchLine(socket: { write(data: string | Uint8Array): number; close(): void }, line: string): Promise<void>;
-      };
-      internals.sessionsBySocket = new class extends Map<object, Set<string>> {
-        override set(): this { throw new Error("fail-loud injected exception"); }
-      }();
-      const writes: string[] = [];
-      const socket = { write: (data: string | Uint8Array) => { writes.push(data.toString()); return data.length; }, close: () => {} };
+  test("dispatchLine preserves the unexpected cause and logs its original stack in fail-loud mode", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dispatch-fail-loud-"));
+    const original = new Error("fail-loud injected exception");
+    const server = new BrokerServer(defaultConfig({ stateDir: root, failLoudUnexpectedErrors: true }));
+    const logs: Array<{ operation: string; error?: string }> = [];
+    const internals = server as unknown as {
+      sessionsBySocket: Map<object, Set<string>>;
+      logger: { log(entry: { operation: string; error?: string }): void };
+      dispatchLine(socket: { write(data: string | Uint8Array): number; close(): void }, line: string): Promise<void>;
+    };
+    internals.logger = { log: (entry) => { logs.push(entry); } };
+    internals.sessionsBySocket = new class extends Map<object, Set<string>> {
+      override set(): this { throw original; }
+    }();
+    const writes: string[] = [];
+    const socket = { write: (data: string | Uint8Array) => { writes.push(data.toString()); return data.length; }, close: () => {} };
+    try {
+      const request = JSON.stringify({ version: 1, id: "fail-loud-id", operation: "metrics", sessionID: "fail-loud-session" });
+      let thrown: unknown;
       try {
-        const request = JSON.stringify({ version: 1, id: "fail-loud-id", operation: "metrics", sessionID: "fail-loud-session" });
-        if (failLoudUnexpectedErrors) {
-          await expect(internals.dispatchLine(socket, request)).rejects.toMatchObject({ name: "UnexpectedRequestError" });
-          expect(writes).toHaveLength(0);
-        } else {
-          await expect(internals.dispatchLine(socket, request)).resolves.toBeUndefined();
-          expect(JSON.parse(writes[0]!)).toMatchObject({
-            id: "fail-loud-id",
-            ok: false,
-            error: { code: "internal", message: "unexpected broker error processing request" },
-          });
-        }
-      } finally {
-        rmSync(root, { recursive: true, force: true });
+        await internals.dispatchLine(socket, request);
+      } catch (err) {
+        thrown = err;
       }
+      expect(thrown).toMatchObject({ name: "UnexpectedRequestError", cause: original });
+      expect((thrown as Error).cause).toBe(original);
+      expect(logs).toHaveLength(1);
+      expect(logs[0]?.operation).toBe("request.processing");
+      expect(logs[0]?.error).toContain(original.stack);
+      expect(writes).toHaveLength(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("dispatchLine writes the fixed safety response when fail-loud is disabled", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dispatch-safety-response-"));
+    const server = new BrokerServer(defaultConfig({ stateDir: root, failLoudUnexpectedErrors: false }));
+    const internals = server as unknown as {
+      sessionsBySocket: Map<object, Set<string>>;
+      dispatchLine(socket: { write(data: string | Uint8Array): number; close(): void }, line: string): Promise<void>;
+    };
+    internals.sessionsBySocket = new class extends Map<object, Set<string>> {
+      override set(): this { throw new Error("safety-response injected exception"); }
+    }();
+    const writes: string[] = [];
+    const socket = { write: (data: string | Uint8Array) => { writes.push(data.toString()); return data.length; }, close: () => {} };
+    try {
+      const request = JSON.stringify({ version: 1, id: "safety-response-id", operation: "metrics", sessionID: "safety-response-session" });
+      await expect(internals.dispatchLine(socket, request)).resolves.toBeUndefined();
+      expect(writes).toHaveLength(1);
+      expect(JSON.parse(writes[0]!)).toMatchObject({
+        id: "safety-response-id",
+        ok: false,
+        error: { code: "internal", message: "unexpected broker error processing request" },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("an ok logger failure cannot write a contradictory second response", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dispatch-ok-log-failure-"));
+    const server = new BrokerServer(defaultConfig({ stateDir: root }));
+    const internals = server as unknown as {
+      logger: { log(entry: { result?: string }): void };
+      dispatchLine(socket: { write(data: string | Uint8Array): number; close(): void }, line: string): Promise<void>;
+    };
+    internals.logger = { log: (entry) => { if (entry.result === "ok") throw new Error("ok logger failed"); } };
+    const writes: string[] = [];
+    const socket = { write: (data: string | Uint8Array) => { writes.push(data.toString()); return data.length; }, close: () => {} };
+    try {
+      const request = JSON.stringify({ version: 1, id: "single-response-id", operation: "metrics", sessionID: "single-response-session" });
+      await internals.dispatchLine(socket, request);
+      expect(writes).toHaveLength(1);
+      expect(JSON.parse(writes[0]!)).toMatchObject({ id: "single-response-id", ok: true });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 
@@ -245,9 +294,11 @@ describe("fail-loud request processing", () => {
     const root = mkdtempSync(join(tmpdir(), "request-framer-failure-"));
     const server = new BrokerServer(defaultConfig({ stateDir: root }));
     let closed = false;
+    let ended = false;
     const writes: string[] = [];
     const socket = {
       write: (data: string | Uint8Array) => { writes.push(data.toString()); return data.length; },
+      end: () => { ended = true; },
       close: () => { closed = true; },
     };
     const internals = server as unknown as {
@@ -259,7 +310,9 @@ describe("fail-loud request processing", () => {
       expect(() => internals.onData(socket, Buffer.from("request\\n"))).not.toThrow();
       expect(internals.framers.has(socket)).toBe(false);
       expect(closed).toBe(true);
+      expect(ended).toBe(false);
       expect(writes).toHaveLength(0);
+      // This assertion assumes the stubbed close returns normally (does not throw).
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

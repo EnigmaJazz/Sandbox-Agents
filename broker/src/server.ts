@@ -203,9 +203,12 @@ interface SocketLike {
 }
 
 class UnexpectedRequestError extends Error {
+  override readonly cause: unknown;
+
   constructor(readonly envelope: BrokerRequestEnvelope | undefined, cause: unknown) {
     super(cause instanceof Error ? cause.message : "unexpected broker error processing request");
     this.name = "UnexpectedRequestError";
+    this.cause = cause;
   }
 }
 
@@ -455,10 +458,9 @@ export class BrokerServer {
       this.logUnexpected(err);
       // The framer may be partially mutated after an allocation failure; do not trust it or send a response.
       try {
-        if (socket.end) socket.end();
-        else socket.close();
+        socket.close();
       } catch {
-        try { socket.close(); } catch { /* best-effort terminal fallback */ }
+        try { if (socket.end) socket.end(); else socket.close(); } catch { /* best-effort terminal fallback */ }
       }
       return;
     }
@@ -488,10 +490,16 @@ export class BrokerServer {
   private async dispatchLine(socket: SocketLike, line: string): Promise<void> {
     const t0 = startTimer();
     let envelope: BrokerRequestEnvelope | undefined;
+    let finalWritten = false;
+    const writeFinal = (response: BrokerResponseEnvelope) => {
+      if (finalWritten) return;
+      this.respond(socket, response);
+      finalWritten = true;
+    };
     try {
       const parsed = this.parseRequest(line);
       if ("error" in parsed) {
-        this.respond(socket, this.errorResponse(parsed.id ?? "0", parsed.error));
+        writeFinal(this.errorResponse(parsed.id ?? "0", parsed.error));
         return;
       }
       envelope = parsed.envelope;
@@ -500,8 +508,10 @@ export class BrokerServer {
         const advisor = this.advisorBindings.get(socket);
         envelope = advisor ? bindAdvisorRequest(envelope, advisor) : refuseAdvisorSessionOnMain(envelope);
       } catch (err) {
-        this.respond(socket, this.errorResponse(envelope.id, err));
-        this.logger.log({ sessionID: envelope.sessionID, operation: envelope.operation, result: "error", error: String((err as Error).message) });
+        writeFinal(this.errorResponse(envelope.id, err));
+        try {
+          this.logger.log({ sessionID: envelope.sessionID, operation: envelope.operation, result: "error", error: String((err as Error).message) });
+        } catch { /* Logging failure must not change the response. */ }
         return;
       }
       // Track the session on this socket so a close can cancel parked entries.
@@ -510,6 +520,7 @@ export class BrokerServer {
       this.sessionsBySocket.set(socket, sessions);
       try {
         const sendProgress = (position: number) => {
+          if (finalWritten) return;
           this.respond(socket, { version: 1, id: envelope!.id, progress: { queued: true, position } } as unknown as BrokerResponseEnvelope);
         };
         const result = await this.withSessionLock(envelope.sessionID, () =>
@@ -520,32 +531,40 @@ export class BrokerServer {
           try { this.ctx.store.touch(envelope.sessionID, { lastOperation: envelope.operation }, envelope.operation); } catch {}
         }
 
-        this.respond(socket, { version: 1, id: envelope.id, ok: true, result });
-        this.logger.log({
-          sessionID: envelope.sessionID,
-          agent: envelope.agent,
-          operation: envelope.operation,
-          result: "ok",
-          durationMs: durationMs(t0),
-        });
+        writeFinal({ version: 1, id: envelope.id, ok: true, result });
+        try {
+          this.logger.log({
+            sessionID: envelope.sessionID,
+            agent: envelope.agent,
+            operation: envelope.operation,
+            result: "ok",
+            durationMs: durationMs(t0),
+          });
+        } catch { /* Logging failure must not change the response. */ }
       } catch (err) {
         const error = toBrokerError(err);
-        this.respond(socket, { version: 1, id: envelope.id, ok: false, error });
-        this.logger.log({
-          sessionID: envelope.sessionID,
-          agent: envelope.agent,
-          operation: envelope.operation,
-          result: "error",
-          error: error.message,
-          durationMs: durationMs(t0),
-        });
+        writeFinal({ version: 1, id: envelope.id, ok: false, error });
+        try {
+          this.logger.log({
+            sessionID: envelope.sessionID,
+            agent: envelope.agent,
+            operation: envelope.operation,
+            result: "error",
+            error: error.message,
+            durationMs: durationMs(t0),
+          });
+        } catch { /* Logging failure must not change the response. */ }
       }
     } catch (err) {
       this.logUnexpected(err);
-      if (this.config.failLoudUnexpectedErrors) {
+      if (this.config.failLoudUnexpectedErrors && !finalWritten) {
         throw new UnexpectedRequestError(envelope, err);
       }
-      this.safeRespond(socket, this.safetyResponse(envelope));
+      // Once a final response was written, resolve even in fail-loud mode so onData cannot send a third envelope.
+      if (!finalWritten) {
+        this.safeRespond(socket, this.safetyResponse(envelope));
+        finalWritten = true;
+      }
     }
   }
 
@@ -560,7 +579,11 @@ export class BrokerServer {
 
   private logUnexpected(err: unknown): void {
     try {
-      this.logger.log({ operation: "request.processing", result: "error", error: String(err) });
+      this.logger.log({
+        operation: "request.processing",
+        result: "error",
+        error: err instanceof Error ? err.stack ?? String(err) : String(err),
+      });
     } catch {
       // Logging must not prevent a protocol-level failure response.
     }
