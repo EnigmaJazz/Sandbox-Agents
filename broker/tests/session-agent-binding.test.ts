@@ -8,7 +8,7 @@
  * from the host plugin's `chat.params` identity, never from a model tool
  * argument, and the operation is absent from the model-facing tool surface.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -424,7 +424,63 @@ describe("fail-loud request processing", () => {
     }
   });
 
-  test("forces a stalled framer-failed socket closed after the drain deadline", async () => {
+  test("uses the production default drain deadline and logs a forced close", () => {
+    const root = mkdtempSync(join(tmpdir(), "request-framer-default-deadline-"));
+    const logs: Array<Record<string, unknown>> = [];
+    const logger = { log: (entry: Record<string, unknown>) => { logs.push(entry); } };
+    const server = new BrokerServer(defaultConfig({ stateDir: root }), logger as unknown as ConstructorParameters<typeof BrokerServer>[1]);
+    const originalSetTimeout = globalThis.setTimeout;
+    let capturedCallback: (() => void) | undefined;
+    let capturedDelay: number | undefined;
+    let unrefCalls = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let closed = 0;
+    const socket = {
+      write: (_data: string | Uint8Array) => 0,
+      end: () => {},
+      close: () => { closed++; },
+    };
+    const internals = server as unknown as {
+      framers: Map<object, { push(data: Buffer): never }>;
+      socketWrites: Map<object, SocketWriteQueue>;
+      respond(socket: typeof socket, response: { id: string }): void;
+      onData(socket: typeof socket, data: Buffer): void;
+    };
+    internals.framers = new Map([[socket, { push: () => { throw new Error("framer allocation failure"); } }]]);
+    globalThis.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+      capturedCallback = callback as () => void;
+      capturedDelay = delay;
+      timer = originalSetTimeout(callback, delay, ...args);
+      const timeout = timer as ReturnType<typeof setTimeout> & { unref?: () => unknown };
+      const originalUnref = timeout.unref;
+      timeout.unref = () => { unrefCalls++; return originalUnref?.call(timeout); };
+      return timer;
+    }) as typeof setTimeout;
+    try {
+      internals.respond(socket, { id: "owed-default-response" });
+      expect(internals.socketWrites.get(socket)?.hasPendingWrites).toBe(true);
+      internals.onData(socket, Buffer.from("request\\n"));
+      expect(capturedDelay).toBe(5_000);
+      expect(unrefCalls).toBe(1);
+      expect(capturedCallback).toBeDefined();
+      capturedCallback!();
+      expect(closed).toBe(1);
+      capturedCallback!();
+      expect(closed).toBe(1);
+      expect(logs.filter((entry) => entry.result === "framer_failure_drain_timeout")).toEqual([{
+        operation: "connection",
+        result: "framer_failure_drain_timeout",
+        detail: "forced socket close after framer-failure drain deadline",
+      }]);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      if (timer) clearTimeout(timer);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("forces a stalled framer-failed socket closed after the drain deadline", () => {
+    jest.useFakeTimers();
     const root = mkdtempSync(join(tmpdir(), "request-framer-stall-"));
     const server = new BrokerServer(defaultConfig({ stateDir: root }), undefined, { framerFailureDrainTimeoutMs: 20 });
     let writeCalls = 0;
@@ -454,7 +510,9 @@ describe("fail-loud request processing", () => {
       expect(closed).toBe(0);
       expect(queue.hasPendingWrites).toBe(true);
       const writesBeforeTimeout = writeCalls;
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      jest.advanceTimersByTime(19);
+      expect(closed).toBe(0);
+      jest.advanceTimersByTime(1);
       expect(closed).toBe(1);
       expect(ended).toBe(0);
       expect(queue.hasPendingWrites).toBe(true);
@@ -464,11 +522,13 @@ describe("fail-loud request processing", () => {
       expect(ended).toBe(0);
       expect(closed).toBe(1);
     } finally {
+      jest.useRealTimers();
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  test("a drain before the deadline ends once and cancels forced close", async () => {
+  test("a drain before the deadline ends once and cancels forced close", () => {
+    jest.useFakeTimers();
     const root = mkdtempSync(join(tmpdir(), "request-framer-drain-deadline-"));
     const server = new BrokerServer(defaultConfig({ stateDir: root }), undefined, { framerFailureDrainTimeoutMs: 20 });
     let allowWrite = false;
@@ -493,10 +553,11 @@ describe("fail-loud request processing", () => {
       internals.socketWrites.get(socket)?.drain();
       expect(ended).toBe(1);
       expect(closed).toBe(0);
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      jest.advanceTimersByTime(20);
       expect(ended).toBe(1);
       expect(closed).toBe(0);
     } finally {
+      jest.useRealTimers();
       rmSync(root, { recursive: true, force: true });
     }
   });

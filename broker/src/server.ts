@@ -515,6 +515,11 @@ export class BrokerServer {
       });
       const forceCloseSocket = () => terminateOnce(() => {
         try { socket.close(); } catch { /* best-effort forced close */ }
+        this.logger.log({
+          operation: "connection",
+          result: "framer_failure_drain_timeout",
+          detail: "forced socket close after framer-failure drain deadline",
+        });
       });
       const queue = this.socketWrites.get(socket);
       if (queue?.hasPendingWrites) {

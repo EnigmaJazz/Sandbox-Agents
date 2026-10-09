@@ -68,5 +68,14 @@ Also recorded while here: the project's `broker/tsconfig.json` sets `erasableSyn
 - TDD GREEN: focused logging tests reported **6 pass / 0 fail / 18 expect() calls**. The sync regression test verifies one stdout write attempt and both durable JSONL records; the async test emits `process.stdout`'s `error` event and verifies the counter, latch, and fixed fallback.
 - Full-suite baseline observed before edits: **803 pass / 0 fail / 3637 expect() calls / 51 files**. Final full suite: **805 pass / 0 fail / 3645 expect() calls / 51 files**. `bun build src/main.ts` from `broker` succeeded.
 
+## R4-STALL-2 — forced-close visibility and deterministic deadline tests
+
+- Added a structured `connection` record after the forced `socket.close()` in the `forceCloseSocket` once-guard callback. It contains only `operation`, `result`, and fixed `detail`; no request/session envelope fields or error are emitted.
+- Added a production-default test that captures the actual scheduled callback and timer handle without waiting for five seconds, verifies the 5000 ms delay and `unref()`, then invokes that same callback and checks one socket close plus the exact log record.
+- Converted both injected-deadline timing tests to Bun's Jest-compatible fake timers. They assert the deadline has not fired before 20 ms, then fires at 20 ms; and that draining before 20 ms ends once and suppresses the later forced close. `jest.useRealTimers()` runs in each `finally`. Fake timers worked; no spy fallback was needed.
+- Focused TDD RED: **46 pass / 1 fail / 278 expect() calls**; the new production-default test failed because the forced-close log record was absent. Focused GREEN: **47 pass / 0 fail / 278 expect() calls**.
+- Full-suite baseline observed before edits: **805 pass / 0 fail / 3645 expect() calls / 51 files**. Final full suite: **806 pass / 0 fail / 3653 expect() calls / 51 files**. `bun build src/main.ts` from `broker` succeeded (exit 0).
+- The log call is after `socket.close()` inside the once-guard callback. The production-default test proves the captured timer is scheduled at 5000 ms, `unref()` is called, and the exact captured callback performs the one-time close and record emission.
+
 ## Next step
 Owner review and manual application; `broker/src/**` remains S17.
