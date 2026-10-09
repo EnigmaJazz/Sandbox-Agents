@@ -40,28 +40,74 @@ export function redact(text: string): string {
 export class Logger {
   private readonly stream: WriteStream;
   private readonly toConsole: boolean;
+  private streamDead = false;
+  private fallbackWritten = false;
+  private droppedLogLineCount = 0;
+  private readonly handleStreamError = (): void => {
+    this.streamDead = true;
+    this.markDropped();
+  };
 
   constructor(opts: { file?: string; toConsole?: boolean } = {}) {
     this.toConsole = opts.toConsole ?? true;
     this.stream = opts.file ? createWriteStream(opts.file, { flags: "a", mode: 0o600 }) : null as unknown as WriteStream;
+    if (this.stream) this.stream.on("error", this.handleStreamError);
+  }
+
+  get droppedLogLines(): number {
+    return this.droppedLogLineCount;
   }
 
   log(entry: Omit<LogEntry, "ts">): void {
-    const line = JSON.stringify({
-      ...entry,
-      error: entry.error ? redact(entry.error) : undefined,
-      ts: new Date().toISOString(),
-    });
-    if (this.toConsole) {
-      process.stdout.write(`${line}\n`);
+    try {
+      const line = JSON.stringify({
+        ...entry,
+        error: entry.error ? redact(entry.error) : undefined,
+        ts: new Date().toISOString(),
+      });
+      if (this.toConsole) process.stdout.write(`${line}\n`);
+      if (this.stream) {
+        if (this.streamDead) this.markDropped();
+        else {
+          try {
+            this.stream.write(`${line}\n`);
+          } catch (err) {
+            this.streamDead = true;
+            throw err;
+          }
+        }
+      }
+    } catch {
+      this.markDropped();
     }
-    if (this.stream) {
-      this.stream.write(`${line}\n`);
+  }
+
+  private markDropped(): void {
+    this.droppedLogLineCount += 1;
+    this.writeFallback();
+  }
+
+  private writeFallback(): void {
+    if (this.fallbackWritten) return;
+    this.fallbackWritten = true;
+    try {
+      const encode = (value: string): string => {
+        try {
+          return JSON.stringify(redact(value)) ?? '"[unavailable]"';
+        } catch {
+          return '"[unavailable]"';
+        }
+      };
+      const record = `{${`"event":${encode("logger_sink_failure")}`},${`"error":${encode("logging sink failed")}`}}`;
+      process.stderr.write(`${record}\n`);
+    } catch {
+      // The emergency path must never throw or recurse into logging.
     }
   }
 
   close(): void {
     if (this.stream) {
+      this.stream.once("close", () => this.stream.off("error", this.handleStreamError));
       this.stream.end();
     }
   }
