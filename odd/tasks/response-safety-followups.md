@@ -77,5 +77,14 @@ Also recorded while here: the project's `broker/tsconfig.json` sets `erasableSyn
 - Full-suite baseline observed before edits: **805 pass / 0 fail / 3645 expect() calls / 51 files**. Final full suite: **806 pass / 0 fail / 3653 expect() calls / 51 files**. `bun build src/main.ts` from `broker` succeeded (exit 0).
 - The log call is after `socket.close()` inside the once-guard callback. The production-default test proves the captured timer is scheduled at 5000 ms, `unref()` is called, and the exact captured callback performs the one-time close and record emission.
 
+## R4-STALL-3 — timer-safe forced-close logging
+
+- The forced-close log now has its own silent `try/catch`, so a logger exception cannot escape the deadline timer callback; the socket-close catch remains limited to close failures.
+- The production-default test captures all timers and identifies the deadline by its 5000 ms delay, asserts exactly one timer has that delay and that timer's `unref()` call, then verifies one close across two invocations.
+- The throwing-logger regression test holds an owed response, triggers framer failure, and verifies invoking the deadline callback does not throw and still closes the socket.
+- Out of scope: `BrokerServer.startReaper()` passes an unguarded `this.logger.log` callback through `reaper.ts` to `setInterval`; this is the same class of timer-callback exposure and is recorded for separate follow-up.
+- Focused TDD RED: **47 pass / 1 fail / 280 expect() calls**; the throwing-logger test failed because `timer log failed` escaped the deadline callback. GREEN: **48 pass / 0 fail / 281 expect() calls**.
+- Full-suite baseline observed before edits: **806 pass / 0 fail / 3653 expect() calls / 51 files**. Final suite: **807 pass / 0 fail / 3656 expect() calls / 51 files**. `bun build src/main.ts` from `broker` succeeded (exit 0).
+
 ## Next step
 Owner review and manual application; `broker/src/**` remains S17.

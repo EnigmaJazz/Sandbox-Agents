@@ -430,10 +430,12 @@ describe("fail-loud request processing", () => {
     const logger = { log: (entry: Record<string, unknown>) => { logs.push(entry); } };
     const server = new BrokerServer(defaultConfig({ stateDir: root }), logger as unknown as ConstructorParameters<typeof BrokerServer>[1]);
     const originalSetTimeout = globalThis.setTimeout;
-    let capturedCallback: (() => void) | undefined;
-    let capturedDelay: number | undefined;
-    let unrefCalls = 0;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timers: Array<{
+      callback: () => void;
+      delay?: number;
+      unrefCalls: number;
+      timer: ReturnType<typeof setTimeout>;
+    }> = [];
     let closed = 0;
     const socket = {
       write: (_data: string | Uint8Array) => 0,
@@ -448,30 +450,77 @@ describe("fail-loud request processing", () => {
     };
     internals.framers = new Map([[socket, { push: () => { throw new Error("framer allocation failure"); } }]]);
     globalThis.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
-      capturedCallback = callback as () => void;
-      capturedDelay = delay;
-      timer = originalSetTimeout(callback, delay, ...args);
+      const timer = originalSetTimeout(callback, delay, ...args);
+      const captured = { callback: callback as () => void, delay, unrefCalls: 0, timer };
+      timers.push(captured);
       const timeout = timer as ReturnType<typeof setTimeout> & { unref?: () => unknown };
       const originalUnref = timeout.unref;
-      timeout.unref = () => { unrefCalls++; return originalUnref?.call(timeout); };
+      timeout.unref = () => { captured.unrefCalls++; return originalUnref?.call(timeout); };
       return timer;
     }) as typeof setTimeout;
     try {
       internals.respond(socket, { id: "owed-default-response" });
       expect(internals.socketWrites.get(socket)?.hasPendingWrites).toBe(true);
       internals.onData(socket, Buffer.from("request\\n"));
-      expect(capturedDelay).toBe(5_000);
-      expect(unrefCalls).toBe(1);
-      expect(capturedCallback).toBeDefined();
-      capturedCallback!();
+      const deadlineTimers = timers.filter((captured) => captured.delay === 5_000);
+      expect(deadlineTimers).toHaveLength(1);
+      const deadlineTimer = deadlineTimers[0]!;
+      expect(deadlineTimer.unrefCalls).toBe(1);
+      deadlineTimer.callback();
       expect(closed).toBe(1);
-      capturedCallback!();
+      deadlineTimer.callback();
       expect(closed).toBe(1);
       expect(logs.filter((entry) => entry.result === "framer_failure_drain_timeout")).toEqual([{
         operation: "connection",
         result: "framer_failure_drain_timeout",
         detail: "forced socket close after framer-failure drain deadline",
       }]);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      for (const captured of timers) clearTimeout(captured.timer);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a throwing forced-close logger cannot escape the drain timer callback", () => {
+    const root = mkdtempSync(join(tmpdir(), "request-framer-throwing-logger-"));
+    const originalSetTimeout = globalThis.setTimeout;
+    let deadlineCallback: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let closed = 0;
+    const logger = {
+      log: (entry: Record<string, unknown>) => {
+        if (entry.result === "framer_failure_drain_timeout") throw new Error("timer log failed");
+      },
+    };
+    const server = new BrokerServer(
+      defaultConfig({ stateDir: root }),
+      logger as unknown as ConstructorParameters<typeof BrokerServer>[1],
+    );
+    const socket = {
+      write: (_data: string | Uint8Array) => 0,
+      end: () => {},
+      close: () => { closed++; },
+    };
+    const internals = server as unknown as {
+      framers: Map<object, { push(data: Buffer): never }>;
+      socketWrites: Map<object, SocketWriteQueue>;
+      respond(socket: typeof socket, response: { id: string }): void;
+      onData(socket: typeof socket, data: Buffer): void;
+    };
+    internals.framers = new Map([[socket, { push: () => { throw new Error("framer allocation failure"); } }]]);
+    globalThis.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+      timer = originalSetTimeout(callback, delay, ...args);
+      if (delay === 5_000) deadlineCallback = callback as () => void;
+      return timer;
+    }) as typeof setTimeout;
+    try {
+      internals.respond(socket, { id: "owed-throwing-log-response" });
+      expect(internals.socketWrites.get(socket)?.hasPendingWrites).toBe(true);
+      internals.onData(socket, Buffer.from("request\\n"));
+      expect(deadlineCallback).toBeDefined();
+      expect(() => deadlineCallback!()).not.toThrow();
+      expect(closed).toBe(1);
     } finally {
       globalThis.setTimeout = originalSetTimeout;
       if (timer) clearTimeout(timer);
