@@ -106,3 +106,8 @@ Owner review and manual application; `broker/src/**` remains S17.
 - Typed-consumer check: `MetricsRecord` is constructed in `broker/src/service.ts`; `cli/sandboxctl` uses a partial typed metrics shape that does not enumerate the new field, and its `metrics` command uses `Record<string, unknown>`. No typed consumer required edits. Service returns `0` for legacy logger test doubles lacking the new getter.
 - Full-suite baseline observed before edits: **810 pass / 0 fail / 3663 expect() calls / 51 files**. Focused TDD RED: **11 pass / 1 fail / 56 expect() calls**; failure was the missing reaper-drop counter (`undefined`, expected `1`). Focused GREEN: **12 pass / 0 fail / 57 expect() calls**. Final full suite: **811 pass / 0 fail / 3665 expect() calls / 51 files**. `bun build src/main.ts` from `broker` completed successfully (exit 0).
 - Reaper schedules, intervals, cleanup/release behavior, `ReaperHandle`, and existing dropped-line accounting/fallback are unchanged. This is retained for owner review; do not auto-apply because `broker/src/**` is S17.
+
+## R4-REAPER-DROP-POLL-DIAG
+
+- Added a bounded-poll exhaustion assertion before the exact worker-stop marker assertion; the loop condition, yield, and 20-iteration cap are unchanged.
+- Baseline full suite: 811 pass / 0 fail / 3665 expect() calls / 51 files. Focused reaper suite: 12 pass / 0 fail / 58 expect() calls; final full suite: 811 pass / 0 fail / 3666 expect() calls / 51 files.

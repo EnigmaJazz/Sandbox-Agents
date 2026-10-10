@@ -166,6 +166,7 @@ describe("idle reaper sweep", () => {
         polls++;
         await Promise.resolve();
       }
+      expect(polls, "worker-stop marker poll exhausted after 20 iterations").toBeLessThan(20);
       expect(h.stopped).toEqual(["worker-timer-log-throws"]);
       reaper.stop();
     } finally {
