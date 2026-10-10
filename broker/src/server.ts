@@ -777,14 +777,17 @@ export class BrokerServer {
         }
       }
       void reapOnDisconnect(this.ctx, sessionID, this.config.disconnectReapMs, (entry) =>
-        this.logger.log({
-          operation: "reaper",
-          sessionID: entry.sessionID,
-          result: entry.action === "error" ? "error" : "ok",
-          error: entry.detail,
-        }),
+        this.logger.log(toReaperLogEntry(entry)),
         () => this.logger.noteReaperTelemetryDrop(),
-      ).catch(() => {});
+      ).catch((err) =>
+        this.logger.log(
+          toReaperLogEntry({
+            sessionID,
+            action: "error",
+            detail: err instanceof Error ? err.message : String(err),
+          }),
+        ),
+      );
     }
     this.sessionsBySocket.delete(socket);
   }
