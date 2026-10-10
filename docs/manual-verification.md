@@ -18,7 +18,7 @@ Verify:
 cd /home/james/agent-sandbox-integration
 git status                        # only repo-local changes
 cd broker && bun test             # unit tests: must pass without msb/nono/opencode
-bun build src/main.ts --outdir /tmp/build-check   # compiles
+bun build --target=bun src/main.ts --outdir /tmp/build-check   # compiles
 ```
 
 Checklist:
@@ -256,7 +256,7 @@ AGENTS.md constraint 3, agents never self-certify a manual gate.
 cd /home/james/agent-sandbox-integration
 git status                                  # only repo-local changes
 cd broker && bun test                       # unit tests must pass
-bun build src/main.ts                       # must compile
+bun build --target=bun src/main.ts                       # must compile
 ```
 
 ```sh

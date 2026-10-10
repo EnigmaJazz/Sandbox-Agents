@@ -69,7 +69,7 @@ primitive and is not the reviewer transport.
 - Broker code must stay dependency-free: `bun:test` + node builtins only, so
   `bun test` works offline.
 - Before committing: `cd broker && bun test` must be green. Run `bun build
-  src/main.ts` to verify compilation. Do not run gated suites
+  --target=bun src/main.ts` to verify compilation. Do not run gated suites
   (`SANDBOX_GATED_TESTS=...`) unless the environment actually supports them.
 - Do not invent facts: verify commands before documenting them; never claim
   a test passed that did not run.
