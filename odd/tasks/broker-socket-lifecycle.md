@@ -125,6 +125,10 @@ ask-on-risk (default). Forecast: one coherent socket-lifecycle unit, well under 
 - Resolution: the documented compile check moved to `bun build --target=bun src/main.ts` because the stale-socket probe imports `node:net`, which the default browser target does not polyfill.
 - The probe does not make the lstat/connect/unlink/listen sequence atomic. It awaits the connection probe, removes the awaitable gap after stale verdict, then invokes `Bun.listen` immediately; a concurrent manual start remains a residual race.
 - R3-socket-probe-timeout correction evidence: observed baseline `815 pass`, `0 fail`, `3679 expect() calls`, `Ran 815 tests across 52 files. [5.00s]`; focused correction `6 pass`, `0 fail`, `15 expect() calls`, `Ran 6 tests across 1 file. [46.00ms]`; full suite `817 pass`, `0 fail`, `3681 expect() calls`, `Ran 817 tests across 52 files. [4.81s]`; runtime-targeted build succeeded.
+- Commit `365b4a1` (fix; 4 files, +324/-3), commit `15e0f54` (documented compile-check correction; 5 files, +9/-9), and commit `5d24a64` (review correction; 42 insertions / 10 deletions).
+- Native review lineage `review-0789e564b02b5363` was approved and acknowledged with authority burned at the corrected candidate identity `sha256:a85e3038315f9e8a2a2e41e46f9c665750237a5935d4050596faec16ff8f88fb`. The review raised one CRITICAL, `R3-socket-probe-timeout` (the unbounded probe); it was corrected in `5d24a64`, and the targeted validator confirmed the correction.
+- Informational review findings and disposition: `R1-1` and `R4-probe-no-timeout` are superseded by the correction because they describe the pre-correction probe; `R4-race-probe-listen` is the already-accepted non-atomic residual; `R4-restartloop-unrecoverable-refusal` is pre-existing and queued as a follow-up in `docs/TODO.md`.
+- Checks as they now stand: full suite `817 pass / 0 fail / 3681 expect() calls` across 52 files; `bun build --target=bun src/main.ts` succeeded (25 modules, exit 0).
 
 ## Next step
-The socket liveness probe is bounded; owner review and manual installation/review of the retained result are required because `broker/src/**` is S17-protected. No systemd unit change is included.
+Closed: implementation, correction, commits and review are complete. No further action is required for this unit.
