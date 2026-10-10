@@ -86,5 +86,14 @@ Also recorded while here: the project's `broker/tsconfig.json` sets `erasableSyn
 - Focused TDD RED: **47 pass / 1 fail / 280 expect() calls**; the throwing-logger test failed because `timer log failed` escaped the deadline callback. GREEN: **48 pass / 0 fail / 281 expect() calls**.
 - Full-suite baseline observed before edits: **806 pass / 0 fail / 3653 expect() calls / 51 files**. Final suite: **807 pass / 0 fail / 3656 expect() calls / 51 files**. `bun build src/main.ts` from `broker` succeeded (exit 0).
 
+## R4-REAPER-LOG — exception-safe reaper telemetry and dropped-log accounting
+
+- Guarded every reaper `onLog` invocation through `safeLog`; the helper catches callback throws so sweep work and cleanup continue. The startup artifact pass uses the same protected logging path, and interval sweeps use it for all three phases.
+- Strengthened `Logger.log` with a method-level catch that accounts for an otherwise escaping failure once through `markDropped()`. The once guard prevents retry/recursion, while the existing one-time stderr fallback implementation remains unchanged.
+- TDD RED: focused reaper tests first reported **8 pass / 2 fail / 50 expect() calls**; direct sweeps rejected on a throwing logger and interval execution did not release the stale worker. After adding the Logger regression, RED reported **10 pass / 1 fail / 53 expect() calls**; the logger accounting failure escaped `Logger.log`.
+- TDD GREEN: focused reaper tests reported **11 pass / 0 fail / 55 expect() calls**. Coverage verifies a throwing callback does not prevent later sweep phases, fake-timer interval work completes without an escaped callback error, and a dropped-line accounting throw does not escape or count twice.
+- Full-suite baseline observed before edits: **807 pass / 0 fail / 3656 expect() calls / 51 files**. Final full suite: **810 pass / 0 fail / 3663 expect() calls / 51 files**. `bun build src/main.ts` from `broker` succeeded (exit 0).
+- `server.ts`, reaper schedule/intervals, forced-close record fields, teardown ordering, and `MetricsRecord` fields were unchanged. `broker/src/**` remains S17; retain the sandbox result for owner review and manual application.
+
 ## Next step
 Owner review and manual application; `broker/src/**` remains S17.

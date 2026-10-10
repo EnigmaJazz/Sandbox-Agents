@@ -4,12 +4,13 @@
  * host-side result flow; fresh and workerless records are untouched; one bad
  * record never kills the sweep.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reapOnDisconnect, sweepIdle, sweepUnfinished } from "../src/reaper.ts";
+import { reapOnDisconnect, runReaperSweeps, startReaper, sweepIdle, sweepUnfinished } from "../src/reaper.ts";
 import { buildEnsureWorkerOp } from "../src/service.ts";
+import { Logger } from "../src/logging.ts";
 import type { OpContext } from "../src/service.ts";
 import type { SessionRecord } from "../src/types.ts";
 
@@ -93,6 +94,62 @@ function record(partial: Partial<SessionRecord> & { sessionID: string }): Sessio
 }
 
 describe("idle reaper sweep", () => {
+  test("Logger.log contains a throw from dropped-line handling", () => {
+    const logger = new Logger({ toConsole: false });
+    const internals = logger as unknown as { markDropped: () => void };
+    const markDropped = internals.markDropped.bind(logger);
+    internals.markDropped = () => {
+      markDropped();
+      throw new Error("fallback observer failed");
+    };
+
+    const resources: { cpu?: number; memBytes?: number; self?: unknown } = {};
+    resources.self = resources;
+    expect(() => logger.log({ operation: "test", result: "ok", resources })).not.toThrow();
+    expect(logger.droppedLogLines).toBe(1);
+    logger.close();
+  });
+
+  test("a throwing logger does not stop later sweep phases", async () => {
+    const h = makeHarness([
+      record({ sessionID: "log-throws", updatedAt: iso(3_700_000) }),
+    ]);
+    let logAttempts = 0;
+
+    await expect(runReaperSweeps(h.ctx, {
+      intervalMs: 10,
+      idleMs: 3_600_000,
+      onLog: () => {
+        logAttempts++;
+        throw new Error("logger failed");
+      },
+    })).resolves.toBeUndefined();
+
+    expect(logAttempts).toBeGreaterThanOrEqual(2);
+    expect(h.stopped).toEqual(["worker-log-throws"]);
+  });
+
+  test("a throwing logger cannot escape the reaper interval callback", async () => {
+    const h = makeHarness([
+      record({ sessionID: "timer-log-throws", updatedAt: iso(3_700_000) }),
+    ]);
+    jest.useFakeTimers();
+    try {
+      const reaper = startReaper(h.ctx, {
+        intervalMs: 10,
+        idleMs: 3_600_000,
+        onLog: () => { throw new Error("logger failed"); },
+      });
+
+      expect(() => jest.advanceTimersByTime(10)).not.toThrow();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(h.stopped).toEqual(["worker-timer-log-throws"]);
+      reaper.stop();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
   test("stale RESULT_READY: worker destroyed, allocation removed, record stays RESULT_READY", async () => {
     const h = makeHarness([record({ sessionID: "r1", updatedAt: iso(3_700_000) })]);
     const { reaped } = await sweepIdle(h.ctx, 3_600_000, (e) => h.logs.push(e));

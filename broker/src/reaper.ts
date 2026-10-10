@@ -73,6 +73,14 @@ export interface ReaperHandle {
 /** Default grace before a terminal/orphan transport artifact is removed. */
 export const DEFAULT_ARTIFACT_GRACE_MS = 3_600_000;
 
+function safeLog(onLog: ReaperOptions["onLog"], entry: ReaperLogEntry): void {
+  try {
+    onLog?.(entry);
+  } catch {
+    // Telemetry must not interrupt cleanup or worker release.
+  }
+}
+
 /**
  * Log the removals for one session: session id, artifact kind, and bytes
  * freed (or the failure). Best-effort by construction - the removals were
@@ -89,13 +97,13 @@ function logRemovals(
     if (r.removed) {
       removed++;
       bytesFreed += r.bytes;
-      onLog?.({
+      safeLog(onLog, {
         sessionID,
         action: "swept_artifact",
         detail: `${r.kind} ${r.bytes} bytes ${r.path}`,
       });
     } else if (r.error) {
-      onLog?.({
+      safeLog(onLog, {
         sessionID,
         action: "error",
         detail: `${r.kind}: ${r.error}`,
@@ -131,7 +139,7 @@ async function cleanupTerminalArtifacts(
     if (!shouldRemoveSessionArtifacts(record, durable, bundleExists)) return;
     logRemovals(sessionID, removeSessionArtifacts(stateDir, sessionID), onLog);
   } catch (err) {
-    onLog?.({
+    safeLog(onLog, {
       sessionID,
       action: "error",
       detail: err instanceof Error ? err.message : String(err),
@@ -187,7 +195,7 @@ export async function sweepStateArtifacts(
       removed += result.removed;
       bytesFreed += result.bytesFreed;
     } catch (err) {
-      onLog?.({
+      safeLog(onLog, {
         sessionID: record.sessionID,
         action: "error",
         detail: err instanceof Error ? err.message : String(err),
@@ -217,7 +225,7 @@ export async function sweepStateArtifacts(
       removed += result.removed;
       bytesFreed += result.bytesFreed;
     } catch (err) {
-      onLog?.({
+      safeLog(onLog, {
         sessionID,
         action: "error",
         detail: err instanceof Error ? err.message : String(err),
@@ -240,7 +248,7 @@ export async function runArtifactSweep(
   try {
     return await sweepStateArtifacts(ctx, graceMs, onLog);
   } catch (err) {
-    onLog?.({
+    safeLog(onLog, {
       sessionID: "",
       action: "error",
       detail: err instanceof Error ? err.message : String(err),
@@ -251,15 +259,16 @@ export async function runArtifactSweep(
 
 /** Run the interval loop; returns a handle that stops it. */
 export function startReaper(ctx: OpContext, opts: ReaperOptions): ReaperHandle {
+  const onLog = (entry: ReaperLogEntry) => safeLog(opts.onLog, entry);
   // Startup pass: clear the bundles/temp indexes accumulated before this
   // broker process started (the defect left one bundle per session forever).
   void runArtifactSweep(
     ctx,
     opts.artifactGraceMs ?? DEFAULT_ARTIFACT_GRACE_MS,
-    opts.onLog,
+    onLog,
   );
   const timer = setInterval(() => {
-    void runReaperSweeps(ctx, opts);
+    void runReaperSweeps(ctx, { ...opts, onLog });
   }, opts.intervalMs);
   if (typeof (timer as { unref?: () => void }).unref === "function") {
     (timer as { unref: () => void }).unref();
@@ -278,7 +287,7 @@ export async function runReaperSweeps(
   opts: ReaperOptions,
 ): Promise<void> {
   const logError = (err: unknown) =>
-    opts.onLog?.({
+    safeLog(opts.onLog, {
       sessionID: "",
       action: "error",
       detail: err instanceof Error ? err.message : String(err),
@@ -339,7 +348,7 @@ export async function sweepIdle(
           workerState: "DESTROYED",
           reapedAt: new Date(now).toISOString(),
         });
-        onLog?.({ sessionID: record.sessionID, action: "reaped_result_ready" });
+        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_result_ready" });
         reaped++;
       } else if (record.state === "SANDBOX_ACTIVE") {
         await releaseWorker(ctx, record);
@@ -348,7 +357,7 @@ export async function sweepIdle(
           workerState: "DESTROYED",
           reapedAt: new Date(now).toISOString(),
         });
-        onLog?.({ sessionID: record.sessionID, action: "reaped_active" });
+        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_active" });
         reaped++;
       }
       // Any other state: skip. CREATING_SANDBOX is mid-creation and must
@@ -356,7 +365,7 @@ export async function sweepIdle(
       // worker the sweep should touch.
     } catch (err) {
       // One bad record must not kill the whole sweep.
-      onLog?.({
+      safeLog(onLog, {
         sessionID: record.sessionID,
         action: "error",
         detail: err instanceof Error ? err.message : String(err),
@@ -421,7 +430,7 @@ export async function sweepUnfinished(
           workerState: "DESTROYED",
           reapedAt: new Date(now).toISOString(),
         });
-        onLog?.({ sessionID: record.sessionID, action: "reaped_active", detail: "idle clean worker released" });
+        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_active", detail: "idle clean worker released" });
         finished++;
         continue;
       }
@@ -432,10 +441,10 @@ export async function sweepUnfinished(
         workerName: undefined,
         workerState: "DESTROYED",
       });
-      onLog?.({ sessionID: record.sessionID, action: "auto_finished", detail: ref });
+      safeLog(onLog, { sessionID: record.sessionID, action: "auto_finished", detail: ref });
       finished++;
     } catch (err) {
-      onLog?.({
+      safeLog(onLog, {
         sessionID: record.sessionID,
         action: "error",
         detail: err instanceof Error ? err.message : String(err),
@@ -472,10 +481,10 @@ export async function reapOnDisconnect(
       workerState: "DESTROYED",
       reapedAt: new Date().toISOString(),
     });
-    onLog?.({ sessionID, action: "reaped_active", detail: "client disconnected" });
+    safeLog(onLog, { sessionID, action: "reaped_active", detail: "client disconnected" });
     return true;
   } catch (err) {
-    onLog?.({
+    safeLog(onLog, {
       sessionID,
       action: "error",
       detail: err instanceof Error ? err.message : String(err),

@@ -78,47 +78,49 @@ export class Logger {
   }
 
   log(entry: Omit<LogEntry, "ts">): void {
-    let line: string;
-    try {
-      line = JSON.stringify({
-        ...entry,
-        error: entry.error ? redact(entry.error) : undefined,
-        ts: new Date().toISOString(),
-      });
-    } catch {
-      this.markDropped();
-      return;
-    }
-
     let dropped = false;
     const markLineDropped = (): void => {
       if (dropped) return;
       dropped = true;
-      this.markDropped();
+      try {
+        this.markDropped();
+      } catch {
+        // A failure in telemetry accounting must not escape Logger.log.
+      }
     };
 
-    if (this.stream) {
-      if (this.streamDead) markLineDropped();
-      else {
-        try {
-          this.stream.write(`${line}\n`);
-        } catch {
-          this.streamDead = true;
-          markLineDropped();
-        }
-      }
-    }
+    try {
+      const line = JSON.stringify({
+        ...entry,
+        error: entry.error ? redact(entry.error) : undefined,
+        ts: new Date().toISOString(),
+      });
 
-    if (this.toConsole) {
-      if (this.stdoutDead) markLineDropped();
-      else {
-        try {
-          process.stdout.write(`${line}\n`);
-        } catch {
-          this.stdoutDead = true;
-          markLineDropped();
+      if (this.stream) {
+        if (this.streamDead) markLineDropped();
+        else {
+          try {
+            this.stream.write(`${line}\n`);
+          } catch {
+            this.streamDead = true;
+            markLineDropped();
+          }
         }
       }
+
+      if (this.toConsole) {
+        if (this.stdoutDead) markLineDropped();
+        else {
+          try {
+            process.stdout.write(`${line}\n`);
+          } catch {
+            this.stdoutDead = true;
+            markLineDropped();
+          }
+        }
+      }
+    } catch {
+      markLineDropped();
     }
   }
 
