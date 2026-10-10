@@ -39,6 +39,7 @@ import {
   shouldRemoveSessionArtifacts,
   type ArtifactRemoval,
 } from "./artifacts.ts";
+import type { LogEntry } from "./logging.ts";
 import { releaseWorker, runPrepare, type OpContext } from "./service.ts";
 import { isTerminalState } from "./state.ts";
 
@@ -51,6 +52,23 @@ export interface ReaperLogEntry {
     | "swept_artifact"
     | "error";
   detail?: string;
+}
+
+/**
+ * Map a reaper telemetry event onto a logger payload (the Logger adds `ts`).
+ * Preserving `action` and `detail` keeps a lossy `reaped_active` (worker
+ * released without an export) distinguishable from an `auto_finished` that
+ * exported its edits first.
+ */
+export function toReaperLogEntry(entry: ReaperLogEntry): Omit<LogEntry, "ts"> {
+  return {
+    operation: "reaper",
+    sessionID: entry.sessionID || undefined,
+    action: entry.action,
+    result: entry.action === "error" ? "error" : "ok",
+    error: entry.action === "error" ? entry.detail : undefined,
+    detail: entry.action === "error" ? undefined : entry.detail,
+  };
 }
 
 export interface ReaperOptions {

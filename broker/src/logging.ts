@@ -18,6 +18,7 @@ export interface LogEntry {
   workerID?: string;
   operation: string;
   result: string;
+  action?: string;
   durationMs?: number;
   resources?: { cpu?: number; memBytes?: number };
   error?: string;

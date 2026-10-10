@@ -64,7 +64,7 @@ import {
 import { ValidationError } from "./validation.ts";
 import { PolicyError } from "./policy.ts";
 import { PendingQueue, QueuedTimedOutError } from "./queue.ts";
-import { reapOnDisconnect, startReaper, type ReaperHandle } from "./reaper.ts";
+import { reapOnDisconnect, startReaper, toReaperLogEntry, type ReaperHandle } from "./reaper.ts";
 import { drainQueue } from "./service.ts";
 import { SANDBOX_OPERATIONS } from "./types.ts";
 import {
@@ -518,14 +518,7 @@ export class BrokerServer {
       intervalMs: this.config.reapIntervalMs,
       idleMs: this.config.reapIdleMs,
       artifactGraceMs: this.config.artifactGraceMs,
-      onLog: (entry) =>
-        this.logger.log({
-          operation: "reaper",
-          sessionID: entry.sessionID || undefined,
-          result: entry.action === "error" ? "error" : "ok",
-          error: entry.action === "error" ? entry.detail : undefined,
-          detail: entry.action === "swept_artifact" ? entry.detail : undefined,
-        }),
+      onLog: (entry) => this.logger.log(toReaperLogEntry(entry)),
       onDrop: () => this.logger.noteReaperTelemetryDrop(),
     });
   }

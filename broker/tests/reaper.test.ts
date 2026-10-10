@@ -8,7 +8,7 @@ import { describe, expect, jest, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reapOnDisconnect, runReaperSweeps, startReaper, sweepIdle, sweepUnfinished } from "../src/reaper.ts";
+import { reapOnDisconnect, runReaperSweeps, startReaper, sweepIdle, sweepUnfinished, toReaperLogEntry } from "../src/reaper.ts";
 import { buildEnsureWorkerOp } from "../src/service.ts";
 import { Logger } from "../src/logging.ts";
 import type { OpContext } from "../src/service.ts";
@@ -345,5 +345,75 @@ describe("idle reaper sweep", () => {
     expect(h.records.get("good")!.reapedAt).toBeDefined();
     const bad = h.logs.find((e) => e.sessionID === "bad");
     expect(bad?.action).toBe("error");
+  });
+});
+
+describe("toReaperLogEntry", () => {
+  test("auto_finished keeps the result ref as detail", () => {
+    const entry = toReaperLogEntry({
+      sessionID: "s-ref",
+      action: "auto_finished",
+      detail: "refs/sandbox/s-ref",
+    });
+
+    expect(entry.operation).toBe("reaper");
+    expect(entry.sessionID).toBe("s-ref");
+    expect(entry.action).toBe("auto_finished");
+    expect(entry.result).toBe("ok");
+    expect(entry.detail).toBe("refs/sandbox/s-ref");
+    expect(entry.error).toBeUndefined();
+  });
+
+  test("reaped_active with a detail is distinguishable from auto_finished", () => {
+    const released = toReaperLogEntry({
+      sessionID: "s-active",
+      action: "reaped_active",
+      detail: "idle clean worker released",
+    });
+    const exported = toReaperLogEntry({
+      sessionID: "s-active",
+      action: "auto_finished",
+      detail: "refs/sandbox/s-active",
+    });
+
+    expect(released.action).toBe("reaped_active");
+    expect(exported.action).toBe("auto_finished");
+    expect(released.action).not.toBe(exported.action);
+    expect(released.result).toBe("ok");
+    expect(released.detail).toBe("idle clean worker released");
+    expect(released.error).toBeUndefined();
+  });
+
+  test("reaped_active without a detail leaves detail undefined", () => {
+    const entry = toReaperLogEntry({ sessionID: "s-no-detail", action: "reaped_active" });
+
+    expect(entry.action).toBe("reaped_active");
+    expect(entry.result).toBe("ok");
+    expect(entry.detail).toBeUndefined();
+    expect(entry.error).toBeUndefined();
+  });
+
+  test("error moves the detail into error and leaves detail undefined", () => {
+    const entry = toReaperLogEntry({
+      sessionID: "s-error",
+      action: "error",
+      detail: "release failed: adapter unavailable",
+    });
+
+    expect(entry.result).toBe("error");
+    expect(entry.error).toBe("release failed: adapter unavailable");
+    expect(entry.detail).toBeUndefined();
+  });
+
+  test("swept_artifact keeps its detail", () => {
+    const entry = toReaperLogEntry({
+      sessionID: "s-swept",
+      action: "swept_artifact",
+      detail: "bundle 12 bytes /state/s-swept.bundle",
+    });
+
+    expect(entry.result).toBe("ok");
+    expect(entry.detail).toBe("bundle 12 bytes /state/s-swept.bundle");
+    expect(entry.error).toBeUndefined();
   });
 });
