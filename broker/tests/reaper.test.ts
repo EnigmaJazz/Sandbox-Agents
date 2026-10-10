@@ -204,7 +204,8 @@ describe("idle reaper sweep", () => {
     expect(rec.workerState).toBe("DESTROYED");
     expect(rec.reapedAt).toBeDefined();
     expect(rec.error).toBeUndefined();
-    expect(h.logs[0]?.action).toBe("reaped_active");
+    // Released without an export: the log must say so, not look routine.
+    expect(h.logs[0]?.action).toBe("reaped_active_unsaved");
   });
 
   test("a reaped SANDBOX_ACTIVE session rebuilds on ensureWorker", async () => {
@@ -289,6 +290,118 @@ describe("idle reaper sweep", () => {
     expect(h.records.get("disconnected")!.workerName).toBeUndefined();
     expect(h.records.get("disconnected")!.workerState).toBe("DESTROYED");
     expect(h.records.get("disconnected")!.reapedAt).toBeDefined();
+  });
+
+  test("socket-close with unexported edits exports them before releasing the worker", async () => {
+    const h = makeHarness([
+      record({ sessionID: "dirty", state: "SANDBOX_ACTIVE", updatedAt: iso(40_000) }),
+    ]);
+    Object.assign(h.ctx.adapter, {
+      exec: async () => ({ status: 0, stdout: " M src/a.ts\n", stderr: "", timedOut: false }),
+    });
+    const prepared: string[] = [];
+
+    const reaped = await reapOnDisconnect(h.ctx, "dirty", 30_000, (e) => h.logs.push(e), undefined, async (_ctx, id) => {
+      prepared.push(id);
+      return `refs/opencode-sandbox/result/${id}`;
+    });
+
+    expect(reaped).toBe(true);
+    expect(prepared).toEqual(["dirty"]);
+    expect(h.removed).toEqual(["worker-dirty"]);
+    const rec = h.records.get("dirty")!;
+    expect(rec.state).toBe("RESULT_READY");
+    expect(rec.resultRef).toBe("refs/opencode-sandbox/result/dirty");
+    expect(rec.workerName).toBeUndefined();
+    expect(h.logs.map((e) => e.action)).toEqual(["auto_finished"]);
+  });
+
+  test("socket-close keeps the worker when the export fails", async () => {
+    const h = makeHarness([
+      record({ sessionID: "stuck", state: "SANDBOX_ACTIVE", updatedAt: iso(40_000) }),
+    ]);
+    Object.assign(h.ctx.adapter, {
+      exec: async () => { throw new Error("worker unreachable"); },
+    });
+
+    const reaped = await reapOnDisconnect(h.ctx, "stuck", 30_000, (e) => h.logs.push(e), undefined, async () => {
+      throw new Error("bundle export failed");
+    });
+
+    expect(reaped).toBe(false);
+    expect(h.stopped).toEqual([]);
+    expect(h.removed).toEqual([]);
+    expect(h.ctx.pool.allocations).toHaveLength(1);
+    const rec = h.records.get("stuck")!;
+    expect(rec.state).toBe("SANDBOX_ACTIVE");
+    expect(rec.workerName).toBe("worker-stuck");
+    expect(h.logs).toEqual([{ sessionID: "stuck", action: "error", detail: "bundle export failed" }]);
+  });
+
+  test("socket-close skips a session with an operation in flight or parked in the queue", async () => {
+    const h = makeHarness([
+      record({ sessionID: "locked", state: "SANDBOX_ACTIVE", updatedAt: iso(40_000) }),
+      record({ sessionID: "queued", state: "SANDBOX_ACTIVE", updatedAt: iso(40_000) }),
+    ]);
+    Object.assign(h.ctx, {
+      activeLocks: new Map([["locked", 1]]),
+      queue: { find: (id: string) => (id === "queued" ? { sessionID: id } : undefined) },
+    });
+
+    expect(await reapOnDisconnect(h.ctx, "locked", 30_000)).toBe(false);
+    expect(await reapOnDisconnect(h.ctx, "queued", 30_000)).toBe(false);
+    expect(h.stopped).toEqual([]);
+    expect(h.records.get("locked")!.workerName).toBe("worker-locked");
+    expect(h.records.get("queued")!.workerName).toBe("worker-queued");
+  });
+
+  test("the periodic sweep exports unexported edits through the same policy", async () => {
+    const h = makeHarness([
+      record({ sessionID: "swept", state: "SANDBOX_ACTIVE", updatedAt: iso(70_000) }),
+    ]);
+    Object.assign(h.ctx.adapter, {
+      exec: async () => ({ status: 0, stdout: "?? new.ts\n", stderr: "", timedOut: false }),
+    });
+
+    const { finished } = await sweepUnfinished(h.ctx, 60_000, (e) => h.logs.push(e), undefined, async (_ctx, id) => `refs/opencode-sandbox/result/${id}`);
+
+    expect(finished).toBe(1);
+    expect(h.records.get("swept")!.state).toBe("RESULT_READY");
+    expect(h.records.get("swept")!.workerState).toBe("DESTROYED");
+    expect(h.logs).toEqual([{ sessionID: "swept", action: "auto_finished", detail: "refs/opencode-sandbox/result/swept" }]);
+  });
+
+  for (const state of ["RETAINED", "APPLIED", "REJECTED", "FAILED_CLOSED"] as const) {
+    test(`a session in ${state} that still holds a worker is released on the next sweep`, async () => {
+      const h = makeHarness([record({ sessionID: "leak", state, updatedAt: iso(1_000) })]);
+
+      const { reaped } = await sweepIdle(h.ctx, 3_600_000, (e) => h.logs.push(e));
+
+      expect(reaped).toBe(1);
+      expect(h.stopped).toEqual(["worker-leak"]);
+      expect(h.removed).toEqual(["worker-leak"]);
+      expect(h.ctx.pool.allocations).toEqual([]);
+      const rec = h.records.get("leak")!;
+      expect(rec.state).toBe(state);
+      expect(rec.workerName).toBeUndefined();
+      expect(rec.workerState).toBe("DESTROYED");
+      expect(rec.reapedAt).toBeDefined();
+      expect(h.logs).toEqual([{ sessionID: "leak", action: "reaped_terminal" }]);
+    });
+  }
+
+  test("sessions that are mid-creation or awaiting approval keep their worker", async () => {
+    const h = makeHarness([
+      record({ sessionID: "creating", state: "CREATING_SANDBOX", workerState: "CREATING", updatedAt: iso(10_000_000) }),
+      record({ sessionID: "approving", state: "APPLY_PENDING", updatedAt: iso(10_000_000) }),
+    ]);
+
+    const { reaped } = await sweepIdle(h.ctx, 3_600_000);
+
+    expect(reaped).toBe(0);
+    expect(h.stopped).toEqual([]);
+    expect(h.records.get("creating")!.workerName).toBe("worker-creating");
+    expect(h.records.get("approving")!.workerName).toBe("worker-approving");
   });
 
   test("fresh records are untouched", async () => {

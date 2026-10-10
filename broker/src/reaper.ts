@@ -12,10 +12,21 @@
  *   record reapedAt. State stays RESULT_READY: the result is already on the
  *   host side (git ref + bundle), so apply/preview/retain/discard still work.
  *   A later ensureWorker re-creates the worker on demand.
- * - SANDBOX_ACTIVE + stale -> release worker + allocation, transition to
- *   FAILED_CLOSED with reason "idle reaped" (crash-leak recovery).
+ * - SANDBOX_ACTIVE + stale -> release worker + allocation, keep the session
+ *   resumable. This is the last resort after sweepUnfinished has had an hour
+ *   to export the edits, so nothing is exported here; it logs
+ *   `reaped_active_unsaved` so the loss is visible (crash-leak recovery).
+ * - Terminal state (APPLIED/REJECTED/RETAINED/FAILED_CLOSED) still holding a
+ *   live worker -> release it at once. Every path into those states should
+ *   release its own worker; this catches the one that did not.
  * - Everything else is skipped: parked queue sessions have no worker yet,
- *   CREATING_SANDBOX is mid-creation, and DESTROYED/FAILED workers are gone.
+ *   CREATING_SANDBOX is mid-creation, APPLY_PENDING is waiting on the user,
+ *   and DESTROYED/FAILED workers are gone.
+ *
+ * Export-before-release (finishOrReleaseActive) is the single policy for a
+ * SANDBOX_ACTIVE worker that is going away early, shared by sweepUnfinished
+ * and reapOnDisconnect: a clean worker is released, a dirty or unreadable one
+ * is exported to RESULT_READY first, and a failed export keeps the worker.
  *
  * The sweep is idempotent (workerName cleared after a reap) and one bad
  * record never kills the sweep (per-record catch, log, continue).
@@ -42,12 +53,15 @@ import {
 import type { LogEntry } from "./logging.ts";
 import { releaseWorker, runPrepare, type OpContext } from "./service.ts";
 import { isTerminalState } from "./state.ts";
+import type { SessionRecord } from "./types.ts";
 
 export interface ReaperLogEntry {
   sessionID: string;
   action:
     | "reaped_result_ready"
     | "reaped_active"
+    | "reaped_active_unsaved"
+    | "reaped_terminal"
     | "auto_finished"
     | "swept_artifact"
     | "error";
@@ -371,6 +385,18 @@ export async function sweepIdle(
       // workers were already released.
       if (!record.workerName) continue;
       if (record.workerState === "DESTROYED" || record.workerState === "FAILED") continue;
+      if (isTerminalState(record.state)) {
+        // The session is finished, so there is no idle period to wait out.
+        await releaseWorker(ctx, record);
+        ctx.store.touch(record.sessionID, {
+          workerName: undefined,
+          workerState: "DESTROYED",
+          reapedAt: new Date(now).toISOString(),
+        });
+        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_terminal" }, onDrop);
+        reaped++;
+        continue;
+      }
       const age = now - Date.parse(record.updatedAt);
       // NaN-safe: an unparseable timestamp is never "stale enough" to reap.
       if (!(age > idleMs)) continue;
@@ -393,12 +419,15 @@ export async function sweepIdle(
           workerState: "DESTROYED",
           reapedAt: new Date(now).toISOString(),
         });
-        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_active" }, onDrop);
+        safeLog(onLog, {
+          sessionID: record.sessionID,
+          action: "reaped_active_unsaved",
+          detail: "idle limit reached; worker released without an export",
+        }, onDrop);
         reaped++;
       }
       // Any other state: skip. CREATING_SANDBOX is mid-creation and must
-      // never be reaped; APPLIED/REJECTED/RETAINED/FAILED_CLOSED have no live
-      // worker the sweep should touch.
+      // never be reaped.
     } catch (err) {
       // One bad record must not kill the whole sweep.
       safeLog(onLog, {
@@ -409,6 +438,59 @@ export async function sweepIdle(
     }
   }
   return { reaped };
+}
+
+/** Test seam: the export step (runPrepare in production). */
+export type PrepareResult = (ctx: OpContext, sessionID: string) => Promise<string>;
+
+/**
+ * Take a SANDBOX_ACTIVE worker away without losing its edits. A clean worker
+ * is released and the session stays resumable. A dirty worker, or one whose
+ * status cannot be read, is exported to RESULT_READY first and then released.
+ * If the export throws, this throws before any release: the worker is kept so
+ * the edits survive for a later attempt.
+ */
+async function finishOrReleaseActive(
+  ctx: OpContext,
+  record: SessionRecord,
+  cleanDetail: string,
+  prepare: PrepareResult,
+): Promise<ReaperLogEntry> {
+  const workerName = record.workerName as string;
+  let hasChanges = true;
+  try {
+    const status = await ctx.adapter.exec(workerName, ["git", "status", "--porcelain", "--", ".", ":(exclude).broker-tmp", ":(exclude)*.bundle"], {
+      cwd: "/work",
+      timeoutMs: 30_000,
+      env: {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "safe.directory",
+        GIT_CONFIG_VALUE_0: "/work",
+      },
+    });
+    if (status.status === 0) {
+      hasChanges = status.stdout.trim().length > 0;
+    }
+  } catch {
+    hasChanges = true;
+  }
+  if (!hasChanges) {
+    await releaseWorker(ctx, record);
+    ctx.store.touch(record.sessionID, {
+      workerName: undefined,
+      workerState: "DESTROYED",
+      reapedAt: new Date().toISOString(),
+    });
+    return { sessionID: record.sessionID, action: "reaped_active", detail: cleanDetail };
+  }
+  const ref = await prepare(ctx, record.sessionID);
+  await releaseWorker(ctx, record);
+  ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", {
+    resultRef: ref,
+    workerName: undefined,
+    workerState: "DESTROYED",
+  });
+  return { sessionID: record.sessionID, action: "auto_finished", detail: ref };
 }
 
 /**
@@ -425,6 +507,7 @@ export async function sweepUnfinished(
   idleMs = 60_000,
   onLog?: (entry: ReaperLogEntry) => void,
   onDrop?: ReaperOptions["onDrop"],
+  prepare: PrepareResult = runPrepare,
 ): Promise<{ finished: number }> {
   const now = Date.now();
   let finished = 0;
@@ -441,44 +524,7 @@ export async function sweepUnfinished(
       if (record.workerState === "DESTROYED" || record.workerState === "FAILED") continue;
       const age = now - Date.parse(record.updatedAt);
       if (!(age > idleMs)) continue;
-      // Has unstaged changes check: query worker git status --porcelain.
-      // A clean worker still gets a release-only reap; the session remains resumable.
-      let hasChanges = true;
-      try {
-        const status = await ctx.adapter.exec(record.workerName, ["git", "status", "--porcelain", "--", ".", ":(exclude).broker-tmp", ":(exclude)*.bundle"], {
-          cwd: "/work",
-          timeoutMs: 30_000,
-          env: {
-            GIT_CONFIG_COUNT: "1",
-            GIT_CONFIG_KEY_0: "safe.directory",
-            GIT_CONFIG_VALUE_0: "/work",
-          },
-        });
-        if (status.status === 0) {
-          hasChanges = status.stdout.trim().length > 0;
-        }
-      } catch {
-        hasChanges = true;
-      }
-      if (!hasChanges) {
-        await releaseWorker(ctx, record);
-        ctx.store.touch(record.sessionID, {
-          workerName: undefined,
-          workerState: "DESTROYED",
-          reapedAt: new Date(now).toISOString(),
-        });
-        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_active", detail: "idle clean worker released" }, onDrop);
-        finished++;
-        continue;
-      }
-      const ref = await runPrepare(ctx, record.sessionID);
-      await releaseWorker(ctx, record);
-      ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", {
-        resultRef: ref,
-        workerName: undefined,
-        workerState: "DESTROYED",
-      });
-      safeLog(onLog, { sessionID: record.sessionID, action: "auto_finished", detail: ref }, onDrop);
+      safeLog(onLog, await finishOrReleaseActive(ctx, record, "idle clean worker released", prepare), onDrop);
       finished++;
     } catch (err) {
       safeLog(onLog, {
@@ -492,10 +538,13 @@ export async function sweepUnfinished(
 }
 
 /**
- * Disconnect-triggered reap (Feature 2b): reap a single SANDBOX_ACTIVE
- * session that lost its client socket and has been idle longer than
- * disconnectIdleMs with no result. Used by server onSocketClose; the
- * periodic sweepIdle (1h) remains as safety net.
+ * Disconnect-triggered reap (Feature 2b): a single SANDBOX_ACTIVE session
+ * that lost its client socket and has been idle longer than disconnectIdleMs
+ * gives its worker back early. It applies the same export-before-release
+ * policy as sweepUnfinished, so a disconnect never discards unexported edits,
+ * and it skips a session with an operation in flight or parked in the queue.
+ * Returns true when the worker was released. Used by server onSocketClose;
+ * the periodic sweeps remain the safety net.
  */
 export async function reapOnDisconnect(
   ctx: OpContext,
@@ -503,9 +552,12 @@ export async function reapOnDisconnect(
   disconnectIdleMs: number,
   onLog?: (entry: ReaperLogEntry) => void,
   onDrop?: ReaperOptions["onDrop"],
+  prepare: PrepareResult = runPrepare,
 ): Promise<boolean> {
   const record = ctx.store.get(sessionID);
   if (!record) return false;
+  if (ctx.queue?.find(sessionID)) return false;
+  if ((ctx.activeLocks?.get(sessionID) ?? 0) > 0) return false;
   if (record.state !== "SANDBOX_ACTIVE") return false;
   if (record.resultRef) return false;
   if (!record.workerName) return false;
@@ -513,13 +565,7 @@ export async function reapOnDisconnect(
   const age = Date.now() - Date.parse(record.updatedAt);
   if (!(age > disconnectIdleMs)) return false;
   try {
-    await releaseWorker(ctx, record);
-    ctx.store.touch(sessionID, {
-      workerName: undefined,
-      workerState: "DESTROYED",
-      reapedAt: new Date().toISOString(),
-    });
-    safeLog(onLog, { sessionID, action: "reaped_active", detail: "client disconnected" }, onDrop);
+    safeLog(onLog, await finishOrReleaseActive(ctx, record, "client disconnected", prepare), onDrop);
     return true;
   } catch (err) {
     safeLog(onLog, {

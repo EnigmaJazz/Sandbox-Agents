@@ -26,7 +26,11 @@ afterEach(() => {
 
 interface ServerInternals {
   ctx: {
-    adapter: { stop(name: string): Promise<void>; remove(name: string): Promise<void> };
+    adapter: {
+      stop(name: string): Promise<void>;
+      remove(name: string): Promise<void>;
+      exec(name: string, argv: string[]): Promise<{ status: number; stdout: string; stderr: string; timedOut: boolean }>;
+    };
     store: SessionStore;
   };
   sessionsBySocket: WeakMap<object, Set<string>>;
@@ -53,9 +57,11 @@ function setup() {
   );
   const internals = server as unknown as ServerInternals;
   // The disconnect path must not touch a real msb binary in this test.
+  // The worker reports a clean tree, so the reap releases without an export.
   internals.ctx.adapter = {
     stop: async () => undefined,
     remove: async () => undefined,
+    exec: async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }),
   };
   return { internals, logged, stateDir };
 }
