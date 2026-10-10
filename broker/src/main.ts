@@ -22,7 +22,7 @@ import {
   type LegacySddMode,
 } from "./legacy-sdd.ts";
 import { spawnArgv } from "./msb.ts";
-import { BrokerServer } from "./server.ts";
+import { BrokerServer, SocketInUseError } from "./server.ts";
 
 interface CliArgs {
   socket?: string;
@@ -212,7 +212,15 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
-  await server.start();
+  try {
+    await server.start();
+  } catch (error) {
+    if (error instanceof SocketInUseError) {
+      console.error(`sandbox broker socket is already in use: ${error.socketPath}`);
+      process.exit(0);
+    }
+    throw error;
+  }
   // Feature 1: idle reaper sweeps every reapIntervalMs; shutdown stops it.
   server.startReaper();
   console.error(`sandbox broker listening on ${config.socketPath} (state: ${config.stateDir})`);

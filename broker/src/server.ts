@@ -16,7 +16,8 @@
  *   When a client socket closes, its parked queue entries are cancelled so
  *   dead sessions cannot leak queue slots or spawn workers later.
  */
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
+import { connect } from "node:net";
 import { join } from "node:path";
 import type { BrokerConfig } from "./config.ts";
 import { computeBudget, discoverHostResources } from "./policy.ts";
@@ -119,6 +120,51 @@ const FRAMER_FAILURE_DRAIN_TIMEOUT_MS = 5_000;
 /** 128 chars is over 4x the longest Operation name (27 chars). */
 const MAX_OPERATION_NAME_LENGTH = 128;
 const OVERSIZE_ID_RE = /"id"\s*:\s*"([A-Za-z0-9-]{1,128})"/;
+
+export class SocketInUseError extends Error {
+  readonly code = "SOCKET_IN_USE";
+
+  constructor(readonly socketPath: string) {
+    super(`socket is already served by a live broker: ${socketPath}`);
+    this.name = "SocketInUseError";
+  }
+}
+
+async function recoverStaleSocket(socketPath: string): Promise<void> {
+  let details;
+  try {
+    details = lstatSync(socketPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (!details.isSocket()) {
+    throw new Error(`refusing to replace existing path that is not a socket: ${socketPath}`);
+  }
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const probe = connect(socketPath);
+      probe.once("connect", () => {
+        probe.destroy();
+        resolve();
+      });
+      probe.once("error", reject);
+    });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ECONNREFUSED" && code !== "ENOENT") {
+      throw new Error(`unable to verify socket listener at ${socketPath} (${code ?? "unknown error"})`, { cause: error });
+    }
+    try {
+      unlinkSync(socketPath);
+    } catch (unlinkError) {
+      if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") throw unlinkError;
+    }
+    return;
+  }
+  throw new SocketInUseError(socketPath);
+}
 
 /**
  * The largest request line the broker accepts: the largest payload any
@@ -304,6 +350,7 @@ export class BrokerServer {
   /** Advisor connections and the one session each is bound to (advisor-socket.ts). */
   private readonly advisorBindings = new WeakMap<SocketLike, AdvisorBinding>();
   private readonly advisorListeners: Array<{ stop(closeActive?: boolean): void }> = [];
+  private readonly advisorSocketPaths: string[] = [];
   private listener: { stop(): void } | null = null;
   private reaper: ReaperHandle | null = null;
 
@@ -368,6 +415,7 @@ export class BrokerServer {
   async start(): Promise<void> {
     const socketPath = this.config.socketPath;
     mkdirSync(join(socketPath, ".."), { recursive: true, mode: 0o700 });
+    await recoverStaleSocket(socketPath);
     const listener = await Bun.listen({
       unix: socketPath,
       socket: {
@@ -408,6 +456,7 @@ export class BrokerServer {
         throw new ValidationError(`advisor project '${projectId}' is not a registered project`);
       }
       const path = advisorSocketPath(this.config.socketPath, projectId);
+      await recoverStaleSocket(path);
       const listener = await Bun.listen({
         unix: path,
         socket: {
@@ -432,6 +481,7 @@ export class BrokerServer {
         },
       });
       this.advisorListeners.push(listener);
+      this.advisorSocketPaths.push(path);
       chmodSync(path, 0o600);
     }
   }
@@ -462,16 +512,32 @@ export class BrokerServer {
   shutdown(): void {
     this.reaper?.stop();
     this.reaper = null;
+    const ownsMainSocket = this.listener !== null;
     try {
       this.listener?.stop();
     } catch {
       /* already closed */
     }
+    this.listener = null;
     for (const listener of this.advisorListeners.splice(0)) {
       try {
         listener.stop();
       } catch {
         /* already closed */
+      }
+    }
+    if (ownsMainSocket) {
+      try {
+        unlinkSync(this.config.socketPath);
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+    for (const path of this.advisorSocketPaths.splice(0)) {
+      try {
+        unlinkSync(path);
+      } catch {
+        /* one advisor socket must not prevent the rest of shutdown */
       }
     }
   }
