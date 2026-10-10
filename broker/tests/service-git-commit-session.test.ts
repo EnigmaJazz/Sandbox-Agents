@@ -492,6 +492,84 @@ describe("gitCommit cross-session applied result", () => {
   });
 });
 
+describe("gitCommit releases the committed result's worker", () => {
+  const GiB = 1024 * 1024 * 1024;
+  const installedCommit = "0123456789abcdef0123456789abcdef01234567";
+
+  function workerHarness(overrides: Partial<SessionRecord> = {}) {
+    const stopped: string[] = [];
+    const removed: string[] = [];
+    const { calls, spawn } = spawnStub([
+      [NAME_ONLY, { status: 0, stdout: "a.ts\u0000", stderr: "" }],
+      [/rev-parse --verify.*result/, { status: 0, stdout: `${installedCommit}\n`, stderr: "" }],
+    ]);
+    const records: Record<string, SessionRecord> = {
+      "session-1": orchestratorRecord,
+      "worker-7": appliedResultRecord("worker-7", {
+        state: "RESULT_READY",
+        installedCommit,
+        workerName: "oc-sandbox-worker-7",
+        workerState: "ACTIVE",
+        resources: { cpu: 2, memBytes: 2 * GiB },
+        ...overrides,
+      }),
+    };
+    const ctx = makeCtx(spawn, records);
+    Object.assign(ctx, {
+      adapter: {
+        stop: async (name: string) => { stopped.push(name); },
+        remove: async (name: string) => { removed.push(name); },
+      },
+      pool: { allocations: [{ cpu: 2, memBytes: 2 * GiB }] },
+    });
+    const req = request({ projectDir: projectRoot, message: "fix: delegated", sandboxSessionID: "worker-7" });
+    return { calls, ctx, records, removed, req, stopped };
+  }
+
+  test("a successful commit stops and removes the worker and frees its allocation", async () => {
+    const h = workerHarness();
+    const result = (await buildGitCommitOp(h.ctx)(h.req)) as { committed?: boolean };
+
+    expect(result.committed).toBe(true);
+    expect(h.stopped).toEqual(["oc-sandbox-worker-7"]);
+    expect(h.removed).toEqual(["oc-sandbox-worker-7"]);
+    expect(h.ctx.pool.allocations).toEqual([]);
+    expect(h.records["worker-7"]?.state).toBe("RETAINED");
+    expect(h.records["worker-7"]?.workerName).toBeUndefined();
+    expect(h.records["worker-7"]?.workerState).toBe("DESTROYED");
+  });
+
+  test("the pending-commit recovery branch releases the worker too", async () => {
+    const baseCommit = "1111111111111111111111111111111111111111";
+    const h = workerHarness({ pendingCommit: { resultCommit: installedCommit, parentCommit: baseCommit } });
+    const spawn: OpContext["git"]["spawn"] = async (argv) => {
+      let stdout = "";
+      if (argv.includes("--name-only")) stdout = "a.ts\0";
+      else if (argv[1] === "rev-parse" && argv[2] === "--verify") stdout = `${installedCommit}\n`;
+      else if (argv[1] === "rev-parse" && argv[2] === "HEAD^") stdout = `${baseCommit}\n`;
+      else if (argv[1] === "rev-parse" && argv[2] === "HEAD") stdout = "abcdef0123456789abcdef0123456789abcdef01\n";
+      return { status: 0, stdout, stderr: "", timedOut: false };
+    };
+    h.ctx.git.spawn = spawn;
+
+    const result = (await buildGitCommitOp(h.ctx)(h.req)) as { alreadyCommitted?: boolean };
+
+    expect(result.alreadyCommitted).toBe(true);
+    expect(h.removed).toEqual(["oc-sandbox-worker-7"]);
+    expect(h.records["worker-7"]?.workerName).toBeUndefined();
+    expect(h.records["worker-7"]?.workerState).toBe("DESTROYED");
+  });
+
+  test("an already-released worker is not stopped again", async () => {
+    const h = workerHarness({ workerState: "DESTROYED" });
+    await buildGitCommitOp(h.ctx)(h.req);
+
+    expect(h.stopped).toEqual([]);
+    expect(h.removed).toEqual([]);
+    expect(h.ctx.pool.allocations).toHaveLength(1);
+  });
+});
+
 describe("gitCommit without an explicit identifier", () => {
   test("keeps the caller's own applied result", async () => {
     const { calls, spawn } = spawnStub([[NAME_ONLY, { status: 0, stdout: "a.ts\u0000", stderr: "" }]]);

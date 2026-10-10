@@ -2604,6 +2604,7 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
           committedCommit: head,
           pendingCommit: undefined,
         });
+        await releaseRetainedWorker(ctx, resultSessionID);
         return {
           committed: false,
           alreadyCommitted: true,
@@ -2646,6 +2647,7 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
       committedCommit,
       pendingCommit: undefined,
     });
+    await releaseRetainedWorker(ctx, resultSessionID);
     return {
       committed: true,
       alreadyCommitted: false,
@@ -3124,6 +3126,31 @@ export async function releaseWorker(
   removePoolAllocation(ctx, record);
   // Feature 2: a slot just freed — admit parked requests (fire-and-forget).
   drainQueue(ctx);
+}
+
+/**
+ * Release the worker of a result that was just committed and retained: the
+ * result is durable in its ref and in HEAD, so the worker has nothing left to
+ * give. Runs after the RETAINED transition so the commit markers are persisted
+ * first, and never throws: a failed release must not fail a commit that has
+ * already landed. The idle sweep releases any worker this leaves behind.
+ */
+async function releaseRetainedWorker(
+  ctx: OpContext,
+  sessionID: string,
+): Promise<void> {
+  const record = ctx.store.get(sessionID);
+  if (!record?.workerName) return;
+  if (record.workerState === "DESTROYED" || record.workerState === "FAILED") return;
+  try {
+    await releaseWorker(ctx, record);
+    ctx.store.touch(sessionID, {
+      workerName: undefined,
+      workerState: "DESTROYED",
+    });
+  } catch {
+    /* sweepIdle releases a terminal-state session that still holds a worker */
+  }
 }
 
 export function buildRegisterProjectOp(ctx: OpContext): OpHandler {
