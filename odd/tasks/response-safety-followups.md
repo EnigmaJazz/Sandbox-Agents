@@ -97,3 +97,12 @@ Also recorded while here: the project's `broker/tsconfig.json` sets `erasableSyn
 
 ## Next step
 Owner review and manual application; `broker/src/**` remains S17.
+
+## R4-REAPER-DROP — separate reaper telemetry-drop accounting
+
+- Added `ReaperOptions.onDrop`; every reaper `safeLog` path receives it explicitly through helper parameters, including artifact removal/error helpers, startup artifact sweep, interval phases, idle/unfinished sweeps, and disconnect reap; both server entry points supply the same Logger hook. The hook is guarded separately so accounting failure cannot interrupt cleanup.
+- `Logger.noteReaperTelemetryDrop()` increments a separate monotonic counter without calling `markDropped()` or writing its stderr fallback. The metrics record exposes `droppedReaperTelemetryEvents` independently of `droppedLogLines`; the server supplies the hook.
+- The focused counter test directly awaits `sweepIdle` with a throwing consumer and verifies one reaper-drop increment and zero dropped log lines. It has no interval/timer dependency. The fake-timer interval test now uses a bounded microtask poll (20 iterations) for the worker-stop marker instead of two fixed microtask ticks.
+- Typed-consumer check: `MetricsRecord` is constructed in `broker/src/service.ts`; `cli/sandboxctl` uses a partial typed metrics shape that does not enumerate the new field, and its `metrics` command uses `Record<string, unknown>`. No typed consumer required edits. Service returns `0` for legacy logger test doubles lacking the new getter.
+- Full-suite baseline observed before edits: **810 pass / 0 fail / 3663 expect() calls / 51 files**. Focused TDD RED: **11 pass / 1 fail / 56 expect() calls**; failure was the missing reaper-drop counter (`undefined`, expected `1`). Focused GREEN: **12 pass / 0 fail / 57 expect() calls**. Final full suite: **811 pass / 0 fail / 3665 expect() calls / 51 files**. `bun build src/main.ts` from `broker` completed successfully (exit 0).
+- Reaper schedules, intervals, cleanup/release behavior, `ReaperHandle`, and existing dropped-line accounting/fallback are unchanged. This is retained for owner review; do not auto-apply because `broker/src/**` is S17.

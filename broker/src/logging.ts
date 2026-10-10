@@ -51,6 +51,7 @@ export class Logger {
   private stdoutDead = false;
   private fallbackWritten = false;
   private droppedLogLineCount = 0;
+  private droppedReaperTelemetryEventsCount = 0;
   private readonly handleStreamError = (): void => {
     if (this.streamDead) return;
     this.streamDead = true;
@@ -75,6 +76,14 @@ export class Logger {
 
   get droppedLogLines(): number {
     return this.droppedLogLineCount;
+  }
+
+  get droppedReaperTelemetryEvents(): number {
+    return this.droppedReaperTelemetryEventsCount;
+  }
+
+  noteReaperTelemetryDrop(): void {
+    this.droppedReaperTelemetryEventsCount += 1;
   }
 
   log(entry: Omit<LogEntry, "ts">): void {

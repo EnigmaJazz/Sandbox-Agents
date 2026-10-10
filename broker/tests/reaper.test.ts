@@ -110,6 +110,24 @@ describe("idle reaper sweep", () => {
     logger.close();
   });
 
+  test("a swallowed reaper log throw increments only reaper telemetry drops", async () => {
+    const h = makeHarness([
+      record({ sessionID: "telemetry-drop", updatedAt: iso(3_700_000) }),
+    ]);
+    const logger = new Logger({ toConsole: false });
+
+    await sweepIdle(
+      h.ctx,
+      3_600_000,
+      () => { throw new Error("consumer failed"); },
+      () => logger.noteReaperTelemetryDrop(),
+    );
+
+    expect(logger.droppedReaperTelemetryEvents).toBe(1);
+    expect(logger.droppedLogLines).toBe(0);
+    logger.close();
+  });
+
   test("a throwing logger does not stop later sweep phases", async () => {
     const h = makeHarness([
       record({ sessionID: "log-throws", updatedAt: iso(3_700_000) }),
@@ -123,6 +141,7 @@ describe("idle reaper sweep", () => {
         logAttempts++;
         throw new Error("logger failed");
       },
+      onDrop: () => { throw new Error("accounting failed"); },
     })).resolves.toBeUndefined();
 
     expect(logAttempts).toBeGreaterThanOrEqual(2);
@@ -142,8 +161,11 @@ describe("idle reaper sweep", () => {
       });
 
       expect(() => jest.advanceTimersByTime(10)).not.toThrow();
-      await Promise.resolve();
-      await Promise.resolve();
+      let polls = 0;
+      while (h.stopped.length === 0 && polls < 20) {
+        polls++;
+        await Promise.resolve();
+      }
       expect(h.stopped).toEqual(["worker-timer-log-throws"]);
       reaper.stop();
     } finally {

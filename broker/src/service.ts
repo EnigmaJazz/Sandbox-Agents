@@ -2276,6 +2276,7 @@ export function buildMetricsOp(ctx: OpContext): OpHandler {
       workersMax: ctx.budget.maxWorkers,
       sessionsByState,
       droppedLogLines: ctx.logger.droppedLogLines,
+      droppedReaperTelemetryEvents: ctx.logger.droppedReaperTelemetryEvents ?? 0,
       budgetExhausted:
         checkAdmission(ctx.pool, ctx.budget, {}).allowed === false,
     };

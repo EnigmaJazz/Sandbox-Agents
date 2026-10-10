@@ -454,6 +454,7 @@ export class BrokerServer {
           error: entry.action === "error" ? entry.detail : undefined,
           detail: entry.action === "swept_artifact" ? entry.detail : undefined,
         }),
+      onDrop: () => this.logger.noteReaperTelemetryDrop(),
     });
   }
 
@@ -701,6 +702,7 @@ export class BrokerServer {
           result: entry.action === "error" ? "error" : "ok",
           error: entry.detail,
         }),
+        () => this.logger.noteReaperTelemetryDrop(),
       ).catch(() => {});
     }
     this.sessionsBySocket.delete(socket);

@@ -692,6 +692,7 @@ export interface MetricsRecord {
   workersMax: number;
   sessionsByState: Record<string, number>;
   droppedLogLines: number;
+  droppedReaperTelemetryEvents: number;
   budgetExhausted: boolean;
 }
 

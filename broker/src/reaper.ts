@@ -64,6 +64,7 @@ export interface ReaperOptions {
    */
   artifactGraceMs?: number;
   onLog?: (entry: ReaperLogEntry) => void;
+  onDrop?: () => void;
 }
 
 export interface ReaperHandle {
@@ -73,11 +74,20 @@ export interface ReaperHandle {
 /** Default grace before a terminal/orphan transport artifact is removed. */
 export const DEFAULT_ARTIFACT_GRACE_MS = 3_600_000;
 
-function safeLog(onLog: ReaperOptions["onLog"], entry: ReaperLogEntry): void {
+function safeLog(
+  onLog: ReaperOptions["onLog"],
+  entry: ReaperLogEntry,
+  onDrop?: ReaperOptions["onDrop"],
+): void {
   try {
     onLog?.(entry);
   } catch {
     // Telemetry must not interrupt cleanup or worker release.
+    try {
+      onDrop?.();
+    } catch {
+      // Drop accounting must not interrupt cleanup or worker release.
+    }
   }
 }
 
@@ -90,6 +100,7 @@ function logRemovals(
   sessionID: string,
   removals: ArtifactRemoval[],
   onLog?: (entry: ReaperLogEntry) => void,
+  onDrop?: ReaperOptions["onDrop"],
 ): { removed: number; bytesFreed: number } {
   let removed = 0;
   let bytesFreed = 0;
@@ -101,13 +112,13 @@ function logRemovals(
         sessionID,
         action: "swept_artifact",
         detail: `${r.kind} ${r.bytes} bytes ${r.path}`,
-      });
+      }, onDrop);
     } else if (r.error) {
       safeLog(onLog, {
         sessionID,
         action: "error",
         detail: `${r.kind}: ${r.error}`,
-      });
+      }, onDrop);
     }
   }
   return { removed, bytesFreed };
@@ -125,6 +136,7 @@ async function cleanupTerminalArtifacts(
   ctx: OpContext,
   sessionID: string,
   onLog?: (entry: ReaperLogEntry) => void,
+  onDrop?: ReaperOptions["onDrop"],
 ): Promise<void> {
   const stateDir = ctx.config?.stateDir;
   if (!stateDir) return;
@@ -137,13 +149,13 @@ async function cleanupTerminalArtifacts(
       durable = await durableHostRefResolves(ctx, record);
     }
     if (!shouldRemoveSessionArtifacts(record, durable, bundleExists)) return;
-    logRemovals(sessionID, removeSessionArtifacts(stateDir, sessionID), onLog);
+    logRemovals(sessionID, removeSessionArtifacts(stateDir, sessionID), onLog, onDrop);
   } catch (err) {
     safeLog(onLog, {
       sessionID,
       action: "error",
       detail: err instanceof Error ? err.message : String(err),
-    });
+    }, onDrop);
   }
 }
 
@@ -162,6 +174,7 @@ export async function sweepStateArtifacts(
   ctx: OpContext,
   graceMs: number = DEFAULT_ARTIFACT_GRACE_MS,
   onLog?: (entry: ReaperLogEntry) => void,
+  onDrop?: ReaperOptions["onDrop"],
 ): Promise<{ removed: number; bytesFreed: number }> {
   const now = Date.now();
   let removed = 0;
@@ -191,6 +204,7 @@ export async function sweepStateArtifacts(
         record.sessionID,
         removeSessionArtifacts(ctx.config.stateDir, record.sessionID),
         onLog,
+        onDrop,
       );
       removed += result.removed;
       bytesFreed += result.bytesFreed;
@@ -199,7 +213,7 @@ export async function sweepStateArtifacts(
         sessionID: record.sessionID,
         action: "error",
         detail: err instanceof Error ? err.message : String(err),
-      });
+      }, onDrop);
     }
   }
 
@@ -221,6 +235,7 @@ export async function sweepStateArtifacts(
         sessionID,
         [removeArtifact({ kind: candidate.kind, path: candidate.path })],
         onLog,
+        onDrop,
       );
       removed += result.removed;
       bytesFreed += result.bytesFreed;
@@ -229,7 +244,7 @@ export async function sweepStateArtifacts(
         sessionID,
         action: "error",
         detail: err instanceof Error ? err.message : String(err),
-      });
+      }, onDrop);
     }
   }
 
@@ -244,31 +259,32 @@ export async function runArtifactSweep(
   ctx: OpContext,
   graceMs: number = DEFAULT_ARTIFACT_GRACE_MS,
   onLog?: (entry: ReaperLogEntry) => void,
+  onDrop?: ReaperOptions["onDrop"],
 ): Promise<{ removed: number; bytesFreed: number }> {
   try {
-    return await sweepStateArtifacts(ctx, graceMs, onLog);
+    return await sweepStateArtifacts(ctx, graceMs, onLog, onDrop);
   } catch (err) {
     safeLog(onLog, {
       sessionID: "",
       action: "error",
       detail: err instanceof Error ? err.message : String(err),
-    });
+    }, onDrop);
     return { removed: 0, bytesFreed: 0 };
   }
 }
 
 /** Run the interval loop; returns a handle that stops it. */
 export function startReaper(ctx: OpContext, opts: ReaperOptions): ReaperHandle {
-  const onLog = (entry: ReaperLogEntry) => safeLog(opts.onLog, entry);
   // Startup pass: clear the bundles/temp indexes accumulated before this
   // broker process started (the defect left one bundle per session forever).
   void runArtifactSweep(
     ctx,
     opts.artifactGraceMs ?? DEFAULT_ARTIFACT_GRACE_MS,
-    onLog,
+    opts.onLog,
+    opts.onDrop,
   );
   const timer = setInterval(() => {
-    void runReaperSweeps(ctx, { ...opts, onLog });
+    void runReaperSweeps(ctx, opts);
   }, opts.intervalMs);
   if (typeof (timer as { unref?: () => void }).unref === "function") {
     (timer as { unref: () => void }).unref();
@@ -291,23 +307,24 @@ export async function runReaperSweeps(
       sessionID: "",
       action: "error",
       detail: err instanceof Error ? err.message : String(err),
-    });
+    }, opts.onDrop);
   try {
     await sweepStateArtifacts(
       ctx,
       opts.artifactGraceMs ?? DEFAULT_ARTIFACT_GRACE_MS,
       opts.onLog,
+      opts.onDrop,
     );
   } catch (err) {
     logError(err);
   }
   try {
-    await sweepUnfinished(ctx, 60_000, opts.onLog);
+    await sweepUnfinished(ctx, 60_000, opts.onLog, opts.onDrop);
   } catch (err) {
     logError(err);
   }
   try {
-    await sweepIdle(ctx, opts.idleMs, opts.onLog);
+    await sweepIdle(ctx, opts.idleMs, opts.onLog, opts.onDrop);
   } catch (err) {
     logError(err);
   }
@@ -321,6 +338,7 @@ export async function sweepIdle(
   ctx: OpContext,
   idleMs: number,
   onLog?: (entry: ReaperLogEntry) => void,
+  onDrop?: ReaperOptions["onDrop"],
 ): Promise<{ reaped: number }> {
   const now = Date.now();
   let reaped = 0;
@@ -348,7 +366,7 @@ export async function sweepIdle(
           workerState: "DESTROYED",
           reapedAt: new Date(now).toISOString(),
         });
-        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_result_ready" });
+        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_result_ready" }, onDrop);
         reaped++;
       } else if (record.state === "SANDBOX_ACTIVE") {
         await releaseWorker(ctx, record);
@@ -357,7 +375,7 @@ export async function sweepIdle(
           workerState: "DESTROYED",
           reapedAt: new Date(now).toISOString(),
         });
-        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_active" });
+        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_active" }, onDrop);
         reaped++;
       }
       // Any other state: skip. CREATING_SANDBOX is mid-creation and must
@@ -369,7 +387,7 @@ export async function sweepIdle(
         sessionID: record.sessionID,
         action: "error",
         detail: err instanceof Error ? err.message : String(err),
-      });
+      }, onDrop);
     }
   }
   return { reaped };
@@ -388,6 +406,7 @@ export async function sweepUnfinished(
   ctx: OpContext,
   idleMs = 60_000,
   onLog?: (entry: ReaperLogEntry) => void,
+  onDrop?: ReaperOptions["onDrop"],
 ): Promise<{ finished: number }> {
   const now = Date.now();
   let finished = 0;
@@ -430,7 +449,7 @@ export async function sweepUnfinished(
           workerState: "DESTROYED",
           reapedAt: new Date(now).toISOString(),
         });
-        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_active", detail: "idle clean worker released" });
+        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_active", detail: "idle clean worker released" }, onDrop);
         finished++;
         continue;
       }
@@ -441,14 +460,14 @@ export async function sweepUnfinished(
         workerName: undefined,
         workerState: "DESTROYED",
       });
-      safeLog(onLog, { sessionID: record.sessionID, action: "auto_finished", detail: ref });
+      safeLog(onLog, { sessionID: record.sessionID, action: "auto_finished", detail: ref }, onDrop);
       finished++;
     } catch (err) {
       safeLog(onLog, {
         sessionID: record.sessionID,
         action: "error",
         detail: err instanceof Error ? err.message : String(err),
-      });
+      }, onDrop);
     }
   }
   return { finished };
@@ -465,6 +484,7 @@ export async function reapOnDisconnect(
   sessionID: string,
   disconnectIdleMs: number,
   onLog?: (entry: ReaperLogEntry) => void,
+  onDrop?: ReaperOptions["onDrop"],
 ): Promise<boolean> {
   const record = ctx.store.get(sessionID);
   if (!record) return false;
@@ -481,14 +501,14 @@ export async function reapOnDisconnect(
       workerState: "DESTROYED",
       reapedAt: new Date().toISOString(),
     });
-    safeLog(onLog, { sessionID, action: "reaped_active", detail: "client disconnected" });
+    safeLog(onLog, { sessionID, action: "reaped_active", detail: "client disconnected" }, onDrop);
     return true;
   } catch (err) {
     safeLog(onLog, {
       sessionID,
       action: "error",
       detail: err instanceof Error ? err.message : String(err),
-    });
+    }, onDrop);
     return false;
   }
 }
