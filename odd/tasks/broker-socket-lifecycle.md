@@ -113,6 +113,7 @@ ask-on-risk (default). Forecast: one coherent socket-lifecycle unit, well under 
 - [x] T4 — Shutdown stops listeners, then individually attempts to unlink only sockets this server actually bound (so shutdown after a refused second start cannot remove the live server's path).
 - [x] T5 — `main.ts` catches `SocketInUseError`, reports the path and exits 0; other startup failures are rethrown.
 - [x] T6 — Added temp-directory tests for stale recovery/mode, live-listener safety, shutdown unlinking and non-socket refusal.
+- [x] R3-socket-probe-timeout — Bounded the liveness probe to 2,000 ms; timeout fails closed without unlinking and reports `probe-timeout`.
 
 ## Evidence
 - Baseline observed before edits: `811 pass`, `0 fail`, `3666 expect() calls`, `Ran 811 tests across 51 files. [4.93s]`.
@@ -123,6 +124,7 @@ ask-on-risk (default). Forecast: one coherent socket-lifecycle unit, well under 
 - `bun build src/main.ts` from `broker` failed because Bun's default browser target has no `node:net` `connect` polyfill (`error: Browser polyfill for module "node:net" doesn't have a matching export named "connect"`). The runtime-targeted `bun build src/main.ts --target=bun` completed successfully (exit 0).
 - Resolution: the documented compile check moved to `bun build --target=bun src/main.ts` because the stale-socket probe imports `node:net`, which the default browser target does not polyfill.
 - The probe does not make the lstat/connect/unlink/listen sequence atomic. It awaits the connection probe, removes the awaitable gap after stale verdict, then invokes `Bun.listen` immediately; a concurrent manual start remains a residual race.
+- R3-socket-probe-timeout correction evidence: observed baseline `815 pass`, `0 fail`, `3679 expect() calls`, `Ran 815 tests across 52 files. [5.00s]`; focused correction `6 pass`, `0 fail`, `15 expect() calls`, `Ran 6 tests across 1 file. [46.00ms]`; full suite `817 pass`, `0 fail`, `3681 expect() calls`, `Ran 817 tests across 52 files. [4.81s]`; runtime-targeted build succeeded.
 
 ## Next step
-Owner review and manual installation/review of the retained result are required because `broker/src/**` is S17-protected. No systemd unit change is included.
+The socket liveness probe is bounded; owner review and manual installation/review of the retained result are required because `broker/src/**` is S17-protected. No systemd unit change is included.

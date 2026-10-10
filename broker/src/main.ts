@@ -216,7 +216,7 @@ async function main(): Promise<void> {
     await server.start();
   } catch (error) {
     if (error instanceof SocketInUseError) {
-      console.error(`sandbox broker socket is already in use: ${error.socketPath}`);
+      console.error(error.message);
       process.exit(0);
     }
     throw error;

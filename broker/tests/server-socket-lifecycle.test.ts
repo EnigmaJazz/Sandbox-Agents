@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { advisorSocketPath } from "../src/advisor-socket.ts";
 import { defaultConfig } from "../src/config.ts";
-import { BrokerServer } from "../src/server.ts";
+import { BrokerServer, raceProbeTimeout } from "../src/server.ts";
 
 const roots: string[] = [];
 
@@ -57,6 +57,14 @@ async function requestMetrics(socketPath: string): Promise<unknown> {
 }
 
 describe("BrokerServer socket lifecycle", () => {
+  test("bounds a probe that never settles", async () => {
+    expect(await raceProbeTimeout(new Promise(() => {}), 1)).toBe("probe-timeout");
+  });
+
+  test("clears the timeout when a probe settles first", async () => {
+    expect(await raceProbeTimeout(Promise.resolve("connected"), 5_000)).toBe("connected");
+  });
+
   test("recovers a socket file left by a stopped listener and binds with mode 0600", async () => {
     const { socketPath, server } = setup();
     const child = Bun.spawn([
@@ -83,7 +91,7 @@ describe("BrokerServer socket lifecycle", () => {
     const second = new BrokerServer(defaultConfig({ stateDir: join(roots[0]!, "state-2"), socketPath }));
     await first.start();
     try {
-      await expect(second.start()).rejects.toMatchObject({ code: "SOCKET_IN_USE" });
+      await expect(second.start()).rejects.toMatchObject({ code: "SOCKET_IN_USE", reason: "connected" });
       second.shutdown();
       expect(existsSync(socketPath)).toBe(true);
       expect(await requestMetrics(socketPath)).toMatchObject({ id: "metrics", ok: true });

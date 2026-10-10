@@ -117,6 +117,7 @@ const REQUEST_ENVELOPE_ALLOWANCE = 64 * 1024;
 const OVERSIZE_ID_PREFIX_BYTES = 512;
 /** Maximum time to wait for owed responses before forcing a framer-failed socket closed. */
 const FRAMER_FAILURE_DRAIN_TIMEOUT_MS = 5_000;
+const SOCKET_PROBE_TIMEOUT_MS = 2_000;
 /** 128 chars is over 4x the longest Operation name (27 chars). */
 const MAX_OPERATION_NAME_LENGTH = 128;
 const OVERSIZE_ID_RE = /"id"\s*:\s*"([A-Za-z0-9-]{1,128})"/;
@@ -124,9 +125,29 @@ const OVERSIZE_ID_RE = /"id"\s*:\s*"([A-Za-z0-9-]{1,128})"/;
 export class SocketInUseError extends Error {
   readonly code = "SOCKET_IN_USE";
 
-  constructor(readonly socketPath: string) {
-    super(`socket is already served by a live broker: ${socketPath}`);
+  constructor(
+    readonly socketPath: string,
+    readonly reason: "connected" | "probe-timeout" = "connected",
+  ) {
+    super(`socket is already served by a live broker (${reason}): ${socketPath}`);
     this.name = "SocketInUseError";
+  }
+}
+
+export async function raceProbeTimeout<T>(
+  probe: Promise<T>,
+  timeoutMs: number,
+): Promise<T | "probe-timeout"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      probe,
+      new Promise<"probe-timeout">((resolve) => {
+        timer = setTimeout(() => resolve("probe-timeout"), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -142,15 +163,16 @@ async function recoverStaleSocket(socketPath: string): Promise<void> {
     throw new Error(`refusing to replace existing path that is not a socket: ${socketPath}`);
   }
 
+  let outcome: "connected" | "probe-timeout";
   try {
-    await new Promise<void>((resolve, reject) => {
+    outcome = await raceProbeTimeout(new Promise<"connected">((resolve, reject) => {
       const probe = connect(socketPath);
       probe.once("connect", () => {
         probe.destroy();
-        resolve();
+        resolve("connected");
       });
       probe.once("error", reject);
-    });
+    }), SOCKET_PROBE_TIMEOUT_MS);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ECONNREFUSED" && code !== "ENOENT") {
@@ -163,7 +185,7 @@ async function recoverStaleSocket(socketPath: string): Promise<void> {
     }
     return;
   }
-  throw new SocketInUseError(socketPath);
+  throw new SocketInUseError(socketPath, outcome);
 }
 
 /**
