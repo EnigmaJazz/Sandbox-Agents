@@ -276,10 +276,19 @@ Decided 2026-10-12:
   strongest, since the checker and native review find the defects. For S17 stages use the
   strongest available model.
 
-Still open:
+- Limits start at 5 stages and 800 changed lines for the feature lane and 2 stages for the fix
+  lane. They are configuration, not constants: broker defaults with a per-project override in
+  the project registration, changeable without a code change, and shown in the burst digest so
+  a limit that is stopping work is visible.
+- Native-review fallback accepted: if the P0 spike shows native review cannot run on an
+  unapplied stage, it runs after apply. The order is then: the user approves the stage on the
+  diff and the continuous checker's verdict, the stage is applied to the working tree, native
+  review runs on it, and only then is it committed. A blocking finding is corrected as a new
+  stage, or the applied stage is reverted before commit. Nothing is committed or pushed
+  unreviewed; what is lost is that host files change before the formal review. The spike still
+  runs first, because review-before-apply is the stronger design.
 
-1. Limits: are 5 stages and 800 lines the right defaults for the feature lane?
-2. If native review cannot run on an unapplied stage, accept review-after-apply as the fallback?
+No decisions are open. P0 can start on the user's go-ahead.
 
 ## Verification of the plan itself
 
