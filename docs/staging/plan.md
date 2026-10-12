@@ -135,9 +135,17 @@ this repository already has:
    other agent name are refused, and the stage-review agent is refused every worker operation.
    The agent name comes from OpenCode's tool context (`ctx.agent`), not from the model.
 
-To verify at install, not assumed: that a per-agent permission overrides the global deny in the
-installed OpenCode version; that a primary agent cannot be targeted by Task; and that
-`gentle-ai sync` does not add the agent to the orchestrator's task allowlist when it rewrites it.
+Explicit denial, not reliance on defaults (decided 2026-10-12): every other agent gets an
+explicit `"<stage-review agent>": "deny"` entry in its `permission.task`, including the
+orchestrator, whose allowlist `gentle-ai sync` rewrites. This repository ships the reviewed
+fragment; the **workflow_optimisation** project, which already owns the live configuration
+overrides, applies it after each sync, and its verifier asserts three things: the deny entry is
+present for every agent, it takes effect over any broader rule in the same map, and
+`host_stage_*` is enabled for the stage-review agent only. That needs a handover to that
+project in P2; nothing is edited there from here.
+
+Still to verify at install, not assumed: that the per-agent enable of `host_stage_*` overrides
+the global deny in the installed OpenCode version.
 
 Further broker-side enforcement, because a permission prompt alone is a plugin-side control:
 
@@ -191,7 +199,7 @@ All code is under S17 paths: test-first in `broker/tests/`, one work-unit commit
 |---|---|---|
 | P0 | This plan accepted; threat-model update; `odd/tasks/staging-chains.md` | Docs only. Spike: can native review run on a stage commit (needs a checked-out candidate; try a shared clone in the state directory, never a worktree in the project). Result decides the burst-time review design. |
 | P1 | Chain and stage records, refs, `chainCreate` / `chainStatus`, worker starts from the tip via the existing `snapshot.resultRef`, stage registered on finish | Broker derives baselines. No apply change yet. |
-| P2 | Stage-review role, the `stageReviewAgents` allowlist and its broker policy; global deny of `host_stage_*`; `host_stage_list/show/approve/reject/apply` tools with `ask` on the three decisions; the stage-review agent definition and prompt; in-order apply reusing the existing apply path; read-only `sandboxctl stages` | First point where the user can work in bursts. Touches `opencode/plugins/**`, `opencode/config-fragments/**` and both installer parity lists. |
+| P2 | Stage-review role, the `stageReviewAgents` allowlist and its broker policy; global deny of `host_stage_*`; `host_stage_list/show/approve/reject/apply` tools with `ask` on the three decisions; the stage-review agent definition and prompt; in-order apply reusing the existing apply path; read-only `sandboxctl stages` | First point where the user can work in bursts. Touches `opencode/plugins/**`, `opencode/config-fragments/**` and both installer parity lists. Includes the handover to workflow_optimisation for the task-deny override and its verifier checks. |
 | P3 | Continuous external check per stage, verdict records, pause on CRITICAL | Uses `docs/advisor/`; finishes plan items A2 and A5-A9 as needed. |
 | P4 | Reject, `STALE`, replay with `merge-tree`, conflict hand-back | Highest risk of subtle bugs; needs adversarial tests. |
 | P5 | Working-agent side: the orchestrator keeps working on the tip, respects the limits, picks up revision notes, never holds the review role | Touches `opencode/plugins/**`. |
