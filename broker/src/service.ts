@@ -3133,7 +3133,8 @@ export async function releaseWorker(
  * result is durable in its ref and in HEAD, so the worker has nothing left to
  * give. Runs after the RETAINED transition so the commit markers are persisted
  * first, and never throws: a failed release must not fail a commit that has
- * already landed. The idle sweep releases any worker this leaves behind.
+ * already landed. A failure is logged, and the idle sweep releases any worker
+ * this leaves behind.
  */
 async function releaseRetainedWorker(
   ctx: OpContext,
@@ -3148,8 +3149,16 @@ async function releaseRetainedWorker(
       workerName: undefined,
       workerState: "DESTROYED",
     });
-  } catch {
-    /* sweepIdle releases a terminal-state session that still holds a worker */
+  } catch (err) {
+    // Not fatal, but not silent either: the idle sweep recovers a terminal-state
+    // session that still holds a worker, and this line shows it needed to.
+    ctx.logger?.log?.({
+      sessionID,
+      operation: "gitCommit",
+      action: "release_retained_worker",
+      result: "error",
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 

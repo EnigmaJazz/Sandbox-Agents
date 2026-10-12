@@ -560,6 +560,35 @@ describe("gitCommit releases the committed result's worker", () => {
     expect(h.records["worker-7"]?.workerState).toBe("DESTROYED");
   });
 
+  test("a failed release is logged, keeps the worker on the record and does not fail the commit", async () => {
+    const h = workerHarness();
+    const logged: Array<Record<string, unknown>> = [];
+    Object.assign(h.ctx, { logger: { log: (entry: Record<string, unknown>) => logged.push(entry) } });
+    const touch = h.ctx.store.touch.bind(h.ctx.store);
+    let failNext = true;
+    h.ctx.store.touch = (sessionID, patch) => {
+      if (failNext && patch.workerState === "DESTROYED") {
+        failNext = false;
+        throw new Error("state write failed");
+      }
+      return touch(sessionID, patch);
+    };
+
+    const result = (await buildGitCommitOp(h.ctx)(h.req)) as { committed?: boolean };
+
+    expect(result.committed).toBe(true);
+    expect(h.records["worker-7"]?.state).toBe("RETAINED");
+    expect(logged).toEqual([
+      {
+        sessionID: "worker-7",
+        operation: "gitCommit",
+        action: "release_retained_worker",
+        result: "error",
+        error: "state write failed",
+      },
+    ]);
+  });
+
   test("an already-released worker is not stopped again", async () => {
     const h = workerHarness({ workerState: "DESTROYED" });
     await buildGitCommitOp(h.ctx)(h.req);
