@@ -91,9 +91,22 @@ Only a human-only operation moves a stage to `APPROVED`, `APPLIED` or `REJECTED`
 
 ### Independent checking
 
-- **v1 (continuous):** when a stage reaches `READY`, the broker offers it to an external advisor
-  (a model from a different vendor, `docs/advisor/`) with the stage's own diff. The verdict is
-  recorded by the broker from the advisor record; a worker cannot write or alter it.
+Two tiers (decided 2026-10-12). An earlier draft used external advisors for the continuous
+per-stage check. That was wrong: external advisor sessions must be opened and prompted by the
+user (subscription terms of service), so they cannot run unattended.
+
+- **Per stage, unattended: internal OpenCode advisors.** Before a stage starts, an internal
+  advisor (`advisor-security` and the lane in TODO Tier 2 item 13) advises on the approach;
+  after it reaches `READY`, an internal advisor reviews the stage's own diff. The advisor runs
+  on a different model from the one that wrote the stage wherever the configured providers
+  allow. Its verdict is submitted through a broker operation that only the advisor role may
+  call, and is stored on the stage; the writing session cannot write or alter it.
+- **Per feature and per bug-fix plan, in the user's burst: external advisors.** Before an ODD
+  feature starts (on its plan) and after its last stage (on the whole feature), and on the plan
+  for a bug fix. The user opens and prompts these sessions, as `docs/advisor/` requires, so
+  they happen when the user is present and never block agents between bursts.
+- A missing pre-stage or post-stage advisor record blocks that stage from being offered for
+  approval. It is not enough for the agent to say advice was taken.
 - **Formal native review (gentle-ai RAR):** needs per-candidate human consent for medium and
   high risk changes, so it **cannot run unattended**. It runs in the user's burst, against the
   slice the user is about to approve. We do not fake or pre-grant consent.
@@ -238,6 +251,30 @@ New or extended items to write before any code:
 - **Retention:** unapproved stages hold refs and bundles. Extend the artifact GC so it never
   removes an unapplied stage's only copy (the durability rule in `artifacts.ts`).
 
+## Where this falls in the wider queue (decided 2026-10-12)
+
+1. Review and restart for the worker-leak fixes (`4fbc94c`, `d65518b`), on gentle-ai 3.7.0.
+2. gentle-ai 4 upgrade day. The current first priority.
+3. Staging P0: threat model and the native-review spike (run on gentle-ai 4).
+4. Prerequisites:
+   - **Workflow enforcement (workflow_optimisation), compulsory.** Agents left to run several
+     stages must not skip checks or drift. Staging must not start unattended multi-stage work
+     until that enforcement is live. Host-side parts built here: the project-scoped signal for
+     the routing guard (TODO Tier 2 item 12) and the ledger append operations (items 7 and 8).
+   - The internal advisory lane running on every unit (Tier 2 item 13).
+   - Host review pipeline tools (Tier 2 item 1), likely needed by the native-review spike.
+   - Review queueing at the reviewer cap (Tier 3 item 8).
+   - Apply-path recovery gaps (Tier 4 items 27 and 30).
+5. Staging P1-P2: the first usable version, on OpenCode V1.
+6. Staging P3-P6.
+7. OpenCode V2 migration. Not urgent: it exists to let OpenChamber update, and V1 is stable.
+   The staging tools are ported with the rest of the plugin surface then.
+
+The broker enforces what it can itself and does not rely on prompts: a stage is not offered
+for approval without its advisor records, limits stop new stages, and a CRITICAL verdict pauses
+the chain. Workflow enforcement covers what the broker cannot see (which checks an agent ran
+inside a stage).
+
 ## Phases
 
 All code is under S17 paths: test-first in `broker/tests/`, one work-unit commit each (about
@@ -248,7 +285,7 @@ All code is under S17 paths: test-first in `broker/tests/`, one work-unit commit
 | P0 | This plan accepted; threat-model update; `odd/tasks/staging-chains.md` | Docs only. Spike: can native review run on a stage commit (needs a checked-out candidate; try a shared clone in the state directory, never a worktree in the project). Result decides the burst-time review design. |
 | P1 | Chain and stage records, refs, `chainCreate` / `chainStatus`, worker starts from the tip via the existing `snapshot.resultRef`, stage registered on finish | Broker derives baselines. No apply change yet. |
 | P2 | Stage-review role, the `stageReviewAgents` allowlist and its broker policy; global deny of `host_stage_*`; `host_stage_list/show/approve/reject/apply` tools with `ask` on the three decisions; the stage-review agent definition and prompt; in-order apply reusing the existing apply path; read-only `sandboxctl stages` | First point where the user can work in bursts. Touches `opencode/plugins/**`, `opencode/config-fragments/**` and both installer parity lists. Includes the handover to workflow_optimisation for the task-deny override and its verifier checks. |
-| P3 | Continuous external check per stage, verdict records, pause on CRITICAL | Uses `docs/advisor/`; finishes plan items A2 and A5-A9 as needed. |
+| P3 | Internal advisor pre and post each stage, broker-recorded verdicts, pause on CRITICAL; external advisor hooks at feature start, feature end and bug-fix planning | Internal lane is TODO Tier 2 item 13. External advisors (`docs/advisor/`, A2 and A5-A9) are needed only for the burst-time hooks, so they do not block P1-P2. |
 | P4 | Reject, `STALE`, replay with `merge-tree`, conflict hand-back | Highest risk of subtle bugs; needs adversarial tests. |
 | P5 | Working-agent side: the orchestrator keeps working on the tip, respects the limits, picks up revision notes, never holds the review role | Touches `opencode/plugins/**`. |
 | P6 | Gated acceptance tests in `tests/acceptance/`; a manual gate for the user to run and sign off | Agents do not self-certify. |
