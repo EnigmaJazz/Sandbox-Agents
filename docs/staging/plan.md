@@ -98,23 +98,48 @@ lines across them (default 800). At the limit the agents stop starting new stage
 chain and work on other projects. This is the safety valve for "a lot of work would need
 repeating".
 
-### Human-only approval channel (the hard part)
+### Review bursts in OpenCode, with a review agent (decided 2026-10-12)
 
-Today the human gate is OpenCode's permission prompt: the plugin asks, the user answers in the
-TUI, the plugin calls the broker. The main socket trusts the caller-supplied `sessionID`, so any
-plugin call could claim approval. A queue the user answers later cannot rely on that.
+The user reviews inside OpenCode, in conversation with a dedicated **stage-review agent**.
 
-Proposal: a third listener, the **operator socket** (mode 0600, separate path, never passed to
-any plugin tool or agent), accepting only `chainList`, `stageShow`, `stageApprove`,
-`stageReject`, `stageApply`. Driven by a terminal tool, `sandboxctl stages ...`, which the user
-runs. Same pattern as the advisor listener, where the role is set by the listener and not by the
-request. The agents' tools cannot reach it because the path is never in their configuration and
-their shell is the sandbox, not the host.
+What the agent does:
 
-### Burst digest
+- Lists the waiting stages per project with size, checker verdict, S17 flag, age and stale
+  markers (the burst digest).
+- Walks one stage at a time: explains the diff, relays the checker's findings, answers
+  questions, and reads surrounding code on request.
+- Turns the discussion into a **revision note** when the user wants changes, and records it on
+  the stage with the rejection. The working agents pick that note up; the review agent does not
+  write code.
 
-`sandboxctl stages` prints, per project: stages waiting, each stage's size, checker verdict,
-S17 flag, age, and stale markers. This replaces answering agents one by one.
+What the agent cannot do:
+
+- It is read-only on the host and has no worker. It cannot edit a stage or a verdict.
+- It cannot approve, reject or apply by itself. Those are separate tools
+  (`host_stage_approve`, `host_stage_reject`, `host_stage_apply`) whose OpenCode permission is
+  `ask`, so each call stops at a prompt the user answers, showing the stage identity and the
+  apply preview. This is the same human gate `sandbox_apply` uses today.
+
+Broker-side enforcement, because a permission prompt alone is a plugin-side control:
+
+- The three decision operations are accepted only from a session bound to the stage-review
+  role (`bindSessionAgent`, `role-policy.ts`), and never from a session that owns a worker in
+  that chain. An agent cannot decide on its own stage.
+- Every decision names the stage's result commit. The broker refuses if it no longer matches,
+  so a decision cannot land on content the user did not see.
+- Each decision is logged with the session, role, stage and commit.
+
+Honest limit: the main socket trusts the session identity a plugin supplies, so this gate is as
+strong as today's apply gate and no stronger. A compromised plugin process could claim the
+review role. Two things keep the consequence bounded: S17 stages are never applied through this
+path (below), and the existing divergence and protected-path checks still run on every apply.
+
+**S17 stages keep today's rule:** they can sit in a chain and be discussed with the review
+agent, but the broker refuses to apply them from any agent session. The user applies those by
+hand, as now.
+
+A terminal view (`sandboxctl stages`, read-only) is kept as a fallback for seeing the queue
+when OpenCode is not running.
 
 ## Threat model changes (P0, `docs/threat-model.md`, S17, user reviews)
 
@@ -123,7 +148,14 @@ New or extended items to write before any code:
 - **Stage-baseline forgery:** a worker supplies a false parent. Mitigated: the broker derives it.
 - **Verdict forgery:** a worker or plugin writes a passing verdict. Mitigated: verdicts come only
   from advisor records the broker published itself.
-- **Approval forgery:** an agent approves its own stage. Mitigated: operator socket only.
+- **Approval forgery:** an agent approves its own stage. Mitigated: decisions only from the
+  stage-review role, never from a session with a worker in the chain, behind an `ask` prompt,
+  bound to the result commit. Residual risk stated above; S17 stages excluded.
+- **Persuasion by the review agent:** it summarises the work the user is approving, so a wrong
+  or manipulated summary could mislead. Mitigated: the approval prompt shows the real diff from
+  the broker, not the agent's summary, and the checker verdict comes from broker records.
+  Stage content is untrusted input to the review agent (prompt injection): it has no write or
+  decision capability to be steered into using.
 - **Stale or reordered apply:** applying stage n without n-1, or after the host moved.
   Mitigated: in-order rule plus the existing divergence check.
 - **Chain growth as a denial of service:** mitigated by the stage and line limits.
@@ -140,10 +172,10 @@ All code is under S17 paths: test-first in `broker/tests/`, one work-unit commit
 |---|---|---|
 | P0 | This plan accepted; threat-model update; `odd/tasks/staging-chains.md` | Docs only. Spike: can native review run on a stage commit (needs a checked-out candidate; try a shared clone in the state directory, never a worktree in the project). Result decides the burst-time review design. |
 | P1 | Chain and stage records, refs, `chainCreate` / `chainStatus`, worker starts from the tip via the existing `snapshot.resultRef`, stage registered on finish | Broker derives baselines. No apply change yet. |
-| P2 | Operator socket, `sandboxctl stages list/show/approve/reject/apply`, in-order apply reusing the existing apply path | First point where the user can work in bursts. |
+| P2 | Stage-review role and its broker policy; `host_stage_list/show/approve/reject/apply` tools with `ask` on the three decisions; the stage-review agent definition and prompt; in-order apply reusing the existing apply path; read-only `sandboxctl stages` | First point where the user can work in bursts. Touches `opencode/plugins/**`, `opencode/config-fragments/**` and both installer parity lists. |
 | P3 | Continuous external check per stage, verdict records, pause on CRITICAL | Uses `docs/advisor/`; finishes plan items A2 and A5-A9 as needed. |
 | P4 | Reject, `STALE`, replay with `merge-tree`, conflict hand-back | Highest risk of subtle bugs; needs adversarial tests. |
-| P5 | Plugin tools and agent prompt: orchestrator keeps working on the tip, respects the limits, never approves; burst digest | Touches `opencode/plugins/**` and `scripts/install-user-files` (both parity lists). |
+| P5 | Working-agent side: the orchestrator keeps working on the tip, respects the limits, picks up revision notes, never holds the review role | Touches `opencode/plugins/**`. |
 | P6 | Gated acceptance tests in `tests/acceptance/`; a manual gate for the user to run and sign off | Agents do not self-certify. |
 
 P1-P2 deliver most of the value (agents stop waiting, the user approves in bursts). P3 and P4
@@ -159,10 +191,13 @@ add the checking and the rework behaviour.
 
 ## Open decisions
 
-1. Where the user does the burst: the terminal tool above (recommended, since it also gives a
-   safe human-only channel), or inside OpenCode.
-2. Limits: are 5 stages and 800 lines the right defaults?
-3. Whether one chain per project is enough, or several lanes per project are needed.
+1. Limits: are 5 stages and 800 lines the right defaults?
+2. Whether one chain per project is enough, or several lanes per project are needed.
+3. Which model runs the stage-review agent. It should differ from the model that wrote the
+   stage, so the conversation is not the author explaining its own work.
+
+Decided: review bursts happen in OpenCode with a stage-review agent (2026-10-12), not in a
+terminal tool.
 
 ## Verification of the plan itself
 
