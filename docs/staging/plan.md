@@ -144,8 +144,11 @@ present for every agent, it takes effect over any broader rule in the same map, 
 `host_stage_*` is enabled for the stage-review agent only. That needs a handover to that
 project in P2; nothing is edited there from here.
 
-Still to verify at install, not assumed: that the per-agent enable of `host_stage_*` overrides
-the global deny in the installed OpenCode version.
+The per-agent override of a global deny is already in use and working (checked 2026-10-12):
+the live `opencode.json` denies `sandbox_bash`, `sandbox_edit`, `sandbox_apply` and others
+globally and grants them per agent as `allow` or `ask` (for example `general` and
+`frontend-apply`), and the broker journal shows those agents' operations succeeding. The
+`host_stage_*` tools use the same arrangement, so no new OpenCode behaviour is assumed.
 
 Further broker-side enforcement, because a permission prompt alone is a plugin-side control:
 
