@@ -61,7 +61,7 @@ after 600 s.
   by all four lenses with no blocking finding, then acknowledged (authority burned). The
   reviewed boundary for this tail is `43a0395`.
 - Advisories from that review, not fixed (fixing would move the boundary):
-  - `R4-001` WARNING, `broker/src/service.ts:3151-3153`: `releaseRetainedWorker` swallows a
+  - `R4-001` WARNING (fixed in the commit after `0398843`, unreviewed), `broker/src/service.ts:3151-3153`: `releaseRetainedWorker` swallows a
     release error with no log, so a failed release after a commit is invisible until the idle
     sweep recovers it.
   - `R1-001` SUGGESTION, `broker/src/reaper.ts:384-399`: the terminal-state release has no age
@@ -85,4 +85,13 @@ after 600 s.
   rebuilt from session records, so workers that survive a restart are not counted.
 
 ## Next step
-Owner reviews `4fbc94c` and `d65518b` (S17) and restarts the broker. Then decide whether to fix `R4-001`.
+Owner reviews `4fbc94c` and `d65518b` (S17) and restarts the broker. The `R4-001` log line needs a further restart to go live.
+
+## Finding while fixing `R4-001`
+`releaseWorker` itself swallows a failed `stop` or `remove` (a retry loop that ignores the
+error), so it almost never throws. After it returns, `releaseRetainedWorker` still clears
+`workerName` and marks the worker `DESTROYED`. If `msb remove` really fails, the VM stays and
+the record no longer points at it, so neither this path nor `sweepIdle` will find it again. The
+new log line covers only a throw from the bookkeeping, not a silent remove failure. Not fixed
+here: the same pattern is in every release path, so it needs its own unit (report the remove
+failure from `releaseWorker`, keep `workerName` when it fails).
