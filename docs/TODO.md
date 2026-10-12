@@ -54,6 +54,7 @@ All Tier 1 items are implemented and committed.
    - **Left for upgrade day (cannot be checked without the installed stack):** the `asi-review-*` relay transport on 4.0.0, a STATUS-returned `review recover` command, and what `gentle-ai sync` does to the live `opencode.json` (`gentle-orchestrator`'s task allowlist; the new `gentle-ai-worker`/`-explore`/`-verify` agents).
    - **Then:** run the upgrade-day runbook in the plan. Do this before the OpenCode V2 migration.
 2. **OpenCode V2 migration, side-by-side** — **PLANNED**; owner **A**, **U** for cutover. Required before OpenChamber can move past 1.24.2. Now: step P0 (shared tool table and thin V1 adapter), V0 discovery, and the V1 broker check. Late, just before cutover: the V2 adapter and V3–V7. Plan: `docs/upgrades/opencode-v2.md`.
+3. **Staged work chains (queue now, review in bursts)** — **PROPOSED; design only, awaiting approval**; owner **A** for the design, **U** to approve it. Agents keep working on a project while finished work is saved as ordered stages in protected refs; the user reviews and applies them in order on their own schedule through a human-only operator channel, with an independent model check per stage. Nothing reaches the host until approved. Plan: `docs/staging/plan.md`.
 
 ## Tier 3 — blocks users now (8 items)
 
