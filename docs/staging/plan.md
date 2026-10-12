@@ -120,7 +120,26 @@ What the agent cannot do:
   `ask`, so each call stops at a prompt the user answers, showing the stage identity and the
   apply preview. This is the same human gate `sandbox_apply` uses today.
 
-Broker-side enforcement, because a permission prompt alone is a plugin-side control:
+Isolation of the agent and its tools (decided 2026-10-12). Three layers, each using a pattern
+this repository already has:
+
+1. **No other agent can reach it.** It is a `mode: "primary"` agent the user selects, not a
+   subagent, so it is not a Task target. Every other agent's `permission.task` already denies
+   by default (`role-agents.jsonc`: `"task": { "*": "deny" }`) or uses an explicit allowlist
+   (the orchestrator); the stage-review agent is in none of them.
+2. **No other agent has its tools.** `host_stage_*` are denied in the global permission
+   fragment and enabled only inside the stage-review agent's own block, whose `tools` map
+   starts from `"*": false`. The three decision tools are `ask` there.
+3. **The broker refuses everyone else.** A new `stageReviewAgents` allowlist in the broker
+   configuration, enforced like `readOnlyAgents` in `HostToolPolicy`: stage operations from any
+   other agent name are refused, and the stage-review agent is refused every worker operation.
+   The agent name comes from OpenCode's tool context (`ctx.agent`), not from the model.
+
+To verify at install, not assumed: that a per-agent permission overrides the global deny in the
+installed OpenCode version; that a primary agent cannot be targeted by Task; and that
+`gentle-ai sync` does not add the agent to the orchestrator's task allowlist when it rewrites it.
+
+Further broker-side enforcement, because a permission prompt alone is a plugin-side control:
 
 - The three decision operations are accepted only from a session bound to the stage-review
   role (`bindSessionAgent`, `role-policy.ts`), and never from a session that owns a worker in
@@ -172,7 +191,7 @@ All code is under S17 paths: test-first in `broker/tests/`, one work-unit commit
 |---|---|---|
 | P0 | This plan accepted; threat-model update; `odd/tasks/staging-chains.md` | Docs only. Spike: can native review run on a stage commit (needs a checked-out candidate; try a shared clone in the state directory, never a worktree in the project). Result decides the burst-time review design. |
 | P1 | Chain and stage records, refs, `chainCreate` / `chainStatus`, worker starts from the tip via the existing `snapshot.resultRef`, stage registered on finish | Broker derives baselines. No apply change yet. |
-| P2 | Stage-review role and its broker policy; `host_stage_list/show/approve/reject/apply` tools with `ask` on the three decisions; the stage-review agent definition and prompt; in-order apply reusing the existing apply path; read-only `sandboxctl stages` | First point where the user can work in bursts. Touches `opencode/plugins/**`, `opencode/config-fragments/**` and both installer parity lists. |
+| P2 | Stage-review role, the `stageReviewAgents` allowlist and its broker policy; global deny of `host_stage_*`; `host_stage_list/show/approve/reject/apply` tools with `ask` on the three decisions; the stage-review agent definition and prompt; in-order apply reusing the existing apply path; read-only `sandboxctl stages` | First point where the user can work in bursts. Touches `opencode/plugins/**`, `opencode/config-fragments/**` and both installer parity lists. |
 | P3 | Continuous external check per stage, verdict records, pause on CRITICAL | Uses `docs/advisor/`; finishes plan items A2 and A5-A9 as needed. |
 | P4 | Reject, `STALE`, replay with `merge-tree`, conflict hand-back | Highest risk of subtle bugs; needs adversarial tests. |
 | P5 | Working-agent side: the orchestrator keeps working on the tip, respects the limits, picks up revision notes, never holds the review role | Touches `opencode/plugins/**`. |
