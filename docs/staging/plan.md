@@ -51,6 +51,26 @@ channel.
 - **The broker, not the worker, supplies each stage's baseline.** It resolves the parent stage's
   commit itself, so a worker cannot claim an arbitrary baseline (extends S15/S16).
 
+### Lanes (decided 2026-10-12)
+
+A project has at most **two active chains**:
+
+- **Feature lane:** one chain per ODD feature (`odd/tasks/<feature>.md`). Each work-unit commit
+  is a stage; the chain closes when the feature is fully applied or abandoned. Limits (5 stages
+  and 800 changed lines, adjustable) are a per-feature budget.
+- **Fix lane:** one chain for separate bug fixes, kept short (default 2 stages).
+
+Why two and not one: stages apply in order, so in a single chain an urgent fix would wait
+behind every unapproved feature stage.
+
+Both lanes start from the same host state, so applying one makes the other stale. Rules:
+
+- The fix lane applies first; the feature chain is then replayed onto the new host state with
+  the same `merge-tree` replay used for rejections (no extra mechanism).
+- When a fix stage lands, the broker compares its paths with the feature chain's and warns
+  immediately if they overlap, not at apply time.
+- No third parallel chain. Each extra chain multiplies replays.
+
 ### Stage states
 
 `BUILDING` (worker active) -> `READY` (result imported) -> `CHECKING` -> `CHECKED(pass | findings)`
@@ -77,6 +97,9 @@ Only a human-only operation moves a stage to `APPROVED`, `APPLIED` or `REJECTED`
 - **Formal native review (gentle-ai RAR):** needs per-candidate human consent for medium and
   high risk changes, so it **cannot run unattended**. It runs in the user's burst, against the
   slice the user is about to approve. We do not fake or pre-grant consent.
+- **Review slices follow stages.** The native review candidate is a work-unit commit or a PR
+  slice, so a stage is normally one candidate. Low-risk stages (`passive`, or under budget) may
+  be grouped and reviewed together; `review assess` on the stage decides, as it does today.
 - A stage with a CRITICAL finding pauses the chain (no new stage starts) until the user looks.
 
 ### Rework after a rejection
@@ -97,6 +120,28 @@ Per-chain limits, set by the user: maximum unapproved stages (default 5) and max
 lines across them (default 800). At the limit the agents stop starting new stages for that
 chain and work on other projects. This is the safety valve for "a lot of work would need
 repeating".
+
+### The user's burst, end to end
+
+The workflow is a series of stage reviews, most with a native review alongside. For each stage,
+in order:
+
+1. The review agent presents the stage: diff, size, S17 flag, the continuous checker's verdict.
+2. The agent runs `review assess` on the stage and says whether a native review is due.
+3. If due, the consent prompt appears and you grant or decline it. The four lenses run in the
+   background while you talk through the diff with the agent; findings are relayed when they
+   land.
+4. You approve (then apply), or reject with a revision note.
+5. On reject, later stages go stale and the replay starts while you move to the next project.
+
+Time is spent waiting for the lenses, so a burst should overlap them: start the consent for
+the next stage's review while the current one is still running, across projects too.
+
+Open spike (P0): the native review needs a checked-out candidate and an acknowledgement that
+burns it. The design for running it against an unapplied stage commit is not settled; the
+shared-clone approach in P0 decides it. If native review cannot run on a stage before it is
+applied, the fallback is to review the applied commit on the feature branch, which shifts the
+review after apply and weakens the guarantee. That fallback needs your explicit decision.
 
 ### Review bursts in OpenCode, with a review agent (decided 2026-10-12)
 
@@ -219,15 +264,22 @@ add the checking and the rework behaviour.
 - Auto-merging an agent's own approval, now or later.
 - Multi-user chains.
 
-## Open decisions
+## Decisions
 
-1. Limits: are 5 stages and 800 lines the right defaults?
-2. Whether one chain per project is enough, or several lanes per project are needed.
-3. Which model runs the stage-review agent. It should differ from the model that wrote the
-   stage, so the conversation is not the author explaining its own work.
+Decided 2026-10-12:
 
-Decided: review bursts happen in OpenCode with a stage-review agent (2026-10-12), not in a
-terminal tool.
+- Review bursts happen in OpenCode with a stage-review agent, not in a terminal tool.
+- At most two chains per project: one per ODD feature, plus a short fix lane (rules above).
+- Review-agent model: the same tier as the orchestrator, from a different vendor than the model
+  that wrote the stage. A weak or local model is not acceptable, because a confident wrong
+  explanation of a diff is the one failure nothing else catches. It does not need to be the
+  strongest, since the checker and native review find the defects. For S17 stages use the
+  strongest available model.
+
+Still open:
+
+1. Limits: are 5 stages and 800 lines the right defaults for the feature lane?
+2. If native review cannot run on an unapplied stage, accept review-after-apply as the fallback?
 
 ## Verification of the plan itself
 
