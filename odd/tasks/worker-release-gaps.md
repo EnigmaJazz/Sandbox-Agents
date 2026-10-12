@@ -56,8 +56,24 @@ after 600 s.
 - `broker/tests/server-reaper-log-seam.test.ts` needed a clean-tree `exec` stub: with no status
   the reap now treats the worker as dirty and tries to export, which is the intended behaviour.
 - `cd broker && bun test`: 836 pass, 0 fail. `bun build src/main.ts --target=bun`: succeeded.
-- Native review: not run from this session, so `4fbc94c` and `d65518b` are unreviewed. The
-  current reviewed boundary was not re-checked here.
+- Native review (2026-10-12): lineage `review-48beb715f4f69712`, base `9604d30` to HEAD
+  `43a0395`, committed only, untracked files excluded; 10 files, 796 lines, high risk. Approved
+  by all four lenses with no blocking finding, then acknowledged (authority burned). The
+  reviewed boundary for this tail is `43a0395`.
+- Advisories from that review, not fixed (fixing would move the boundary):
+  - `R4-001` WARNING, `broker/src/service.ts:3151-3153`: `releaseRetainedWorker` swallows a
+    release error with no log, so a failed release after a commit is invisible until the idle
+    sweep recovers it.
+  - `R1-001` SUGGESTION, `broker/src/reaper.ts:384-399`: the terminal-state release has no age
+    check; no reachable data loss, a short race window remains.
+  - `R2-001` SUGGESTION, `broker/src/reaper.ts:395-404`: the release/touch/`reapedAt` sequence
+    is repeated in several branches and in `releaseRetainedWorker`; a shared helper would help.
+  - `R2-002` SUGGESTION, `broker/src/reaper.ts:458-475`: say explicitly that an unknown git
+    status is treated as dirty.
+- Not covered by that review: commits between `bf3c792` and `9604d30` other than the
+  socket-lifecycle unit (lineage `review-0789e564b02b5363`). A review of the whole range from
+  `bf3c792` was refused with `lens_context_budget_exceeded`, and the CLI reviews only up to
+  HEAD, so earlier slices cannot be reviewed in place.
 
 ## Not verified
 - Live behaviour. The running broker still has the old code until the owner restarts it.
@@ -69,4 +85,4 @@ after 600 s.
   rebuilt from session records, so workers that survive a restart are not counted.
 
 ## Next step
-Owner reviews `4fbc94c` and `d65518b`, then restarts the broker.
+Owner reviews `4fbc94c` and `d65518b` (S17) and restarts the broker. Then decide whether to fix `R4-001`.
