@@ -10,10 +10,12 @@
  * `opencode_review_transport_binding_invalid`.
  *
  * Boundaries enforced here, all fail closed with typed refusals:
- * - root: canonical, absolute, exactly equal to one broker-allowlisted project
- *   root, and never equal to the plugin server root. Refusal happens BEFORE any
- *   child spawn; there is no fallback to `directory`, `worktree`,
- *   `process.cwd()`, or a handler registry.
+ * - root: the session's resolved repository is canonical and absolute, and
+ *   exactly equals one broker-allowlisted project root. A failed or unusable
+ *   session lookup refuses as `reviewer_relay_session_lookup_failed`. Equality
+ *   with the plugin server root is permitted when that root is allowlisted.
+ *   Refusal happens BEFORE any child spawn; there is no fallback to `directory`,
+ *   `worktree`, `process.cwd()`, or a handler registry.
  * - hooks: only the dedicated `asi-review-*` names. The installed
  *   `REVIEW_AGENTS` names are disjoint and pass through untouched.
  * - spawn: fixed binary + argv vector, `shell: false`, piped stdio, and a
@@ -230,9 +232,9 @@ export interface RootSelectionInput {
 /**
  * Select the reviewer Task's canonical repository root.
  *
- * The session repository must be a canonical absolute path, exactly equal to
- * one broker-allowlisted project root, and different from the plugin server
- * root. Every failure refuses before any child process exists.
+ * The session repository must be a canonical absolute path exactly equal to
+ * one broker-allowlisted project root. Every failure refuses before any child
+ * process exists.
  */
 export function selectCanonicalSessionRoot(input: RootSelectionInput): string {
   const sessionRoot = requireCanonicalAbsoluteRoot(input.sessionDirectory, input.realpath);
@@ -251,11 +253,9 @@ export function selectCanonicalSessionRoot(input: RootSelectionInput): string {
   if (!allowlist.includes(sessionRoot)) {
     throw rootRefused("session repository is not an exact allowlisted project root");
   }
+  // Deliberately removed inequality guard: allowlisted server-root equality is permitted; allowlist validation and fail-closed lookup refusal replace it.
   const serverRoot = requireCanonicalAbsoluteRoot(input.serverRoot, input.realpath);
   console.log(`[reviewer-relay] root check sessionRoot=${sessionRoot} serverRoot=${serverRoot}`);
-  if (serverRoot === sessionRoot) {
-    throw rootRefused("session repository equals the plugin server root");
-  }
   return sessionRoot;
 }
 
@@ -291,11 +291,8 @@ export function createSessionRootResolver(
     }
     const cached = cache.get(sessionID);
     if (cached !== undefined) {
-      // Re-check the server-root inequality on a hit so a cache shared with
-      // another plugin instance can never bypass this instance's guard.
-      if (requireCanonicalAbsoluteRoot(deps.serverRoot, deps.realpath) === cached) {
-        throw rootRefused("cached session repository equals the plugin server root");
-      }
+      const projectPaths = await deps.loadAllowlistedPaths().catch((cause) => { throw refusalOr(cause, policyRefused); });
+      selectCanonicalSessionRoot({ sessionDirectory: cached, serverRoot: deps.serverRoot, projectPaths, realpath: deps.realpath });
       return cached;
     }
     let sessionDirectory: unknown;
@@ -303,6 +300,9 @@ export function createSessionRootResolver(
       sessionDirectory = await deps.lookupSessionDirectory(sessionID);
     } catch (cause) {
       throw refusalOr(cause, sessionLookupFailed);
+    }
+    if (typeof sessionDirectory !== "string" || sessionDirectory.length === 0) {
+      throw sessionLookupFailed("session lookup returned no usable repository directory");
     }
     let projectPaths: readonly unknown[];
     try {
@@ -1190,9 +1190,9 @@ export interface ReviewerRelayConfig {
   worktree?: string;
   /**
    * The stable plugin-process boot root, not the per-request instance
-   * directory. `PluginInput.directory` follows the request and equals the
-   * session's project, so it must never be the server-root inequality guard.
-   * When omitted, the historical `worktree || directory` fallback is used.
+   * directory. It is validated for canonical form for logging and sanity; it
+   * does not impose a root inequality check. When omitted, the historical
+   * `worktree || directory` fallback is used.
    */
   serverRoot?: string;
   brokerRequest?: BrokerRequestFn;

@@ -10,6 +10,7 @@ import {
   buildReviewCaptureValidationAsk,
   buildReviewRecoverAsk,
   buildRegisterProjectAsk,
+  buildSandboxResultInstallAsk,
   buildReviewStartAsk,
   buildReviewValidateAsk,
   buildGitPushAsk,
@@ -22,7 +23,7 @@ import {
 import { OPERATION_TIMEOUT_MS } from "../../opencode/plugins/lib/broker-client.ts";
 
 describe("host tool ask metadata", () => {
-  test("base builder never auto-approves and keeps the permission key", () => {
+  test("base builder keeps approval metadata visible and never auto-approves", () => {
     const ask = buildHostToolAsk({
       permission: "host_example",
       operation: "sddArchiveCompose",
@@ -33,10 +34,25 @@ describe("host tool ask metadata", () => {
     expect(ask.patterns).toEqual(["*"]);
     expect(ask.always).toEqual([]);
     expect(ask.metadata).toEqual({
+      hostOperation: "sddArchiveCompose",
+      summary: "compose it",
+      a: 1,
+    });
+    expect(ask.metadata).not.toHaveProperty("details");
+  });
+
+  test("base builder avoids PermissionCard metadata-suppression keys", () => {
+    const ask = buildHostToolAsk({
+      permission: "host_example",
       operation: "sddArchiveCompose",
       summary: "compose it",
-      details: { a: 1 },
+      details: { preview: "visible diff" },
     });
+    // PermissionCard's genericContent and description branches suppress the Details dump.
+    for (const key of ["command", "content", "action", "operation", "description"]) {
+      expect(ask.metadata).not.toHaveProperty(key);
+    }
+    expect(ask.metadata.hostOperation).toBe("sddArchiveCompose");
   });
 
   test("base builder rejects malformed input", () => {
@@ -73,8 +89,8 @@ describe("host tool ask metadata", () => {
       output: "openspec/changes/y/composed.md",
     });
     expect(ask.permission).toBe("host_sdd_archive_compose");
-    expect(ask.metadata.operation).toBe("sddArchiveCompose");
-    expect(ask.metadata.details).toEqual({
+    expect(ask.metadata.hostOperation).toBe("sddArchiveCompose");
+    expect(ask.metadata).toMatchObject({
       canonical: "openspec/specs/x/spec.md",
       delta: "openspec/changes/y/specs/x/spec.md",
       output: "openspec/changes/y/composed.md",
@@ -90,8 +106,8 @@ describe("host tool ask metadata", () => {
       protectedPaths: [],
     });
     expect(ask.permission).toBe("host_git_commit");
-    expect(ask.metadata.operation).toBe("gitCommit");
-    expect(ask.metadata.details).toMatchObject({
+    expect(ask.metadata.hostOperation).toBe("gitCommit");
+    expect(ask.metadata).toMatchObject({
       message: "fix: scoped",
       branch: "feature/x",
       subject: "fix: scoped",
@@ -105,11 +121,11 @@ describe("host tool ask metadata", () => {
   test("git commit ask surfaces a delegated sandbox session id", () => {
     const ask = buildGitCommitAsk({ message: "fix: delegated", sandboxSessionID: "worker-7" });
     expect(ask.permission).toBe("host_git_commit");
-    expect(ask.metadata.details).toMatchObject({
+    expect(ask.metadata).toMatchObject({
       message: "fix: delegated",
       sandboxSessionID: "worker-7",
     });
-    expect(ask.metadata.details.pathCount).toBeUndefined();
+    expect(ask.metadata.pathCount).toBeUndefined();
     expect(() =>
       buildGitCommitAsk({ message: "m", sandboxSessionID: "" }),
     ).toThrow(HostToolAskError);
@@ -125,8 +141,8 @@ describe("host tool ask metadata", () => {
       warning: "creates a new commit",
     });
     expect(ask.permission).toBe("host_git_push");
-    expect(ask.metadata.operation).toBe("gitPush");
-    expect(ask.metadata.details).toMatchObject({
+    expect(ask.metadata.hostOperation).toBe("gitPush");
+    expect(ask.metadata).toMatchObject({
       remote: "origin",
       branch: "feature/x",
       ahead: 3,
@@ -140,8 +156,8 @@ describe("host tool ask metadata", () => {
   test("gh issue ask carries repo/title/body preview and byte count", () => {
     const ask = buildGhIssueCreateAsk({ repo: "owner/repo", title: "Bug", body: "line1\nline2" });
     expect(ask.permission).toBe("host_gh_issue_create");
-    expect(ask.metadata.operation).toBe("ghIssueCreate");
-    expect(ask.metadata.details).toMatchObject({
+    expect(ask.metadata.hostOperation).toBe("ghIssueCreate");
+    expect(ask.metadata).toMatchObject({
       repo: "owner/repo",
       title: "Bug",
       bodyPreview: "line1\nline2",
@@ -160,8 +176,8 @@ describe("host tool ask metadata", () => {
       reason: "widen",
     });
     expect(ask.permission).toBe("host_sdd_attempt_grant");
-    expect(ask.metadata.operation).toBe("sddAttemptGrant");
-    expect(ask.metadata.details).toMatchObject({
+    expect(ask.metadata.hostOperation).toBe("sddAttemptGrant");
+    expect(ask.metadata).toMatchObject({
       rootCount: 2,
       changeInstance: "instance-token",
       actor: "gentle-orchestrator",
@@ -171,8 +187,8 @@ describe("host tool ask metadata", () => {
   test("plan append ask surfaces the document, heading, and byte count", () => {
     const ask = buildPlanDocAppendAsk({ doc: "todo", content: "line1\nline2", heading: "Next" });
     expect(ask.permission).toBe("host_plan_append");
-    expect(ask.metadata.operation).toBe("planDocAppend");
-    expect(ask.metadata.details).toEqual({
+    expect(ask.metadata.hostOperation).toBe("planDocAppend");
+    expect(ask.metadata).toMatchObject({
       doc: "todo",
       contentBytes: 11,
       heading: "Next",
@@ -182,7 +198,7 @@ describe("host tool ask metadata", () => {
 
   test("plan append ask omits the heading when absent and rejects bad input", () => {
     const ask = buildPlanDocAppendAsk({ doc: "plan", content: "x" });
-    expect(ask.metadata.details).toEqual({ doc: "plan", contentBytes: 1 });
+    expect(ask.metadata).toMatchObject({ doc: "plan", contentBytes: 1 });
     expect(() => buildPlanDocAppendAsk({ doc: "todo", content: "" })).toThrow(HostToolAskError);
     expect(() => buildPlanDocAppendAsk({ doc: "other" as never, content: "x" })).toThrow(HostToolAskError);
     expect(() => buildPlanDocAppendAsk({ doc: "todo", content: "x", heading: "" })).toThrow(
@@ -198,10 +214,10 @@ describe("host tool ask metadata", () => {
       makePublic: true,
     });
     expect(ask.permission).toBe("host_register_project");
-    expect(ask.metadata.operation).toBe("registerProject");
+    expect(ask.metadata.hostOperation).toBe("registerProject");
     expect(ask.always).toEqual([]);
     expect(ask.patterns).toEqual(["*"]);
-    expect(ask.metadata.details).toMatchObject({
+    expect(ask.metadata).toMatchObject({
       path: "/home/james/new-project",
       dryRun: "yes",
       createRemote: "no",
@@ -214,65 +230,98 @@ describe("host tool ask metadata", () => {
     expect(() => buildRegisterProjectAsk({ path: "" })).toThrow(HostToolAskError);
   });
 
-describe("host review lifecycle ask metadata", () => {
-  test("each review op keeps its permission key and never auto-approves", () => {
-    const asks = [
-      buildReviewStartAsk({ contract: "Contract-TOKEN", target: "Target-TOKEN", focus: "risk", lineage: "Lineage-TOKEN" }),
-      buildReviewCaptureResultAsk({ input: "-", lens: "lens-token", order: 2 }),
-      buildReviewCaptureUnachievableAsk({ target: "T", reason: "r" }),
-      buildReviewAcknowledgeApprovedAsk({}),
-      buildReviewCaptureCorrectionPlanAsk({ target: "T", correctionLines: 4 }),
-      buildReviewCaptureRefuterAsk({ target: "T", materialize: true }),
-      buildReviewCaptureValidationAsk({ target: "T", requestHash: `sha256:${"a".repeat(64)}`, execute: true }),
-      buildReviewValidateAsk({ gate: "pre-pr", lineage: "L" }),
-      buildReviewRecoverAsk({ actor: "gentle-orchestrator", disposition: "scope_changed" }),
-    ];
-    for (const ask of asks) {
-      expect(ask.permission.startsWith("host_review_")).toBe(true);
-      expect(ask.always).toEqual([]);
-      expect(ask.patterns).toEqual(["*"]);
-      expect(typeof ask.metadata.summary).toBe("string");
-    }
-  });
-
-  test("review recover ask never surfaces maintainer authorization content", () => {
-    const ask = buildReviewRecoverAsk({
-      actor: "gentle-orchestrator",
-      disposition: "scope_changed",
-      maintainerAuthorization: '{"approve":true}',
-      reason: "r",
+  describe("host review lifecycle ask metadata", () => {
+    test("each review op keeps its permission key and never auto-approves", () => {
+      const asks = [
+        buildReviewStartAsk({ contract: "Contract-TOKEN", target: "Target-TOKEN", focus: "risk", lineage: "Lineage-TOKEN" }),
+        buildReviewCaptureResultAsk({ input: "-", lens: "lens-token", order: 2 }),
+        buildReviewCaptureUnachievableAsk({ target: "T", reason: "r" }),
+        buildReviewAcknowledgeApprovedAsk({}),
+        buildReviewCaptureCorrectionPlanAsk({ target: "T", correctionLines: 4 }),
+        buildReviewCaptureRefuterAsk({ target: "T", materialize: true }),
+        buildReviewCaptureValidationAsk({ target: "T", requestHash: `sha256:${"a".repeat(64)}`, execute: true }),
+        buildReviewValidateAsk({ gate: "pre-pr", lineage: "L" }),
+        buildReviewRecoverAsk({ actor: "gentle-orchestrator", disposition: "scope_changed" }),
+      ];
+      for (const ask of asks) {
+        expect(ask.permission.startsWith("host_review_")).toBe(true);
+        expect(ask.always).toEqual([]);
+        expect(ask.patterns).toEqual(["*"]);
+        expect(typeof ask.metadata.summary).toBe("string");
+      }
     });
-    expect(JSON.stringify(ask.metadata.details)).not.toContain("approve");
-    expect(ask.metadata.details).toMatchObject({
-      actor: "gentle-orchestrator",
-      disposition: "scope_changed",
+
+    test("review recover ask never surfaces maintainer authorization content", () => {
+      const ask = buildReviewRecoverAsk({
+        actor: "gentle-orchestrator",
+        disposition: "scope_changed",
+        maintainerAuthorization: '{"approve":true}',
+        reason: "r",
+      });
+      expect(JSON.stringify(ask.metadata)).not.toContain("approve");
+      expect(ask.metadata).toMatchObject({
+        actor: "gentle-orchestrator",
+        disposition: "scope_changed",
+      });
+    });
+
+    test("review ask builders reject invalid enums and malformed inputs", () => {
+      expect(() => buildReviewStartAsk({ focus: "nope" as never })).toThrow(HostToolAskError);
+      expect(() => buildReviewCaptureResultAsk({ order: 0 })).not.toThrow();
+      expect(buildReviewCaptureResultAsk({ order: 0 }).metadata.order).toBe(0);
+      expect(() => buildReviewCaptureResultAsk({ order: 33 })).toThrow(HostToolAskError);
+      expect(() => buildReviewValidateAsk({ gate: "nope" as never })).toThrow(HostToolAskError);
+    });
+
+    test("review capture-result ask surfaces inline byte count and digest only", () => {
+      const body = '{"reviewer":"x"}';
+      const ask = buildReviewCaptureResultAsk({
+        inputJsonBytes: Buffer.byteLength(body, "utf8"),
+        inputJsonDigest: "abcd1234",
+      });
+      expect(ask.metadata.inputJsonBytes).toBe(Buffer.byteLength(body, "utf8"));
+      expect(ask.metadata.inputJsonDigest).toBe("abcd1234");
+      expect(JSON.stringify(ask.metadata)).not.toContain("reviewer");
     });
   });
-
-  test("review ask builders reject invalid enums and malformed inputs", () => {
-    expect(() => buildReviewStartAsk({ focus: "nope" as never })).toThrow(HostToolAskError);
-    expect(() => buildReviewCaptureResultAsk({ order: 0 })).not.toThrow();
-    expect(buildReviewCaptureResultAsk({ order: 0 }).metadata.details.order).toBe(0);
-    expect(() => buildReviewCaptureResultAsk({ order: 33 })).toThrow(HostToolAskError);
-    expect(() => buildReviewValidateAsk({ gate: "nope" as never })).toThrow(HostToolAskError);
-  });
-
-  test("review capture-result ask surfaces inline byte count and digest only", () => {
-    const body = '{"reviewer":"x"}';
-    const ask = buildReviewCaptureResultAsk({
-      inputJsonBytes: Buffer.byteLength(body, "utf8"),
-      inputJsonDigest: "abcd1234",
-    });
-    expect(ask.metadata.details.inputJsonBytes).toBe(Buffer.byteLength(body, "utf8"));
-    expect(ask.metadata.details.inputJsonDigest).toBe("abcd1234");
-    expect(JSON.stringify(ask.metadata.details)).not.toContain("reviewer");
-  });
-});
 });
 
 describe("host review lens-context client timeout", () => {
   test("bounds the reviewLensContext client wait above the read default", () => {
     expect(OPERATION_TIMEOUT_MS.reviewLensContext).toBe(130_000);
     expect(OPERATION_TIMEOUT_MS.reviewLensContext).toBeGreaterThan(30_000);
+  });
+});
+
+describe("sandbox result install ask metadata", () => {
+  test("approval metadata carries the summary and bounded install preview", () => {
+    const ask = buildSandboxResultInstallAsk({
+      resultRef: "refs/opencode-sandbox/result/worker-7",
+      resultCommit: "0123456789abcdef0123456789abcdef01234567",
+      changedPaths: ["broker/src/server.ts", "gone.ts"],
+      sandboxSessionID: "worker-7",
+      preview: "diff --git a/file.ts b/file.ts\n+visible change",
+      previewTruncated: true,
+      previewFile: "/private/preview.patch",
+    });
+    expect(ask.permission).toBe("host_sandbox_result_install");
+    expect(ask.metadata.hostOperation).toBe("sandboxResultInstall");
+    expect(ask.always).toEqual([]);
+    expect(ask.patterns).toEqual(["*"]);
+    expect(ask.metadata).toMatchObject({
+      summary: "Install 2 result path(s) from refs/opencode-sandbox/result/worker-7 at commit 0123456789ab",
+      resultRef: "refs/opencode-sandbox/result/worker-7",
+      resultCommit: "0123456789abcdef0123456789abcdef01234567",
+      sandboxSessionID: "worker-7",
+      pathCount: 2,
+      pathPreview: "broker/src/server.ts, gone.ts",
+      preview: "diff --git a/file.ts b/file.ts\n+visible change",
+      previewTruncated: true,
+      previewFile: "/private/preview.patch",
+    });
+    expect(ask.metadata).not.toHaveProperty("details");
+    expect(() =>
+      buildSandboxResultInstallAsk({ resultRef: "", resultCommit: "x" }),
+    ).toThrow(HostToolAskError);
   });
 });

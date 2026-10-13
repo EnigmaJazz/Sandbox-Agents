@@ -90,7 +90,13 @@ describe("snapshot plan (§17) — never touches the user's index/branch", () =>
     expect(imp.argvSteps[0]).toEqual(["git", "bundle", "verify", "/tmp/r.bundle"]);
     const fetch = imp.argvSteps[1];
     expect(fetch[1]).toBe("fetch");
-    expect(fetch.some((t) => t.includes(`${RESULT_REF_PREFIX}/sess123:${RESULT_REF_PREFIX}/sess123`))).toBe(true);
+    expect(fetch).toEqual([
+      "git",
+      "fetch",
+      "--no-tags",
+      "/tmp/r.bundle",
+      `+${RESULT_REF_PREFIX}/sess123:${RESULT_REF_PREFIX}/sess123`,
+    ]);
     // The user's branch must never appear in the plan.
     const all = imp.argvSteps.flat().join(" ");
     expect(all).not.toMatch(/\s(master|main|HEAD:)\b/);
@@ -208,7 +214,7 @@ describe("host git commit argv (§31) — ref-scoped, never sweeps", () => {
   test("message is bounded, flag-safe, control-free", () => {
     expect(() => buildGitCommitArgv({ paths, message: "" })).toThrow(ValidationError);
     expect(() => buildGitCommitArgv({ paths, message: "-x" })).toThrow(ValidationError);
-    expect(() => buildGitCommitArgv({ paths, message: "a\nb" })).toThrow(ValidationError);
+    expect(() => buildGitCommitArgv({ paths, message: "a\nb" })).not.toThrow();
     expect(() => buildGitCommitArgv({ paths, message: "x".repeat(4097) })).toThrow(ValidationError);
   });
 });

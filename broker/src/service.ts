@@ -34,6 +34,7 @@ import type { SpawnFn } from "./msb.ts";
 import {
   assertArgv,
   assertContent,
+  assertExpectedResultCommit,
   assertExternalCopyTarget,
   assertGrepQuery,
   assertPayloadKeys,
@@ -69,6 +70,14 @@ import {
   parseLsFilesLines,
   parseLsTreeLines,
 } from "./gitops.ts";
+import {
+  buildResultCommitArgv,
+  buildResultDeleteArgv,
+  buildResultPatchArgv,
+  buildResultRestoreArgv,
+  planSandboxResultInstall,
+  readSandboxResult,
+} from "./sandbox-result.ts";
 import {
   assertCopyOutReviewLimit,
   countCopyLines,
@@ -113,6 +122,7 @@ import type {
   MetricsRecord,
   PolicyRecord,
   Operation,
+  SessionState,
 } from "./types.ts";
 
 export interface OpContext {
@@ -156,12 +166,12 @@ function payloadOf(req: BrokerRequestEnvelope): Payload {
  * session record's agent is trusted, so an unknown session fails closed.
  */
 export function authorizeHostDispatch(
-  ctx: Pick<OpContext, "store"> & { config: { readOnlyAgents?: readonly string[] } },
+  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> },
   operation: string,
   sessionID: string,
   _reqAgent?: string,
 ): HostToolAccess {
-  const policy = new HostToolPolicy(ctx.config.readOnlyAgents ?? []);
+  const policy = new HostToolPolicy(ctx.config.readOnlyAgents);
   const existing = ctx.store.get(sessionID);
   const trusted = existing?.agent;
   const decision = policy.decide(operation, trusted);
@@ -179,7 +189,7 @@ export function authorizeHostDispatch(
  * the binding can only ever record a host-authoritative orchestrator identity.
  */
 function assertBindableAgent(
-  config: { readOnlyAgents?: readonly string[] },
+  config: Pick<BrokerConfig, "readOnlyAgents">,
   agent: unknown,
 ): string {
   if (typeof agent !== "string" || agent.length === 0) {
@@ -188,7 +198,7 @@ function assertBindableAgent(
   if (agent.length > 128) {
     throw new ValidationError("bindSessionAgent agent exceeds 128 bytes");
   }
-  const allow = config.readOnlyAgents ?? [];
+  const allow = config.readOnlyAgents;
   if (!allow.includes(agent)) {
     throw new PolicyError(
       `session agent binding refused: "${agent}" is not a host-authoritative orchestrator identity`,
@@ -214,7 +224,7 @@ function assertBindableAgent(
  * orchestrator identity.
  */
 export function bindSessionAgent(
-  ctx: Pick<OpContext, "store"> & { config: { readOnlyAgents?: readonly string[] } },
+  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> },
   sessionID: string,
   payload: unknown,
 ): SessionRecord {
@@ -224,6 +234,17 @@ export function bindSessionAgent(
     (payload as { agent?: unknown } | undefined)?.agent,
   );
   const existing = ctx.store.get(sessionID);
+  if (
+    existing &&
+    (existing.workerLifecycleEntered === true ||
+      existing.workerName !== undefined ||
+      existing.workerState !== undefined ||
+      ["CREATING_SANDBOX", "SANDBOX_ACTIVE", "RESULT_READY", "APPLY_PENDING", "APPLIED", "RETAINED", "REJECTED"].includes(existing.state))
+  ) {
+    throw new PolicyError(
+      `session ${sessionID} entered the worker lifecycle and cannot be bound to a host mutation identity`,
+    );
+  }
   if (existing?.agent !== undefined && existing.agent !== agent) {
     throw new PolicyError(
       `session ${sessionID} is already bound to "${existing.agent}"; the first host-authoritative binding wins`,
@@ -278,8 +299,7 @@ export function buildEnsureWorkerOp(ctx: OpContext): (req: BrokerRequestEnvelope
     // Orchestrator read-only: refuse before any touch/admission side effect (R2).
     const existing = ctx.store.get(req.sessionID);
     const trusted = existing?.agent ?? req.agent;
-    const readOnly =
-      (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? [];
+    const readOnly = ctx.config.readOnlyAgents;
     if (trusted && readOnly.includes(trusted)) {
       throw new PolicyError(
         `orchestrator agent "${trusted}" is not allowed to create a worker (orchestrator-readonly)`,
@@ -290,11 +310,12 @@ export function buildEnsureWorkerOp(ctx: OpContext): (req: BrokerRequestEnvelope
         `orchestrator agent "${req.agent}" is not allowed to create a worker (orchestrator-readonly)`,
       );
     }
-    const payload = payloadOf(req) as { projectDir?: unknown };
+    const payload = payloadOf(req) as { projectDir?: unknown; snapshot?: unknown };
     const projectID = resolveProjectID(payload.projectDir, ctx.config.projects);
     const record = ctx.store.touch(req.sessionID, {
       projectID,
       agent: req.agent,
+      workerLifecycleEntered: true,
       lastOperation: "ensureWorker",
     }, "ensureWorker");
 
@@ -311,10 +332,17 @@ export function buildEnsureWorkerOp(ctx: OpContext): (req: BrokerRequestEnvelope
           record.workerState !== "DESTROYED" &&
           record.workerState !== "FAILED"
         ) {
+          if (payload.snapshot !== undefined) {
+            await assertPinnedSnapshotCompatible(ctx, projectID, record, payload.snapshot);
+          }
+          const snapshot =
+            (record as SessionRecordWithSnapshotIdentity).snapshotIdentity ??
+            await pinnedSnapshotIdentity(ctx, projectID, record, payload.snapshot);
           return {
             worker: record.workerName,
             state: record.state,
             reused: true,
+            snapshot,
           };
         }
         break;
@@ -366,8 +394,7 @@ async function createWorkerForSession(
   // Orchestrator read-only: fail closed even for queued creations
   const existing2 = ctx.store.get(sessionID);
   const trusted2 = existing2?.agent ?? req.agent;
-  const ro2 =
-    (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? [];
+  const ro2 = ctx.config.readOnlyAgents;
   if (trusted2 && ro2.includes(trusted2)) {
     throw new PolicyError(
       `orchestrator agent "${trusted2}" is not allowed to create a worker (orchestrator-readonly)`,
@@ -415,7 +442,8 @@ async function createWorkerForSession(
     // Snapshot: synthetic baseline B under refs/opencode-sandbox/baseline/<id>.
     // MUST be awaited — the bundle is required before createWorker/copyIn.
     const bundle = bundlePathFor(ctx.config.stateDir, sessionID);
-    await runSnapshot(ctx, repoDir, sessionID, bundle);
+    const snapshotSelection = snapshotFromPayload(payloadOf(req)?.snapshot);
+    const snapshot = await runSnapshot(ctx, repoDir, sessionID, bundle, snapshotSelection);
 
     // Create the worker from the TRUSTED image with policy-derived resources.
     await ctx.adapter.createWorker({
@@ -482,15 +510,16 @@ async function createWorkerForSession(
         workerName,
         workerState: "ACTIVE",
         baselineRef: baselineRef(sessionID),
+        snapshotIdentity: snapshot,
         resultRef: undefined,
         error: undefined,
         resources: {
           cpu: ctx.budget.perWorkerCpu,
           memBytes: ctx.budget.perWorkerMemBytes,
         },
-      },
+      } as Partial<SessionRecord> & { snapshotIdentity: SnapshotIdentity },
     );
-    return { worker: workerName, state: next.state, reused: false };
+    return { worker: workerName, state: next.state, reused: false, snapshot };
   } catch (err) {
     // §10: creation failure -> FAILED_CLOSED. Never fall back to host (S14).
     // Gate 5 live finding: a partially created worker must not be left
@@ -660,12 +689,109 @@ function ensureGitRepo(ctx: OpContext, repoDir: string): void {
  * bundle for the worker. The user's branch/index are never touched (§17).
  * Any failure fails closed (S14) — no partial state is published.
  */
+type SnapshotSelection = { worktree: true } | { resultRef: string } | { commit: string };
+type SnapshotIdentity = { commit: string; tree: string; source: "worktree" | "resultRef" | "commit"; resultRef?: string; headSha: string };
+type SessionRecordWithSnapshotIdentity = SessionRecord & { snapshotIdentity?: SnapshotIdentity };
+
+function snapshotFromPayload(value: unknown): SnapshotSelection {
+  if (value === undefined) return { worktree: true };
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new ValidationError("snapshot must be an object");
+  const snapshot = value as Record<string, unknown>;
+  const keys = Object.keys(snapshot);
+  if (keys.length !== 1) throw new ValidationError("snapshot must name exactly one of resultRef, commit, worktree");
+  if (keys[0] === "worktree" && snapshot.worktree === true) return { worktree: true };
+  if (keys[0] === "resultRef" && typeof snapshot.resultRef === "string" && /^refs\/opencode-sandbox\/result\/[A-Za-z0-9_-]{1,64}$/.test(snapshot.resultRef)) {
+    return { resultRef: snapshot.resultRef };
+  }
+  if (keys[0] === "commit" && typeof snapshot.commit === "string" && /^[0-9a-fA-F]{40}$/.test(snapshot.commit)) {
+    return { commit: snapshot.commit };
+  }
+  throw new ValidationError("snapshot must contain a valid resultRef, full commit SHA, or worktree: true");
+}
+
+async function assertPinnedSnapshotCompatible(
+  ctx: OpContext,
+  projectID: string,
+  record: SessionRecord,
+  rawSelection: unknown,
+): Promise<void> {
+  const selection = snapshotFromPayload(rawSelection);
+  const repoDir = projectDirFor(ctx, projectID);
+  const env = { GIT_DIR: join(repoDir, ".git") };
+  if (!record.baselineRef) throw new StateError("existing worker has no pinned snapshot identity");
+  const current = await ctx.git.spawn(["git", "rev-parse", "--verify", `${record.baselineRef}^{commit}`], { env, cwd: repoDir });
+  if (current.status !== 0 || !/^[0-9a-f]{40}$/.test(current.stdout.trim())) throw new StateError("existing worker snapshot identity cannot be resolved");
+  if (!("worktree" in selection)) {
+    const reference = "resultRef" in selection ? selection.resultRef : selection.commit;
+    const resolved = await ctx.git.spawn(["git", "rev-parse", "--verify", `${reference}^{commit}`], { env, cwd: repoDir });
+    if (resolved.status !== 0 || !/^[0-9a-f]{40}$/.test(resolved.stdout.trim())) {
+      throw new StateError("snapshot does not resolve to a commit in the registered project");
+    }
+    if (current.stdout.trim() !== resolved.stdout.trim()) throw new StateError("snapshot differs from the existing worker snapshot");
+    return;
+  }
+  const head = await ctx.git.spawn(["git", "rev-parse", "--verify", "HEAD"], { env, cwd: repoDir });
+  if (head.status !== 0) throw new StateError("project has no HEAD commit; cannot compare worker snapshot");
+  const index = join(ctx.config.stateDir, "tmp", `${record.sessionID}.snapshot-check.index`);
+  mkdirSync(join(ctx.config.stateDir, "tmp"), { recursive: true, mode: 0o700 });
+  const worktreeEnv = { ...env, GIT_INDEX_FILE: index };
+  try {
+    for (const argv of [["git", "read-tree", "HEAD"], ["git", "add", "-A", "--"]]) {
+      const result = await ctx.git.spawn(argv, { env: worktreeEnv, cwd: repoDir });
+      if (result.status !== 0) throw new StateError(`cannot compare working-tree snapshot: ${trimErr(result.stderr)}`);
+    }
+    const tree = await ctx.git.spawn(["git", "write-tree"], { env: worktreeEnv, cwd: repoDir });
+    const oldTree = await ctx.git.spawn(["git", "rev-parse", "--verify", `${current.stdout.trim()}^{tree}`], { env, cwd: repoDir });
+    const oldParent = await ctx.git.spawn(["git", "rev-parse", "--verify", `${current.stdout.trim()}^`], { env, cwd: repoDir });
+    const oldSubject = await ctx.git.spawn(["git", "log", "-1", "--format=%s", current.stdout.trim()], { env, cwd: repoDir });
+    if (tree.status !== 0 || oldTree.status !== 0 || oldParent.status !== 0 || oldSubject.status !== 0 || tree.stdout.trim() !== oldTree.stdout.trim() || oldParent.stdout.trim() !== head.stdout.trim() || oldSubject.stdout.trim() !== `opencode-sandbox baseline for ${record.sessionID}`) {
+      throw new StateError("snapshot differs from the existing worker snapshot");
+    }
+  } finally {
+    rmSync(index, { force: true });
+  }
+}
+
+async function pinnedSnapshotIdentity(
+  ctx: OpContext,
+  projectID: string,
+  record: SessionRecord,
+  rawSelection: unknown,
+): Promise<SnapshotIdentity> {
+  const repoDir = projectDirFor(ctx, projectID);
+  const env = { GIT_DIR: join(repoDir, ".git") };
+  if (!record.baselineRef) throw new StateError("existing worker has no pinned snapshot identity");
+  const commit = await ctx.git.spawn(["git", "rev-parse", "--verify", `${record.baselineRef}^{commit}`], { env, cwd: repoDir });
+  if (commit.status !== 0 || !/^[0-9a-f]{40}$/.test(commit.stdout.trim())) {
+    throw new StateError("existing worker snapshot identity cannot be resolved");
+  }
+  const commitSha = commit.stdout.trim();
+  const tree = await ctx.git.spawn(["git", "rev-parse", "--verify", `${commitSha}^{tree}`], { env, cwd: repoDir });
+  const head = await ctx.git.spawn(["git", "rev-parse", "--verify", `${commitSha}^`], { env, cwd: repoDir });
+  const subject = await ctx.git.spawn(["git", "log", "-1", "--format=%s", commitSha], { env, cwd: repoDir });
+  if (tree.status !== 0 || !/^[0-9a-f]{40}$/.test(tree.stdout.trim())) {
+    throw new StateError("existing worker snapshot identity cannot be resolved");
+  }
+  const selection = rawSelection === undefined ? undefined : snapshotFromPayload(rawSelection);
+  const source: SnapshotIdentity["source"] = selection
+    ? "resultRef" in selection ? "resultRef" : "commit"
+    : subject.status === 0 && subject.stdout.trim() === `opencode-sandbox baseline for ${record.sessionID}` ? "worktree" : "commit";
+  return {
+    commit: commitSha,
+    tree: tree.stdout.trim(),
+    source,
+    ...(selection && "resultRef" in selection ? { resultRef: selection.resultRef } : {}),
+    headSha: /^[0-9a-f]{40}$/.test(head.stdout.trim()) ? head.stdout.trim() : commitSha,
+  };
+}
+
 async function runSnapshot(
   ctx: OpContext,
   repoDir: string,
   sessionID: string,
   bundle: string,
-): Promise<string> {
+  selection: SnapshotSelection,
+): Promise<SnapshotIdentity> {
   mkdirSync(join(ctx.config.stateDir, "bundles"), {
     recursive: true,
     mode: 0o700,
@@ -685,54 +811,42 @@ async function runSnapshot(
   const git = (argv: string[], timeoutMs = 120_000) =>
     ctx.git.spawn(argv, { env, cwd: repoDir, timeoutMs });
 
-  // HEAD must exist: the baseline commit B has HEAD as its parent.
   const head = await git(["git", "rev-parse", "--verify", "HEAD"]);
-  if (head.status !== 0) {
-    throw new StateError(
-      `project has no HEAD commit; cannot snapshot (${repoDir})`,
-    );
+  if (head.status !== 0) throw new StateError(`project has no HEAD commit; cannot snapshot (${repoDir})`);
+  const headSha = head.stdout.trim();
+  let commitSha: string;
+  let treeSha: string;
+  let source: SnapshotIdentity["source"];
+  let pinnedResultRef: string | undefined;
+  if ("worktree" in selection) {
+    const add = await git(["git", "add", "-A", "--"]);
+    if (add.status !== 0) throw new StateError(`snapshot add failed: ${trimErr(add.stderr)}`);
+    const tree = await git(["git", "write-tree"]);
+    if (tree.status !== 0) throw new StateError(`snapshot write-tree failed: ${trimErr(tree.stderr)}`);
+    treeSha = tree.stdout.trim();
+    const commit = await git(["git", "commit-tree", treeSha, "-p", "HEAD", "-m", `opencode-sandbox baseline for ${sessionID}`]);
+    if (commit.status !== 0) throw new StateError(`snapshot commit-tree failed: ${trimErr(commit.stderr)}`);
+    commitSha = commit.stdout.trim();
+    source = "worktree";
+  } else {
+    const reference = "resultRef" in selection ? selection.resultRef : selection.commit;
+    const resolved = await git(["git", "rev-parse", "--verify", `${reference}^{commit}`]);
+    if (resolved.status !== 0 || !/^[0-9a-f]{40}$/.test(resolved.stdout.trim())) {
+      throw new StateError("snapshot does not resolve to a commit in the registered project");
+    }
+    commitSha = resolved.stdout.trim();
+    const tree = await git(["git", "rev-parse", "--verify", `${commitSha}^{tree}`]);
+    if (tree.status !== 0 || !/^[0-9a-f]{40}$/.test(tree.stdout.trim())) throw new StateError("snapshot commit tree cannot be resolved");
+    treeSha = tree.stdout.trim();
+    source = "resultRef" in selection ? "resultRef" : "commit";
+    if ("resultRef" in selection) pinnedResultRef = selection.resultRef;
   }
-
-  // Stage the full working tree (HEAD + staged + unstaged + untracked,
-  // respecting .gitignore) into the TEMPORARY index only.
-  const add = await git(["git", "add", "-A", "--"]);
-  if (add.status !== 0) {
-    throw new StateError(`snapshot add failed: ${trimErr(add.stderr)}`);
-  }
-  const tree = await git(["git", "write-tree"]);
-  if (tree.status !== 0) {
-    throw new StateError(`snapshot write-tree failed: ${trimErr(tree.stderr)}`);
-  }
-  const commit = await git([
-    "git",
-    "commit-tree",
-    tree.stdout.trim(),
-    "-p",
-    "HEAD",
-    "-m",
-    `opencode-sandbox baseline for ${sessionID}`,
-  ]);
-  if (commit.status !== 0) {
-    throw new StateError(
-      `snapshot commit-tree failed: ${trimErr(commit.stderr)}`,
-    );
-  }
-  const update = await git(["git", "update-ref", ref, commit.stdout.trim()]);
-  if (update.status !== 0) {
-    throw new StateError(
-      `snapshot update-ref failed: ${trimErr(update.stderr)}`,
-    );
-  }
+  const update = await git(["git", "update-ref", ref, commitSha]);
+  if (update.status !== 0) throw new StateError(`snapshot update-ref failed: ${trimErr(update.stderr)}`);
   const bundleCreate = await git(["git", "bundle", "create", bundle, ref]);
-  if (bundleCreate.status !== 0) {
-    throw new StateError(
-      `snapshot bundle failed: ${trimErr(bundleCreate.stderr)}`,
-    );
-  }
-  // systemd UMask=0077 makes git create the bundle 0600 -> root-owned in the
-  // guest -> unreadable by the non-root worker user (Gate 5 live finding).
+  if (bundleCreate.status !== 0) throw new StateError(`snapshot bundle failed: ${trimErr(bundleCreate.stderr)}`);
   chmodSync(bundle, 0o644);
-  return ref;
+  return { commit: commitSha, tree: treeSha, source, ...(pinnedResultRef ? { resultRef: pinnedResultRef } : {}), headSha };
 }
 
 function trimErr(s: string): string {
@@ -765,10 +879,13 @@ async function gcSessionArtifacts(
       remove = true;
     } else {
       let durable = false;
-      if (removalNeedsDurableRef(record)) {
+      const bundleExists = existsSync(
+        bundlePathFor(ctx.config.stateDir, sessionID),
+      );
+      if (removalNeedsDurableRef(record, bundleExists)) {
         durable = await durableHostRefResolves(ctx, record);
       }
-      remove = shouldRemoveSessionArtifacts(record, durable);
+      remove = shouldRemoveSessionArtifacts(record, durable, bundleExists);
     }
     if (!remove) return;
     for (const r of removeSessionArtifacts(ctx.config.stateDir, sessionID)) {
@@ -826,8 +943,14 @@ export function buildExecOp(ctx: OpContext): OpHandler {
     );
     let cwd: string | undefined;
     if (payload.cwd !== undefined) {
-      assertSandboxPath(payload.cwd, ctx.config.resource.pathMaxBytes);
-      cwd = payload.cwd;
+      if (payload.cwd === "/work") {
+        cwd = "/work";
+      } else {
+        assertSandboxPath(payload.cwd, ctx.config.resource.pathMaxBytes);
+        // The API cwd is project-relative; msb needs a guest-absolute workdir.
+        // Relative workdirs are unusable by the guest, so anchor them under /work.
+        cwd = resolve("/work", payload.cwd);
+      }
     }
     const record = recordOr404(ctx.store, req.sessionID);
     const worker = requireActiveWorker(record);
@@ -851,11 +974,39 @@ export function buildReadFileOp(ctx: OpContext): OpHandler {
     assertSandboxPath(payload.path, ctx.config.resource.pathMaxBytes);
     const record = recordOr404(ctx.store, req.sessionID);
     const worker = requireActiveWorker(record);
+    const path = payload.path as string;
+    const maxBytes = ctx.config.resource.contentMaxBytes;
+    // Size first: a read must be refused, never silently shortened. The read
+    // limit equals the write limit, so anything sandbox_write accepts can be
+    // read back whole by sandbox_edit.
+    const stat = await ctx.adapter.exec(
+      worker,
+      ["stat", "-L", "-c", "%s:%F", "--", path],
+      { timeoutMs: 30_000 },
+    );
+    if (stat.status !== 0) {
+      throw new MsbError(
+        `readFile failed in worker (status ${stat.status}): ${stat.stderr.trim()}`,
+      );
+    }
+    const statLine = /^(\d+):(regular file|regular empty file)\s*$/.exec(stat.stdout);
+    if (!statLine) {
+      throw new ValidationError(`readFile target is not a regular file: ${path}`);
+    }
+    const size = Number(statLine[1]);
+    if (size > maxBytes) {
+      throw new ValidationError(
+        `readFile refused: ${path} is ${size} bytes, over the ${maxBytes}-byte limit; use sandbox_grep or sandbox_copy_out`,
+      );
+    }
+    // base64, not cat: the exact bytes survive the exec channel, including
+    // CRLF line endings that the adapter's PTY normalization would rewrite.
     const result = await ctx.adapter.exec(
       worker,
-      ["cat", "--", payload.path as string],
+      ["base64", "-w", "0", "--", path],
       {
         timeoutMs: 30_000,
+        maxOutputBytes: Math.ceil(maxBytes / 3) * 4 + 64,
       },
     );
     if (result.status !== 0) {
@@ -863,7 +1014,21 @@ export function buildReadFileOp(ctx: OpContext): OpHandler {
         `readFile failed in worker (status ${result.status}): ${result.stderr.trim()}`,
       );
     }
-    return { content: result.stdout };
+    const bytes = Buffer.from(result.stdout.replace(/\s+/g, ""), "base64");
+    if (bytes.length !== size) {
+      throw new MsbError(
+        `readFile refused: read ${bytes.length} of ${size} bytes from ${path} (truncated or changed during the read)`,
+      );
+    }
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    } catch {
+      throw new ValidationError(
+        `readFile refused: ${path} is not valid UTF-8 text; use sandbox_copy_out for binary files`,
+      );
+    }
+    return { content };
   };
 }
 
@@ -881,6 +1046,8 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
       `write-${req.sessionID}-${randomUUID()}.tmp`,
     );
     const workerTmp = `/work/.broker-tmp/write-${randomUUID()}.tmp`;
+    const targetPath = payload.path as string;
+    let stageTmp: string | null = null;
     try {
       mkdirSync(join(ctx.config.stateDir, "tmp"), {
         recursive: true,
@@ -913,22 +1080,42 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
           `writeFile mkdir failed in worker (status ${mkdirRes.status}): ${mkdirRes.stderr.trim()}`,
         );
       }
+      // Read the target's mode BEFORE replacing it: the replacement must keep
+      // it (an executable script must stay executable).
+      const targetMode = await existingTargetMode(ctx, worker, targetPath);
       await ctx.adapter.copyIn(worker, hostTmp, workerTmp);
-      const moved = await ctx.adapter.exec(
+      const targetDir = workerDirOf(targetPath);
+      const targetMkdir = await ctx.adapter.exec(
         worker,
-        ["mv", "-f", workerTmp, payload.path as string],
-        {
-          timeoutMs: 30_000,
-        },
+        ["mkdir", "-p", "--", targetDir],
+        { timeoutMs: 30_000 },
       );
-      if (moved.status !== 0) {
+      if (targetMkdir.status !== 0) {
         throw new MsbError(
-          `writeFile failed in worker (status ${moved.status}): ${moved.stderr.trim()}`,
+          `writeFile target mkdir failed in worker (status ${targetMkdir.status}): ${targetMkdir.stderr.trim()}`,
         );
       }
+      // The copied-in temp is root-owned, so the worker user cannot chmod it.
+      // Stage a worker-owned copy beside the target (same filesystem, so the
+      // final mv stays an atomic rename), set its mode, then replace.
+      stageTmp = `${targetDir}/.broker-write-${randomUUID()}.tmp`;
+      await execOrThrow(ctx, worker, ["cp", "--", workerTmp, stageTmp], "writeFile stage");
+      await execOrThrow(
+        ctx,
+        worker,
+        ["chmod", targetMode ?? "644", "--", stageTmp],
+        "writeFile chmod",
+      );
+      await execOrThrow(ctx, worker, ["mv", "-f", "--", stageTmp, targetPath], "writeFile");
+      stageTmp = null;
       return { path: payload.path };
     } finally {
       rmSync(hostTmp, { force: true });
+      // Best-effort worker cleanup; a failure here must not mask the result.
+      const leftovers = stageTmp ? [workerTmp, stageTmp] : [workerTmp];
+      await ctx.adapter
+        .exec(worker, ["rm", "-f", "--", ...leftovers], { timeoutMs: 30_000 })
+        .catch(() => undefined);
     }
   };
 }
@@ -1109,6 +1296,48 @@ export function buildCopyInOp(ctx: OpContext): OpHandler {
   };
 }
 
+/** Run a worker command; any non-zero status fails closed with its stderr. */
+async function execOrThrow(
+  ctx: OpContext,
+  worker: string,
+  argv: string[],
+  what: string,
+): Promise<void> {
+  const res = await ctx.adapter.exec(worker, argv, { timeoutMs: 30_000 });
+  if (res.status !== 0) {
+    throw new MsbError(`${what} failed in worker (status ${res.status}): ${res.stderr.trim()}`);
+  }
+}
+
+/**
+ * Octal mode of an existing regular-file target, or null when the target
+ * does not exist. A non-regular target (directory, device) is refused, and a
+ * target that exists but cannot be inspected fails closed.
+ */
+async function existingTargetMode(
+  ctx: OpContext,
+  worker: string,
+  path: string,
+): Promise<string | null> {
+  const stat = await ctx.adapter.exec(
+    worker,
+    ["stat", "-L", "-c", "%a:%F", "--", path],
+    { timeoutMs: 30_000 },
+  );
+  if (stat.status === 0) {
+    const m = /^([0-7]{3,4}):(regular file|regular empty file)\s*$/.exec(stat.stdout);
+    if (!m) throw new ValidationError(`writeFile target is not a regular file: ${path}`);
+    return m[1]!;
+  }
+  const exists = await ctx.adapter.exec(worker, ["test", "-e", path], { timeoutMs: 30_000 });
+  if (exists.status === 0) {
+    throw new MsbError(
+      `writeFile could not read the existing mode of ${path}: ${stat.stderr.trim()}`,
+    );
+  }
+  return null;
+}
+
 function workerDirOf(filePath: string): string {
   const idx = filePath.lastIndexOf("/");
   return idx > 0 ? filePath.slice(0, idx) : "/work";
@@ -1159,7 +1388,7 @@ export function buildApplyOp(ctx: OpContext): OpHandler {
       );
       if (check.status !== 0) {
         throw new MsbError(
-          `patch does not apply cleanly: ${check.stderr.trim()}`,
+          `patch does not apply cleanly: ${check.stderr.trim()}. Check unified-diff hunk line counts and include at least one unchanged context line in each changed-line hunk; an end-of-file append-only hunk is valid. Include a final newline.`,
         );
       }
       const applied = await ctx.adapter.exec(
@@ -1468,6 +1697,14 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
   });
   const hostBundle = bundlePathFor(ctx.config.stateDir, sessionID);
   const workerBundle = `/work/.broker-tmp/result-${sessionID}.bundle`;
+  const stagingDir = await ctx.adapter.exec(
+    worker,
+    ["mkdir", "-p", "/work/.broker-tmp"],
+    { cwd: "/work", timeoutMs: 30_000 },
+  );
+  if (stagingDir.status !== 0) {
+    throw new MsbError(`result bundle staging directory failed: ${trimErr(stagingDir.stderr)}`);
+  }
 
   // Worker side: stage the working tree (transfer artifacts excluded), commit
   // it when there is anything new, then publish result ref + bundle. Without
@@ -1529,7 +1766,7 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
       throw new MsbError(`result commit failed: ${trimErr(commit.stderr)}`);
     }
   }
-  await ctx.adapter.exec(
+  const updated = await ctx.adapter.exec(
     worker,
     ["git", "update-ref", ref, "HEAD"],
     {
@@ -1542,7 +1779,10 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
       },
     },
   );
-  await ctx.adapter.exec(
+  if (updated.status !== 0) {
+    throw new MsbError(`result ref staging failed: ${trimErr(updated.stderr)}`);
+  }
+  const bundle = await ctx.adapter.exec(
     worker,
     ["git", "bundle", "create", workerBundle, ref],
     {
@@ -1555,6 +1795,9 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
       },
     },
   );
+  if (bundle.status !== 0) {
+    throw new MsbError(`result bundle creation failed: ${trimErr(bundle.stderr)}`);
+  }
   await ctx.adapter.copyOut(worker, workerBundle, hostBundle);
 
   // Host side: verify + import under the sandbox result namespace.
@@ -1574,7 +1817,7 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
     throw new StateError("project not in allowlist");
   const projectID: string = record.projectID;
   const imported = await ctx.git.spawn(
-    ["git", "fetch", "--no-tags", hostBundle, `${ref}:${ref}`],
+    ["git", "fetch", "--no-tags", hostBundle, `+${ref}:${ref}`],
     {
       cwd: projectDirFor(ctx, projectID),
       timeoutMs: 120_000,
@@ -2032,6 +2275,8 @@ export function buildMetricsOp(ctx: OpContext): OpHandler {
       workersActive: ctx.pool.allocations.length,
       workersMax: ctx.budget.maxWorkers,
       sessionsByState,
+      droppedLogLines: ctx.logger.droppedLogLines,
+      droppedReaperTelemetryEvents: ctx.logger.droppedReaperTelemetryEvents ?? 0,
       budgetExhausted:
         checkAdmission(ctx.pool, ctx.budget, {}).allowed === false,
     };
@@ -2059,8 +2304,7 @@ export function buildPolicyOp(ctx: OpContext): OpHandler {
         maxApplyDiffLines: ctx.config.resource.maxApplyDiffLines,
       },
       network: ctx.config.network,
-      readOnlyAgents:
-        (ctx.config as { readOnlyAgents?: string[] }).readOnlyAgents ?? [],
+      readOnlyAgents: ctx.config.readOnlyAgents,
       roleModels:
         (ctx.config as { roleModels?: Record<string, unknown> }).roleModels ??
         {},
@@ -2126,30 +2370,77 @@ async function runHostStep(
 }
 
 /**
- * Resolve the applied B→C result to commit.
- *
- * With no `sandboxSessionID`, this is the caller's own session (unchanged
- * behaviour). With an explicit identifier it is THAT sandbox session's
- * persisted APPLIED result. The identifier is a session id (validated as a
- * git ref component), never an arbitrary commit/tree/branch/path: the broker
- * derives the refs from its own persisted record, requires the record to be in
- * the sandbox result namespace and bound to the same project as the commit
- * target, and fails closed on anything else.
+ * Session states whose durable B→C result ref can be read by host tools.
+ * `APPLIED` is included so an applied result stays inspectable.
  */
-function resolveCommitResult(
+const RESULT_READABLE_STATES: readonly SessionState[] = [
+  "RESULT_READY",
+  "RETAINED",
+  "APPLIED",
+];
+
+interface ResultRefPolicy {
+  /** Acceptable session states for the caller. */
+  states: readonly SessionState[];
+  /** Fail-closed error prefix, e.g. "cannot commit" / "cannot read result". */
+  prefix: string;
+  /** Commit wording: the state gate is specifically "applied". */
+  applied: boolean;
+}
+
+/** Read-op policy: any state with a durable result, read wording. */
+const RESULT_READ_POLICY: ResultRefPolicy = {
+  states: RESULT_READABLE_STATES,
+  prefix: "cannot read result",
+  applied: false,
+};
+
+/**
+ * Install-op policy: any state with a durable result. Installing writes the
+ * result's own diff paths into the working tree under one approval; it is not
+ * the commit gate, so APPLIED is not required.
+ */
+const RESULT_INSTALL_POLICY: ResultRefPolicy = {
+  states: RESULT_READABLE_STATES,
+  prefix: "cannot install result",
+  applied: false,
+};
+
+/**
+ * Resolve a session's durable B→C result refs. Shared by the commit op
+ * (an `APPLIED` result or an installed result whose recorded commit is present)
+ * and the read op (any state with a durable result). The
+ * identifier is a session id (validated as a git ref component), never an
+ * arbitrary commit/tree/branch/path: the broker derives the refs from its own
+ * persisted record, requires the record to be in the sandbox result namespace
+ * and bound to the same project as the caller, and fails closed otherwise.
+ */
+function resolveResultRefs(
   ctx: OpContext,
   callerSessionID: string,
   projectID: string,
   sandboxSessionID: unknown,
+  policy: ResultRefPolicy,
 ): { baseline: string; result: string } {
+  const { states, prefix, applied } = policy;
   if (sandboxSessionID === undefined) {
     const record = recordOr404(ctx.store, callerSessionID);
-    if (record.state !== "APPLIED" || !record.resultRef) {
-      throw new StateError("cannot commit: no applied B→C result for this session");
+    const commitEligible =
+      applied &&
+      Boolean(record.installedCommit) &&
+      (record.state === "RESULT_READY" || record.state === "RETAINED");
+    if ((!states.includes(record.state) && !commitEligible) || !record.resultRef) {
+      throw new StateError(
+        applied
+          ? `${prefix}: no applied B→C result for this session`
+          : `${prefix}: no B→C result for this session`,
+      );
     }
     if (record.projectID !== projectID) {
       throw new StateError(
-        "cannot commit: this session's applied result is not bound to this project",
+        applied
+          ? `${prefix}: this session's applied result is not bound to this project`
+          : `${prefix}: this session's result is not bound to this project`,
       );
     }
     return {
@@ -2164,25 +2455,47 @@ function resolveCommitResult(
   // anything that could traverse or name an outside ref before any lookup.
   assertRefComponent(sandboxSessionID);
   const record = recordOr404(ctx.store, sandboxSessionID);
-  if (record.state !== "APPLIED" || !record.resultRef) {
+  const commitEligible = applied && Boolean(record.installedCommit) &&
+    (record.state === "RESULT_READY" || record.state === "RETAINED");
+  if ((!states.includes(record.state) && !commitEligible) || !record.resultRef) {
     throw new StateError(
-      `cannot commit: sandbox session ${sandboxSessionID} has no applied B→C result`,
+      applied
+        ? `${prefix}: sandbox session ${sandboxSessionID} has no applied B→C result`
+        : `${prefix}: sandbox session ${sandboxSessionID} has no B→C result`,
     );
   }
   if (record.projectID !== projectID) {
     throw new StateError(
-      `cannot commit: sandbox session ${sandboxSessionID} is not bound to this project`,
+      `${prefix}: sandbox session ${sandboxSessionID} is not bound to this project`,
     );
   }
   if (!record.resultRef.startsWith(`${RESULT_REF_PREFIX}/`)) {
     throw new StateError(
-      `cannot commit: sandbox session ${sandboxSessionID} result ref is outside the sandbox result namespace`,
+      `${prefix}: sandbox session ${sandboxSessionID} result ref is outside the sandbox result namespace`,
     );
   }
   return {
     baseline: record.baselineRef ?? baselineRef(sandboxSessionID),
     result: record.resultRef,
   };
+}
+
+/**
+ * Resolve a commit-eligible B→C result. The result is the caller's own applied
+ * or recorded-installed result unless `sandboxSessionID` names the delegated
+ * session whose result should be committed instead.
+ */
+function resolveCommitResult(
+  ctx: OpContext,
+  callerSessionID: string,
+  projectID: string,
+  sandboxSessionID: unknown,
+): { baseline: string; result: string } {
+  return resolveResultRefs(ctx, callerSessionID, projectID, sandboxSessionID, {
+    states: ["APPLIED"],
+    prefix: "cannot commit",
+    applied: true,
+  });
 }
 
 /**
@@ -2208,6 +2521,26 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
       projectID,
       payload.sandboxSessionID,
     );
+    const resultSessionID = (payload.sandboxSessionID ?? req.sessionID) as string;
+    const resultRecord = recordOr404(ctx.store, resultSessionID);
+    const resolvedResult = await runHostStep(
+      ctx,
+      buildResultCommitArgv(result),
+      projectRoot,
+      60_000,
+    );
+    const resultCommit = resolvedResult.stdout.trim().toLowerCase();
+    if (resolvedResult.status !== 0 || !/^[0-9a-f]{40}$/.test(resultCommit)) {
+      throw new StateError("cannot commit: result ref commit could not be resolved");
+    }
+    if (
+      resultRecord.installedCommit &&
+      resultRecord.installedCommit !== resultCommit
+    ) {
+      throw new StateError(
+        "cannot commit: installed result commit no longer matches the result ref",
+      );
+    }
     const changed = await changedPathsBetween(ctx, projectID, baseline, result);
     if (changed.length === 0) {
       throw new StateError("refusing to commit: the B→C result is empty");
@@ -2221,6 +2554,77 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
         `refusing to commit protected paths (S17): ${rejected.join(", ")}`,
       );
     }
+    if (resultRecord.committedCommit) {
+      return {
+        committed: false,
+        alreadyCommitted: true,
+        committedCommit: resultRecord.committedCommit,
+        paths: changed,
+        steps: [],
+      };
+    }
+    let retryParentCommit: string | undefined;
+    if (resultRecord.pendingCommit) {
+      const intent = resultRecord.pendingCommit;
+      if (intent.resultCommit !== resultCommit) {
+        throw new StateError("cannot commit: pending commit intent no longer matches the result ref");
+      }
+      const headResult = await runHostStep(ctx, ["git", "rev-parse", "HEAD"], projectRoot);
+      const head = headResult.stdout.trim().toLowerCase();
+      if (headResult.status !== 0 || !/^[0-9a-f]{40}$/.test(head)) {
+        throw new StateError("cannot commit: pending commit HEAD could not be determined");
+      }
+      if (head === intent.parentCommit) {
+        // The prior git commit did not advance HEAD; retry the commit below.
+        retryParentCommit = head;
+      } else {
+        const parentResult = await runHostStep(ctx, ["git", "rev-parse", "HEAD^"], projectRoot);
+        const parent = parentResult.stdout.trim().toLowerCase();
+        if (
+          parentResult.status !== 0 ||
+          !/^[0-9a-f]{40}$/.test(parent) ||
+          parent !== intent.parentCommit
+        ) {
+          throw new StateError(
+            "cannot commit: pending commit state is ambiguous; stop the broker and follow the exact pendingCommit recovery procedure in docs/TODO.md",
+          );
+        }
+        const treeResult = await runHostStep(
+          ctx,
+          ["git", "diff", "--quiet", resultCommit, "HEAD", "--", ...changed],
+          projectRoot,
+        );
+        if (treeResult.status !== 0) {
+          throw new StateError(
+            "cannot commit: HEAD does not carry the pending result; stop the broker and follow the pendingCommit recovery procedure in docs/TODO.md",
+          );
+        }
+        ctx.store.transition(resultSessionID, resultRecord.state, "RETAINED", {
+          installedCommit: resultCommit,
+          committedCommit: head,
+          pendingCommit: undefined,
+        });
+        await releaseRetainedWorker(ctx, resultSessionID);
+        return {
+          committed: false,
+          alreadyCommitted: true,
+          committedCommit: head,
+          paths: changed,
+          steps: [],
+        };
+      }
+    }
+    const parentCommit = retryParentCommit ?? await (async () => {
+      const parentResult = await runHostStep(ctx, ["git", "rev-parse", "HEAD"], projectRoot);
+      const parent = parentResult.stdout.trim().toLowerCase();
+      if (parentResult.status !== 0 || !/^[0-9a-f]{40}$/.test(parent)) {
+        throw new StateError("cannot commit: current HEAD could not be recorded before commit");
+      }
+      return parent;
+    })();
+    ctx.store.touch(resultSessionID, {
+      pendingCommit: { resultCommit, parentCommit },
+    });
     const steps = buildGitCommitArgv({
       paths: changed,
       message: payload.message as string,
@@ -2233,7 +2637,326 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
         throw new MsbError(`git commit failed (${argv[1]}): ${step.stderr}`);
       }
     }
-    return { committed: true, paths: changed, steps: results };
+    const committedHead = await runHostStep(ctx, ["git", "rev-parse", "HEAD"], projectRoot);
+    const committedCommit = committedHead.stdout.trim().toLowerCase();
+    if (committedHead.status !== 0 || !/^[0-9a-f]{40}$/.test(committedCommit)) {
+      throw new StateError("git commit succeeded but its committed HEAD could not be recorded");
+    }
+    ctx.store.transition(resultSessionID, resultRecord.state, "RETAINED", {
+      installedCommit: resultCommit,
+      committedCommit,
+      pendingCommit: undefined,
+    });
+    await releaseRetainedWorker(ctx, resultSessionID);
+    return {
+      committed: true,
+      alreadyCommitted: false,
+      committedCommit,
+      paths: changed,
+      steps: results,
+    };
+  };
+}
+
+/**
+ * T1 read: inspect a session's durable B→C result ref with fixed argv only.
+ *
+ * The ref is resolved from a session id (never a caller-supplied raw ref);
+ * `compareSandboxSessionID` selects a two-ref comparison between two
+ * broker-resolved result refs. Read-only: no working-tree, index, or ref
+ * mutation, and no worker activation.
+ */
+export function buildResultDiffOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as { ref?: unknown };
+    // Reuse ensureWorker's exact result-ref shape validation; never accept a raw Git revision.
+    const selection = snapshotFromPayload({ resultRef: payload.ref });
+    if (!("resultRef" in selection)) throw new ValidationError("ref must be a sandbox result ref");
+    const ref = selection.resultRef;
+    const projectID = ctx.config.advisorProjects
+      .filter((id) => req.sessionID.startsWith(`advisor-${id}-`))
+      .sort((a, b) => b.length - a.length)
+      .find((id) => {
+        const nonce = req.sessionID.slice(`advisor-${id}-`.length);
+        return nonce.length === 16 && [...nonce].every((c) => "0123456789abcdef".includes(c));
+      });
+    if (!projectID) throw new PolicyError("resultDiff is available only to a registered advisor session");
+    const project = ctx.config.projects.find((entry) => entry.id === projectID);
+    if (!project) throw new StateError("advisor project is not registered");
+
+    const sessionID = ref.slice(RESULT_REF_PREFIX.length + 1);
+    const record = recordOr404(ctx.store, sessionID);
+    if (!RESULT_READABLE_STATES.includes(record.state) || record.resultRef !== ref) {
+      throw new StateError(`cannot read result: sandbox session ${sessionID} has no resolvable B→C result`);
+    }
+    if (record.projectID !== projectID) {
+      throw new StateError(`cannot read result: sandbox session ${sessionID} is not bound to this project`);
+    }
+    const baseline = record.baselineRef ?? baselineRef(sessionID);
+    const cwd = project.path;
+    const git = async (argv: string[], what: string) => {
+      const result = await ctx.git.spawn(argv, { cwd, timeoutMs: 60_000, maxOutputBytes: GIT_OUTPUT_MAX_BYTES });
+      if (result.timedOut || result.status !== 0) {
+        throw new StateError(`${what}: ${result.stderr.trim().slice(0, 500)}`);
+      }
+      return result.stdout;
+    };
+    const commit = (await git(buildResultCommitArgv(ref), "cannot resolve result ref")).trim();
+    if (!/^[0-9a-f]{40}$/.test(commit)) throw new StateError("cannot resolve result ref: malformed commit identity");
+    const baselineCommit = (await git(buildResultCommitArgv(baseline), "cannot resolve result baseline")).trim();
+    if (!/^[0-9a-f]{40}$/.test(baselineCommit)) {
+      throw new StateError("cannot resolve result baseline: malformed commit identity");
+    }
+    const rawDiff = await git(buildResultPatchArgv(baseline, ref), "cannot read result diff");
+    if (Buffer.byteLength(rawDiff, "utf8") >= GIT_OUTPUT_MAX_BYTES) {
+      throw new StateError("cannot read result diff: output reached the git output cap");
+    }
+    const preview = buildApplyPreview(rawDiff);
+    return {
+      ref,
+      baseline,
+      result: ref,
+      commit,
+      diff: preview.preview,
+      truncated: preview.previewTruncated,
+      totalLines: preview.totalLines,
+      truncation: {
+        helper: "buildApplyPreview",
+        maxLines: APPLY_PREVIEW_MAX_LINES,
+        maxBytes: GIT_OUTPUT_MAX_BYTES,
+      },
+    };
+  };
+}
+
+export function buildSandboxResultOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as {
+      projectDir?: unknown;
+      sandboxSessionID?: unknown;
+      compareSandboxSessionID?: unknown;
+    };
+    authorizeHostDispatch(ctx, "sandboxResult", req.sessionID, req.agent);
+    const { projectID, projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const { baseline, result } = resolveResultRefs(
+      ctx,
+      req.sessionID,
+      projectID,
+      payload.sandboxSessionID,
+      RESULT_READ_POLICY,
+    );
+    // Resolve the comparison ref BEFORE any spawn so a bad second session
+    // fails closed without touching git.
+    let comparison: { sessionID: string; result: string } | null = null;
+    if (payload.compareSandboxSessionID !== undefined) {
+      const other = resolveResultRefs(
+        ctx,
+        req.sessionID,
+        projectID,
+        payload.compareSandboxSessionID,
+        RESULT_READ_POLICY,
+      );
+      comparison = {
+        sessionID: payload.compareSandboxSessionID as string,
+        result: other.result,
+      };
+    }
+    const sessionID =
+      payload.sandboxSessionID === undefined
+        ? req.sessionID
+        : (payload.sandboxSessionID as string);
+    const readResult = await readSandboxResult(ctx, projectRoot, sessionID, baseline, result, comparison);
+    const completePatch = await ctx.git.spawn(buildResultPatchArgv(baseline, result), { cwd: projectRoot, timeoutMs: 60_000, maxOutputBytes: GIT_OUTPUT_MAX_BYTES });
+    let applyPreviewFiles: ApplyPreviewFiles | undefined;
+    if (completePatch.status === 0 && Buffer.byteLength(completePatch.stdout, "utf8") < GIT_OUTPUT_MAX_BYTES) {
+      try {
+        applyPreviewFiles = ensureCompleteApplyPreview(ctx.config.stateDir, sessionID, completePatch.stdout);
+      } catch {
+        // The install approval guard refuses a truncated preview without this artifact.
+      }
+    }
+    return { ...readResult, ...(applyPreviewFiles ? { applyPreviewFiles } : {}) };
+  };
+}
+
+/**
+ * T2 install (approval-gated host mutation): write exactly the resolved B→C
+ * result's own diff paths into the host working tree. The broker derives every
+ * path from the persisted baseline/result refs; the caller never supplies a ref
+ * or a path list. Fixed argv only: `git restore --source=<result> --worktree`
+ * restores the working tree and never stages the index. The single human
+ * approval is the manual review, so S17 paths surface through it rather than
+ * being rejected (unlike gitCommit, which rejects them). No worker activation.
+ */
+export function buildSandboxResultInstallOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as {
+      projectDir?: unknown;
+      sandboxSessionID?: unknown;
+      expectedResultCommit?: unknown;
+    };
+    authorizeHostDispatch(ctx, "sandboxResultInstall", req.sessionID, req.agent);
+    assertExpectedResultCommit(payload.expectedResultCommit);
+    const expectedResultCommit = payload.expectedResultCommit;
+    const { projectID, projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const { baseline, result } = resolveResultRefs(
+      ctx,
+      req.sessionID,
+      projectID,
+      payload.sandboxSessionID,
+      RESULT_INSTALL_POLICY,
+    );
+    const resultSessionID = (payload.sandboxSessionID ?? req.sessionID) as string;
+    const resultRecord = recordOr404(ctx.store, resultSessionID);
+    if (
+      resultRecord.installedCommit !== undefined &&
+      resultRecord.installedCommit !== expectedResultCommit
+    ) {
+      throw new StateError(
+        "cannot install result: stored installed commit does not match the requested result commit",
+      );
+    }
+    const resolvedCommit = await runHostStep(
+      ctx,
+      buildResultCommitArgv(result),
+      projectRoot,
+      60_000,
+    );
+    if (resolvedCommit.status !== 0) {
+      throw new StateError(
+        `cannot install result: cannot resolve the result ref commit (${trimErr(resolvedCommit.stderr)})`,
+      );
+    }
+    const resultCommit = resolvedCommit.stdout.trim().toLowerCase();
+    if (resultCommit !== expectedResultCommit) {
+      throw new StateError(
+        `cannot install result: the result ref moved since the preview (result-commit-mismatch): expectedResultCommit ${expectedResultCommit}, resolved ${resultCommit}`,
+      );
+    }
+    const changed = await changedPathsBetween(ctx, projectID, baseline, result);
+    if (changed.length === 0) {
+      throw new StateError("cannot install result: the B→C result is empty");
+    }
+    if (resultRecord.installedCommit !== undefined) {
+      const worktreeProof = await runHostStep(
+        ctx,
+        ["git", "diff", "--quiet", result, "--", ...changed],
+        projectRoot,
+      );
+      if (worktreeProof.status !== 0) {
+        throw new StateError(
+          "cannot install result: stored installed marker is stale; worktree does not match the result ref",
+        );
+      }
+      return {
+        installed: true,
+        alreadyInstalled: true,
+        resultRef: result,
+        resultCommit,
+      };
+    }
+    const rawChanges = await rawChangesBetween(ctx, projectID, baseline, result);
+    const rawPaths = rawChanges.map((change) => change.path).sort();
+    const sortedChanged = [...changed].sort();
+    if (
+      rawPaths.length !== sortedChanged.length ||
+      rawPaths.some((path, index) => path !== sortedChanged[index])
+    ) {
+      throw new StateError(
+        "cannot install result: raw metadata disagrees with the changed-path list",
+      );
+    }
+    const unsafe = rawChanges
+      .filter((change) => change.kind === "symlink" || change.kind === "submodule")
+      .map((change) => `${change.kind}:${change.path}`);
+    if (unsafe.length > 0) {
+      throw new StateError(
+        `cannot install result: unsafe symlink/submodule changes: ${unsafe.join(", ")}`,
+      );
+    }
+    const { restorePaths, deletePaths } = planSandboxResultInstall(rawChanges);
+    assertResultDeleteTargetsContained(projectRoot, deletePaths);
+    const targetPaths = [...new Set([...restorePaths, ...deletePaths])].sort();
+    if (targetPaths.length > 0) {
+      const baselineCheck = await runHostStep(
+        ctx,
+        ["git", "diff", "--quiet", baseline, "--", ...targetPaths],
+        projectRoot,
+      );
+      if (baselineCheck.status === 1) {
+        const divergent = await runHostStep(
+          ctx,
+          ["git", "diff", "--name-only", "-z", baseline, "--", ...targetPaths],
+          projectRoot,
+        );
+        if (divergent.status !== 0) {
+          throw new StateError(
+            `cannot install result: cannot identify baseline divergence (${trimErr(divergent.stderr)})`,
+          );
+        }
+        const parsed = parseNulDelimitedPaths(divergent.stdout);
+        if (!parsed.complete || parsed.paths.length === 0) {
+          throw new StateError("cannot install result: cannot identify baseline divergence");
+        }
+        throw new StateError(
+          `cannot install result: working tree diverged from baseline at: ${parsed.paths.join(", ")}`,
+        );
+      }
+      if (baselineCheck.status !== 0) {
+        throw new StateError(
+          `cannot install result: baseline check failed (${trimErr(baselineCheck.stderr)})`,
+        );
+      }
+    }
+    const steps: HostStepResult[] = [];
+    if (restorePaths.length > 0) {
+      const restore = await runHostStep(
+        ctx,
+        buildResultRestoreArgv(result, restorePaths),
+        projectRoot,
+      );
+      steps.push(restore);
+      if (restore.status !== 0) {
+        throw new MsbError(`cannot install result: git restore failed (${trimErr(restore.stderr)})`);
+      }
+    }
+    if (deletePaths.length > 0) {
+      const deleted = await runHostStep(ctx, buildResultDeleteArgv(deletePaths), projectRoot);
+      steps.push(deleted);
+      if (deleted.status !== 0) {
+        throw new MsbError(
+          `cannot install result: deleting removed paths failed (${trimErr(deleted.stderr)})`,
+        );
+      }
+    }
+    ctx.store.touch(resultSessionID, { installedCommit: expectedResultCommit });
+    return {
+      installed: true,
+      alreadyInstalled: false,
+      resultRef: result,
+      resultCommit,
+      paths: changed,
+      restoredPaths: restorePaths,
+      deletedPaths: deletePaths,
+      steps,
+    };
+  };
+}
+
+function assertResultDeleteTargetsContained(projectRoot: string, paths: readonly string[]): void { for (const path of paths) { const target = resolve(projectRoot, path); let parentRealPath: string; try { parentRealPath = realpathSync(dirname(target)); } catch { throw new StateError(`cannot install result: result-delete-parent-unavailable: cannot resolve parent for ${path}`); } if (!isWithin(projectRoot, parentRealPath)) throw new StateError(`cannot install result: result-delete-parent-escape: resolved parent for ${path} is outside the project`); try { if (!lstatSync(target).isFile()) throw new StateError(`cannot install result: result-delete-not-regular-file: ${path}`); } catch (error) { if (error instanceof StateError) throw error; if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new StateError(`cannot install result: result-delete-target-unavailable: cannot inspect ${path}`); } } }
+/** Clear one session's pending host-commit intent after explicit approval. */
+export function buildGitClearCommitIntentOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as { projectDir?: unknown; sandboxSessionID?: unknown };
+    authorizeHostDispatch(ctx, "gitClearCommitIntent", req.sessionID, req.agent);
+    const { projectID } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    resolveCommitResult(ctx, req.sessionID, projectID, payload.sandboxSessionID);
+    const sessionID = (payload.sandboxSessionID ?? req.sessionID) as string;
+    const record = recordOr404(ctx.store, sessionID);
+    const intent = record.pendingCommit;
+    if (!intent) throw new StateError("cannot clear commit intent: session has no pending commit intent");
+    ctx.store.touch(sessionID, { pendingCommit: undefined });
+    return { cleared: true, resultCommit: intent.resultCommit, parentCommit: intent.parentCommit };
   };
 }
 
@@ -2403,6 +3126,44 @@ export async function releaseWorker(
   removePoolAllocation(ctx, record);
   // Feature 2: a slot just freed — admit parked requests (fire-and-forget).
   drainQueue(ctx);
+}
+
+/**
+ * Release the worker of a result that was just committed and retained: the
+ * result is durable in its ref and in HEAD, so the worker has nothing left to
+ * give. Runs after the RETAINED transition so the commit markers are persisted
+ * first, and never throws: a failed release must not fail a commit that has
+ * already landed. A failure is logged, and the idle sweep releases any worker
+ * this leaves behind.
+ */
+async function releaseRetainedWorker(
+  ctx: OpContext,
+  sessionID: string,
+): Promise<void> {
+  const record = ctx.store.get(sessionID);
+  if (!record?.workerName) return;
+  if (record.workerState === "DESTROYED" || record.workerState === "FAILED") return;
+  try {
+    await releaseWorker(ctx, record);
+    ctx.store.touch(sessionID, {
+      workerName: undefined,
+      workerState: "DESTROYED",
+    });
+  } catch (err) {
+    // Not fatal, but not silent either: the idle sweep recovers a terminal-state
+    // session that still holds a worker, and this line shows it needed to.
+    try {
+      ctx.logger?.log?.({
+        sessionID,
+        operation: "gitCommit",
+        action: "release_retained_worker",
+        result: "error",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } catch {
+      // Logging must not fail a commit that has already landed.
+    }
+  }
 }
 
 export function buildRegisterProjectOp(ctx: OpContext): OpHandler {

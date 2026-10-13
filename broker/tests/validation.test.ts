@@ -12,6 +12,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   ValidationError,
+  GIT_COMMIT_MESSAGE_MAX_BYTES,
+  GH_BODY_MAX_BYTES,
+  assertGitCommitMessage,
+  assertGhBody,
   assertArgv,
   assertCount,
   assertEvidenceRevision,
@@ -933,5 +937,40 @@ describe("host review lens-context and inline capture validators", () => {
       expect(() => assertReviewInputJson(bad, max)).toThrow(ValidationError);
     }
     expect(() => assertReviewInputJson(1, max)).toThrow(ValidationError);
+  });
+});
+
+describe("commit and issue text validators", () => {
+  test("accepts a multi-line commit with a routed trailer and body tab", () => {
+    expect(() =>
+      assertGitCommitMessage("Implement feature\n\nBody\ttext\r\nROUTED: bugfix@passed (2026-10-02)"),
+    ).not.toThrow();
+  });
+
+  test("accepts CRLF but rejects a bare carriage return", () => {
+    expect(() => assertGitCommitMessage("Subject\r\nBody")).not.toThrow();
+    expect(() => assertGitCommitMessage("Subject\rBody")).toThrow(ValidationError);
+    expect(() => assertGhBody("Body\r\nline")).not.toThrow();
+    expect(() => assertGhBody("Body\rline")).toThrow(ValidationError);
+  });
+
+  test("rejects NUL and other control characters in commit messages and issue bodies", () => {
+    for (const control of ["\u0000", "\u0001", "\u007f"]) {
+      expect(() => assertGitCommitMessage(`Subject\nBody${control}`)).toThrow(ValidationError);
+      expect(() => assertGhBody(`Body${control}`)).toThrow(ValidationError);
+    }
+  });
+
+  test("rejects a commit message without a single-line subject", () => {
+    expect(() => assertGitCommitMessage("\nBody without subject")).toThrow(ValidationError);
+  });
+
+  test("retains commit and issue body size limits", () => {
+    expect(() => assertGitCommitMessage("x".repeat(GIT_COMMIT_MESSAGE_MAX_BYTES + 1))).toThrow(ValidationError);
+    expect(() => assertGhBody("x".repeat(GH_BODY_MAX_BYTES + 1))).toThrow(ValidationError);
+  });
+
+  test("continues accepting multi-line issue bodies", () => {
+    expect(() => assertGhBody("Issue summary\n\nDetails\twith a tab")).not.toThrow();
   });
 });

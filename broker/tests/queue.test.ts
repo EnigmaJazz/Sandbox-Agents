@@ -126,6 +126,94 @@ function makeHarness(
   return { ctx, created, projDir, ensureWorker };
 }
 
+function makeReuseHarness(sessionID: string) {
+  const harness = makeHarness();
+  const pinned = "a".repeat(40);
+  const head = "b".repeat(40);
+  const tree = "c".repeat(40);
+  const driftedTree = "d".repeat(40);
+  harness.ctx.git.spawn = async (argv: string[]) => {
+    const ok = (stdout = "") => ({ status: 0, stdout, stderr: "", timedOut: false });
+    if (argv[0] === "git" && argv[1] === "rev-parse") {
+      if (argv[3]?.startsWith("refs/opencode-sandbox/baseline/")) return ok(`${pinned}\n`);
+      if (argv[3]?.startsWith("refs/opencode-sandbox/result/")) return ok(`${"e".repeat(40)}\n`);
+      if (argv[3] === `${pinned}^{tree}`) return ok(`${tree}\n`);
+      if (argv[3] === `${pinned}^`) return ok(`${head}\n`);
+      if (argv[3] === "HEAD") return ok(`${head}\n`);
+      if (argv[3]?.endsWith("^{commit}")) return ok(`${argv[3].startsWith("refs/") || argv[3] === `${pinned}^{commit}` ? pinned : "e".repeat(40)}\n`);
+    }
+    if (argv[0] === "git" && argv[1] === "write-tree") return ok(`${driftedTree}\n`);
+    if (argv[0] === "git" && argv[1] === "log") return ok(`opencode-sandbox baseline for ${sessionID}\n`);
+    return ok();
+  };
+  harness.ctx.store.touch(sessionID, {
+    projectID: "repo",
+    state: "SANDBOX_ACTIVE",
+    workerName: `worker-${sessionID}`,
+    workerState: "ACTIVE",
+    baselineRef: `refs/opencode-sandbox/baseline/${sessionID}`,
+  });
+  return { ...harness, pinned, head, tree };
+}
+
+function reuseRequest(
+  ctx: OpContext,
+  projDir: string,
+  sessionID: string,
+  snapshot?: unknown,
+): Promise<unknown> {
+  const payload = { projectDir: projDir, ...(snapshot === undefined ? {} : { snapshot }) };
+  return buildEnsureWorkerOp(ctx)({
+    version: 1,
+    id: `reuse-${sessionID}`,
+    operation: "ensureWorker",
+    sessionID,
+    payload,
+  } as BrokerRequestEnvelope);
+}
+
+test("existing worker reuse without a snapshot ignores host worktree drift and returns its snapshot identity", async () => {
+  const sessionID = "reuse-drift";
+  const { ctx, projDir, pinned, head, tree } = makeReuseHarness(sessionID);
+
+  const result = await reuseRequest(ctx, projDir, sessionID) as {
+    worker: string;
+    reused: boolean;
+    snapshot?: { commit: string; tree: string; source: string; headSha: string };
+  };
+
+  expect(result.worker).toBe(`worker-${sessionID}`);
+  expect(result.reused).toBe(true);
+  expect(result.snapshot).toEqual({ commit: pinned, tree, source: "worktree", headSha: head });
+});
+
+test("existing worker reuse refuses an explicitly selected commit that differs from its snapshot", async () => {
+  const sessionID = "reuse-mismatch";
+  const { ctx, projDir } = makeReuseHarness(sessionID);
+
+  for (const snapshot of [
+    { commit: "f".repeat(40) },
+    { resultRef: "refs/opencode-sandbox/result/other" },
+  ]) {
+    await expect(reuseRequest(ctx, projDir, sessionID, snapshot)).rejects.toThrow(
+      "snapshot differs from the existing worker snapshot",
+    );
+  }
+});
+
+test("existing worker reuse accepts an explicitly selected matching commit", async () => {
+  const sessionID = "reuse-match";
+  const { ctx, projDir, pinned } = makeReuseHarness(sessionID);
+
+  const result = await reuseRequest(ctx, projDir, sessionID, { commit: pinned }) as {
+    reused: boolean;
+    snapshot?: { commit: string };
+  };
+
+  expect(result.reused).toBe(true);
+  expect(result.snapshot?.commit).toBe(pinned);
+});
+
 function victimRecord(name: string): SessionRecord {
   return {
     sessionID: name,

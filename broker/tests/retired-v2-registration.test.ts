@@ -128,12 +128,12 @@ describe("v6 §28 retired v2 registration removal", () => {
       reason: "widen roots",
     });
     expect(ask.permission).toBe("host_sdd_attempt_grant");
-    expect(ask.metadata.operation).toBe("sddAttemptGrant");
-    expect(ask.metadata.details.rootCount).toBe(2);
+    expect(ask.metadata.hostOperation).toBe("sddAttemptGrant");
+    expect(ask.metadata.rootCount).toBe(2);
     expect(ask.always).toEqual([]);
   });
 
-  test("the permission fragment denies the eight retired tools and keeps grant ask", () => {
+  test("the permission fragment denies the eight retired tools and keeps grant dormant", () => {
     const fragment = readFileSync(
       resolve(import.meta.dir, "../../opencode/config-fragments/sandbox-permissions.jsonc"),
       "utf8",
@@ -141,6 +141,7 @@ describe("v6 §28 retired v2 registration removal", () => {
     for (const tool of RETIRED_HOST_TOOLS) {
       expect(fragment).toContain(`"${tool}": "deny"`);
     }
-    expect(fragment).toContain('"host_sdd_attempt_grant": "ask"');
+    expect(fragment).toContain('"host_sdd_attempt_grant":');
+    expect(fragment).toContain('"host_sdd_attempt_grant": "deny"');
   });
 });

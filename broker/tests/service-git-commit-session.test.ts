@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config.ts";
-import { buildGitCommitOp, type OpContext } from "../src/service.ts";
+import { buildGitClearCommitIntentOp, buildGitCommitOp, type OpContext } from "../src/service.ts";
+import { ADVISOR_ALLOWED_OPERATIONS } from "../src/advisor-socket.ts";
 import { StateError } from "../src/state.ts";
-import { ValidationError } from "../src/validation.ts";
-import type { BrokerRequestEnvelope, SessionRecord } from "../src/types.ts";
+import { ALLOWED_PAYLOAD_KEYS, HOST_MUTATION_OPERATIONS, HostToolPolicy, ValidationError } from "../src/validation.ts";
+import { OPERATIONS, type BrokerRequestEnvelope, type SessionRecord } from "../src/types.ts";
 
 const ORCHESTRATOR = "gentle-orchestrator";
 const projectRoot = process.cwd();
@@ -55,7 +56,26 @@ function makeCtx(
   });
   return {
     config,
-    store: { get: (sessionID: string) => records[sessionID] },
+    store: {
+      get: (sessionID: string) => records[sessionID],
+      touch: (sessionID: string, patch: Partial<SessionRecord>) => {
+        const next = { ...records[sessionID]!, ...patch };
+        records[sessionID] = next;
+        return next;
+      },
+      transition: (
+        sessionID: string,
+        from: SessionRecord["state"],
+        to: SessionRecord["state"],
+        patch: Partial<SessionRecord> = {},
+      ) => {
+        const current = records[sessionID]!;
+        if (current.state !== from) throw new Error(`expected ${from}, got ${current.state}`);
+        const next = { ...current, ...patch, state: to };
+        records[sessionID] = next;
+        return next;
+      },
+    },
     adapter: {},
     budget: {},
     resources: {},
@@ -75,12 +95,111 @@ function spawnStub(
     for (const [pattern, result] of rules) {
       if (pattern.test(argv.join(" "))) return { ...result, timedOut: false };
     }
+    if (argv.join(" ") === "git rev-parse HEAD") {
+      return { status: 0, stdout: "abcdef0123456789abcdef0123456789abcdef01\n", stderr: "", timedOut: false };
+    }
+    if (argv[1] === "rev-parse" && argv[2] === "--verify") {
+      return { status: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "", timedOut: false };
+    }
     return { status: 0, stdout: "", stderr: "", timedOut: false };
   };
   return { calls, spawn };
 }
 
 const NAME_ONLY = /diff --name-only/;
+
+describe("gitClearCommitIntent", () => {
+  test("clears a cross-session wedge without changing commit markers or state", async () => {
+    const intent = { resultCommit: "0123456789abcdef0123456789abcdef01234567", parentCommit: "abcdef0123456789abcdef0123456789abcdef01" };
+    const original = appliedResultRecord("worker-7", {
+      pendingCommit: intent,
+      installedCommit: "0123456789abcdef0123456789abcdef01234567",
+      committedCommit: undefined,
+    });
+    const records = { "session-1": orchestratorRecord, "worker-7": original };
+    const { spawn } = spawnStub([[NAME_ONLY, { status: 0, stdout: "a.ts\u0000", stderr: "" }]]);
+    const ctx = makeCtx(spawn, records);
+    const result = await buildGitClearCommitIntentOp(ctx)({
+      ...request({ projectDir: projectRoot, sandboxSessionID: "worker-7" }), operation: "gitClearCommitIntent",
+    }) as { cleared: boolean; resultCommit: string; parentCommit: string };
+
+    expect(result).toEqual({ cleared: true, ...intent });
+    expect(records["session-1"]).toEqual(orchestratorRecord);
+    expect(records["worker-7"]).toEqual({ ...original, pendingCommit: undefined });
+    await expect(buildGitCommitOp(ctx)(request({ projectDir: projectRoot, message: "fix: recover", sandboxSessionID: "worker-7" })))
+      .resolves.toMatchObject({ committed: true });
+  });
+
+  test("refuses when the session has no pending intent", async () => {
+    const ctx = makeCtx(async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }), { "session-1": orchestratorRecord, "worker-7": appliedResultRecord("worker-7") });
+    await expect(buildGitClearCommitIntentOp(ctx)({
+      ...request({ projectDir: projectRoot, sandboxSessionID: "worker-7" }), operation: "gitClearCommitIntent",
+    })).rejects.toThrow("no pending commit intent");
+  });
+
+  test("refuses a target result bound to another project", async () => {
+    const ctx = makeCtx(async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }), { "session-1": orchestratorRecord, "worker-7": appliedResultRecord("worker-7", { projectID: "other", pendingCommit: { resultCommit: "r", parentCommit: "p" } }) });
+    await expect(buildGitClearCommitIntentOp(ctx)({ ...request({ projectDir: projectRoot, sandboxSessionID: "worker-7" }), operation: "gitClearCommitIntent" })).rejects.toThrow("not bound to this project");
+    expect(ctx.store.get("worker-7")?.pendingCommit).toBeDefined();
+  });
+
+  test("rejects caller-supplied path or state fields", async () => {
+    const ctx = makeCtx(async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }), {
+      "session-1": appliedResultRecord("session-1", {
+        agent: ORCHESTRATOR,
+        pendingCommit: {
+          resultCommit: "0123456789abcdef0123456789abcdef01234567",
+          parentCommit: "abcdef0123456789abcdef0123456789abcdef01",
+        },
+      }),
+    });
+    await expect(buildGitClearCommitIntentOp(ctx)({
+      ...request({ path: "/tmp/state.json" }), operation: "gitClearCommitIntent",
+    })).rejects.toThrow("unexpected field 'path'");
+    expect(ctx.store.get("session-1")?.pendingCommit).toBeDefined();
+  });
+
+  test("authorizes only orchestrators and classifies the operation as a mutation", async () => {
+    const intent = {
+      resultCommit: "0123456789abcdef0123456789abcdef01234567",
+      parentCommit: "abcdef0123456789abcdef0123456789abcdef01",
+    };
+    expect(OPERATIONS).toContain("gitClearCommitIntent");
+    expect(ALLOWED_PAYLOAD_KEYS.gitClearCommitIntent).toEqual(["projectDir", "sandboxSessionID"]);
+    expect(HOST_MUTATION_OPERATIONS).toContain("gitClearCommitIntent");
+    expect(ADVISOR_ALLOWED_OPERATIONS.has("gitClearCommitIntent")).toBe(false);
+    expect(new HostToolPolicy([ORCHESTRATOR]).decide("gitClearCommitIntent", "worker-agent").allowed).toBe(false);
+    expect(new HostToolPolicy([ORCHESTRATOR]).decide("gitClearCommitIntent", ORCHESTRATOR).allowed).toBe(true);
+    const ctx = makeCtx(async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }), {
+      "session-1": appliedResultRecord("session-1", { agent: "worker-agent", pendingCommit: intent }),
+    });
+    await expect(buildGitClearCommitIntentOp(ctx)({
+      ...request({ projectDir: projectRoot }), operation: "gitClearCommitIntent",
+    })).rejects.toThrow("orchestrator-only");
+    expect(ctx.store.get("session-1")?.pendingCommit).toEqual(intent);
+  });
+
+  test("clearing an ambiguous intent lets the next commit attempt proceed", async () => {
+    const intent = {
+      resultCommit: "0123456789abcdef0123456789abcdef01234567",
+      parentCommit: "abcdef0123456789abcdef0123456789abcdef01",
+    };
+    const { calls, spawn } = spawnStub([
+      [NAME_ONLY, { status: 0, stdout: "a.ts\u0000", stderr: "" }],
+      [/git rev-parse HEAD\^$/, { status: 0, stdout: "3333333333333333333333333333333333333333\n", stderr: "" }],
+      [/git rev-parse HEAD$/, { status: 0, stdout: "4444444444444444444444444444444444444444\n", stderr: "" }],
+    ]);
+    const ctx = makeCtx(spawn, {
+      "session-1": appliedResultRecord("session-1", { agent: ORCHESTRATOR, pendingCommit: intent }),
+    });
+    await expect(buildGitCommitOp(ctx)(request({ projectDir: projectRoot, message: "fix: recover" })))
+      .rejects.toThrow("pending commit state is ambiguous");
+    await buildGitClearCommitIntentOp(ctx)({ ...request({ projectDir: projectRoot }), operation: "gitClearCommitIntent" });
+    const result = await buildGitCommitOp(ctx)(request({ projectDir: projectRoot, message: "fix: recover" }));
+    expect(result).toMatchObject({ committed: true, alreadyCommitted: false });
+    expect(calls.some((argv) => argv[1] === "commit")).toBe(true);
+  });
+});
 
 describe("gitCommit cross-session applied result", () => {
   test("commits exactly the explicit sandboxSessionID's applied result paths", async () => {
@@ -135,7 +254,7 @@ describe("gitCommit cross-session applied result", () => {
       buildGitCommitOp(ctx)(
         request({ projectDir: projectRoot, message: "m", sandboxSessionID: "worker-7" }),
       ),
-    ).rejects.toThrow(StateError);
+    ).rejects.toThrow("cannot commit: sandbox session worker-7 has no applied B→C result");
     expect(calls).toHaveLength(0);
   });
 
@@ -196,6 +315,168 @@ describe("gitCommit cross-session applied result", () => {
     expect(calls.some((c) => c[1] === "commit")).toBe(false);
   });
 
+  test("commits an installed RESULT_READY result and returns alreadyCommitted on retry", async () => {
+    const installedCommit = "0123456789abcdef0123456789abcdef01234567";
+    const committedCommit = "abcdef0123456789abcdef0123456789abcdef01";
+    const { calls, spawn } = spawnStub([
+      [NAME_ONLY, { status: 0, stdout: "a.ts\u0000", stderr: "" }],
+      [/rev-parse --verify.*result/, { status: 0, stdout: `${installedCommit}\n`, stderr: "" }],
+      [/rev-parse HEAD/, { status: 0, stdout: `${committedCommit}\n`, stderr: "" }],
+    ]);
+    const records: Record<string, SessionRecord> = {
+      "session-1": orchestratorRecord,
+      "worker-7": appliedResultRecord("worker-7", {
+        state: "RESULT_READY",
+        installedCommit,
+      }),
+    };
+    const ctx = makeCtx(spawn, records);
+    const op = buildGitCommitOp(ctx);
+    const result = (await op(request({
+      projectDir: projectRoot,
+      message: "fix: delegated",
+      sandboxSessionID: "worker-7",
+    }))) as { committed?: boolean; alreadyCommitted?: boolean };
+    expect(result.committed).toBe(true);
+    expect(result.alreadyCommitted).toBe(false);
+    expect(records["worker-7"]?.state).toBe("RETAINED");
+    expect(records["worker-7"]?.installedCommit).toBe(installedCommit);
+    expect(records["worker-7"]?.committedCommit).toBe(committedCommit);
+    expect(records["worker-7"]?.pendingCommit).toBeUndefined();
+
+    const retry = (await op(request({
+      projectDir: projectRoot,
+      message: "fix: delegated",
+      sandboxSessionID: "worker-7",
+    }))) as { committed?: boolean; alreadyCommitted?: boolean };
+    expect(retry.alreadyCommitted).toBe(true);
+    expect(calls.filter((call) => call[1] === "commit")).toHaveLength(1);
+  });
+
+  test("retries a failed commit when HEAD remains at the recorded parent", async () => {
+    const installedCommit = "0123456789abcdef0123456789abcdef01234567";
+    const parentCommit = "1111111111111111111111111111111111111111";
+    const committedCommit = "abcdef0123456789abcdef0123456789abcdef01";
+    let commitAttempts = 0;
+    let commitSucceeded = false;
+    const calls: string[][] = [];
+    const spawn: OpContext["git"]["spawn"] = async (argv) => {
+      calls.push(argv);
+      let stdout = "";
+      let status = 0;
+      if (argv.includes("--name-only")) stdout = "a.ts\0";
+      else if (argv[1] === "rev-parse" && argv[3]?.includes("result/") && argv[3]?.endsWith("^{commit}")) stdout = `${installedCommit}\n`;
+      else if (argv[1] === "rev-parse" && argv[2] === "HEAD") stdout = `${commitSucceeded ? committedCommit : parentCommit}\n`;
+      else if (argv[1] === "commit") {
+        commitAttempts += 1;
+        if (commitAttempts === 1) status = 1;
+        else commitSucceeded = true;
+      }
+      return { status, stdout, stderr: status ? "temporary hook failure" : "", timedOut: false };
+    };
+    const records: Record<string, SessionRecord> = {
+      "session-1": orchestratorRecord,
+      "worker-7": appliedResultRecord("worker-7", { state: "RESULT_READY", installedCommit }),
+    };
+    const op = buildGitCommitOp(makeCtx(spawn, records));
+    const req = request({ projectDir: projectRoot, message: "fix: delegated", sandboxSessionID: "worker-7" });
+    await expect(op(req)).rejects.toThrow("temporary hook failure");
+    expect(records["worker-7"]?.pendingCommit).toEqual({ resultCommit: installedCommit, parentCommit });
+    const retry = (await op(req)) as { committed?: boolean; committedCommit?: string };
+    expect(retry.committed).toBe(true);
+    expect(retry.committedCommit).toBe(committedCommit);
+    expect(commitAttempts).toBe(2);
+    expect(records["worker-7"]?.pendingCommit).toBeUndefined();
+  });
+
+  test("does not create a second commit when the first RETAINED transition is lost", async () => {
+    const installedCommit = "0123456789abcdef0123456789abcdef01234567";
+    const committedCommit = "abcdef0123456789abcdef0123456789abcdef01";
+    const baseCommit = "1111111111111111111111111111111111111111";
+    const calls: string[][] = [];
+    let commitRan = false;
+    const spawn: OpContext["git"]["spawn"] = async (argv) => {
+      calls.push(argv);
+      let stdout = "";
+      if (argv.includes("--name-only")) stdout = "a.ts\0";
+      else if (argv[1] === "rev-parse" && argv[3]?.includes("result/") && argv[3]?.endsWith("^{commit}")) stdout = `${installedCommit}\n`;
+      else if (argv[1] === "rev-parse" && argv[2] === "HEAD^") stdout = `${baseCommit}\n`;
+      else if (argv[1] === "commit") commitRan = true;
+      else if (argv[1] === "rev-parse" && argv[2] === "HEAD") stdout = `${commitRan ? committedCommit : baseCommit}\n`;
+      else if (argv[1] === "diff" && argv[2] === "--quiet") return { status: 0, stdout: "", stderr: "", timedOut: false };
+      return { status: 0, stdout, stderr: "", timedOut: false };
+    };
+    const records: Record<string, SessionRecord> = {
+      "session-1": orchestratorRecord,
+      "worker-7": appliedResultRecord("worker-7", { state: "RESULT_READY", installedCommit }),
+    };
+    const ctx = makeCtx(spawn, records);
+    const originalTransition = ctx.store.transition.bind(ctx.store);
+    let loseFirstTransition = true;
+    ctx.store.transition = (...args) => {
+      if (loseFirstTransition) {
+        loseFirstTransition = false;
+        throw new Error("simulated crash before RETAINED persistence");
+      }
+      return originalTransition(...args);
+    };
+    const op = buildGitCommitOp(ctx);
+    const req = request({ projectDir: projectRoot, message: "fix: delegated", sandboxSessionID: "worker-7" });
+    await expect(op(req)).rejects.toThrow("simulated crash");
+    const retry = (await op(req)) as { alreadyCommitted?: boolean; committedCommit?: string };
+    expect(retry.alreadyCommitted).toBe(true);
+    expect(retry.committedCommit).toBe(committedCommit);
+    expect(calls.filter((call) => call[1] === "commit")).toHaveLength(1);
+    expect(records["worker-7"]?.pendingCommit).toBeUndefined();
+  });
+
+  test("fails closed when HEAD advanced without the pending result proof", async () => {
+    const installedCommit = "0123456789abcdef0123456789abcdef01234567";
+    const parentCommit = "1111111111111111111111111111111111111111";
+    const advancedHead = "abcdef0123456789abcdef0123456789abcdef01";
+    const { calls, spawn } = spawnStub([
+      [NAME_ONLY, { status: 0, stdout: "a.ts\0", stderr: "" }],
+      [/rev-parse --verify.*result/, { status: 0, stdout: `${installedCommit}\n`, stderr: "" }],
+      [/rev-parse HEAD\^/, { status: 0, stdout: `${parentCommit}\n`, stderr: "" }],
+      [/rev-parse HEAD$/, { status: 0, stdout: `${advancedHead}\n`, stderr: "" }],
+      [/diff --quiet/, { status: 1, stdout: "", stderr: "" }],
+    ]);
+    const records: Record<string, SessionRecord> = {
+      "session-1": orchestratorRecord,
+      "worker-7": appliedResultRecord("worker-7", {
+        state: "RESULT_READY",
+        installedCommit,
+        pendingCommit: { resultCommit: installedCommit, parentCommit },
+      }),
+    };
+    await expect(buildGitCommitOp(makeCtx(spawn, records))(
+      request({ projectDir: projectRoot, message: "fix: delegated", sandboxSessionID: "worker-7" }),
+    )).rejects.toThrow(/ambiguous|does not carry/);
+    expect(calls.some((call) => call[1] === "commit")).toBe(false);
+    expect(records["worker-7"]?.pendingCommit).toBeDefined();
+  });
+
+  test("refuses an installed result whose result ref no longer matches installedCommit", async () => {
+    const { calls, spawn } = spawnStub([
+      [/rev-parse --verify.*result/, { status: 0, stdout: "ffffffffffffffffffffffffffffffffffffffff\n", stderr: "" }],
+    ]);
+    const ctx = makeCtx(spawn, {
+      "session-1": orchestratorRecord,
+      "worker-7": appliedResultRecord("worker-7", {
+        state: "RESULT_READY",
+        installedCommit: "0123456789abcdef0123456789abcdef01234567",
+      }),
+    });
+    await expect(
+      buildGitCommitOp(ctx)(request({
+        projectDir: projectRoot,
+        message: "m",
+        sandboxSessionID: "worker-7",
+      })),
+    ).rejects.toThrow(StateError);
+    expect(calls.some((call) => call[1] === "commit")).toBe(false);
+  });
+
   test("refuses an empty resolved result", async () => {
     const { calls, spawn } = spawnStub([[NAME_ONLY, { status: 0, stdout: "", stderr: "" }]]);
     const ctx = makeCtx(spawn, {
@@ -208,6 +489,131 @@ describe("gitCommit cross-session applied result", () => {
       ),
     ).rejects.toThrow(StateError);
     expect(calls.some((c) => c[1] === "commit")).toBe(false);
+  });
+});
+
+describe("gitCommit releases the committed result's worker", () => {
+  const GiB = 1024 * 1024 * 1024;
+  const installedCommit = "0123456789abcdef0123456789abcdef01234567";
+
+  function workerHarness(overrides: Partial<SessionRecord> = {}) {
+    const stopped: string[] = [];
+    const removed: string[] = [];
+    const { calls, spawn } = spawnStub([
+      [NAME_ONLY, { status: 0, stdout: "a.ts\u0000", stderr: "" }],
+      [/rev-parse --verify.*result/, { status: 0, stdout: `${installedCommit}\n`, stderr: "" }],
+    ]);
+    const records: Record<string, SessionRecord> = {
+      "session-1": orchestratorRecord,
+      "worker-7": appliedResultRecord("worker-7", {
+        state: "RESULT_READY",
+        installedCommit,
+        workerName: "oc-sandbox-worker-7",
+        workerState: "ACTIVE",
+        resources: { cpu: 2, memBytes: 2 * GiB },
+        ...overrides,
+      }),
+    };
+    const ctx = makeCtx(spawn, records);
+    Object.assign(ctx, {
+      adapter: {
+        stop: async (name: string) => { stopped.push(name); },
+        remove: async (name: string) => { removed.push(name); },
+      },
+      pool: { allocations: [{ cpu: 2, memBytes: 2 * GiB }] },
+    });
+    const req = request({ projectDir: projectRoot, message: "fix: delegated", sandboxSessionID: "worker-7" });
+    return { calls, ctx, records, removed, req, stopped };
+  }
+
+  test("a successful commit stops and removes the worker and frees its allocation", async () => {
+    const h = workerHarness();
+    const result = (await buildGitCommitOp(h.ctx)(h.req)) as { committed?: boolean };
+
+    expect(result.committed).toBe(true);
+    expect(h.stopped).toEqual(["oc-sandbox-worker-7"]);
+    expect(h.removed).toEqual(["oc-sandbox-worker-7"]);
+    expect(h.ctx.pool.allocations).toEqual([]);
+    expect(h.records["worker-7"]?.state).toBe("RETAINED");
+    expect(h.records["worker-7"]?.workerName).toBeUndefined();
+    expect(h.records["worker-7"]?.workerState).toBe("DESTROYED");
+  });
+
+  test("the pending-commit recovery branch releases the worker too", async () => {
+    const baseCommit = "1111111111111111111111111111111111111111";
+    const h = workerHarness({ pendingCommit: { resultCommit: installedCommit, parentCommit: baseCommit } });
+    const spawn: OpContext["git"]["spawn"] = async (argv) => {
+      let stdout = "";
+      if (argv.includes("--name-only")) stdout = "a.ts\0";
+      else if (argv[1] === "rev-parse" && argv[2] === "--verify") stdout = `${installedCommit}\n`;
+      else if (argv[1] === "rev-parse" && argv[2] === "HEAD^") stdout = `${baseCommit}\n`;
+      else if (argv[1] === "rev-parse" && argv[2] === "HEAD") stdout = "abcdef0123456789abcdef0123456789abcdef01\n";
+      return { status: 0, stdout, stderr: "", timedOut: false };
+    };
+    h.ctx.git.spawn = spawn;
+
+    const result = (await buildGitCommitOp(h.ctx)(h.req)) as { alreadyCommitted?: boolean };
+
+    expect(result.alreadyCommitted).toBe(true);
+    expect(h.removed).toEqual(["oc-sandbox-worker-7"]);
+    expect(h.records["worker-7"]?.workerName).toBeUndefined();
+    expect(h.records["worker-7"]?.workerState).toBe("DESTROYED");
+  });
+
+  test("a failed release is logged, keeps the worker on the record and does not fail the commit", async () => {
+    const h = workerHarness();
+    const logged: Array<Record<string, unknown>> = [];
+    Object.assign(h.ctx, { logger: { log: (entry: Record<string, unknown>) => logged.push(entry) } });
+    const touch = h.ctx.store.touch.bind(h.ctx.store);
+    let failNext = true;
+    h.ctx.store.touch = (sessionID, patch) => {
+      if (failNext && patch.workerState === "DESTROYED") {
+        failNext = false;
+        throw new Error("state write failed");
+      }
+      return touch(sessionID, patch);
+    };
+
+    const result = (await buildGitCommitOp(h.ctx)(h.req)) as { committed?: boolean };
+
+    expect(result.committed).toBe(true);
+    expect(h.records["worker-7"]?.state).toBe("RETAINED");
+    expect(logged).toEqual([
+      {
+        sessionID: "worker-7",
+        operation: "gitCommit",
+        action: "release_retained_worker",
+        result: "error",
+        error: "state write failed",
+      },
+    ]);
+  });
+
+  test("a throwing logger does not fail the commit after a failed release", async () => {
+    const h = workerHarness();
+    Object.assign(h.ctx, { logger: { log: () => { throw new Error("logger failed"); } } });
+    const touch = h.ctx.store.touch.bind(h.ctx.store);
+    let failNext = true;
+    h.ctx.store.touch = (sessionID, patch) => {
+      if (failNext && patch.workerState === "DESTROYED") {
+        failNext = false;
+        throw new Error("state write failed");
+      }
+      return touch(sessionID, patch);
+    };
+
+    await expect(buildGitCommitOp(h.ctx)(h.req)).resolves.toMatchObject({ committed: true });
+
+    expect(h.records["worker-7"]?.state).toBe("RETAINED");
+  });
+
+  test("an already-released worker is not stopped again", async () => {
+    const h = workerHarness({ workerState: "DESTROYED" });
+    await buildGitCommitOp(h.ctx)(h.req);
+
+    expect(h.stopped).toEqual([]);
+    expect(h.removed).toEqual([]);
+    expect(h.ctx.pool.allocations).toHaveLength(1);
   });
 });
 

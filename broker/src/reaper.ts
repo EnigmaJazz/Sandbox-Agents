@@ -12,10 +12,21 @@
  *   record reapedAt. State stays RESULT_READY: the result is already on the
  *   host side (git ref + bundle), so apply/preview/retain/discard still work.
  *   A later ensureWorker re-creates the worker on demand.
- * - SANDBOX_ACTIVE + stale -> release worker + allocation, transition to
- *   FAILED_CLOSED with reason "idle reaped" (crash-leak recovery).
+ * - SANDBOX_ACTIVE + stale -> release worker + allocation, keep the session
+ *   resumable. This is the last resort after sweepUnfinished has had an hour
+ *   to export the edits, so nothing is exported here; it logs
+ *   `reaped_active_unsaved` so the loss is visible (crash-leak recovery).
+ * - Terminal state (APPLIED/REJECTED/RETAINED/FAILED_CLOSED) still holding a
+ *   live worker -> release it at once. Every path into those states should
+ *   release its own worker; this catches the one that did not.
  * - Everything else is skipped: parked queue sessions have no worker yet,
- *   CREATING_SANDBOX is mid-creation, and DESTROYED/FAILED workers are gone.
+ *   CREATING_SANDBOX is mid-creation, APPLY_PENDING is waiting on the user,
+ *   and DESTROYED/FAILED workers are gone.
+ *
+ * Export-before-release (finishOrReleaseActive) is the single policy for a
+ * SANDBOX_ACTIVE worker that is going away early, shared by sweepUnfinished
+ * and reapOnDisconnect: a clean worker is released, a dirty or unreadable one
+ * is exported to RESULT_READY first, and a failed export keeps the worker.
  *
  * The sweep is idempotent (workerName cleared after a reap) and one bad
  * record never kills the sweep (per-record catch, log, continue).
@@ -28,7 +39,8 @@
  * not-yet-durable record's artifact is NEVER removed - it may still be the
  * only copy (planned mode / not-yet-imported result). See artifacts.ts.
  */
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { bundlePathFor } from "./gitops.ts";
 import {
   durableHostRefResolves,
   listOrphanArtifactCandidates,
@@ -38,18 +50,39 @@ import {
   shouldRemoveSessionArtifacts,
   type ArtifactRemoval,
 } from "./artifacts.ts";
+import type { LogEntry } from "./logging.ts";
 import { releaseWorker, runPrepare, type OpContext } from "./service.ts";
 import { isTerminalState } from "./state.ts";
+import type { SessionRecord } from "./types.ts";
 
 export interface ReaperLogEntry {
   sessionID: string;
   action:
     | "reaped_result_ready"
     | "reaped_active"
+    | "reaped_active_unsaved"
+    | "reaped_terminal"
     | "auto_finished"
     | "swept_artifact"
     | "error";
   detail?: string;
+}
+
+/**
+ * Map a reaper telemetry event onto a logger payload (the Logger adds `ts`).
+ * Preserving `action` and `detail` keeps a lossy `reaped_active` (worker
+ * released without an export) distinguishable from an `auto_finished` that
+ * exported its edits first.
+ */
+export function toReaperLogEntry(entry: ReaperLogEntry): Omit<LogEntry, "ts"> {
+  return {
+    operation: "reaper",
+    sessionID: entry.sessionID || undefined,
+    action: entry.action,
+    result: entry.action === "error" ? "error" : "ok",
+    error: entry.action === "error" ? entry.detail : undefined,
+    detail: entry.action === "error" ? undefined : entry.detail,
+  };
 }
 
 export interface ReaperOptions {
@@ -63,6 +96,7 @@ export interface ReaperOptions {
    */
   artifactGraceMs?: number;
   onLog?: (entry: ReaperLogEntry) => void;
+  onDrop?: () => void;
 }
 
 export interface ReaperHandle {
@@ -71,6 +105,23 @@ export interface ReaperHandle {
 
 /** Default grace before a terminal/orphan transport artifact is removed. */
 export const DEFAULT_ARTIFACT_GRACE_MS = 3_600_000;
+
+function safeLog(
+  onLog: ReaperOptions["onLog"],
+  entry: ReaperLogEntry,
+  onDrop?: ReaperOptions["onDrop"],
+): void {
+  try {
+    onLog?.(entry);
+  } catch {
+    // Telemetry must not interrupt cleanup or worker release.
+    try {
+      onDrop?.();
+    } catch {
+      // Drop accounting must not interrupt cleanup or worker release.
+    }
+  }
+}
 
 /**
  * Log the removals for one session: session id, artifact kind, and bytes
@@ -81,6 +132,7 @@ function logRemovals(
   sessionID: string,
   removals: ArtifactRemoval[],
   onLog?: (entry: ReaperLogEntry) => void,
+  onDrop?: ReaperOptions["onDrop"],
 ): { removed: number; bytesFreed: number } {
   let removed = 0;
   let bytesFreed = 0;
@@ -88,17 +140,17 @@ function logRemovals(
     if (r.removed) {
       removed++;
       bytesFreed += r.bytes;
-      onLog?.({
+      safeLog(onLog, {
         sessionID,
         action: "swept_artifact",
         detail: `${r.kind} ${r.bytes} bytes ${r.path}`,
-      });
+      }, onDrop);
     } else if (r.error) {
-      onLog?.({
+      safeLog(onLog, {
         sessionID,
         action: "error",
         detail: `${r.kind}: ${r.error}`,
-      });
+      }, onDrop);
     }
   }
   return { removed, bytesFreed };
@@ -116,24 +168,26 @@ async function cleanupTerminalArtifacts(
   ctx: OpContext,
   sessionID: string,
   onLog?: (entry: ReaperLogEntry) => void,
+  onDrop?: ReaperOptions["onDrop"],
 ): Promise<void> {
   const stateDir = ctx.config?.stateDir;
   if (!stateDir) return;
   try {
     const record = ctx.store.get(sessionID);
     if (!record) return;
+    const bundleExists = existsSync(bundlePathFor(stateDir, sessionID));
     let durable = false;
-    if (removalNeedsDurableRef(record)) {
+    if (removalNeedsDurableRef(record, bundleExists)) {
       durable = await durableHostRefResolves(ctx, record);
     }
-    if (!shouldRemoveSessionArtifacts(record, durable)) return;
-    logRemovals(sessionID, removeSessionArtifacts(stateDir, sessionID), onLog);
+    if (!shouldRemoveSessionArtifacts(record, durable, bundleExists)) return;
+    logRemovals(sessionID, removeSessionArtifacts(stateDir, sessionID), onLog, onDrop);
   } catch (err) {
-    onLog?.({
+    safeLog(onLog, {
       sessionID,
       action: "error",
       detail: err instanceof Error ? err.message : String(err),
-    });
+    }, onDrop);
   }
 }
 
@@ -152,6 +206,7 @@ export async function sweepStateArtifacts(
   ctx: OpContext,
   graceMs: number = DEFAULT_ARTIFACT_GRACE_MS,
   onLog?: (entry: ReaperLogEntry) => void,
+  onDrop?: ReaperOptions["onDrop"],
 ): Promise<{ removed: number; bytesFreed: number }> {
   const now = Date.now();
   let removed = 0;
@@ -169,24 +224,28 @@ export async function sweepStateArtifacts(
       const age = now - Date.parse(record.updatedAt);
       // NaN-safe: an unparseable timestamp is never "stale enough".
       if (!(age > graceMs)) continue;
+      const bundleExists = existsSync(
+        bundlePathFor(ctx.config.stateDir, record.sessionID),
+      );
       let durable = false;
-      if (removalNeedsDurableRef(record)) {
+      if (removalNeedsDurableRef(record, bundleExists)) {
         durable = await durableHostRefResolves(ctx, record);
       }
-      if (!shouldRemoveSessionArtifacts(record, durable)) continue;
+      if (!shouldRemoveSessionArtifacts(record, durable, bundleExists)) continue;
       const result = logRemovals(
         record.sessionID,
         removeSessionArtifacts(ctx.config.stateDir, record.sessionID),
         onLog,
+        onDrop,
       );
       removed += result.removed;
       bytesFreed += result.bytesFreed;
     } catch (err) {
-      onLog?.({
+      safeLog(onLog, {
         sessionID: record.sessionID,
         action: "error",
         detail: err instanceof Error ? err.message : String(err),
-      });
+      }, onDrop);
     }
   }
 
@@ -208,15 +267,16 @@ export async function sweepStateArtifacts(
         sessionID,
         [removeArtifact({ kind: candidate.kind, path: candidate.path })],
         onLog,
+        onDrop,
       );
       removed += result.removed;
       bytesFreed += result.bytesFreed;
     } catch (err) {
-      onLog?.({
+      safeLog(onLog, {
         sessionID,
         action: "error",
         detail: err instanceof Error ? err.message : String(err),
-      });
+      }, onDrop);
     }
   }
 
@@ -231,15 +291,16 @@ export async function runArtifactSweep(
   ctx: OpContext,
   graceMs: number = DEFAULT_ARTIFACT_GRACE_MS,
   onLog?: (entry: ReaperLogEntry) => void,
+  onDrop?: ReaperOptions["onDrop"],
 ): Promise<{ removed: number; bytesFreed: number }> {
   try {
-    return await sweepStateArtifacts(ctx, graceMs, onLog);
+    return await sweepStateArtifacts(ctx, graceMs, onLog, onDrop);
   } catch (err) {
-    onLog?.({
+    safeLog(onLog, {
       sessionID: "",
       action: "error",
       detail: err instanceof Error ? err.message : String(err),
-    });
+    }, onDrop);
     return { removed: 0, bytesFreed: 0 };
   }
 }
@@ -252,6 +313,7 @@ export function startReaper(ctx: OpContext, opts: ReaperOptions): ReaperHandle {
     ctx,
     opts.artifactGraceMs ?? DEFAULT_ARTIFACT_GRACE_MS,
     opts.onLog,
+    opts.onDrop,
   );
   const timer = setInterval(() => {
     void runReaperSweeps(ctx, opts);
@@ -273,27 +335,28 @@ export async function runReaperSweeps(
   opts: ReaperOptions,
 ): Promise<void> {
   const logError = (err: unknown) =>
-    opts.onLog?.({
+    safeLog(opts.onLog, {
       sessionID: "",
       action: "error",
       detail: err instanceof Error ? err.message : String(err),
-    });
+    }, opts.onDrop);
   try {
     await sweepStateArtifacts(
       ctx,
       opts.artifactGraceMs ?? DEFAULT_ARTIFACT_GRACE_MS,
       opts.onLog,
+      opts.onDrop,
     );
   } catch (err) {
     logError(err);
   }
   try {
-    await sweepUnfinished(ctx, 60_000, opts.onLog);
+    await sweepUnfinished(ctx, 60_000, opts.onLog, opts.onDrop);
   } catch (err) {
     logError(err);
   }
   try {
-    await sweepIdle(ctx, opts.idleMs, opts.onLog);
+    await sweepIdle(ctx, opts.idleMs, opts.onLog, opts.onDrop);
   } catch (err) {
     logError(err);
   }
@@ -307,6 +370,7 @@ export async function sweepIdle(
   ctx: OpContext,
   idleMs: number,
   onLog?: (entry: ReaperLogEntry) => void,
+  onDrop?: ReaperOptions["onDrop"],
 ): Promise<{ reaped: number }> {
   const now = Date.now();
   let reaped = 0;
@@ -321,6 +385,18 @@ export async function sweepIdle(
       // workers were already released.
       if (!record.workerName) continue;
       if (record.workerState === "DESTROYED" || record.workerState === "FAILED") continue;
+      if (isTerminalState(record.state)) {
+        // The session is finished, so there is no idle period to wait out.
+        await releaseWorker(ctx, record);
+        ctx.store.touch(record.sessionID, {
+          workerName: undefined,
+          workerState: "DESTROYED",
+          reapedAt: new Date(now).toISOString(),
+        });
+        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_terminal" }, onDrop);
+        reaped++;
+        continue;
+      }
       const age = now - Date.parse(record.updatedAt);
       // NaN-safe: an unparseable timestamp is never "stale enough" to reap.
       if (!(age > idleMs)) continue;
@@ -334,34 +410,87 @@ export async function sweepIdle(
           workerState: "DESTROYED",
           reapedAt: new Date(now).toISOString(),
         });
-        onLog?.({ sessionID: record.sessionID, action: "reaped_result_ready" });
+        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_result_ready" }, onDrop);
         reaped++;
       } else if (record.state === "SANDBOX_ACTIVE") {
         await releaseWorker(ctx, record);
-        ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "FAILED_CLOSED", {
+        ctx.store.touch(record.sessionID, {
           workerName: undefined,
           workerState: "DESTROYED",
-          error: "idle reaped",
           reapedAt: new Date(now).toISOString(),
         });
-        // Terminal: the transport artifacts are consumed (durability-gated).
-        await cleanupTerminalArtifacts(ctx, record.sessionID, onLog);
-        onLog?.({ sessionID: record.sessionID, action: "reaped_active" });
+        safeLog(onLog, {
+          sessionID: record.sessionID,
+          action: "reaped_active_unsaved",
+          detail: "idle limit reached; worker released without an export",
+        }, onDrop);
         reaped++;
       }
       // Any other state: skip. CREATING_SANDBOX is mid-creation and must
-      // never be reaped; APPLIED/REJECTED/RETAINED/FAILED_CLOSED have no live
-      // worker the sweep should touch.
+      // never be reaped.
     } catch (err) {
       // One bad record must not kill the whole sweep.
-      onLog?.({
+      safeLog(onLog, {
         sessionID: record.sessionID,
         action: "error",
         detail: err instanceof Error ? err.message : String(err),
-      });
+      }, onDrop);
     }
   }
   return { reaped };
+}
+
+/** Test seam: the export step (runPrepare in production). */
+export type PrepareResult = (ctx: OpContext, sessionID: string) => Promise<string>;
+
+/**
+ * Take a SANDBOX_ACTIVE worker away without losing its edits. A clean worker
+ * is released and the session stays resumable. A dirty worker, or one whose
+ * status cannot be read, is exported to RESULT_READY first and then released.
+ * If the export throws, this throws before any release: the worker is kept so
+ * the edits survive for a later attempt.
+ */
+async function finishOrReleaseActive(
+  ctx: OpContext,
+  record: SessionRecord,
+  cleanDetail: string,
+  prepare: PrepareResult,
+): Promise<ReaperLogEntry> {
+  const workerName = record.workerName as string;
+  let hasChanges = true;
+  try {
+    const status = await ctx.adapter.exec(workerName, ["git", "status", "--porcelain", "--", ".", ":(exclude).broker-tmp", ":(exclude)*.bundle"], {
+      cwd: "/work",
+      timeoutMs: 30_000,
+      env: {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "safe.directory",
+        GIT_CONFIG_VALUE_0: "/work",
+      },
+    });
+    if (status.status === 0) {
+      hasChanges = status.stdout.trim().length > 0;
+    }
+  } catch {
+    hasChanges = true;
+  }
+  if (!hasChanges) {
+    await releaseWorker(ctx, record);
+    ctx.store.touch(record.sessionID, {
+      workerName: undefined,
+      workerState: "DESTROYED",
+      reapedAt: new Date().toISOString(),
+    });
+    return { sessionID: record.sessionID, action: "reaped_active", detail: cleanDetail };
+  }
+  const ref = await prepare(ctx, record.sessionID);
+  await releaseWorker(ctx, record);
+  ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", {
+    resultRef: ref,
+    workerName: undefined,
+    workerState: "DESTROYED",
+  });
+  return { sessionID: record.sessionID, action: "auto_finished", detail: ref };
 }
 
 /**
@@ -377,6 +506,8 @@ export async function sweepUnfinished(
   ctx: OpContext,
   idleMs = 60_000,
   onLog?: (entry: ReaperLogEntry) => void,
+  onDrop?: ReaperOptions["onDrop"],
+  prepare: PrepareResult = runPrepare,
 ): Promise<{ finished: number }> {
   const now = Date.now();
   let finished = 0;
@@ -393,73 +524,40 @@ export async function sweepUnfinished(
       if (record.workerState === "DESTROYED" || record.workerState === "FAILED") continue;
       const age = now - Date.parse(record.updatedAt);
       if (!(age > idleMs)) continue;
-      // Has unstaged changes check: query worker git status --porcelain.
-      // If no changes, release and fail closed (nothing to export).
-      let hasChanges = true;
-      try {
-        const status = await ctx.adapter.exec(record.workerName, ["git", "status", "--porcelain", "--", ".", ":(exclude).broker-tmp", ":(exclude)*.bundle"], {
-          cwd: "/work",
-          timeoutMs: 30_000,
-          env: {
-            GIT_CONFIG_COUNT: "1",
-            GIT_CONFIG_KEY_0: "safe.directory",
-            GIT_CONFIG_VALUE_0: "/work",
-          },
-        });
-        if (status.status === 0) {
-          hasChanges = status.stdout.trim().length > 0;
-        }
-      } catch {
-        hasChanges = true;
-      }
-      if (!hasChanges) {
-        await releaseWorker(ctx, record);
-        ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "FAILED_CLOSED", {
-          workerName: undefined,
-          workerState: "DESTROYED",
-          error: "idle clean worker released",
-          reapedAt: new Date(now).toISOString(),
-        });
-        // Terminal: the transport artifacts are consumed (durability-gated).
-        await cleanupTerminalArtifacts(ctx, record.sessionID, onLog);
-        onLog?.({ sessionID: record.sessionID, action: "reaped_active", detail: "idle clean worker released" });
-        finished++;
-        continue;
-      }
-      const ref = await runPrepare(ctx, record.sessionID);
-      await releaseWorker(ctx, record);
-      ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", {
-        resultRef: ref,
-        workerName: undefined,
-        workerState: "DESTROYED",
-      });
-      onLog?.({ sessionID: record.sessionID, action: "auto_finished", detail: ref });
+      safeLog(onLog, await finishOrReleaseActive(ctx, record, "idle clean worker released", prepare), onDrop);
       finished++;
     } catch (err) {
-      onLog?.({
+      safeLog(onLog, {
         sessionID: record.sessionID,
         action: "error",
         detail: err instanceof Error ? err.message : String(err),
-      });
+      }, onDrop);
     }
   }
   return { finished };
 }
 
 /**
- * Disconnect-triggered reap (Feature 2b): reap a single SANDBOX_ACTIVE
- * session that lost its client socket and has been idle longer than
- * disconnectIdleMs with no result. Used by server onSocketClose; the
- * periodic sweepIdle (1h) remains as safety net.
+ * Disconnect-triggered reap (Feature 2b): a single SANDBOX_ACTIVE session
+ * that lost its client socket and has been idle longer than disconnectIdleMs
+ * gives its worker back early. It applies the same export-before-release
+ * policy as sweepUnfinished, so a disconnect never discards unexported edits,
+ * and it skips a session with an operation in flight or parked in the queue.
+ * Returns true when the worker was released. Used by server onSocketClose;
+ * the periodic sweeps remain the safety net.
  */
 export async function reapOnDisconnect(
   ctx: OpContext,
   sessionID: string,
   disconnectIdleMs: number,
   onLog?: (entry: ReaperLogEntry) => void,
+  onDrop?: ReaperOptions["onDrop"],
+  prepare: PrepareResult = runPrepare,
 ): Promise<boolean> {
   const record = ctx.store.get(sessionID);
   if (!record) return false;
+  if (ctx.queue?.find(sessionID)) return false;
+  if ((ctx.activeLocks?.get(sessionID) ?? 0) > 0) return false;
   if (record.state !== "SANDBOX_ACTIVE") return false;
   if (record.resultRef) return false;
   if (!record.workerName) return false;
@@ -467,23 +565,14 @@ export async function reapOnDisconnect(
   const age = Date.now() - Date.parse(record.updatedAt);
   if (!(age > disconnectIdleMs)) return false;
   try {
-    await releaseWorker(ctx, record);
-    ctx.store.transition(sessionID, "SANDBOX_ACTIVE", "FAILED_CLOSED", {
-      workerName: undefined,
-      workerState: "DESTROYED",
-      error: "client disconnected",
-      reapedAt: new Date().toISOString(),
-    });
-    // Terminal: the transport artifacts are consumed (durability-gated).
-    await cleanupTerminalArtifacts(ctx, sessionID, onLog);
-    onLog?.({ sessionID, action: "reaped_active", detail: "client disconnected" });
+    safeLog(onLog, await finishOrReleaseActive(ctx, record, "client disconnected", prepare), onDrop);
     return true;
   } catch (err) {
-    onLog?.({
+    safeLog(onLog, {
       sessionID,
       action: "error",
       detail: err instanceof Error ? err.message : String(err),
-    });
+    }, onDrop);
     return false;
   }
 }

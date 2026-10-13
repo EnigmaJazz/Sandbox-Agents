@@ -33,14 +33,15 @@ export type HostMutationOperation =
   | "reviewValidate"
   | "reviewRecover"
   | "sddArchiveCompose"
-  | "registerProject";
+  | "registerProject"
+  | "sandboxResultInstall";
 
 export interface HostToolAskMetadata {
-  operation: HostMutationOperation;
+  hostOperation: HostMutationOperation;
   /** One-line human summary of the host mutation. */
   summary: string;
-  /** Exact, human-auditable arguments that drive the mutation. */
-  details: Record<string, string | number>;
+  /** Flat, human-auditable fields rendered by the approval harness. */
+  [key: string]: string | number;
 }
 
 export interface HostToolAsk {
@@ -75,7 +76,7 @@ export function buildHostToolAsk(input: {
   permission: string;
   operation: HostMutationOperation;
   summary: string;
-  details: Record<string, string | number>;
+  details: Record<string, string | number | boolean>;
 }): HostToolAsk {
   assertNonEmpty(input.permission, "permission");
   assertNonEmpty(input.operation, "operation");
@@ -92,9 +93,9 @@ export function buildHostToolAsk(input: {
     patterns: ["*"],
     always: [],
     metadata: {
-      operation: input.operation,
+      ...input.details,
+      hostOperation: input.operation,
       summary: input.summary,
-      details: { ...input.details },
     },
   };
 }
@@ -155,7 +156,7 @@ export interface GitCommitAskArgs {
 /** Approval metadata for `host_git_commit` (branch/subject/path preview/protected). */
 export function buildGitCommitAsk(args: GitCommitAskArgs): HostToolAsk {
   assertNonEmpty(args.message, "message");
-  const details: Record<string, string | number> = { message: args.message };
+  const details: Record<string, string | number | boolean> = { message: args.message };
   if (args.sandboxSessionID !== undefined) {
     assertNonEmpty(args.sandboxSessionID, "sandboxSessionID");
     details.sandboxSessionID = args.sandboxSessionID;
@@ -202,7 +203,7 @@ export function buildGitPushAsk(args: GitPushAskArgs): HostToolAsk {
   if (!Number.isInteger(args.ahead) || args.ahead < 0) {
     throw new HostToolAskError("ahead must be a non-negative integer");
   }
-  const details: Record<string, string | number> = {
+  const details: Record<string, string | number | boolean> = {
     remote: args.remote,
     branch: args.branch,
     ahead: args.ahead,
@@ -263,7 +264,7 @@ export function buildPlanDocAppendAsk(args: PlanDocAppendAskArgs): HostToolAsk {
   if (args.heading !== undefined) {
     assertNonEmpty(args.heading, "heading");
   }
-  const details: Record<string, string | number> = {
+  const details: Record<string, string | number | boolean> = {
     doc: args.doc,
     contentBytes: Buffer.byteLength(args.content, "utf8"),
   };
@@ -287,7 +288,7 @@ export interface RegisterProjectAskArgs {
 /** Approval metadata for `host_register_project` (path + yes/no flag summary). */
 export function buildRegisterProjectAsk(args: RegisterProjectAskArgs): HostToolAsk {
   assertNonEmpty(args.path, "path");
-  const details: Record<string, string | number> = {
+  const details: Record<string, string | number | boolean> = {
     path: args.path,
     dryRun: args.dryRun ? "yes" : "no",
     createRemote: args.createRemote ? "yes" : "no",
@@ -346,8 +347,8 @@ function assertReviewEnum(value: unknown, values: readonly string[], what: strin
 
 function reviewAskDetails(
   fields: Record<string, string | number | boolean | undefined>,
-): Record<string, string | number> {
-  const details: Record<string, string | number> = {};
+): Record<string, string | number | boolean> {
+  const details: Record<string, string | number | boolean> = {};
   for (const [key, value] of Object.entries(fields)) {
     if (value === undefined) continue;
     details[key] = typeof value === "boolean" ? (value ? "yes" : "no") : value;
@@ -589,5 +590,55 @@ export function buildReviewRecoverAsk(args: ReviewRecoverAskArgs = {}): HostTool
       reason: args.reason,
       maintainerAuthorization: args.maintainerAuthorization !== undefined ? "present (redacted)" : undefined,
     }),
+  });
+}
+
+export interface SandboxResultInstallAskArgs {
+  resultRef: string;
+  resultCommit: string;
+  changedPaths?: readonly string[];
+  deletionPaths?: readonly string[];
+  sandboxSessionID?: string;
+  preview?: string;
+  previewTruncated?: boolean;
+  previewFile?: string;
+}
+
+/** Approval metadata for `host_sandbox_result_install` (ref, commit, paths). */
+export function buildSandboxResultInstallAsk(args: SandboxResultInstallAskArgs): HostToolAsk {
+  assertNonEmpty(args.resultRef, "resultRef");
+  assertNonEmpty(args.resultCommit, "resultCommit");
+  const details: Record<string, string | number | boolean> = {
+    resultRef: args.resultRef,
+    resultCommit: args.resultCommit,
+  };
+  if (args.sandboxSessionID !== undefined) {
+    assertNonEmpty(args.sandboxSessionID, "sandboxSessionID");
+    details.sandboxSessionID = args.sandboxSessionID;
+  }
+  if (args.changedPaths !== undefined) {
+    assertRepoRelativePaths(args.changedPaths, "changedPaths");
+    details.pathCount = args.changedPaths.length;
+    details.pathPreview = args.changedPaths.slice(0, 20).join(", ");
+  }
+  if (args.deletionPaths !== undefined) {
+    assertRepoRelativePaths(args.deletionPaths, "deletionPaths");
+    details.deletionCount = args.deletionPaths.length;
+    details.deletionPreview = args.deletionPaths.slice(0, 20).join(", ");
+  }
+  if (args.previewTruncated && !args.previewFile) throw new HostToolAskError("truncated install preview requires a complete previewFile artifact");
+  if (args.preview !== undefined) {
+    const truncationNote = "\n(... approval preview truncated; inspect previewFile)";
+    details.preview = args.preview.length > 12_000
+      ? `${args.preview.slice(0, 12_000 - truncationNote.length)}${truncationNote}`
+      : args.preview;
+  }
+  if (args.previewTruncated !== undefined) details.previewTruncated = args.previewTruncated;
+  if (args.previewFile !== undefined) { assertNonEmpty(args.previewFile, "previewFile"); details.previewFile = args.previewFile; }
+  return buildHostToolAsk({
+    permission: "host_sandbox_result_install",
+    operation: "sandboxResultInstall",
+    summary: `Install ${details.pathCount ?? 0} result path(s) from ${args.resultRef} at commit ${args.resultCommit.slice(0, 12)}`,
+    details,
   });
 }

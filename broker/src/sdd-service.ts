@@ -1,7 +1,13 @@
+import { lstatSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { SddRuntimeExecutor } from "./sdd-runtime.ts";
 import type { BrokerRequestEnvelope } from "./types.ts";
-import { assertPayloadKeys, ValidationError } from "./validation.ts";
+import { assertPayloadKeys, resolveProjectID, ValidationError } from "./validation.ts";
 import { authorizeHostDispatch, type OpContext } from "./service.ts";
+import { assertLegacySddEnabled } from "./legacy-sdd.ts";
+import { markExternalLensLineage } from "./advisor-lineages.ts";
+import { guardExternalLensCapture, relayAdvisorResponse } from "./advisor-relay.ts";
+import { PolicyError } from "./policy.ts";
 
 export interface SddOpContext extends OpContext {
   sddRuntime: SddRuntimeExecutor;
@@ -53,6 +59,7 @@ function requireStringArray(payload: SddPayload, key: string): string[] {
 /** Host-side SDD status; deliberately has no worker/session dependency. */
 export function buildSddStatusOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
+    assertLegacySddEnabled(ctx.config);
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "sddStatus", req.sessionID, req.agent);
     return ctx.sddRuntime.status(requireProjectDir(payload), {
@@ -65,6 +72,7 @@ export function buildSddStatusOp(ctx: SddOpContext) {
 /** Host-side SDD continue; exact frozen argv without `--json`. */
 export function buildSddContinueOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
+    assertLegacySddEnabled(ctx.config);
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "sddContinue", req.sessionID, req.agent);
     return ctx.sddRuntime.sddContinue({
@@ -77,6 +85,7 @@ export function buildSddContinueOp(ctx: SddOpContext) {
 /** Read-only per-phase task-result validation. */
 export function buildSddTaskResultOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
+    assertLegacySddEnabled(ctx.config);
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "sddTaskResult", req.sessionID, req.agent);
     return ctx.sddRuntime.taskResult({
@@ -163,6 +172,7 @@ export function buildReviewLensContextOp(ctx: SddOpContext) {
 /** Host-side attempt grant: registers canonical host roots for a caller token. */
 export function buildSddAttemptGrantOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
+    assertLegacySddEnabled(ctx.config);
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "sddAttemptGrant", req.sessionID, req.agent);
     return ctx.sddRuntime.attemptGrant({
@@ -183,6 +193,7 @@ export function buildSddAttemptGrantOp(ctx: SddOpContext) {
 /** Host-side deterministic archive-delta composition. */
 export function buildSddArchiveComposeOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
+    assertLegacySddEnabled(ctx.config);
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "sddArchiveCompose", req.sessionID, req.agent);
     return ctx.sddRuntime.archiveCompose({
@@ -203,13 +214,73 @@ function reviewOptional(payload: SddPayload, keys: readonly string[]): SddPayloa
   return out;
 }
 
-/** Review start: fixed argv, provider tokens preserved verbatim. */
+const REVIEW_TRACE_REFUSAL =
+  "reviewStart trace must resolve unambiguously outside the project root";
+
+function assertTraceOutsideProject(projectDir: string, trace: unknown): void {
+  if (typeof trace !== "string") throw new ValidationError(REVIEW_TRACE_REFUSAL);
+
+  let projectRoot: string;
+  try {
+    projectRoot = realpathSync(projectDir);
+  } catch {
+    throw new ValidationError(REVIEW_TRACE_REFUSAL);
+  }
+
+  let candidate = resolve(projectRoot, trace);
+  const missingParts: string[] = [];
+  while (true) {
+    try {
+      candidate = resolve(realpathSync(candidate), ...[...missingParts].reverse());
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") throw new ValidationError(REVIEW_TRACE_REFUSAL);
+      try {
+        lstatSync(candidate);
+        throw new ValidationError(REVIEW_TRACE_REFUSAL);
+      } catch (statError) {
+        if ((statError as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw new ValidationError(REVIEW_TRACE_REFUSAL);
+        }
+      }
+      const parent = dirname(candidate);
+      if (parent === candidate) throw new ValidationError(REVIEW_TRACE_REFUSAL);
+      missingParts.push(basename(candidate));
+      candidate = parent;
+    }
+  }
+
+  const fromRoot = relative(projectRoot, candidate);
+  if (
+    fromRoot === "" ||
+    (!isAbsolute(fromRoot) &&
+      fromRoot !== ".." &&
+      !fromRoot.startsWith(`..${sep}`))
+  ) {
+    throw new ValidationError(REVIEW_TRACE_REFUSAL);
+  }
+}
+
+/** Review start validates trace at the broker boundary, then preserves the provider token verbatim. */
 export function buildReviewStartOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "reviewStart", req.sessionID, req.agent);
-    return ctx.sddRuntime.reviewStart({
-      projectDir: requireProjectDir(payload),
+    const projectDir = requireProjectDir(payload);
+    if (payload.trace !== undefined) assertTraceOutsideProject(projectDir, payload.trace);
+    // External advisors (A4): an external-lens lineage starts WITHOUT a runtime
+    // agent, so gentle-ai asks for reviewer results as files; the broker then
+    // records the lineage so only stored advisor responses can fill it.
+    const externalLenses = payload.externalLenses;
+    if (externalLenses !== undefined && externalLenses !== true) {
+      throw new ValidationError("externalLenses must be true when present");
+    }
+    if (externalLenses === true && payload.agent !== undefined) {
+      throw new PolicyError("externalLenses starts a review without a runtime agent; do not pass agent");
+    }
+    const started = await ctx.sddRuntime.reviewStart({
+      projectDir,
       ...reviewOptional(payload, [
         "agent",
         "contract",
@@ -229,6 +300,13 @@ export function buildReviewStartOp(ctx: SddOpContext) {
         "trace",
       ]),
     });
+    if (externalLenses === true && started.status === 0) {
+      const lineage = (started.json as { lineage_id?: unknown } | null)?.lineage_id;
+      if (typeof lineage === "string") {
+        markExternalLensLineage(ctx, resolveProjectID(projectDir, ctx.config.projects), lineage);
+      }
+    }
+    return started;
   };
 }
 
@@ -241,8 +319,13 @@ export function buildReviewCaptureResultOp(ctx: SddOpContext) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
     const payload = payloadOf(req);
     authorizeHostDispatch(ctx, "reviewCaptureResult", req.sessionID, req.agent);
+    const projectDir = requireProjectDir(payload);
+    if (payload.inputFromAdvisorResponse !== undefined) {
+      return relayAdvisorResponse(ctx, projectDir, payload);
+    }
+    guardExternalLensCapture(ctx, projectDir, payload);
     return ctx.sddRuntime.reviewCaptureResult({
-      projectDir: requireProjectDir(payload),
+      projectDir,
       ...reviewOptional(payload, [
         "agent",
         "input",

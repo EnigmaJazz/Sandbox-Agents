@@ -63,12 +63,39 @@ describe("installer/rollback plugin coverage parity", () => {
     });
   }
 
+  test("both scripts explicitly include the sandbox edit core helper", () => {
+    for (const script of SCRIPTS) {
+      expect(pluginLoopEntries(script), `${script} omits lib/sandbox-edit-core.ts`).toContain(
+        "lib/sandbox-edit-core.ts",
+      );
+    }
+  });
+
   test("both scripts cover the same plugin files", () => {
     const installer = pluginLoopEntries(SCRIPTS[0]!);
     const rollback = pluginLoopEntries(SCRIPTS[1]!);
     expect(sorted(installer)).toEqual(sorted(rollback));
     expect(installer.length).toBe(EXPECTED_PLUGIN_FILES.length);
     expect(rollback.length).toBe(EXPECTED_PLUGIN_FILES.length);
+  });
+});
+
+describe("nono profile symlink install contract", () => {
+  test("installer links the repo profile and leaves an existing correct link alone", () => {
+    const source = readScript("scripts/install-user-files");
+    expect(source).toContain('NONO_SOURCE="$REPO_ROOT/nono/profile/opencode-secure.json"');
+    expect(source).toContain('[[ -L "$NONO_DEST" ]] && [[ "$(readlink "$NONO_DEST")" == "$NONO_SOURCE" ]]');
+    expect(source).toContain('log "link $NONO_SOURCE -> $NONO_DEST (symlink; not a copy)"');
+    expect(source).toContain('ln -s "$NONO_SOURCE" "$NONO_DEST"');
+    expect(source).toContain('"$NONO_BIN" profile validate "$REPO_ROOT/nono/profile/opencode-secure.json" >/dev/null');
+  });
+
+  test("rollback removes the installed symlink and restores regular-file backups", () => {
+    const source = readScript("scripts/rollback");
+    expect(source).toContain('if [[ -L "$NONO_DEST" ]]');
+    expect(source).toContain('do_it rm -f "$NONO_DEST"');
+    expect(source).toContain('[[ -f "$bak" && ! -L "$bak" ]]');
+    expect(source).toContain('do_it cp -p "$bak" "$ORIG"');
   });
 });
 

@@ -61,6 +61,10 @@ export type Operation =
   | "reviewLensContext"
   | "sddAttemptGrant"
   | "planDocAppend"
+  // Host sandbox-result read (T1): fixed argv, read-only, no worker (§31).
+  | "sandboxResult"
+  // Host sandbox-result install (T2): fixed argv, approval-gated host mutation.
+  | "sandboxResultInstall"
   // Host-authoritative session→agent binding (plugin-only; never exposed as a
   // `host_*` or `sandbox_*` tool).
   | "bindSessionAgent"
@@ -76,6 +80,7 @@ export type Operation =
   | "reviewRecover"
   // Host git/GH mutations: fixed argv, orchestrator-only (§31).
   | "gitCommit"
+  | "gitClearCommitIntent"
   | "gitPush"
   | "ghIssueCreate"
   // §8 structured read-only host API (never mutation)
@@ -96,7 +101,96 @@ export type Operation =
   | "copyIn"
   // read-only policy/introspection (used by the routing guard plugin)
   | "policy"
-  | "registerProject";
+  | "registerProject"
+  // External advisors (advisor-records.ts): evidence records, never authority.
+  | "resultDiff"
+  | "advisorAsk"
+  | "advisorGet"
+  | "advisorList"
+  | "advisorRead"
+  | "advisorRespond"
+  | "evidenceKeep";
+
+/**
+ * Exhaustive guard-policy partition. Labels follow the current dispatch case
+ * and handler behavior; this map does not prove handler code matches its label.
+ */
+export type SandboxGuardClass =
+  | "sandbox-dispatch-guard"
+  | "sandbox-handler-guard"
+  | "exempt-from-sandbox-guard";
+
+export const SANDBOX_GUARD_CLASS = {
+  ensureWorker: "sandbox-handler-guard",
+  workerStatus: "sandbox-dispatch-guard",
+  exec: "sandbox-dispatch-guard",
+  readFile: "sandbox-dispatch-guard",
+  writeFile: "sandbox-dispatch-guard",
+  applyPatch: "sandbox-dispatch-guard",
+  listDir: "sandbox-dispatch-guard",
+  grep: "sandbox-dispatch-guard",
+  diff: "sandbox-dispatch-guard",
+  prepareResult: "sandbox-dispatch-guard",
+  applyResult: "sandbox-dispatch-guard",
+  discardResult: "sandbox-dispatch-guard",
+  keepResult: "sandbox-dispatch-guard",
+  destroyWorker: "sandbox-dispatch-guard",
+  listWorkers: "sandbox-dispatch-guard",
+  metrics: "exempt-from-sandbox-guard",
+  sddStatus: "exempt-from-sandbox-guard",
+  sddContinue: "exempt-from-sandbox-guard",
+  sddArchiveCompose: "exempt-from-sandbox-guard",
+  sddTaskResult: "exempt-from-sandbox-guard",
+  reviewAssess: "exempt-from-sandbox-guard",
+  reviewModeStatus: "exempt-from-sandbox-guard",
+  reviewStatus: "exempt-from-sandbox-guard",
+  reviewLensContext: "exempt-from-sandbox-guard",
+  sddAttemptGrant: "exempt-from-sandbox-guard",
+  planDocAppend: "exempt-from-sandbox-guard",
+  sandboxResult: "exempt-from-sandbox-guard",
+  sandboxResultInstall: "exempt-from-sandbox-guard",
+  bindSessionAgent: "exempt-from-sandbox-guard",
+  reviewStart: "exempt-from-sandbox-guard",
+  reviewCaptureResult: "exempt-from-sandbox-guard",
+  reviewCaptureUnachievable: "exempt-from-sandbox-guard",
+  reviewAcknowledgeApproved: "exempt-from-sandbox-guard",
+  reviewCaptureCorrectionPlan: "exempt-from-sandbox-guard",
+  reviewCaptureRefuter: "exempt-from-sandbox-guard",
+  reviewCaptureValidation: "exempt-from-sandbox-guard",
+  reviewValidate: "exempt-from-sandbox-guard",
+  reviewRecover: "exempt-from-sandbox-guard",
+  gitCommit: "exempt-from-sandbox-guard",
+  gitClearCommitIntent: "exempt-from-sandbox-guard",
+  gitPush: "exempt-from-sandbox-guard",
+  ghIssueCreate: "exempt-from-sandbox-guard",
+  hostSystemSummary: "exempt-from-sandbox-guard",
+  hostMemory: "exempt-from-sandbox-guard",
+  hostDiskUsage: "exempt-from-sandbox-guard",
+  hostNetworkListeners: "exempt-from-sandbox-guard",
+  hostProcessList: "exempt-from-sandbox-guard",
+  hostServiceStatus: "exempt-from-sandbox-guard",
+  hostServiceLogs: "exempt-from-sandbox-guard",
+  hostTailscaleStatus: "exempt-from-sandbox-guard",
+  hostDockerList: "exempt-from-sandbox-guard",
+  hostDockerLogs: "exempt-from-sandbox-guard",
+  copyOutInfo: "sandbox-dispatch-guard",
+  copyOut: "sandbox-dispatch-guard",
+  copyInInfo: "sandbox-dispatch-guard",
+  copyIn: "sandbox-dispatch-guard",
+  policy: "exempt-from-sandbox-guard",
+  registerProject: "exempt-from-sandbox-guard",
+  resultDiff: "exempt-from-sandbox-guard",
+  advisorAsk: "exempt-from-sandbox-guard",
+  advisorGet: "exempt-from-sandbox-guard",
+  advisorList: "exempt-from-sandbox-guard",
+  advisorRead: "exempt-from-sandbox-guard",
+  advisorRespond: "exempt-from-sandbox-guard",
+  evidenceKeep: "exempt-from-sandbox-guard",
+} as const satisfies Record<Operation, SandboxGuardClass>;
+
+export const SANDBOX_OPERATIONS: readonly Operation[] = Object.entries(SANDBOX_GUARD_CLASS)
+  .filter(([, guardClass]) => guardClass === "sandbox-dispatch-guard")
+  .map(([operation]) => operation as Operation);
 
 /** Every Operation that exists in the protocol. Immutable; unknown ops fail closed. */
 export const OPERATIONS: readonly Operation[] = [
@@ -126,6 +220,8 @@ export const OPERATIONS: readonly Operation[] = [
   "reviewLensContext",
   "sddAttemptGrant",
   "planDocAppend",
+  "sandboxResult",
+  "sandboxResultInstall",
   "bindSessionAgent",
   "reviewStart",
   "reviewCaptureResult",
@@ -136,6 +232,7 @@ export const OPERATIONS: readonly Operation[] = [
   "reviewCaptureValidation",
   "reviewValidate",
   "reviewRecover",
+  "gitClearCommitIntent",
   "hostSystemSummary",
   "hostMemory",
   "hostDiskUsage",
@@ -152,6 +249,13 @@ export const OPERATIONS: readonly Operation[] = [
   "copyIn",
   "policy",
   "registerProject",
+  "resultDiff",
+  "advisorAsk",
+  "advisorGet",
+  "advisorList",
+  "advisorRead",
+  "advisorRespond",
+  "evidenceKeep",
 ];
 
 /** Worker policy fields the LLM must NEVER be able to supply (§7, §11). */
@@ -209,6 +313,10 @@ export interface BrokerResponseEnvelope {
 // ---------------------------------------------------------------------------
 // Per-operation payloads (validated by validation.ts against exact key sets)
 // ---------------------------------------------------------------------------
+
+export interface ResultDiffPayload {
+  ref: string;
+}
 
 export interface EnsureWorkerPayload {
   /** Project directory (from ToolContext.directory); mapped to a projectID via the trusted allowlist. */
@@ -543,9 +651,17 @@ export interface SessionRecord {
   projectID?: string;
   workerName?: string;
   workerState?: WorkerState;
+  /** Durable evidence that this session entered the worker lifecycle, including after worker teardown. */
+  workerLifecycleEntered?: boolean;
   agent?: string;
   baselineRef?: string;
   resultRef?: string;
+  /** Exact result-ref commit installed into the host worktree. */
+  installedCommit?: string;
+  /** Host commit intent persisted before git commit; retries if HEAD is unchanged and recovers a proven commit transition. */
+  pendingCommit?: { resultCommit: string; parentCommit: string };
+  /** Host commit created from this result; enables retry-safe commit responses. */
+  committedCommit?: string;
   error?: string;
   /** Set by the idle reaper when it released this session's worker. */
   reapedAt?: string;
@@ -575,6 +691,8 @@ export interface MetricsRecord {
   workersActive: number;
   workersMax: number;
   sessionsByState: Record<string, number>;
+  droppedLogLines: number;
+  droppedReaperTelemetryEvents: number;
   budgetExhausted: boolean;
 }
 

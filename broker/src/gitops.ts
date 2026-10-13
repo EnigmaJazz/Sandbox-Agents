@@ -96,7 +96,7 @@ export function buildResultImportPlan(gitDir: string, bundlePath: string, sessio
       // Import the worker bundle; the ref is fetched into the sandbox
       // namespace so the worker's result branch is never a host branch.
       ["git", "bundle", "verify", bundlePath],
-      ["git", "fetch", "--no-tags", bundlePath, `${ref}:${ref}`],
+      ["git", "fetch", "--no-tags", bundlePath, `+${ref}:${ref}`],
     ],
   };
 }

@@ -18,6 +18,7 @@ export interface LogEntry {
   workerID?: string;
   operation: string;
   result: string;
+  action?: string;
   durationMs?: number;
   resources?: { cpu?: number; memBytes?: number };
   error?: string;
@@ -38,30 +39,131 @@ export function redact(text: string): string {
 }
 
 export class Logger {
+  private static readonly stdoutLoggers = new Set<Logger>();
+  private static readonly handleStdoutError = (): void => {
+    for (const logger of Logger.stdoutLoggers) logger.handleStdoutError();
+  };
+
+  private readonly file: string | undefined;
   private readonly stream: WriteStream;
   private readonly toConsole: boolean;
+  // Reopening a dead sink requires a broker restart; no retry path is implemented.
+  private streamDead = false;
+  private stdoutDead = false;
+  private fallbackWritten = false;
+  private droppedLogLineCount = 0;
+  private droppedReaperTelemetryEventsCount = 0;
+  private readonly handleStreamError = (): void => {
+    if (this.streamDead) return;
+    this.streamDead = true;
+    this.markDropped();
+  };
+  private readonly handleStdoutError = (): void => {
+    if (this.stdoutDead) return;
+    this.stdoutDead = true;
+    this.markDropped();
+  };
 
   constructor(opts: { file?: string; toConsole?: boolean } = {}) {
+    this.file = opts.file;
     this.toConsole = opts.toConsole ?? true;
-    this.stream = opts.file ? createWriteStream(opts.file, { flags: "a", mode: 0o600 }) : null as unknown as WriteStream;
+    this.stream = this.file ? createWriteStream(this.file, { flags: "a", mode: 0o600 }) : null as unknown as WriteStream;
+    if (this.stream) this.stream.on("error", this.handleStreamError);
+    if (this.toConsole) {
+      Logger.stdoutLoggers.add(this);
+      if (Logger.stdoutLoggers.size === 1) process.stdout.on("error", Logger.handleStdoutError);
+    }
+  }
+
+  get droppedLogLines(): number {
+    return this.droppedLogLineCount;
+  }
+
+  get droppedReaperTelemetryEvents(): number {
+    return this.droppedReaperTelemetryEventsCount;
+  }
+
+  noteReaperTelemetryDrop(): void {
+    this.droppedReaperTelemetryEventsCount += 1;
   }
 
   log(entry: Omit<LogEntry, "ts">): void {
-    const line = JSON.stringify({
-      ...entry,
-      error: entry.error ? redact(entry.error) : undefined,
-      ts: new Date().toISOString(),
-    });
-    if (this.toConsole) {
-      process.stdout.write(`${line}\n`);
+    let dropped = false;
+    const markLineDropped = (): void => {
+      if (dropped) return;
+      dropped = true;
+      try {
+        this.markDropped();
+      } catch {
+        // A failure in telemetry accounting must not escape Logger.log.
+      }
+    };
+
+    try {
+      const line = JSON.stringify({
+        ...entry,
+        error: entry.error ? redact(entry.error) : undefined,
+        ts: new Date().toISOString(),
+      });
+
+      if (this.stream) {
+        if (this.streamDead) markLineDropped();
+        else {
+          try {
+            this.stream.write(`${line}\n`);
+          } catch {
+            this.streamDead = true;
+            markLineDropped();
+          }
+        }
+      }
+
+      if (this.toConsole) {
+        if (this.stdoutDead) markLineDropped();
+        else {
+          try {
+            process.stdout.write(`${line}\n`);
+          } catch {
+            this.stdoutDead = true;
+            markLineDropped();
+          }
+        }
+      }
+    } catch {
+      markLineDropped();
     }
-    if (this.stream) {
-      this.stream.write(`${line}\n`);
+  }
+
+  private markDropped(): void {
+    this.droppedLogLineCount += 1;
+    this.writeFallback();
+  }
+
+  private writeFallback(): void {
+    if (this.fallbackWritten) return;
+    this.fallbackWritten = true;
+    try {
+      const encode = (value: string): string => {
+        try {
+          return JSON.stringify(redact(value)) ?? '"[unavailable]"';
+        } catch {
+          return '"[unavailable]"';
+        }
+      };
+      const record = `{${`"event":${encode("logger_sink_failure")}`},${`"error":${encode("logging sink failed")}`}}`;
+      process.stderr.write(`${record}\n`);
+    } catch {
+      // The emergency path must never throw or recurse into logging.
     }
   }
 
   close(): void {
+    if (this.toConsole) {
+      Logger.stdoutLoggers.delete(this);
+      if (Logger.stdoutLoggers.size === 0) process.stdout.off("error", Logger.handleStdoutError);
+    }
     if (this.stream) {
+      this.stream.once("close", () => this.stream.off("error", this.handleStreamError));
       this.stream.end();
     }
   }

@@ -6,7 +6,7 @@ context: |
   Stack: Bun + TypeScript; dependency-free broker using bun:test and Node built-ins.
   Architecture: trusted sandbox broker with explicit security boundaries.
   Persistence: hybrid Magic Context and OpenSpec.
-  Verification: cd broker && bun test; bun build src/main.ts.
+  Verification: cd broker && bun test; bun build --target=bun src/main.ts.
   English artifacts; no live configuration changes, installs, sudo, or credentials.
 
 projects:
@@ -20,7 +20,7 @@ projects:
       e2e: null
     coverage_command: null
     linter_command: null
-    type_checker_command: bun build src/main.ts
+    type_checker_command: bun build --target=bun src/main.ts
     formatter_command: null
 
 rules:
@@ -44,7 +44,7 @@ rules:
       - Do not modify S17 protected paths without explicit manual review.
   verify:
     test_command: cd broker && bun test
-    build_command: bun build src/main.ts
+    build_command: bun build --target=bun src/main.ts
     coverage_threshold: 0
   archive:
     - Warn before merging destructive deltas.

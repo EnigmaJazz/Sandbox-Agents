@@ -6,15 +6,23 @@
  *
  * Environment overrides: BROKER_SOCKET, BROKER_STATE_DIR, BROKER_LOG_FILE,
  * BROKER_GIT_MODE (real|planned), MSB_BINARY, MSB_WORKER_IMAGE,
- * BROKER_GENTLE_AI_BINARY, BROKER_REAP_INTERVAL_MS, BROKER_REAP_IDLE_MS,
- * BROKER_QUEUE_TIMEOUT_MS, BROKER_QUEUE_MAX_LENGTH.
+ * BROKER_GENTLE_AI_BINARY, BROKER_LEGACY_SDD (auto|on|off), BROKER_ADVISOR_PROJECTS,
+ * BROKER_REAP_INTERVAL_MS,
+ * BROKER_REAP_IDLE_MS, BROKER_QUEUE_TIMEOUT_MS, BROKER_QUEUE_MAX_LENGTH.
  *
  * Gate 1: nothing is installed; run manually for local testing only.
  * The systemd unit (systemd-user/sandbox-broker.service) is the intended
  * production launcher after Gate 4 manual review.
  */
 import { defaultConfig } from "./config.ts";
-import { BrokerServer } from "./server.ts";
+import {
+  detectGentleAiMajor,
+  parseLegacySddMode,
+  resolveLegacySdd,
+  type LegacySddMode,
+} from "./legacy-sdd.ts";
+import { spawnArgv } from "./msb.ts";
+import { BrokerServer, SocketInUseError } from "./server.ts";
 
 interface CliArgs {
   socket?: string;
@@ -70,6 +78,7 @@ function parseBrokerEnv(): {
   resource?: { maxApplyDiffLines?: number };
   externalCopyTargets?: string[];
   sddRuntime?: { binary: string };
+  advisorProjects?: string[];
 } {
   const raw = process.env.BROKER_PROJECTS;
   const out: {
@@ -79,6 +88,7 @@ function parseBrokerEnv(): {
     resource?: { maxApplyDiffLines?: number };
     externalCopyTargets?: string[];
     sddRuntime?: { binary: string };
+    advisorProjects?: string[];
   } = {};
   const gentleAiBinary = process.env.BROKER_GENTLE_AI_BINARY;
   if (gentleAiBinary !== undefined) {
@@ -152,6 +162,19 @@ function parseBrokerEnv(): {
       process.exit(1);
     }
   }
+  const advisorProjects = process.env.BROKER_ADVISOR_PROJECTS;
+  if (advisorProjects) {
+    try {
+      const parsed = JSON.parse(advisorProjects) as unknown;
+      if (!Array.isArray(parsed) || parsed.some((p) => typeof p !== "string")) {
+        throw new Error("BROKER_ADVISOR_PROJECTS must be a JSON array of project ids");
+      }
+      out.advisorProjects = parsed as string[];
+    } catch (err) {
+      console.error(`invalid BROKER_ADVISOR_PROJECTS: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  }
   return out;
 }
 
@@ -167,6 +190,21 @@ async function main(): Promise<void> {
     logPath: args.logFile ?? process.env.BROKER_LOG_FILE,
     ...parseBrokerEnv(),
   });
+  // Legacy SDD dormancy (gentle-ai 4): resolve once, before serving.
+  let legacySddMode: LegacySddMode;
+  try {
+    legacySddMode = parseLegacySddMode(process.env.BROKER_LEGACY_SDD);
+  } catch (err) {
+    console.error(`invalid BROKER_LEGACY_SDD: ${(err as Error).message}`);
+    process.exit(1);
+  }
+  const gentleAiMajor = await detectGentleAiMajor(config.sddRuntime.binary, spawnArgv);
+  const legacySdd = resolveLegacySdd(legacySddMode, gentleAiMajor);
+  config.sddRuntime.legacySddEnabled = legacySdd.enabled;
+  console.error(
+    `legacy SDD ${legacySdd.enabled ? "enabled" : "dormant"} (BROKER_LEGACY_SDD=${legacySddMode}, gentle-ai major ${gentleAiMajor ?? "unknown"})`,
+  );
+  if (legacySdd.warning) console.error(`warning: ${legacySdd.warning}`);
   const server = new BrokerServer(config);
   const shutdown = () => {
     server.shutdown?.();
@@ -174,7 +212,15 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
-  await server.start();
+  try {
+    await server.start();
+  } catch (error) {
+    if (error instanceof SocketInUseError) {
+      console.error(error.message);
+      process.exit(0);
+    }
+    throw error;
+  }
   // Feature 1: idle reaper sweeps every reapIntervalMs; shutdown stops it.
   server.startReaper();
   console.error(`sandbox broker listening on ${config.socketPath} (state: ${config.stateDir})`);

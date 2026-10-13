@@ -680,6 +680,22 @@ export function assertRegisterableProjectPath(
 
 /** One `-m` commit message: 1..4096 bytes, never flag-like, no control chars. */
 export const GIT_COMMIT_MESSAGE_MAX_BYTES = 4096;
+
+/** A full git object id: 40 hex (sha1) or 64 hex (sha256), lowercase only. */
+export const GIT_COMMIT_OID_RE = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
+
+/**
+ * `expectedResultCommit`: the exact result commit the caller previewed. A full
+ * lowercase object id; anything else fails closed before any git step runs.
+ */
+export function assertExpectedResultCommit(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !GIT_COMMIT_OID_RE.test(value)) {
+    throw new ValidationError(
+      "expectedResultCommit must be a full lowercase commit id (40 or 64 hex)",
+    );
+  }
+}
+
 /** `gh` value caps: repository slug, title, and body bytes. */
 export const GH_REPO_MAX_BYTES = 256;
 export const GH_TITLE_MAX_BYTES = 256;
@@ -690,15 +706,27 @@ export const GIT_REMOTE_RE = /^(?!.*\.\.)[A-Za-z0-9._][A-Za-z0-9._-]{0,254}$/;
 export const GIT_BRANCH_RE = /^(?!.*\.\.)[A-Za-z0-9._/][A-Za-z0-9._/-]{0,254}$/;
 /** Allowlisted `owner/name` GitHub repository slug. */
 export const GH_REPO_RE = /^(?!-)[A-Za-z0-9._-]{1,100}\/(?!-)[A-Za-z0-9._-]{1,100}$/;
-/** Body control characters that remain rejected while tab/newline/CR are kept. */
+/** Body controls rejected while tab/newline and CRLF are permitted. */
 const BODY_UNSAFE_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+const BARE_CARRIAGE_RETURN_RE = /\r(?!\n)/;
+
+function assertBodyTextControls(value: string, what: string): void {
+  if (BODY_UNSAFE_CONTROL_RE.test(value) || BARE_CARRIAGE_RETURN_RE.test(value)) {
+    throw new ValidationError(`${what} contains control characters or NUL`);
+  }
+}
 
 export function assertGitCommitMessage(value: unknown): asserts value is string {
   if (typeof value !== "string" || value.length === 0) {
     throw new ValidationError("message must be a non-empty string");
   }
   assertMaxBytes(value, GIT_COMMIT_MESSAGE_MAX_BYTES, "message");
-  assertNoControlChars(value, "message");
+  const subject = value.split(/\r?\n/, 1)[0];
+  if (subject.length === 0) {
+    throw new ValidationError("message subject must be a non-empty single line");
+  }
+  // These values are individual argv elements, never shell input; no shell-metacharacter check applies.
+  assertBodyTextControls(value, "message");
   if (value.startsWith("-")) {
     throw new ValidationError("message must not start with '-'");
   }
@@ -765,9 +793,7 @@ export function assertGhBody(value: unknown): asserts value is string {
     throw new ValidationError("body must be a string");
   }
   assertMaxBytes(value, GH_BODY_MAX_BYTES, "body");
-  if (BODY_UNSAFE_CONTROL_RE.test(value)) {
-    throw new ValidationError("body contains control characters or NUL");
-  }
+  assertBodyTextControls(value, "body");
   if (value.startsWith("-")) {
     throw new ValidationError("body must not start with '-'");
   }
@@ -788,12 +814,16 @@ export const HOST_READ_OPERATIONS: readonly string[] = [
   "reviewModeStatus",
   "reviewStatus",
   "reviewLensContext",
+  "sandboxResult",
+  "advisorGet",
+  "advisorList",
 ];
 
-/** Host mutations: `gentle-orchestrator` only, fragment `ask` + in-tool `ctx.ask`. */
+/** Host mutation names; HOST_MUTATION_IDENTITY_OPERATIONS grants each identity its explicit subset. */
 export const HOST_MUTATION_OPERATIONS: readonly string[] = [
   "sddArchiveCompose",
   "gitCommit",
+  "gitClearCommitIntent",
   "gitPush",
   "ghIssueCreate",
   "registerProject",
@@ -808,6 +838,8 @@ export const HOST_MUTATION_OPERATIONS: readonly string[] = [
   "reviewCaptureValidation",
   "reviewValidate",
   "reviewRecover",
+  "sandboxResultInstall",
+  "advisorAsk",
 ];
 
 export function hostToolAccess(operation: unknown): HostToolAccess {
@@ -829,14 +861,21 @@ export interface HostToolDecision {
  * the trusted `readOnlyAgents` allowlist (config); the caller passes the
  * broker-derived trusted agent, never a raw envelope claim.
  */
-export class HostToolPolicy {
-  private readonly orchestratorAgents: readonly string[];
+export const HOST_MUTATION_IDENTITY_OPERATIONS: Readonly<Record<string, readonly string[]>> = {
+  "gentle-orchestrator": HOST_MUTATION_OPERATIONS,
+  "pm-odd": HOST_MUTATION_OPERATIONS.filter((operation) => operation !== "registerProject"),
+  "pm-systematic": HOST_MUTATION_OPERATIONS.filter((operation) => operation !== "registerProject"),
+  "pm-sdd": HOST_MUTATION_OPERATIONS.filter((operation) => operation !== "registerProject"),
+};
 
-  constructor(orchestratorAgents: readonly string[]) {
-    if (!Array.isArray(orchestratorAgents)) {
+export class HostToolPolicy {
+  private readonly authorizedAgents: readonly string[];
+
+  constructor(authorizedAgents: readonly string[]) {
+    if (!Array.isArray(authorizedAgents)) {
       throw new ValidationError("host tool policy requires an orchestrator agent allowlist");
     }
-    this.orchestratorAgents = [...orchestratorAgents];
+    this.authorizedAgents = [...authorizedAgents];
   }
 
   access(operation: unknown): HostToolAccess {
@@ -848,7 +887,11 @@ export class HostToolPolicy {
     if (access === "read") {
       return { allowed: true, access, reasonCode: "HOST_READ_OPEN" };
     }
-    if (typeof trustedAgent === "string" && this.orchestratorAgents.includes(trustedAgent)) {
+    if (
+      typeof trustedAgent === "string" &&
+      this.authorizedAgents.includes(trustedAgent) &&
+      (HOST_MUTATION_IDENTITY_OPERATIONS[trustedAgent] ?? []).includes(String(operation))
+    ) {
       return { allowed: true, access, reasonCode: "HOST_MUTATION_ORCHESTRATOR" };
     }
     return {
@@ -864,7 +907,7 @@ export class HostToolPolicy {
 // ---------------------------------------------------------------------------
 
 export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
-  ensureWorker: ["projectDir"],
+  ensureWorker: ["projectDir", "snapshot"],
   exec: ["argv", "cwd", "timeoutMs", "env"],
   readFile: ["path"],
   writeFile: ["path", "content"],
@@ -930,10 +973,14 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
     "untrackedScope", "expectedUntrackedInventory", "intendedUntracked",
     "baseRef", "committedOnly", "workspaceOverlay", "lineage", "consent",
     "locale", "policy", "trace",
+    // External advisors (A4): start without a runtime agent and register the lineage.
+    "externalLenses",
   ],
   reviewCaptureResult: [
     "projectDir", "agent", "input", "inputJson", "lens", "order", "target", "lineage",
     "expectedRevision", "repositoryContext", "subjectHash", "materialize", "preflight",
+    // External advisors (A4): relay a stored advisory response; exclusive with everything above but projectDir.
+    "inputFromAdvisorResponse",
   ],
   reviewCaptureUnachievable: [
     "projectDir", "target", "lineage", "expectedRevision", "repositoryContext",
@@ -964,8 +1011,12 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
     "untrackedScope", "expectedUntrackedInventory", "intendedUntracked", "focus", "policy",
   ],
   gitCommit: ["projectDir", "message", "sandboxSessionID"],
+  gitClearCommitIntent: ["projectDir", "sandboxSessionID"],
   gitPush: ["projectDir", "remote", "setUpstream", "allowProtectedBranch"],
   ghIssueCreate: ["projectDir", "repo", "title", "body"],
+  sandboxResult: ["projectDir", "sandboxSessionID", "compareSandboxSessionID"],
+  resultDiff: ["ref"],
+  sandboxResultInstall: ["projectDir", "sandboxSessionID", "expectedResultCommit"],
   hostSystemSummary: [],
   hostMemory: [],
   hostNetworkListeners: [],
@@ -982,6 +1033,16 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   copyIn: ["hostSource", "workerPath", "confirm"],
   policy: [],
   registerProject: ["path", "dryRun", "createRemote", "makePublic"],
+  // External advisors (advisor-records.ts). No field may carry an acknowledgement token.
+  advisorAsk: [
+    "projectDir", "kind", "binding", "snapshot", "host", "selection", "group", "parentId",
+    "question", "evidenceRefs", "review",
+  ],
+  advisorGet: ["projectDir", "id"],
+  advisorList: ["projectDir", "task", "step", "status"],
+  advisorRead: ["id"],
+  advisorRespond: ["id", "status", "verdict", "findings", "reviewerResult"],
+  evidenceKeep: ["requestId", "paths"],
 };
 
 export function assertPayloadKeys(operation: string, payload: unknown): void {

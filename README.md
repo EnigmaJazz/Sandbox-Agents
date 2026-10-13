@@ -52,7 +52,7 @@ Agents do not self-certify gates (docs/manual-verification.md).
 
 ```sh
 cd broker && bun test        # 87 unit tests, no msb/nono/opencode needed
-bun build src/main.ts --outdir /tmp/build-check
+bun build --target=bun src/main.ts --outdir /tmp/build-check
 nono profile validate nono/profile/opencode-secure.json
 nono run --dry-run --profile nono/profile/opencode-secure.json -- true
 ```

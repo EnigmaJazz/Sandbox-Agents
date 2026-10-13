@@ -55,12 +55,18 @@ import {
   buildReviewStartAsk,
   buildReviewValidateAsk,
   buildRegisterProjectAsk,
+  buildSandboxResultInstallAsk,
   buildGitPushAsk,
-  buildSddArchiveComposeAsk,
-  buildSddAttemptGrantAsk,
 } from "./lib/host-tool-approval.ts";
+import { applyTargetedEdit } from "./lib/sandbox-edit-core.ts";
+import { buildLegacySddTools, legacySddToolsEnabled } from "./lib/legacy-sdd-tools.ts";
 
-const READ_ONLY_AGENTS: readonly string[] = ["gentle-orchestrator"];
+const READ_ONLY_AGENTS: readonly string[] = [
+  "gentle-orchestrator",
+  "pm-odd",
+  "pm-systematic",
+  "pm-sdd",
+];
 
 function assertNotOrchestrator(agent: string | undefined, toolName: string): void {
   if (agent && READ_ONLY_AGENTS.includes(agent)) {
@@ -98,7 +104,7 @@ function notActiveError(): Error {
  * redirection, pipes or environment interpolation. The resulting argv is
  * validated broker-side (shell metacharacters rejected).
  */
-export function tokenizeCommand(command: string): string[] {
+function tokenizeCommand(command: string): string[] {
   const tokens: string[] = [];
   let current = "";
   let quote: "'" | '"' | null = null;
@@ -138,12 +144,8 @@ export function tokenizeCommand(command: string): string[] {
 const pathArg = z.string().min(1).max(4096);
 const sessionIdArg = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 const contentArg = z.string().max(1024 * 1024);
-const sddIdentifierArg = z.string().regex(/^[A-Za-z0-9._-]{1,128}$/).refine((value) => !value.includes(".."));
-const sddLowercaseRequestIdArg = z.string().regex(/^[a-z0-9][a-z0-9-]{0,127}$/);
-const sddContractArg = z.enum(["gentle-ai.sdd-status/v2"]);
 const untrackedInventoryArg = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const reviewAgentArg = z.string().regex(/^[a-z0-9_-]{1,64}$/);
-const sddPathArg = z.string().min(1).max(4096);
 
 function currentProjectDirectory(directory: string | undefined): string {
   if (!directory) throw new Error("host-side SDD runtime requires the current project directory");
@@ -253,10 +255,11 @@ export default function sandboxToolsPlugin() {
 
       sandbox_write: tool({
         description:
-          "Create or overwrite a file in the worker-only sandbox. The first useful mutation " +
+          "Create or overwrite a file (replace the entire file contents) in the worker-only sandbox. The first useful mutation " +
           "activates the worker naturally—no dummy sandbox_bash; no approval is required and the " +
-          "host stays unchanged. path is relative to the sandbox project root, never absolute or " +
-          "traversal. The broker appends a final newline when absent.",
+          "host stays unchanged. Use sandbox_edit for targeted text changes that preserve the rest " +
+          "of the file. path is relative to the sandbox project root, never absolute or traversal. " +
+          "The broker appends a final newline when absent.",
         args: { path: pathArg, content: contentArg },
         execute: async (args, ctx) => {
           assertNotOrchestrator(ctx.agent, "sandbox_write");
@@ -268,16 +271,39 @@ export default function sandboxToolsPlugin() {
 
       sandbox_edit: tool({
         description:
-          "Replace the full contents of a file in the worker-only sandbox. The first useful " +
-          "mutation activates the worker naturally—no dummy sandbox_bash; no approval is required " +
-          "and the host stays unchanged until sandbox_apply. path is relative to the sandbox " +
-          "project root, never absolute or traversal. The broker appends a final newline when absent.",
-        args: { path: pathArg, content: contentArg },
+          "Edit a file in the worker-only sandbox by replacing only the specified text. oldString " +
+          "must occur exactly once unless replaceAll is true. Refuses an empty oldString, no match, " +
+          "multiple matches without replaceAll, or a result that would leave the file empty. For " +
+          "whole-file replacement, use sandbox_write. The first useful mutation activates the worker " +
+          "naturally—no dummy sandbox_bash; no approval is required and the host stays unchanged " +
+          "until sandbox_apply. path is relative to the sandbox project root, never absolute or " +
+          "traversal. The broker appends a final newline when absent.",
+        args: {
+          path: pathArg,
+          oldString: z.string().max(1024 * 1024),
+          newString: z.string().max(1024 * 1024),
+          replaceAll: z.boolean().optional(),
+        },
         execute: async (args, ctx) => {
           assertNotOrchestrator(ctx.agent, "sandbox_edit");
           await ensureWorker(ctx.sessionID, ctx.directory);
           const c = await client();
-          return formatResult("writeFile", await c.request("writeFile", ctx.sessionID, { path: args.path, content: args.content }, ctx.agent));
+          const file = (await c.request("readFile", ctx.sessionID, { path: args.path }, ctx.agent)) as {
+            content?: unknown;
+          };
+          if (typeof file.content !== "string") {
+            throw new Error("sandbox_edit: broker read returned no file content");
+          }
+          const content = applyTargetedEdit(
+            file.content,
+            args.oldString,
+            args.newString,
+            args.replaceAll,
+          );
+          return formatResult(
+            "writeFile",
+            await c.request("writeFile", ctx.sessionID, { path: args.path, content }, ctx.agent),
+          );
         },
       }),
 
@@ -286,15 +312,22 @@ export default function sandboxToolsPlugin() {
           "Apply ONLY a complete plain-text Git unified diff in the worker-only sandbox. No Markdown " +
           "fences, *** Begin Patch envelopes, shell commands, or code snippets. Patch paths are " +
           "relative to the sandbox project root, never /work or absolute/traversal, and must match " +
-          "the current worker checkout. git apply --check runs first. The first useful mutation " +
+          "the current worker checkout. git apply --check runs first. If rejected, check hunk line " +
+          "counts and context: changed-line hunks need unchanged context; EOF append-only hunks may " +
+          "end on added lines. Include a final newline. The first useful mutation " +
           "activates the worker naturally—no dummy sandbox_bash; no approval is required and the " +
           "host stays unchanged.",
         args: { patch: z.string().min(1).max(4 * 1024 * 1024) },
         execute: async (args, ctx) => {
           assertNotOrchestrator(ctx.agent, "sandbox_apply_patch");
-          await ensureWorker(ctx.sessionID, ctx.directory);
-          const c = await client();
-          return formatResult("applyPatch", await c.request("applyPatch", ctx.sessionID, { patch: args.patch }, ctx.agent));
+          try {
+            await ensureWorker(ctx.sessionID, ctx.directory);
+            const c = await client();
+            return formatResult("applyPatch", await c.request("applyPatch", ctx.sessionID, { patch: args.patch }, ctx.agent));
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            throw new Error(`sandbox_apply_patch failed: ${detail}. Provide a complete Git unified diff; check hunk line counts and include unchanged context for changed lines. Append-only EOF hunks may end on additions. Include a final newline.`);
+          }
         },
       }),
 
@@ -503,53 +536,79 @@ export default function sandboxToolsPlugin() {
         },
       }),
 
-      host_sdd_status: tool({
+      host_sandbox_result: tool({
         description:
-          "Run a host-side, allowlisted SDD runtime status operation (read-only; no approval). The " +
-          "broker uses the current canonical project root and exact operation-specific argv, never " +
-          "sandbox_bash; this tool never accepts arbitrary cwd, binary, or argv and does not activate " +
-          "a worker. Returns JSON.",
+          "Read a sandbox result ref (read-only; no approval). Resolves the ref from a " +
+          "sandbox session id, returns the commit identity and timestamp, the changed paths " +
+          "with per-file added/removed counts, and a bounded/redacted patch. Set " +
+          "compareSandboxSessionID to diff two result refs. Never accepts a raw ref or a " +
+          "path list. Returns JSON.",
         args: {
-          change: sddIdentifierArg.optional(),
-          contract: sddContractArg.optional(),
+          sandboxSessionID: sessionIdArg.optional(),
+          compareSandboxSessionID: sessionIdArg.optional(),
         },
         execute: async (args, ctx) => {
           const c = await client();
-          const result = await c.request("sddStatus", ctx.sessionID, {
+          const result = await c.request("sandboxResult", ctx.sessionID, {
             projectDir: currentProjectDirectory(ctx.directory),
-            ...(args.change ? { change: args.change } : {}),
-            ...(args.contract ? { contract: args.contract } : {}),
+            ...(args.sandboxSessionID ? { sandboxSessionID: args.sandboxSessionID } : {}),
+            ...(args.compareSandboxSessionID
+              ? { compareSandboxSessionID: args.compareSandboxSessionID }
+              : {}),
           }, ctx.agent);
           return JSON.stringify(result, null, 2);
         },
       }),
 
-      host_sdd_continue: tool({
+      host_sandbox_result_install: tool({
         description:
-          "Run a host-side, allowlisted SDD continue operation (read-only; no approval). Exact " +
-          "frozen argv, canonical project root, no worker activation. Returns JSON.",
-        args: { change: sddIdentifierArg.optional() },
-        execute: async (args, ctx) => {
-          const c = await client();
-          const result = await c.request("sddContinue", ctx.sessionID, {
-            projectDir: currentProjectDirectory(ctx.directory),
-            ...(args.change ? { change: args.change } : {}),
-          }, ctx.agent);
-          return JSON.stringify(result, null, 2);
+          "Install a sandbox result ref into the working tree (orchestrator-only mutation; " +
+          "requires human approval). Reads the result first and binds the install to the exact " +
+          "previewed commit: if the ref moves between preview and install the broker refuses " +
+          "(result-commit-mismatch). The broker derives every path from the result's own diff; " +
+          "deleted paths are removed and present paths are restored, and the index is never " +
+          "staged. Never accepts a raw ref or a path list. Returns JSON.",
+        args: {
+          sandboxSessionID: sessionIdArg.optional(),
         },
-      }),
-
-      host_sdd_task_result: tool({
-        description:
-          "Validate a per-phase SDD task result (read-only; no approval). phase is " +
-          "the SDD phase id; input is a project-relative path or '-'. Returns JSON.",
-        args: { phase: sddIdentifierArg, input: sddPathArg },
         execute: async (args, ctx) => {
           const c = await client();
-          const result = await c.request("sddTaskResult", ctx.sessionID, {
+          const preview = (await c.request("sandboxResult", ctx.sessionID, {
             projectDir: currentProjectDirectory(ctx.directory),
-            phase: args.phase,
-            input: args.input,
+            ...(args.sandboxSessionID ? { sandboxSessionID: args.sandboxSessionID } : {}),
+          }, ctx.agent)) as {
+            result: { ref: string; commit: string };
+            changedPaths: Array<{ path: string }>;
+            patch: string;
+            patchTruncated: boolean;
+            applyPreviewFiles?: { plain?: string; ansi?: string };
+          };
+          const boundedPreview = preview.patch.length > 12_000
+            ? `${preview.patch.slice(0, 12_000)}\n(... approval preview truncated; inspect previewFile)`
+            : preview.patch;
+          const previewTruncated = preview.patchTruncated || preview.patch.length > 12_000;
+          await requestApplyApproval(
+            { previewTruncated, applyPreviewFiles: preview.applyPreviewFiles },
+            async (paths) => ctx.ask(
+              buildSandboxResultInstallAsk({
+                resultRef: preview.result.ref,
+                resultCommit: preview.result.commit,
+                changedPaths: preview.changedPaths.map((entry) => entry.path),
+                preview: boundedPreview,
+                previewTruncated,
+                ...(paths.previewFile ? { previewFile: paths.previewFile } : {}),
+                ...(args.sandboxSessionID !== undefined
+                  ? { sandboxSessionID: args.sandboxSessionID }
+                  : {}),
+              }),
+            ),
+          );
+          const result = await c.request("sandboxResultInstall", ctx.sessionID, {
+            projectDir: currentProjectDirectory(ctx.directory),
+            expectedResultCommit: preview.result.commit,
+            ...(args.sandboxSessionID !== undefined
+              ? { sandboxSessionID: args.sandboxSessionID }
+              : {}),
           }, ctx.agent);
           return JSON.stringify(result, null, 2);
         },
@@ -671,57 +730,6 @@ export default function sandboxToolsPlugin() {
         },
       }),
 
-      host_sdd_attempt_grant: tool({
-        description:
-          "Grant canonical host roots to a caller change instance (orchestrator-only " +
-          "mutation; requires human approval). Roots are forwarded in order; an " +
-          "initial grant may omit the CAS revision. Returns JSON.",
-        args: {
-          change: sddIdentifierArg,
-          expectedRevision: untrackedInventoryArg.optional(),
-          roots: z.array(z.string().min(1).max(4096)).min(1).max(32),
-          changeInstance: z.string().min(1).max(128),
-          requestId: sddLowercaseRequestIdArg,
-          actor: z.string().min(1).max(128),
-          reason: z.string().min(1).max(500),
-        },
-        execute: async (args, ctx) => {
-          await ctx.ask(buildSddAttemptGrantAsk(args));
-          const c = await client();
-          const payload: Record<string, unknown> = {
-            projectDir: currentProjectDirectory(ctx.directory),
-            change: args.change,
-            roots: args.roots,
-            changeInstance: args.changeInstance,
-            requestId: args.requestId,
-            actor: args.actor,
-            reason: args.reason,
-          };
-          if (args.expectedRevision) payload.expectedRevision = args.expectedRevision;
-          const result = await c.request("sddAttemptGrant", ctx.sessionID, payload, ctx.agent);
-          return JSON.stringify(result, null, 2);
-        },
-      }),
-
-      host_sdd_archive_compose: tool({
-        description:
-          "Compose an SDD archive delta into the canonical spec (orchestrator-only " +
-          "mutation; requires human approval). canonical/delta/output are " +
-          "project-relative paths. Returns JSON.",
-        args: { canonical: sddPathArg, delta: sddPathArg, output: sddPathArg },
-        execute: async (args, ctx) => {
-          await ctx.ask(buildSddArchiveComposeAsk(args));
-          const c = await client();
-          const result = await c.request("sddArchiveCompose", ctx.sessionID, {
-            projectDir: currentProjectDirectory(ctx.directory),
-            canonical: args.canonical,
-            delta: args.delta,
-            output: args.output,
-          }, ctx.agent);
-          return JSON.stringify(result, null, 2);
-        },
-      }),
-
       host_git_commit: tool({
         description:
           "Commit exactly an applied B→C result's paths (orchestrator-only mutation; " +
@@ -749,6 +757,31 @@ export default function sandboxToolsPlugin() {
             ...(args.sandboxSessionID !== undefined
               ? { sandboxSessionID: args.sandboxSessionID }
               : {}),
+          }, ctx.agent);
+          return JSON.stringify(result, null, 2);
+        },
+      }),
+
+      host_git_clear_commit_intent: tool({
+        description:
+          "Clear only a pending host-commit intent for the current session or the selected delegated session (orchestrator-only; requires human approval). " +
+          "Refuses when no intent exists, and reports the result commit and recorded parent that were cleared. " +
+          "Does not alter the session state, installed/committed markers, working tree, index, or refs. Returns JSON.",
+        args: { sandboxSessionID: sessionIdArg.optional() },
+        execute: async (args, ctx) => {
+          await ctx.ask({
+            permission: "host_git_clear_commit_intent",
+            patterns: ["*"],
+            always: [],
+            metadata: {
+              summary: `Clear the pending host-commit intent for session ${args.sandboxSessionID ?? ctx.sessionID}`,
+              sessionID: args.sandboxSessionID ?? ctx.sessionID,
+            },
+          });
+          const c = await client();
+          const result = await c.request("gitClearCommitIntent", ctx.sessionID, {
+            projectDir: currentProjectDirectory(ctx.directory),
+            ...(args.sandboxSessionID !== undefined ? { sandboxSessionID: args.sandboxSessionID } : {}),
           }, ctx.agent);
           return JSON.stringify(result, null, 2);
         },
@@ -1109,6 +1142,16 @@ export default function sandboxToolsPlugin() {
           return JSON.stringify(result, null, 2);
         },
       }),
+
+      // gentle-ai 4 retired SDD: the five host_sdd_* tools are dormant unless
+      // OPENCODE_SANDBOX_LEGACY_SDD=1 (rollback to 3.x). See lib/legacy-sdd-tools.ts.
+      ...(legacySddToolsEnabled()
+        ? buildLegacySddTools({
+            client,
+            projectDirectory: currentProjectDirectory,
+            revisionArg: untrackedInventoryArg,
+          })
+        : {}),
     },
     "chat.params": async (input: unknown) => {
       // Host-authoritative session->agent binding: only a host-resolved

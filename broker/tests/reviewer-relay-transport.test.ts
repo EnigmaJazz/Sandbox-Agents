@@ -282,15 +282,31 @@ describe("reviewer relay session root selection", () => {
     expect(refusal).toThrow("canonical");
   });
 
-  test("refuses the plugin server root even when it is allowlisted", () => {
-    expect(() =>
+  test("accepts the plugin server root when it is allowlisted", () => {
+    expect(
       selectCanonicalSessionRoot({
         sessionDirectory: canonicalRepo,
         serverRoot: canonicalRepo,
         projectPaths: [projectPath(canonicalRepo)],
         realpath: realpathSync,
       }),
-    ).toThrow("reviewer_relay_root_refused");
+    ).toBe(canonicalRepo);
+  });
+
+  test("refuses a server root that is not broker-allowlisted without spawning a child", async () => {
+    const harness = relayHarness({
+      sessionDirectory: canonicalOther,
+      serverRoot: canonicalOther,
+      projectPaths: [projectPath(canonicalRepo)],
+      rootCache: new Map<string, string>(),
+    });
+    const refusal = await harness.hooks["tool.execute.before"](
+      taskInput("s-server-root-unlisted", "c1"),
+      { args: { subagent_type: "asi-review-readability", prompt: BINDING_PROMPT } },
+    );
+
+    expect(deliveredError(refusal)).toContain("reviewer_relay_root_refused");
+    expect(harness.children).toHaveLength(0);
   });
 
   test("refuses a root outside the broker allowlist", () => {
@@ -377,8 +393,18 @@ describe("reviewer relay session root selection", () => {
     expect(await resolve("session-1")).toBe(canonicalRepo);
     expect(await resolve("session-1")).toBe(canonicalRepo);
     expect(sessionLookups).toBe(1);
-    expect(policyLookups).toBe(1);
+    expect(policyLookups).toBe(2);
     expect(cache.get("session-1")).toBe(canonicalRepo);
+  });
+
+  test("cache hit refuses a root missing from the current broker allowlist", async () => {
+    const resolve = createSessionRootResolver({
+      lookupSessionDirectory: async () => { throw new Error("cache hit must not lookup"); },
+      loadAllowlistedPaths: async () => [canonicalOther],
+      realpath: realpathSync, serverRoot: canonicalOther,
+      cache: new Map([["session-1", canonicalRepo]]),
+    });
+    expect((await refusalOf(() => resolve("session-1"))).code).toBe("reviewer_relay_root_refused");
   });
 
   test("resolver never falls back to the server project when lookup fails", async () => {
@@ -1194,8 +1220,10 @@ class ScriptedTransportChild implements TransportChild {
 
 interface RelayHarnessOptions {
   sessionDirectory?: unknown;
+  sessionLookupFailure?: boolean;
   projectPaths?: readonly unknown[];
   serverRoot?: string;
+  rootCache?: Map<string, string>;
   registry?: RelayRegistry;
   promptBody?: string;
   resultOutput?: string;
@@ -1226,7 +1254,10 @@ function relayHarness(options: RelayHarnessOptions = {}): RelayHarness {
     worktree: options.serverRoot ?? canonicalOther,
     client: {
       session: {
-        get: async () => ({ data: { directory: options.sessionDirectory ?? canonicalRepo } }),
+        get: async () => {
+          if (options.sessionLookupFailure) throw new Error("session unavailable");
+          return { data: { directory: options.sessionDirectory ?? canonicalRepo } };
+        },
       },
     },
     brokerRequest: async () => ({ projects: options.projectPaths ?? [projectPath(canonicalRepo)] }),
@@ -1234,6 +1265,7 @@ function relayHarness(options: RelayHarnessOptions = {}): RelayHarness {
     realpath: realpathSync,
     env: ENV,
     registry: options.registry,
+    rootCache: options.rootCache,
   });
   return { hooks, specs, children };
 }
@@ -1298,6 +1330,55 @@ describe("reviewer relay hook scope", () => {
     );
     expect(after.output).toBe('{"admitted":true}');
     expect(harness.children[0]!.killed).toBe(true);
+  });
+
+  test("a fresh session resolved to the server root relays successfully", async () => {
+    const harness = relayHarness({ sessionDirectory: canonicalRepo, serverRoot: canonicalRepo });
+    const before = { args: { subagent_type: "asi-review-risk", prompt: BINDING_PROMPT } };
+    const result = await harness.hooks["tool.execute.before"](taskInput("s-server-root-fresh", "c1"), before);
+
+    expect(result).toBeUndefined();
+    expect(harness.specs).toHaveLength(1);
+    expect(harness.specs[0]!.cwd).toBe(canonicalRepo);
+    expect(before.args.prompt).toBe(MATERIALIZED_PROMPT);
+  });
+
+  test("a failed session lookup refuses with the lookup-failure kind", async () => {
+    const harness = relayHarness({ sessionLookupFailure: true, serverRoot: canonicalRepo });
+    const before = { args: { subagent_type: "asi-review-risk", prompt: BINDING_PROMPT } };
+    const result = await harness.hooks["tool.execute.before"](taskInput("s-lookup-failure", "c1"), before);
+
+    expect(deliveredError(result)).toContain("reviewer_relay_session_lookup_failed");
+    expect(deliveredError(result)).not.toContain("reviewer_relay_root_refused");
+    expect(harness.specs).toHaveLength(0);
+  });
+
+  test("a cached session root equal to the server root relays successfully", async () => {
+    const harness = relayHarness({
+      sessionDirectory: canonicalRepo,
+      serverRoot: canonicalRepo,
+      rootCache: new Map([["s-server-root-cached", canonicalRepo]]),
+    });
+    const before = { args: { subagent_type: "asi-review-risk", prompt: BINDING_PROMPT } };
+    const result = await harness.hooks["tool.execute.before"](taskInput("s-server-root-cached", "c1"), before);
+
+    expect(result).toBeUndefined();
+    expect(harness.specs).toHaveLength(1);
+    expect(harness.specs[0]!.cwd).toBe(canonicalRepo);
+    expect(before.args.prompt).toBe(MATERIALIZED_PROMPT);
+  });
+
+  test("an unusable session directory refuses as a lookup failure", async () => {
+    const resolver = createSessionRootResolver({
+      lookupSessionDirectory: async () => undefined,
+      loadAllowlistedPaths: async () => [projectPath(canonicalRepo)],
+      realpath: realpathSync,
+      serverRoot: canonicalOther,
+      cache: new Map(),
+    });
+    const result = await refusalOf(() => resolver("s-empty-directory"));
+
+    expect(result.code).toBe("reviewer_relay_session_lookup_failed");
   });
 
   test("a structured Task result yields the reviewer text in the completion frame", async () => {

@@ -20,6 +20,12 @@ import { randomUUID } from "node:crypto";
 export interface BrokerClientOptions {
   socketPath: string;
   timeoutMs?: number;
+  /**
+   * Extra time a request parked by the broker's worker-pool queue may wait,
+   * counted once from the first queued notice. Default: the broker's default
+   * queue timeout (BROKER_QUEUE_TIMEOUT_MS, 600 s).
+   */
+  queuedHoldTimeoutMs?: number;
 }
 
 export interface BrokerResponse {
@@ -53,7 +59,39 @@ export function brokerSocketPath(env: Record<string, string | undefined> = proce
 interface Pending {
   resolve: (resp: BrokerResponse) => void;
   reject: (err: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+  timer?: ReturnType<typeof setTimeout>;
+  /** Fails the request with a timeout; re-armed once when the broker queues it. */
+  onTimeout: () => void;
+  opTimeout: number;
+  queued: boolean;
+}
+
+interface PendingWrite {
+  data: Buffer;
+  offset: number;
+  onSent: () => void;
+}
+
+/**
+ * Broker frames always begin `{"version":1,"id":"<id>"` (server.ts builds every
+ * response with version then id). Recover an id only from that position, so a
+ * leftover tail can never be matched through an "id" inside its content.
+ */
+const FRAME_ID_AT_START_RE = /^\{"version":1,"id":("(?:\\.|[^"\\])*")/;
+
+function frameIdAtStart(bytes: Buffer): string | undefined {
+  const m = FRAME_ID_AT_START_RE.exec(bytes.subarray(0, 512).toString("utf8"));
+  if (!m) return undefined;
+  try {
+    return JSON.parse(m[1]!) as string;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Structure-only preview for logs: never leaks frame content. */
+function redactedPrefix(bytes: Buffer): string {
+  return bytes.subarray(0, 160).toString("utf8").replace(/[^{}\[\]:,"\\]/g, ".");
 }
 
 export interface BrokerClient {
@@ -66,6 +104,7 @@ export const OPERATION_TIMEOUT_MS: Record<string, number> = {
   bindSessionAgent: 10_000,
   ensureWorker: 120_000,
   gitCommit: 130_000,
+  sandboxResultInstall: 130_000,
   gitPush: 130_000,
   ghIssueCreate: 130_000,
   planDocAppend: 30_000,
@@ -90,18 +129,45 @@ export const OPERATION_TIMEOUT_MS: Record<string, number> = {
  */
 export async function createBrokerClient(opts: BrokerClientOptions): Promise<BrokerClient> {
   const timeoutMs = opts.timeoutMs ?? 30_000;
+  const queuedHoldTimeoutMs = opts.queuedHoldTimeoutMs ?? 600_000;
   const pending = new Map<string, Pending>();
   let socket: ReturnType<typeof Bun.connect> | null = null;
   let closed = false;
   let connecting: Promise<void> | null = null;
-  let rx = "";
+  let rx = Buffer.alloc(0);
 
   const failPending = (err: Error) => {
     for (const p of pending.values()) {
-      clearTimeout(p.timer);
+      if (p.timer) clearTimeout(p.timer);
       p.reject(err);
     }
     pending.clear();
+  };
+  const outgoing: PendingWrite[] = [];
+
+  const flushWrites = (sock: ReturnType<typeof Bun.connect>) => {
+    if (socket !== sock) return;
+    while (outgoing.length > 0) {
+      const write = outgoing[0]!;
+      try {
+        const remaining = write.data.subarray(write.offset);
+        const writtenBytes = sock.write(remaining);
+        if (!Number.isInteger(writtenBytes) || writtenBytes < 0 || writtenBytes > remaining.length) {
+          throw new Error(`invalid socket write result: ${writtenBytes}`);
+        }
+        write.offset += writtenBytes;
+        if (write.offset < write.data.length) return;
+        outgoing.shift();
+        write.onSent();
+      } catch (err) {
+        outgoing.length = 0;
+        closed = true;
+        socket = null;
+        failPending(new BrokerClientError(`failed to write request: ${String(err)}`, "unavailable"));
+        sock.close();
+        return;
+      }
+    }
   };
 
   const connect = async (): Promise<void> => {
@@ -112,29 +178,58 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
         unix: opts.socketPath,
         socket: {
           open() {
-            /* connected; reset the receive accumulator */
-            rx = "";
+            /* connected; reset both frame accumulators */
+            rx = Buffer.alloc(0);
+            outgoing.length = 0;
+          },
+          drain(sock) {
+            flushWrites(sock);
           },
           data(sock, data: Buffer) {
-            // NDJSON framing: a response line may arrive split across socket
-            // reads (large bodies), so accumulate and emit only complete lines.
-            rx += data.toString("utf8");
+            // Mirror reviewer-relay-core.ts:828-844: buffer raw bytes and decode
+            // only complete lines so chunk-split UTF-8 code points remain intact.
+            // No response-side size cap is imposed: the broker currently has no
+            // such cap, and introducing one changes the response contract without
+            // evidence that truncation caused the observed frame loss.
+            rx = Buffer.concat([rx, data]);
             let nl: number;
-            while ((nl = rx.indexOf("\n")) !== -1) {
-              const line = rx.slice(0, nl);
-              rx = rx.slice(nl + 1);
-              if (line.trim().length === 0) continue;
+            while ((nl = rx.indexOf(0x0a)) !== -1) {
+              const lineBytes = rx.subarray(0, nl);
+              rx = rx.subarray(nl + 1);
+              if (lineBytes.toString("utf8").trim().length === 0) continue;
+              const line = lineBytes.toString("utf8");
               let resp: BrokerResponse;
               try {
                 resp = JSON.parse(line) as BrokerResponse;
               } catch {
-                continue; // ignore malformed frames; keep the socket alive
+                // Only an id at the frame's start identifies its caller.
+                const recoveredId = frameIdAtStart(lineBytes);
+                const p = recoveredId === undefined ? undefined : pending.get(recoveredId);
+                if (p && recoveredId !== undefined) {
+                  pending.delete(recoveredId);
+                  if (p.timer) clearTimeout(p.timer);
+                  p.reject(new BrokerClientError("broker returned an unparseable response frame", "malformed_response"));
+                } else {
+                  console.warn("broker-client discarded malformed response frame", {
+                    lineLength: lineBytes.length,
+                    prefix: redactedPrefix(lineBytes),
+                    pendingIds: [...pending.keys()].slice(0, 10),
+                    ...(recoveredId === undefined ? {} : { id: recoveredId }),
+                  });
+                }
+                continue; // keep the socket usable after a bad frame
               }
-              // queued hold: log and keep pending open, waiting for real worker result with same id
+              // Queued hold: the broker parked the request until a worker frees up.
+              // Replace the response deadline once with a bounded one (queue wait
+              // plus the operation's own budget); later notices never extend it.
               if ((resp as any).progress?.queued) {
                 console.log(`pool full, queued position ${(resp as any).progress.position}`);
                 const p = pending.get(resp.id);
-                if (p) clearTimeout(p.timer);
+                if (p && !p.queued) {
+                  p.queued = true;
+                  if (p.timer) clearTimeout(p.timer);
+                  p.timer = setTimeout(p.onTimeout, queuedHoldTimeoutMs + p.opTimeout);
+                }
                 continue;
               }
               const p = pending.get(resp.id);
@@ -142,19 +237,26 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
                 pending.delete(resp.id);
                 clearTimeout(p.timer);
                 p.resolve(resp);
+              } else {
+                console.warn("broker-client received unmatched response id", {
+                  id: resp.id,
+                  pendingCount: pending.size,
+                });
               }
             }
           },
           close() {
             closed = true;
             socket = null;
-            rx = "";
+            rx = Buffer.alloc(0);
+            outgoing.length = 0;
             failPending(new BrokerClientError("broker socket closed", "unavailable"));
           },
           error(_sock, err) {
             closed = true;
             socket = null;
-            rx = "";
+            rx = Buffer.alloc(0);
+            outgoing.length = 0;
             failPending(
               new BrokerClientError(
                 `broker connection error: ${String(err?.message ?? err)}`,
@@ -190,15 +292,33 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
       const id = randomUUID();
       return new Promise<unknown>((resolve, reject) => {
         const opTimeout = OPERATION_TIMEOUT_MS[operation] ?? timeoutMs;
-        const timer = setTimeout(() => {
+        const onTimeout = () => {
+          // Discard a partial reply only when it is THIS request's: it may never
+          // complete (a truncated frame), and would otherwise swallow the next
+          // reply. A partial reply belonging to another request is left intact so
+          // that request still resolves.
+          if (rx.length > 0) {
+            const own = frameIdAtStart(rx) === id;
+            console.warn("broker-client timed out with residual response bytes", {
+              operation,
+              residualBytes: rx.length,
+              residualPrefix: redactedPrefix(rx),
+              discarded: own,
+            });
+            if (own) rx = Buffer.alloc(0);
+          }
           pending.delete(id);
           reject(new BrokerClientError(`broker request '${operation}' timed out`, "timeout"));
-        }, opTimeout);
-        pending.set(id, {
-          resolve,
-          reject,
-          timer,
-        });
+        };
+        const pendingRequest: Pending = { resolve, reject, onTimeout, opTimeout, queued: false };
+        const startTimeout = () => {
+          // Start only after the complete request frame is sent: backpressure
+          // must not consume the broker-response budget while bytes are queued.
+          // A queued notice may already have armed the longer hold deadline.
+          if (pendingRequest.queued || !pending.has(id)) return;
+          pendingRequest.timer = setTimeout(onTimeout, opTimeout);
+        };
+        pending.set(id, pendingRequest);
         const line = JSON.stringify({
           version: 1,
           id,
@@ -207,13 +327,18 @@ export async function createBrokerClient(opts: BrokerClientOptions): Promise<Bro
           ...(agent ? { agent } : {}),
           ...(payload !== undefined ? { payload } : {}),
         });
-        try {
-          socket?.write(`${line}\n`);
-        } catch (err) {
+        const currentSocket = socket;
+        if (!currentSocket) {
           pending.delete(id);
-          clearTimeout(timer);
-          reject(new BrokerClientError(`failed to write request: ${String(err)}`, "unavailable"));
+          reject(new BrokerClientError("broker socket is unavailable", "unavailable"));
+          return;
         }
+        outgoing.push({
+          data: Buffer.from(`${line}\n`),
+          offset: 0,
+          onSent: startTimeout,
+        });
+        flushWrites(currentSocket);
       }).then((resp: BrokerResponse) => {
         if (!resp.ok) {
           throw new BrokerClientError(

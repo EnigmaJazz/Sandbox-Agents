@@ -86,6 +86,9 @@ function makeRuntime() {
 function makeCtx(options: { recordAgent?: string; readOnlyAgents?: string[] } = {}): SddOpContext {
   const config = defaultConfig({
     readOnlyAgents: options.readOnlyAgents ?? [ORCHESTRATOR],
+    // These tests exercise the SDD operations as they run on gentle-ai 3.x
+    // (the rollback path); the dormant default is covered by legacy-sdd-dormancy.test.ts.
+    sddRuntime: { legacySddEnabled: true },
   });
   const record: SessionRecord | undefined =
     (options as { noRecord?: boolean }).noRecord === true
@@ -183,6 +186,64 @@ const HANDLERS: Record<
   reviewRecover: buildReviewRecoverOp,
   registerProject: buildRegisterProjectOp,
 };
+
+describe("review trace path guard", () => {
+  function traceContext() {
+    const root = mkdtempSync(join(tmpdir(), "review-trace-guard-"));
+    const projectRoot = join(root, "project");
+    mkdirSync(projectRoot);
+    const ctx = makeCtx();
+    ctx.config.projects = [{ id: "repo", path: projectRoot }];
+    return { root, projectRoot, ctx };
+  }
+
+  test("refuses a trace path inside the project before calling reviewStart", async () => {
+    const { root, projectRoot, ctx } = traceContext();
+    try {
+      const handler = buildReviewStartOp(ctx);
+      await expect(
+        handler(request("reviewStart", { projectDir: projectRoot, trace: join(projectRoot, "trace.json") })),
+      ).rejects.toThrow(
+        "reviewStart trace must resolve unambiguously outside the project root",
+      );
+      expect(ctx.sddRuntime.calls).toHaveLength(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("forwards an outside-project trace token verbatim", async () => {
+    const { root, projectRoot, ctx } = traceContext();
+    try {
+      const trace = join(root, "outside-trace.json");
+      await buildReviewStartOp(ctx)(request("reviewStart", {
+        projectDir: projectRoot,
+        trace,
+        focus: "risk",
+      }));
+      expect(ctx.sddRuntime.calls).toEqual([{
+        method: "reviewStart",
+        payload: expect.objectContaining({ projectDir: projectRoot, trace, focus: "risk" }),
+      }]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses an unresolvable trace token before calling reviewStart", async () => {
+    const { root, projectRoot, ctx } = traceContext();
+    try {
+      await expect(
+        buildReviewStartOp(ctx)(request("reviewStart", { projectDir: projectRoot, trace: String.fromCharCode(0) })),
+      ).rejects.toThrow(
+        "reviewStart trace must resolve unambiguously outside the project root",
+      );
+      expect(ctx.sddRuntime.calls).toHaveLength(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("host tool authorization", () => {
   test("reads are open to every agent", () => {
@@ -373,7 +434,18 @@ describe("host git/GH handlers", () => {
     };
     return {
       config,
-      store: { get: () => record },
+      store: {
+        get: () => record,
+        touch: (_sessionID, patch = {}) => {
+          Object.assign(record, patch);
+          return record;
+        },
+        transition: (_sessionID, from, to, patch = {}) => {
+          if (record.state !== from) throw new Error(`expected ${from}, got ${record.state}`);
+          Object.assign(record, patch, { state: to });
+          return record;
+        },
+      },
       sddRuntime: makeRuntime(),
       pool: { allocations: [] },
       hostRead: { has: () => false },
@@ -393,6 +465,12 @@ describe("host git/GH handlers", () => {
       calls.push(argv);
       for (const [pattern, result] of rules) {
         if (pattern.test(argv.join(" "))) return { ...result, timedOut: false };
+      }
+      if (argv.join(" ") === "git rev-parse HEAD") {
+        return { status: 0, stdout: "abcdef0123456789abcdef0123456789abcdef01\n", stderr: "", timedOut: false };
+      }
+      if (argv[1] === "rev-parse" && argv[2] === "--verify") {
+        return { status: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "", timedOut: false };
       }
       return { status: 0, stdout: "", stderr: "", timedOut: false };
     };
@@ -875,12 +953,12 @@ describe("host review lifecycle routing", () => {
       request(
         "reviewStart",
         {
-          projectDir: "/repo",
+          projectDir: process.cwd(),
           contract: "Contract-TOKEN.:v2",
           target: "Target-TOKEN",
           focus: "risk",
           lineage: "Lineage-TOKEN",
-          trace: "Trace-TOKEN",
+          trace: join(tmpdir(), "Trace-TOKEN"),
         },
         ORCHESTRATOR,
       ),
@@ -888,12 +966,12 @@ describe("host review lifecycle routing", () => {
     const call = (ctx.sddRuntime as unknown as { calls: RuntimeCall[] }).calls[0]!;
     expect(call.method).toBe("reviewStart");
     expect(call.payload).toMatchObject({
-      projectDir: "/repo",
+      projectDir: process.cwd(),
       contract: "Contract-TOKEN.:v2",
       target: "Target-TOKEN",
       focus: "risk",
       lineage: "Lineage-TOKEN",
-      trace: "Trace-TOKEN",
+      trace: join(tmpdir(), "Trace-TOKEN"),
     });
   });
 

@@ -26,6 +26,8 @@
       "$HOME/.local/state/opencode",
       "$HOME/.cache/opencode",
       "$HOME/.config/opencode",
+      "$HOME/.cache/aft",
+      "~/.bun/install/cache",
       "$HOME/.local/share/cortexkit",
       "$HOME/.config/cortexkit",
       "$HOME/.gentle-ai",
@@ -33,7 +35,7 @@
       "$HOME/.cache/workflow-health-check",
       "$HOME/ai-workspace/workflow_optimisation/.atl",
       "$HOME/ai-workspace/workflow_optimisation/.codegraph",
-      "$HOME/.Config/openchamber/chats/.auto-update-history.json",
+      "$HOME/.config/openchamber/chats/.auto-update-history.json",
       "$HOME/.config/openchamber/chats/**/.auto-update-history.json",
       "$HOME/agent-sandbox-integration/.atl",
       "$HOME/agent-sandbox-integration/.codegraph",
@@ -76,7 +78,10 @@
       "$HOME/mem-opt/.git",
       "$HOME/mem-opt/.atl",
       "$HOME/mem-opt/.codegraph",
-      "/mnt/ai_storage/kinver-hub/proxy/.git"
+      "/mnt/ai_storage/kinver-hub/proxy/.git",
+      "$HOME/.nanobot/workspace/.git",
+      "$HOME/.nanobot/workspace/.atl",
+      "$HOME/.nanobot/workspace/.codegraph"
     ],
     "allow_file": [
       "$HOME/.auto-update-history.json",
@@ -87,7 +92,8 @@
       "/home/james/.auto-update-history.json",
       "/home/james/ai-workspace/.auto-update-history.json",
       "/home/james/.config/openchamber/.auto-update-history.json",
-      "/home/james/ai-workspace/tasker/.auto-update-history.json"
+      "/home/james/ai-workspace/tasker/.auto-update-history.json",
+      "/home/james/.nanobot/.auto-update-history.json"
     ],
     "read": [
       "$HOME/agent-sandbox-integration",
@@ -100,7 +106,8 @@
       "/home/james/nono-opencode-test",
       "/home/james/omni-router-setup",
       "/home/james/mem-opt",
-      "/home/james/agent-sandbox-integration"
+      "/home/james/agent-sandbox-integration",
+      "/home/james/.nanobot/workspace"
     ],
     "deny": [
       "$HOME/.ssh",
@@ -123,7 +130,9 @@
       "mcp.context7.com",
       "context7.com",
       "registry.npmjs.org",
-      "registry.yarnpkg.com"
+      "registry.yarnpkg.com",
+      "api.githubcopilot.com",
+      "huggingface.co"
     ],
     "open_port": [
       4096,

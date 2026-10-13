@@ -85,6 +85,12 @@ export interface SddRuntimeConfig {
   /** Trusted host executable; never supplied by a request payload. */
   binary: string;
   outputMaxBytes: number;
+  /**
+   * Whether the five legacy SDD operations may run (legacy-sdd.ts). main.ts
+   * resolves it at startup from BROKER_LEGACY_SDD and the installed gentle-ai
+   * version; the default is false so any other construction fails closed.
+   */
+  legacySddEnabled: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +135,11 @@ export interface BrokerConfig {
   /** S17: security components agents must never modify. */
   protectedSecurityFiles: string[];
   /**
+   * Registered project ids that get an external-advisor socket
+   * (advisor-socket.ts). Empty means no advisor listener at all.
+   */
+  advisorProjects: string[];
+  /**
    * Idle reaper (Feature 1): sweep interval in ms. Every interval, workers
    * whose records are untouched for reapIdleMs are released.
    */
@@ -168,6 +179,8 @@ export interface BrokerConfig {
    * touch/admission side effect.
    */
   readOnlyAgents: string[];
+  /** Rethrow unexpected request-processing failures after server-side logging. */
+  failLoudUnexpectedErrors: boolean;
   /**
    * Per-role model selection (role-model R4). Changing any entry affects only
    * that role's model — authorization outcomes are unchanged (policy independence).
@@ -229,7 +242,12 @@ export const DEFAULT_PROTECTED_SECURITY_FILES: string[] = [
 ];
 
 /** Orchestrator read-only agents (orchestrator-readonly R2). */
-export const DEFAULT_READ_ONLY_AGENTS: string[] = ["gentle-orchestrator"];
+export const DEFAULT_READ_ONLY_AGENTS: string[] = [
+  "gentle-orchestrator",
+  "pm-odd",
+  "pm-systematic",
+  "pm-sdd",
+];
 
 /** Role-model defaults per capability-model §6 (model-policy independence). */
 export const DEFAULT_ROLE_MODELS: RoleModelsConfig = {
@@ -312,6 +330,7 @@ export function defaultConfig(
     externalCopyTargets: DEFAULT_EXTERNAL_COPY_TARGETS,
     protectedPaths: DEFAULT_PROTECTED_PATHS,
     protectedSecurityFiles: DEFAULT_PROTECTED_SECURITY_FILES,
+    advisorProjects: [],
     reapIntervalMs: positiveIntEnv("BROKER_REAP_INTERVAL_MS", 60_000),
     reapIdleMs: positiveIntEnv("BROKER_REAP_IDLE_MS", 3_600_000),
     artifactGraceMs: positiveIntEnv("BROKER_ARTIFACT_GRACE_MS", 3_600_000),
@@ -319,6 +338,7 @@ export function defaultConfig(
     queueTimeoutMs: positiveIntEnv("BROKER_QUEUE_TIMEOUT_MS", 600_000),
     queueMaxLength: positiveIntEnv("BROKER_QUEUE_MAX_LENGTH", 32),
     readOnlyAgents: [...DEFAULT_READ_ONLY_AGENTS],
+    failLoudUnexpectedErrors: process.env.NODE_ENV === "test",
     roleModels: { ...DEFAULT_ROLE_MODELS },
     resource: {
       reserveCpuFraction: 0.25,
@@ -365,6 +385,7 @@ export function defaultConfig(
     sddRuntime: {
       binary: process.env.BROKER_GENTLE_AI_BINARY ?? "gentle-ai",
       outputMaxBytes: 512 * 1024,
+      legacySddEnabled: false,
     },
     network: {
       mode: "deny-by-default",

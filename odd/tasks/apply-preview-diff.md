@@ -2,7 +2,7 @@
 
 - **Feature:** `apply-preview-diff`
 - **Project:** `sandbox-integration` (`/home/james/agent-sandbox-integration`)
-- **Status:** T1–T3 implemented and verified in the sandbox; result retained, not installed (S17 refused apply). T4 (docs) and T5 (post-install readback) pending.
+- **Status:** T1–T3 installed (broker-owned plain and ANSI artifacts + the fail-closed approval guard); T4 (docs) and T5 (post-install readback) pending.
 - **Created:** 2026-09-19
 - **Delivery strategy:** `ask-on-risk`
 - **Chain strategy:** `stacked-to-main` (the user's standing choice)
@@ -36,33 +36,28 @@ one. The current implementation partially exists but conflates them (see
 file lives in the OS temp dir and is colourised with ANSI escapes, so it is
 neither stable nor editor-friendly.
 
-### Relationship to the open finding `R4-apply-preview-bypass`
+### Relationship to the review finding `R4-apply-preview-bypass`
 
-The user cites the open finding **`R4-apply-preview-bypass`** (BLOCKER,
-resilience lens) with the text:
+The finding was reported as a BLOCKER by the resilience lens: large apply
+results could be executed although the human preview was truncated. The cited
+range (`broker/src/service.ts:1559-1563`) is stale and does not contain the
+finding text; the broker's `buildApplyResultOp` also still has no independent
+preview-line-count gate.
 
-> "Large apply results are now executed despite the human preview being
-> truncated, so approval cannot inspect the complete B→C delta"
-> (`broker/src/service.ts:1559-1563`).
+**Resolution:** the repository plugin now blocks the reported approval path.
+`apply-preview-guard.ts` refuses a truncated preview unless the broker supplied
+a complete plain artifact, and `sandbox_apply` invokes the guard before `ctx.ask`
+and before sending `applyResult` (`opencode/plugins/lib/apply-preview-guard.ts:43-74`;
+`opencode/plugins/sandbox-tools.ts:428-465`). Therefore approval cannot proceed
+through this plugin when the preview is truncated and no complete artifact
+exists. This resolves the recorded approval bypass; it does not add a broker-side
+size gate, nor prove that every conceivable caller path passes through the
+plugin. Do not describe the finding as an open approval bypass unless new
+ evidence identifies a bypassing path.
 
-Observed (this session): the cited range `broker/src/service.ts:1559-1563` is
-the `releaseWorker` comment plus the start of the `APPLIED` return object — it
-does **not** contain the finding text verbatim, so the finding's line reference
-is stale relative to the current file. The finding's **substance** is nonetheless
-consistent with the code: the apply path (`buildApplyResultOp`) has **no**
-`maxApplyDiffLines` gate. A repo search finds `maxApplyDiffLines` only in
-`broker/src/copy-review.ts:59-63` (whole-file `copy_out` review limit) and
-`broker/src/main.ts:133-137` (config wiring); it is absent from the apply path.
-
-This tracker is about **how the delta is presented for review** — it does not
-change what is applied. It is adjacent to, but not a fix for, that finding: this
-tracker makes the *complete* delta inspectable in a file, while the finding is
-that execution is not gated on the preview being complete. The two must be
-reconciled when the finding is fixed, and neither substitutes for the other.
-
-The standing boundary still applies: **`sandbox_apply` must not proceed when the
-complete B→C preview cannot be shown.** This tracker improves presentation; it
-does not relax that boundary.
+This tracker concerns artifact presentation as well as the approval boundary;
+its completed artifact work does not substitute for the guard. The remaining
+T4 documentation and T5 installed readback are listed below.
 
 ## Verified current surface (file:line)
 
@@ -344,12 +339,12 @@ no feature code, deploy, mirror, restart, or commit was performed.
   halves of one presentation change. Confirm the artifact-location decision
   (`.git/gentle-ai/**` vs broker state dir) before T1.
 
-## Implementation result (2026-09-20) — retained, not installed
+## Implementation result (2026-09-20) — installed (2026-09-22)
 
 T1, T2 and T3 are DONE (implemented and verified in the sandbox). T4 (docs) and
 T5 (post-install readback) remain pending.
 
-- **Result retained, not installed:** `refs/opencode-sandbox/result/ses_f4184a893ffe1h0mHlXInJJ6q6`.
+- **Result (installed 2026-09-22):** `refs/opencode-sandbox/result/ses_f4184a893ffe1h0mHlXInJJ6q6`.
   S17 refused apply with `result touches protected paths (S7/S17):
   broker/src/gitops.ts, broker/src/service.ts, opencode/plugins/sandbox-tools.ts`.
 - **Files:**
@@ -391,9 +386,9 @@ recorded deviation from the tracker constraint, not an oversight.
 
 | Task | Status  | Notes |
 |------|---------|-------|
-| T1   | DONE    | Plain full-diff artifact + metadata path. Broker owns the write at `<stateDir>/apply-preview/<sessionID>.diff`; `applyPreviewFiles` in the diff op; `previewFile` in the approval metadata. |
-| T2   | DONE    | Opt-in ANSI colour. `<sessionID>.ansi.diff`; single `coloriseDiff` in the writer; the plugin temp write is gone. |
-| T3   | DONE    | Tests. RED 8 fail / 8 → GREEN 8 / 0; new `broker/tests/apply-preview.test.ts`; `broker/tests/service-diff.test.ts` updated. |
+| T1   | installed | Plain full-diff artifact + metadata path. Broker owns the write at `<stateDir>/apply-preview/<sessionID>.diff`; `applyPreviewFiles` in the diff op; `previewFile` in the approval metadata. |
+| T2   | installed | Opt-in ANSI colour. `<sessionID>.ansi.diff`; single `coloriseDiff` in the writer; the plugin temp write is gone. |
+| T3   | installed | Tests. RED 8 fail / 8 → GREEN 8 / 0; new `broker/tests/apply-preview.test.ts`; `broker/tests/service-diff.test.ts` updated. |
 | T4   | pending | Docs. No tool or parameter surface changed, so the permission fragment is likely unchanged. |
 | T5   | pending | Post-install readback. The surface is unverified against a running broker until install. |
 
@@ -458,9 +453,7 @@ recorded deviation from the tracker constraint, not an oversight.
 
 ## Next step
 
-Install pending: a manual S17 install of this result together with the relay log
-fix (`refs/opencode-sandbox/result/ses_f4195f0fbffexkejqwVz70j1H6`), then
-`install-user-files --apply`, `daemon-reload`, restart `sandbox-broker` and
-`secure-opencode`. Expected host suite after both changes: **448 pass / 0 fail**.
-Then T5 — the post-install readback of the implemented path, the metadata field,
+Installed (2026-09-22): the broker-owned plain/ANSI artifacts and the fail-closed
+approval guard are committed and installed. T5 — the post-install readback of the
+implemented path, the metadata field,
 and the docs.

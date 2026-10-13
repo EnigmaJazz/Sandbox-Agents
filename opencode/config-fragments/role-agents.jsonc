@@ -5,7 +5,7 @@
 // user's opencode.json MANUALLY after reviewing the change. It must never be
 // applied by overwriting the user's config automatically.
 //
-// Gate: Phase 0.2 + Phase B/C (SDD change role-based-subagents).
+// Gate: Phase 0.2 + Phase B/C (SDD change role-based-subagents; historical—gentle-ai 4 retired SDD).
 // Intent: central roleModels mapping (role-model R4, model-policy independence);
 //         every new agent is hidden, mode:subagent, tools allowlist, deny tasks.
 //         The broker remains authoritative for every stateful decision; config

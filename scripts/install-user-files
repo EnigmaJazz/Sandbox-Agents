@@ -26,24 +26,88 @@ source "$SCRIPT_DIR/secure-launcher.conf"
 
 STATE_DIR="${BROKER_STATE_DIR:-$HOME/.local/state/opencode-sandbox}"
 JOURNAL="$STATE_DIR/install-journal.tsv"
-mkdir -p "$STATE_DIR"
-chmod 700 "$STATE_DIR"
 
 APPLY=0
-case "${1:-}" in
-  --apply) APPLY=1 ;;
-  --dry-run|"") ;;
-  *) echo "usage: $0 [--dry-run|--apply]" >&2; exit 2 ;;
-esac
+VERIFY=0
+PRUNE_BACKUPS=0
+DRY_RUN=0
+for argument in "$@"; do
+  case "$argument" in
+    --apply) APPLY=1 ;;
+    --verify) VERIFY=1 ;;
+    --prune-backups) PRUNE_BACKUPS=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    *) echo "usage: $0 [--dry-run|--apply|--verify|--prune-backups]" >&2; exit 2 ;;
+  esac
+done
+if [[ "$VERIFY" == "1" && "$PRUNE_BACKUPS" == "1" ]]; then
+  echo "[install] backup pruning is not allowed in verify mode" >&2
+  exit 2
+fi
+if [[ "$PRUNE_BACKUPS" == "1" && "$APPLY" == "1" ]]; then
+  echo "[install] --prune-backups cannot be combined with --apply" >&2
+  exit 2
+fi
+if [[ "$DRY_RUN" == "1" && "$APPLY" == "1" ]]; then
+  echo "[install] --dry-run cannot be combined with --apply" >&2
+  exit 2
+fi
+if [[ "$APPLY" != "1" && "$VERIFY" != "1" && "$PRUNE_BACKUPS" != "1" ]]; then
+  DRY_RUN=1
+fi
+
+# Only an applying install may create or modify installer state.
+if [[ "$APPLY" == "1" ]]; then
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR"
+fi
+DRIFT=0
+VERIFIED_COUNT=0
+VERIFY_EXPECTED_DESTINATIONS=()
+VERIFY_STALE_CHECK_SKIPPED=0
 
 log() {
-  echo "[install] $*"
+  if [[ "$*" == error:* ]]; then
+    printf '[install] %s\n' "$*" >&2
+  else
+    printf '[install] %s\n' "$*"
+  fi
 }
 
 journal() { # action kind source dest
   if [[ "$APPLY" == "1" ]]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$(date -Is)" "$1" "$2" "$3" "$4" >>"$JOURNAL"
   fi
+}
+
+prune_destination_backups() { # destination [protected backup]
+  local destination="$1" protected="${2:-}" directory name escaped_name output
+  directory="$(dirname "$destination")"
+  name="$(basename "$destination")"
+  escaped_name="$(printf '%s' "$name" | sed 's/[][\\.^$*+?{}|()]/\\&/g')"
+  if ! output="$(find "$directory" -maxdepth 1 -type f -regextype posix-extended -regex ".*/${escaped_name}\\.bak-[0-9]{14}$" -printf '%f\n' 2>&1)"; then
+    log "error: cannot list installer backups for $destination: $output"
+    return 1
+  fi
+  local -a backups=()
+  if [[ -n "$output" ]]; then
+    mapfile -t backups < <(printf '%s\n' "$output" | sort -r)
+  fi
+  local retained=0 backup_path
+  for backup_path in "${backups[@]}"; do
+    backup_path="$directory/$backup_path"
+    retained=$((retained + 1))
+    if (( retained > 3 )) && [[ "$backup_path" != "$protected" ]]; then
+      if [[ "$DRY_RUN" == "1" ]]; then
+        log "would delete old backup $backup_path"
+      elif rm -- "$backup_path"; then
+        log "deleted old backup $backup_path"
+      else
+        log "error: cannot remove installer backup $backup_path"
+        return 1
+      fi
+    fi
+  done
 }
 
 backup() { # file -> creates file.bak-<ts> if it exists and no bak yet
@@ -53,11 +117,78 @@ backup() { # file -> creates file.bak-<ts> if it exists and no bak yet
   [[ -e "$bak" ]] && return 0
   cp -p "$f" "$bak"
   log "backed up $f -> $bak"
+  prune_destination_backups "$f" "$bak"
 }
+
+managed_destinations() {
+  local root="$HOME/.config/opencode/plugins"
+  printf '%s\n' \
+    "$HOME/.config/nono/profiles/opencode-secure.json" \
+    "$HOME/.config/systemd/user/sandbox-broker.service" \
+    "$HOME/.config/opencode-sandbox/broker.env" \
+    "$root/sandbox-tools.ts" "$root/routing-guard.ts" \
+    "$root/lib/broker-client.ts" "$root/lib/reviewer-relay-core.ts" \
+    "$root/lib/session-agent-binding.ts" "$root/reviewer-relay-transport.ts" \
+    "$root/lib/host-tool-approval.ts" "$root/lib/apply-preview-guard.ts" \
+    "$root/lib/sandbox-edit-core.ts" "$root/lib/legacy-sdd-tools.ts"
+}
+
+prune_all_backups() {
+  local destination failed=0
+  while IFS= read -r destination; do
+    prune_destination_backups "$destination" || failed=1
+  done < <(managed_destinations)
+  return "$failed"
+}
+
+count_all_backups() {
+  local destination directory name escaped_name output count=0
+  while IFS= read -r destination; do
+    directory="$(dirname "$destination")"
+    name="$(basename "$destination")"
+    escaped_name="$(printf '%s' "$name" | sed 's/[][\\.^$*+?{}|()]/\\&/g')"
+    if ! output="$(find "$directory" -maxdepth 1 -type f -regextype posix-extended -regex ".*/${escaped_name}\\.bak-[0-9]{14}$" -printf x 2>&1)"; then
+      log "error: cannot list installer backups for $destination: $output"
+      return 1
+    fi
+    count=$((count + ${#output}))
+  done < <(managed_destinations)
+  printf '%s' "$count"
+}
+
+if [[ "$PRUNE_BACKUPS" == "1" ]]; then
+  if prune_all_backups; then
+    log "backup pruning complete"
+    exit 0
+  fi
+  exit 1
+fi
 
 install_file() { # src dest mode
   local src="$1" dest="$2" mode="$3"
-  if [[ -f "$dest" ]] && ! cmp -s "$src" "$dest"; then
+  if [[ "$VERIFY" == "1" ]]; then
+    VERIFY_EXPECTED_DESTINATIONS+=("$dest")
+    if [[ -L "$dest" || -d "$dest" ]]; then
+      log "drift $dest: type differs (expected regular file)"
+      DRIFT=1
+    elif [[ ! -e "$dest" ]]; then
+      log "drift $dest: absent"
+      DRIFT=1
+    elif [[ ! -f "$dest" ]]; then
+      log "drift $dest: type differs (expected regular file)"
+      DRIFT=1
+    elif ! cmp -s "$src" "$dest"; then
+      log "drift $dest: content differs"
+      DRIFT=1
+    elif [[ "$(stat -c '%a' "$dest")" != "${mode#0}" ]]; then
+      log "drift $dest: mode differs"
+      DRIFT=1
+    else
+      VERIFIED_COUNT=$((VERIFIED_COUNT + 1))
+    fi
+    return 0
+  fi
+  if [[ "$APPLY" == "1" && -f "$dest" ]] && ! cmp -s "$src" "$dest"; then
     backup "$dest"
   fi
   log "install $src -> $dest (mode $mode)"
@@ -69,11 +200,42 @@ install_file() { # src dest mode
 
 # --- 1. nono profile ---------------------------------------------------------
 NONO_DEST="$HOME/.config/nono/profiles/opencode-secure.json"
+NONO_SOURCE="$REPO_ROOT/nono/profile/opencode-secure.json"
 log "step 1: nono profile"
-if [[ "$APPLY" == "1" ]]; then
-  "$NONO_BIN" profile validate "$REPO_ROOT/nono/profile/opencode-secure.json" >/dev/null
+if [[ "$VERIFY" == "1" ]]; then
+  VERIFY_EXPECTED_DESTINATIONS+=("$NONO_DEST")
+  if [[ ! -e "$NONO_DEST" && ! -L "$NONO_DEST" ]]; then
+    log "drift $NONO_DEST: absent"
+    DRIFT=1
+  elif [[ ! -L "$NONO_DEST" ]]; then
+    log "drift $NONO_DEST: type differs (expected symlink)"
+    DRIFT=1
+  elif [[ "$(readlink "$NONO_DEST")" != "$NONO_SOURCE" ]]; then
+    log "drift $NONO_DEST: link target differs"
+    DRIFT=1
+  else
+    VERIFIED_COUNT=$((VERIFIED_COUNT + 1))
+    log "verified $NONO_DEST (expected symlink)"
+  fi
+else
+  if [[ "$APPLY" == "1" ]]; then
+    "$NONO_BIN" profile validate "$REPO_ROOT/nono/profile/opencode-secure.json" >/dev/null
+  fi
+  if [[ -L "$NONO_DEST" ]] && [[ "$(readlink "$NONO_DEST")" == "$NONO_SOURCE" ]]; then
+    log "already linked $NONO_DEST -> $NONO_SOURCE"
+  else
+    if [[ "$APPLY" == "1" && -f "$NONO_DEST" && ! -L "$NONO_DEST" ]]; then
+      backup "$NONO_DEST"
+    fi
+    log "link $NONO_SOURCE -> $NONO_DEST (symlink; not a copy)"
+    if [[ "$APPLY" == "1" ]]; then
+      mkdir -p "$(dirname "$NONO_DEST")"
+      rm -f "$NONO_DEST"
+      ln -s "$NONO_SOURCE" "$NONO_DEST"
+    fi
+    journal "symlink" "$NONO_SOURCE" "$NONO_DEST" ""
+  fi
 fi
-install_file "$REPO_ROOT/nono/profile/opencode-secure.json" "$NONO_DEST" 0644
 
 # --- 2. opencode config fragment merge --------------------------------------
 log "step 2: opencode permission fragment (merge with diff FIRST)"
@@ -97,7 +259,7 @@ install_file "$REPO_ROOT/systemd-user/sandbox-broker.service" "$UNIT_DEST" 0644
 # Operational policy (git mode, worker disk, project registry) — loaded via
 # EnvironmentFile because systemd Environment= cannot hold JSON values.
 ENV_DEST="$HOME/.config/opencode-sandbox/broker.env"
-mkdir -p "$(dirname "$ENV_DEST")"
+if [[ "$VERIFY" != "1" ]]; then mkdir -p "$(dirname "$ENV_DEST")"; fi
 install_file "$REPO_ROOT/systemd-user/broker.env" "$ENV_DEST" 0644
 if [[ "$APPLY" == "1" ]]; then
   log "unit + env copied; enable manually with: systemctl --user daemon-reload && systemctl --user enable --now sandbox-broker"
@@ -106,12 +268,65 @@ fi
 # --- 4. opencode plugins -----------------------------------------------------
 log "step 4: opencode plugins (sandbox-tools, routing-guard, lib)"
 PLUGIN_DEST="$HOME/.config/opencode/plugins"
-mkdir -p "$PLUGIN_DEST/lib"
-for f in sandbox-tools.ts routing-guard.ts lib/broker-client.ts lib/reviewer-relay-core.ts lib/session-agent-binding.ts reviewer-relay-transport.ts lib/host-tool-approval.ts lib/apply-preview-guard.ts; do
+if [[ "$VERIFY" != "1" ]]; then mkdir -p "$PLUGIN_DEST/lib"; fi
+for f in sandbox-tools.ts routing-guard.ts lib/broker-client.ts lib/reviewer-relay-core.ts lib/session-agent-binding.ts reviewer-relay-transport.ts lib/host-tool-approval.ts lib/apply-preview-guard.ts lib/sandbox-edit-core.ts lib/legacy-sdd-tools.ts; do
   install_file "$REPO_ROOT/opencode/plugins/$f" "$PLUGIN_DEST/$f" 0644
 done
 
+verify_stale_destinations() {
+  local timestamp action source destination detail expected expected_dest
+  if [[ ! -e "$JOURNAL" && ! -L "$JOURNAL" ]]; then
+    VERIFY_STALE_CHECK_SKIPPED=1
+    log "stale destination check skipped: install journal is absent"
+    return 0
+  fi
+  if [[ -L "$JOURNAL" || ! -f "$JOURNAL" || ! -r "$JOURNAL" ]]; then
+    log "error: install journal is unusable: $JOURNAL"
+    return 1
+  fi
+  while IFS=$'\t' read -r timestamp action source destination detail; do
+    [[ "$action" == "file" || "$action" == "symlink" ]] || continue
+    case "$destination" in
+      "$HOME/.config/nono/profiles/"*|"$HOME/.config/systemd/user/"*|"$HOME/.config/opencode-sandbox/"*|"$PLUGIN_DEST/"*) ;;
+      *) continue ;;
+    esac
+    expected=0
+    for expected_dest in "${VERIFY_EXPECTED_DESTINATIONS[@]}"; do
+      if [[ "$destination" == "$expected_dest" ]]; then expected=1; break; fi
+    done
+    [[ "$expected" == "1" ]] && continue
+    [[ "$destination" == *.bak-* ]] && continue
+    [[ -e "$destination" || -L "$destination" ]] || continue
+    [[ -d "$destination" ]] && continue
+    log "drift $destination: stale installed destination"
+    DRIFT=1
+  done <"$JOURNAL"
+}
+
 # --- summary -----------------------------------------------------------------
+if [[ "$VERIFY" == "1" ]]; then
+  if ! verify_stale_destinations; then
+    exit 1
+  fi
+  if ! BACKUP_COUNT="$(count_all_backups)"; then
+    exit 1
+  fi
+  if [[ "${#VERIFY_EXPECTED_DESTINATIONS[@]}" -eq 0 ]]; then
+    log "verification failed: no installed destinations were enumerated"
+    exit 1
+  fi
+  if [[ "$DRIFT" == "1" ]]; then
+    log "verification failed: installed files differ from repository"
+    exit 1
+  fi
+  if [[ "$VERIFY_STALE_CHECK_SKIPPED" == "1" ]]; then
+    # Exit 2 distinguishes a fresh-install journal absence from full verification.
+    log "verification incomplete: $VERIFIED_COUNT installed files verified; $BACKUP_COUNT installer backups; stale destination check skipped (install journal is absent); config fragment excluded (manual merge; no installed counterpart)"
+    exit 2
+  fi
+  log "verification passed: $VERIFIED_COUNT installed files verified; $BACKUP_COUNT installer backups; config fragment excluded (manual merge; no installed counterpart)"
+  exit 0
+fi
 log "done."
 if [[ "$APPLY" != "1" ]]; then
   log "dry-run — nothing was installed. Re-run with --apply ONLY after manual review."
