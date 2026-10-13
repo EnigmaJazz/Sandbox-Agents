@@ -69,8 +69,10 @@ after 600 s.
     is repeated in several branches and in `releaseRetainedWorker`; a shared helper would help.
   - `R2-002` SUGGESTION, `broker/src/reaper.ts:458-475`: say explicitly that an unknown git
     status is treated as dirty.
-- `R3-001` CRITICAL (lineage `review-3a285dbad4589d87`): fixed in this change by guarding the
-  release-error log; commit: `<user to fill in>`.
+- `R3-001` CRITICAL (lineage `review-3a285dbad4589d87`): independently verified against source
+  and fixed by guarding the release-error log in commit `c6bff59`. It is covered by the approved
+  review `review-263b7dd739be9b2b` (zero findings). The earlier review escalated as
+  `unknown_causality` with `R3-001` downgraded to informational; the fresh approval supersedes it.
 - Not covered by that review: commits between `bf3c792` and `9604d30` other than the
   socket-lifecycle unit (lineage `review-0789e564b02b5363`). A review of the whole range from
   `bf3c792` was refused with `lens_context_budget_exceeded`, and the CLI reviews only up to
@@ -99,7 +101,7 @@ after 600 s.
   rebuilt from session records, so workers that survive a restart are not counted.
 
 ## Next step
-Owner reviews this S17 result (commit placeholder: `<user to fill in>`) and restarts the broker to activate the `R3-001` guard. The existing `4fbc94c` and `d65518b` changes still require the owner review/restart noted above.
+Owner restarts the broker for the fixes to go live.
 
 ## Finding while fixing `R4-001`
 `releaseWorker` itself swallows a failed `stop` or `remove` (a retry loop that ignores the
