@@ -19,7 +19,7 @@ gentle-ai 4.0.0 removed `sdd-status`, `sdd-continue`, `sdd-attempt`, `sdd-archiv
 ## Constraints
 
 - Never delete SDD code, argv builders, approval builders or tests.
-- No behaviour change on gentle-ai 3.7.0 with default settings. Broker: met by `auto`. Plugin: met by install timing; the T2 plugin change is installed on upgrade day, because the plugin can't detect the version at load time (see the plan's step 2).
+- No behaviour change on gentle-ai 3.7.0 with default settings. Broker: met by `auto`. Plugin: its default remains dormant because it cannot detect the version at load time; upgrade-day installer verification found all 13 installed files, including every plugin file, byte-identical to the repository, so the plugin dormancy change was already installed (see the plan's step 2).
 - Fail closed: an unknown gentle-ai version disables SDD rather than enabling it.
 - `broker/src/**` and `opencode/plugins/**` are S17: the user reviews and installs.
 - Broker stays dependency-free (`bun:test` and node builtins only).
@@ -76,7 +76,7 @@ Started 2026-10-02.
 - **T2 done.** The five `host_sdd_*` definitions moved to `opencode/plugins/lib/legacy-sdd-tools.ts` and are registered from `sandbox-tools.ts` only when `OPENCODE_SANDBOX_LEGACY_SDD=1`. The four SDD-only argument schemas moved with them; the shared revision schema, `client()` and the project-directory check are passed in. A script check confirms the moved bodies are identical to the originals apart from those three substitutions. `scripts/install-user-files` and `scripts/rollback` list the new file (the existing parity test caught the omission).
   - Tests: 5 new in `broker/tests/legacy-sdd-tools.test.ts`. They failed before implementation (module missing), then passed.
   - Checks: `bun test` passed 605, 0 fail. The plugin bundle builds (`bun build opencode/plugins/sandbox-tools.ts`, externals for the SDK and zod), and so does the broker.
-  - Deviation: the plugin defaults to dormant even on 3.7.0, so it's installed on upgrade day (recorded in the plan).
+  - Upgrade-day installer verification found all 13 installed files, including every plugin file, byte-identical to the repository; the plugin dormancy change was already installed.
 - **T3 done and committed as `5e65f46`** (`chore(sdd): mark the five live host_sdd_* permissions dormant for gentle-ai 4`, 3 files, 12 insertions / 8 deletions).
   - The user ran the suite on the host; all tests passed.
 - **T4 done.** The prompt marks host-side SDD dormant by default, identifies the exact legacy opt-in, and no longer advertises the retired `host_sdd_attempt_acquire`. The manifest now places all 13 `host_sdd_*` entries in its dormant table with `deny` permissions, cites `legacy-sdd-tools.ts` and `broker/src/legacy-sdd.ts`, and records the default total as 13 sandbox + 20 host = 33 tools (33 prior host entries − 8 already retired − 5 dormant by default).
@@ -91,4 +91,6 @@ Started 2026-10-02.
 
 ## Next step
 
-Pre-upgrade work is complete. Upgrade day is user-owned: follow the runbook in `docs/upgrades/gentle-ai-4.md`, then record the result there and in `docs/TODO.md`.
+Upgrade day was performed on 2026-10-13. The outcome is recorded in `docs/upgrades/gentle-ai-4.md` and `docs/TODO.md`: the broker started with legacy SDD dormant; `gentle-ai sync` preserved all six `asi-review-*` task permissions and relay definitions; and the relay end-to-end validation passed its materialization, dispatch, capture, and state-machine path for lineage `review-3a285dbad4589d87` (base `43a0395`, committed-only, untracked excluded; 6 files / 90 lines, medium risk, single `review-reliability` lens). The resulting review escalated with `unknown_causality`, so it did not approve or advance the reviewed boundary past `43a0395`. Its finding `R3-001` was verified against source and fixed with a regression test in commit `c6bff59` after baseline HEAD `1e4f13a`; a further broker restart is needed for that fix to go live. A STATUS-returned `review recover` command was not exercised because no recoverable state appeared. The direct broker `sddStatus` refusal and workflow_optimisation verifier result are not recorded.
+
+The only remaining human step is telling workflow_optimisation about the impact. The broker restart for `c6bff59` remains a project follow-up.

@@ -43,17 +43,17 @@ All Tier 1 items are implemented and committed.
 
 ## Planned upgrades (plans in `docs/upgrades/`)
 
-1. **gentle-ai 4.0: SDD retirement, with SDD kept dormant** — **READY FOR UPGRADE DAY (prepared and pre-verified against the real 4.0.0 binary on 2026-10-09)**; owner **U** for upgrade day, **A** to record the result. Plan: `docs/upgrades/gentle-ai-4.md`.
+1. **gentle-ai 4.0: SDD retirement, with SDD kept dormant** — **UPGRADE PERFORMED 2026-10-13; follow-up pending**; owner **U** for the further broker restart and external handoff, **A** to record the result. Plan: `docs/upgrades/gentle-ai-4.md`.
    - **Done:**
      - step 1, the broker switch (`2c17837`);
-     - step 2, plugin dormancy (`d94f827`);
-     - step 3, the permission fragment (`5e65f46`, delegated);
-     - step 6, the rollback kit (the user copied the 3.7.0 binary to `~/.local/share/opencode-sandbox/gentle-ai-3.7.0` and verified it).
-     - steps 4–5, prompt and docs (`83f448c`) and the OpenSpec archive (`8152748`).
-   - **Verified 2026-10-09 against 4.0.0 in isolation, through the real broker code at `bf3c792`:** version detection, flag parity for all 12 review subcommands (flag sets identical to 3.7.0), the external-lens lifecycle to acknowledgement and `already_reviewed`, a CRITICAL finding to `correction_required`, the oversized-candidate refusal, and review-store compatibility in both directions (so rollback is safe). Results table: `docs/upgrades/gentle-ai-4.md`.
-   - **Already live:** the broker runs this checkout at HEAD `7aec9e6` and was restarted on 2026-10-10 at 13:02:47; its startup line reported `legacy SDD enabled (BROKER_LEGACY_SDD=auto, gentle-ai major 3)`. The remaining live-stack checks are listed below for upgrade day.
-   - **Left for upgrade day (cannot be checked without the installed stack):** the `asi-review-*` relay transport on 4.0.0, a STATUS-returned `review recover` command, and what `gentle-ai sync` does to the live `opencode.json` (`gentle-orchestrator`'s task allowlist; the new `gentle-ai-worker`/`-explore`/`-verify` agents).
-   - **Then:** run the upgrade-day runbook in the plan. Do this before the OpenCode V2 migration.
+     - step 2, plugin dormancy (`d94f827`); installer verification found all 13 installed files, including every plugin file, byte-identical to the repository;
+     - step 3, the permission fragment (`5e65f46`, delegated), and the live sync check: `gentle-ai sync` preserved all six `asi-review-*` permissions in `gentle-orchestrator`'s task allowlist and the relay agent definitions. The live `host_sdd_*` grant occurrences were all `deny` or `false`;
+     - step 6, the rollback kit (the user copied the 3.7.0 binary to `~/.local/share/opencode-sandbox/gentle-ai-3.7.0` and verified it);
+     - steps 4–5, prompt and docs (`83f448c`) and the OpenSpec archive (`8152748`);
+     - upgrade-day relay end-to-end validation: lineage `review-3a285dbad4589d87`, base `43a0395`, committed-only, untracked excluded; 6 files / 90 lines, medium risk, one `review-reliability` lens. The relay materialized and dispatched through `asi-review-reliability`; `review/capture-result` accepted the result and drove the state machine.
+   - **Relay review outcome:** `state: escalated`, cause `unknown_causality`; `R3-001` (CRITICAL, reliability, `broker/src/service.ts:3152-3162`) was downgraded by the provider as `unverified_location` (`candidate_causal_finding_ids: []`). Maintainer action is informational; no correction was demanded. The escalation did not approve the review, and the reviewed boundary did not advance past `43a0395`.
+   - **Not exercised:** A STATUS-returned `review recover` command; no recoverable state appeared. Source for upgrade-day details: `docs/upgrades/gentle-ai-4.md`.
+   - **Follow-up:** `R3-001` was independently verified against source and fixed with a test that failed before the fix, in commit `c6bff59`, after upgrade-day baseline HEAD `1e4f13a`. A further broker restart is needed for that fix to go live; tell workflow_optimisation about the impact. Do this before the OpenCode V2 migration.
 2. **OpenCode V2 migration, side-by-side** — **PLANNED**; owner **A**, **U** for cutover. Required before OpenChamber can move past 1.24.2. Now: step P0 (shared tool table and thin V1 adapter), V0 discovery, and the V1 broker check. Late, just before cutover: the V2 adapter and V3–V7. Plan: `docs/upgrades/opencode-v2.md`.
 3. **Staged work chains (queue now, review in bursts)** — **PLANNED; design agreed, P0 not started**; owner **A** for the design, **U** to approve it. Agents keep working on a project while finished work is saved as ordered stages in protected refs; the user reviews and applies them in order on their own schedule through a human-only operator channel, with an internal-advisor check before and after each stage and external advisors at feature boundaries. Nothing reaches the host until approved. **Order (decided 2026-10-12):** after the gentle-ai 4 upgrade, before the OpenCode V2 migration. **Prerequisites:** workflow enforcement from workflow_optimisation (compulsory; host-side parts are Tier 2 items 7, 8 and 12), the internal advisory lane (Tier 2 item 13), Tier 2 item 1, Tier 3 item 8, Tier 4 items 27 and 30. Plan: `docs/staging/plan.md`.
 
