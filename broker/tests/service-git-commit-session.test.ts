@@ -589,6 +589,24 @@ describe("gitCommit releases the committed result's worker", () => {
     ]);
   });
 
+  test("a throwing logger does not fail the commit after a failed release", async () => {
+    const h = workerHarness();
+    Object.assign(h.ctx, { logger: { log: () => { throw new Error("logger failed"); } } });
+    const touch = h.ctx.store.touch.bind(h.ctx.store);
+    let failNext = true;
+    h.ctx.store.touch = (sessionID, patch) => {
+      if (failNext && patch.workerState === "DESTROYED") {
+        failNext = false;
+        throw new Error("state write failed");
+      }
+      return touch(sessionID, patch);
+    };
+
+    await expect(buildGitCommitOp(h.ctx)(h.req)).resolves.toMatchObject({ committed: true });
+
+    expect(h.records["worker-7"]?.state).toBe("RETAINED");
+  });
+
   test("an already-released worker is not stopped again", async () => {
     const h = workerHarness({ workerState: "DESTROYED" });
     await buildGitCommitOp(h.ctx)(h.req);

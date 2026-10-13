@@ -3152,13 +3152,17 @@ async function releaseRetainedWorker(
   } catch (err) {
     // Not fatal, but not silent either: the idle sweep recovers a terminal-state
     // session that still holds a worker, and this line shows it needed to.
-    ctx.logger?.log?.({
-      sessionID,
-      operation: "gitCommit",
-      action: "release_retained_worker",
-      result: "error",
-      error: err instanceof Error ? err.message : String(err),
-    });
+    try {
+      ctx.logger?.log?.({
+        sessionID,
+        operation: "gitCommit",
+        action: "release_retained_worker",
+        result: "error",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } catch {
+      // Logging must not fail a commit that has already landed.
+    }
   }
 }
 
