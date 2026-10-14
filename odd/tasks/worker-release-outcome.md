@@ -135,7 +135,19 @@ Deferred (recorded, not fixed here): config-dir cleanup separation and its swall
 ## Progress
 - 2026-10-14 — T1–T6 implemented; installed as result `ses_ec3c43ab7ffdmpzqSZVk3OBmjQ` (commit `7190c1a`, baseline `0425e99`), 10 paths. T7 partial: `docs/TODO.md` item 15 updated in the same result.
 - 2026-10-14 — post-code advisory resolved and installed as result `ses_ec395c89affdP3JE0hwfkKq6hc` (commit `8f54c68`): 338 authored changed lines, 20,993 authored patch bytes, 3 files (`broker/src/reaper.ts`, `broker/src/service.ts`, `broker/tests/worker-release-outcome.test.ts`). Full suite `bun --cwd broker test --reporter=dot` → 875 pass / 0 fail (baseline 865; +10); build `bun build --target=bun src/main.ts` bundled 26 modules.
+- 2026-10-14 — committed as `b85e3bc` on master: 11 files, +1030 / −61. T7 complete (TODO entry, tracker, Magic Context mirror, route evidence).
 - Related finding, not fixed here: `keepResult` is unreachable at runtime — it is absent from `ALLOWED_PAYLOAD_KEYS` (`broker/src/validation.ts:909-924`), so a real `keepResult` request is rejected before the handler. Needs its own unit.
 
+## Review outcome
+Native RDD review `review-e2650ddc3d12daca` — **approved, 0 findings**, acknowledged, authority burned.
+- Candidate: base-diff from `c8ffaa89a2f01bfb04ab0c8a81cbf45d31c77cb6` to `079b42ac396051dcec3f58adf5ef0feba8c8307c`, committed-only, workspace projection, target `sha256:68176e945f19a29422cee16dc46551759e4cd023a2dc377f178772951614aa89`.
+- Risk: medium (`executable_change` at `broker/src/policy.ts`); 13 paths, 1101 changed lines; correction budget 200.
+- Lens: `review-reliability` (selected order 0, subject `sha256:fc856e9f69c6d0bcc94896c7c4657c2f83c00c161261caaebbcc227187922e35`), dispatched through the relay lane `asi-review-reliability` with the provider-issued prompt verbatim. Reported no reachable regression across the 13 changed paths.
+- Consumed revision `sha256:3ebdd4a43325eabb14fadfd8acb1c51267f76ce19d9f46e66209709bea5f6852`.
+- `review assess` before the start: medium / `under_budget` / `review_due: false`; the slice was reviewed on the owner's explicit decision.
+
+## Status
+COMPLETE — implemented, tested, committed and reviewed.
+
 ## Next step
-Owner commits the installed result by hand (`broker/src/**` is S17: `sandbox_apply` and `host_git_commit` refuse it). Then native RDD review.
+None for this unit. The deferred advisories and the `keepResult` finding are recorded above for separate units.
