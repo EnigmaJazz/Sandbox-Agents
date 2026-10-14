@@ -948,7 +948,7 @@ describe("reviewer relay spawn discipline", () => {
   });
 
   test("the deadline is finite and supports multi-minute reviewer calls", async () => {
-    expect(RELAY_DEADLINE_MS).toBe(600_000);
+    expect(RELAY_DEADLINE_MS).toBe(2_700_000);
 
     const recorder = recordingSpawn();
     const relay = startRelay({

@@ -25,7 +25,7 @@
  *   stderr bound, and fail-closed handling of a missing
  *   GENTLE_AI_REVIEW_CONTEXT_END.
  * - lifecycle: a versioned process-global owner/deferred/refused registry, a
- *   four-concurrent cap, a finite 600-second end-to-end deadline, and kill on
+ *   four-concurrent cap, a finite and bounded 2,700-second end-to-end deadline, and kill on
  *   crash, abort, duplicate completion, or disposal.
  *
  * The relay never synthesizes provider tokens, lineage, subject identity, or
@@ -109,7 +109,7 @@ export const STDOUT_FRAME_LIMIT_BYTES = 4 * 1024 * 1024;
 /** Bound for all stderr collected from the child. */
 export const STDERR_LIMIT_BYTES = 64 * 1024;
 /** Finite end-to-end deadline: multi-minute reviewer calls, never unbounded. */
-export const RELAY_DEADLINE_MS = 600_000;
+export const RELAY_DEADLINE_MS = 2_700_000;
 /** Distinct live relay cap; a fifth distinct Task refuses before spawning. */
 export const MAX_CONCURRENT_RELAYS = 4;
 /** Maximum bytes for a candidate canonical root. */
