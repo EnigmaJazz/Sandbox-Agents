@@ -15,7 +15,7 @@ This directory holds ODD task trackers for work in progress and completed units.
 | `reviewer-relay-root-guard` | Commit `dd345f2`; approved successor lineage `review-8b3f47c19de20a55`. |
 | `request-line-cap` | Commit `9c44aa9`. |
 | `response-safety-followups` | Approved parent lineage `review-e88a985fad223e87` (response-safety correction); the tracker also records units A–C and subsequent queue-drain/reaper follow-ups, but does not give those later units separate closure lineages. |
-| `sandbox-diff-receipt-bytes` | Complete at reviewed boundary `05b54fa`; approved and acknowledged lineage `review-fe7cae5a7ddc98d0` (medium risk; `review-reliability` only). |
+| `sandbox-diff-receipt-bytes` | Complete at reviewed boundary `1085ec6`; approved and acknowledged lineage `review-b97b2c817ed00b83` (medium risk; `review-reliability` only). |
 
 ## Partial
 
