@@ -74,7 +74,15 @@ function makeHarness(initial: SessionRecord[], opts: { throwOnTouch?: string } =
   const ctx = {
     store,
     adapter,
-    pool: { allocations: [{ cpu: 2, memBytes: 2 * GiB }] },
+    // Identity-keyed allocations (Tier 2 item 15): one per seeded record, so a
+    // release frees exactly that session's slot.
+    pool: {
+      allocations: initial.map((r) => ({
+        cpu: 2,
+        memBytes: 2 * GiB,
+        sessionID: r.sessionID,
+      })),
+    },
   } as unknown as OpContext;
 
   return { ctx, records, stopped, removed, logs };

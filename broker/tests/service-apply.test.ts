@@ -35,6 +35,12 @@ function makeApplyContext(
 
   const store = {
     get: () => record,
+    // applyResult clears workerName + sets DESTROYED only after a CONFIRMED
+    // release (Tier 2 item 15); the fake store needs the same mutation seam.
+    touch: (_sessionID: string, patch: Partial<SessionRecord> = {}) => {
+      record = { ...record, ...patch };
+      return record;
+    },
     transition: (_sessionID: string, from: SessionState, to: SessionState, patch: Partial<SessionRecord> = {}) => {
       if (record.state !== from) throw new Error(`unexpected state ${record.state}, expected ${from}`);
       record = { ...record, ...patch, state: to };

@@ -503,6 +503,7 @@ async function createWorkerForSession(
     ctx.pool.allocations.push({
       cpu: ctx.budget.perWorkerCpu,
       memBytes: ctx.budget.perWorkerMemBytes,
+      sessionID,
     });
     const next = store.transition(
       sessionID,
@@ -2043,7 +2044,15 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     // Gate 6 finding: APPLIED is terminal for the session's worker - release
     // the transient worker and its pool allocation now instead of leaking
     // them until an explicit stop/cleanup (pool exhaustion after demos).
-    await releaseWorker(ctx, record);
+    // A landed apply must never fail because of worker cleanup: on a failed
+    // release the record keeps its worker and the idle sweep retries it later.
+    const outcome = await releaseWorker(ctx, record);
+    if (outcome.released) {
+      record = ctx.store.touch(req.sessionID, {
+        workerName: undefined,
+        workerState: "DESTROYED",
+      });
+    }
     // APPLIED is terminal: the transport artifacts are consumed.
     await gcSessionArtifacts(ctx, req.sessionID, "applyResult");
     return {
@@ -2239,12 +2248,18 @@ export function buildKeepResultOp(ctx: OpContext): OpHandler {
     if (record.state !== "RESULT_READY" && record.state !== "APPLIED") {
       throw new StateError(`cannot keep result from state ${record.state}`);
     }
-    if (record.workerName && record.workerState === "ACTIVE") {
-      await releaseWorker(ctx, record);
+    // Release any NAMED worker, not only an ACTIVE one: a PAUSED worker is
+    // still a live VM. Destruction derives from a CONFIRMED removal; on
+    // failure both workerName and workerState stay for the next sweep.
+    if (record.workerName) {
+      const outcome = await releaseWorker(ctx, record);
+      if (outcome.released) {
+        record = ctx.store.touch(req.sessionID, {
+          workerName: undefined,
+          workerState: "DESTROYED",
+        });
+      }
     }
-    ctx.store.touch(req.sessionID, {
-      workerState: record.workerName ? "DESTROYED" : undefined,
-    });
     record = ctx.store.transition(req.sessionID, record.state, "RETAINED", {
       error: undefined,
     });
@@ -2265,24 +2280,40 @@ export function buildDiscardResultOp(ctx: OpContext): OpHandler {
     if (payload.confirm !== "REJECT") {
       throw new ValidationError('discardResult requires confirm: "REJECT"');
     }
-    let record = recordOr404(ctx.store, req.sessionID);
-    if (record.state !== "RESULT_READY" && record.state !== "RETAINED") {
+    const record = recordOr404(ctx.store, req.sessionID);
+    // X (Tier 2 item 15): RETAINED -> REJECTED is an illegal transition, so a
+    // discard from RETAINED must fail BEFORE it removes the worker or deletes
+    // the result ref (the old code mutated first and threw afterwards).
+    if (record.state !== "RESULT_READY") {
       throw new StateError(`cannot discard result from state ${record.state}`);
     }
-    if (record.workerName && record.workerState === "ACTIVE") {
-      await ctx.adapter.remove(record.workerName).catch(() => undefined);
-      removePoolAllocation(ctx, record);
-    }
+    // Delete the result ref first and check the status: a failed deletion must
+    // fail closed, never be acknowledged as a discard that removed the ref.
     const ref = record.resultRef ?? resultRef(req.sessionID);
     if (ctx.git.runnerMode === "real") {
-      await ctx.git.spawn(["git", "update-ref", "-d", ref], {
+      const deleted = await ctx.git.spawn(["git", "update-ref", "-d", ref], {
         timeoutMs: 30_000,
       });
+      if (deleted.status !== 0) {
+        throw new StateError(
+          `result ref deletion failed (status ${deleted.status}); result retained`,
+        );
+      }
     }
-    ctx.store.transition(req.sessionID, record.state, "REJECTED", {
-      workerState: record.workerName ? "DESTROYED" : undefined,
-      error: undefined,
-    });
+    // Route the worker removal through releaseWorker (stop-first + bounded
+    // retry + typed outcome). `DESTROYED` is recorded ONLY on a confirmed
+    // removal; a failed release keeps workerName + workerState so the sweep
+    // retries, while the discard still completes.
+    const outcome = await releaseWorker(ctx, record);
+    const patch: Partial<SessionRecord> = { error: undefined };
+    if (outcome.released) {
+      patch.workerName = undefined;
+      patch.workerState = record.workerName ? "DESTROYED" : undefined;
+    } else {
+      patch.workerName = record.workerName;
+      patch.workerState = record.workerState;
+    }
+    ctx.store.transition(req.sessionID, "RESULT_READY", "REJECTED", patch);
     // REJECTED is terminal: the transport artifacts are consumed.
     await gcSessionArtifacts(ctx, req.sessionID, "discardResult");
     return { state: "REJECTED" };
@@ -2296,10 +2327,26 @@ export function buildDestroyWorkerOp(ctx: OpContext): OpHandler {
     if (!record.workerName) {
       return { destroyed: true, worker: null };
     }
-    if (record.workerState === "ACTIVE" || record.workerState === "CREATING") {
+    if (record.workerState === "DESTROYED" || record.workerState === "FAILED") {
+      // The VM is already gone, but a leaked pool allocation for this session
+      // must still be reconciled. releaseWorker's no-live-worker path frees the
+      // identity-keyed allocation (and drains the queue); without this an
+      // orphaned allocation would escape every release path.
       await releaseWorker(ctx, record);
+      return { destroyed: true, worker: record.workerName };
     }
-    ctx.store.touch(req.sessionID, { workerState: "DESTROYED" });
+    // Explicit client operation: surface a failed removal instead of pretending
+    // the worker is gone. The record keeps workerName until removal confirms.
+    const outcome = await releaseWorker(ctx, record);
+    if (!outcome.released) {
+      throw new MsbError(
+        `worker removal failed for ${record.workerName}: ${outcome.error ?? "unknown error"}`,
+      );
+    }
+    ctx.store.touch(req.sessionID, {
+      workerName: undefined,
+      workerState: "DESTROYED",
+    });
     return { destroyed: true, worker: record.workerName };
   };
 }
@@ -3166,21 +3213,26 @@ export function buildHostOp(ctx: OpContext): OpHandler {
 }
 
 /**
- * Remove EXACTLY ONE pool allocation matching the record's resources.
+ * Remove EXACTLY the pool allocation OWNED by the record's session.
  *
- * The previous value-match filter removed EVERY allocation with matching
- * values — in a homogeneous pool (all workers share perWorkerCpu /
- * perWorkerMemBytes) one release silently freed the whole pool, corrupting
- * admission accounting and (with the Feature 2 drain) oversubscribing the
- * real pool. A session owns exactly one allocation; remove that one (S22).
+ * Matching is by worker identity (`sessionID`), never by cpu/mem values: in a
+ * homogeneous pool every allocation has the same values, so a repeat release
+ * of one session would otherwise debit a DIFFERENT session's allocation
+ * (aggregate undercount -> oversubscription). Idempotent — a second release
+ * finds no allocation and removes none (S22, Tier 2 item 15).
  */
 function removePoolAllocation(ctx: OpContext, record: SessionRecord): void {
-  const mem = record.resources?.memBytes ?? -1;
-  const cpu = record.resources?.cpu ?? -1;
   const idx = ctx.pool.allocations.findIndex(
-    (a) => a.memBytes === mem && a.cpu === cpu,
+    (a) => a.sessionID === record.sessionID,
   );
   if (idx !== -1) ctx.pool.allocations.splice(idx, 1);
+}
+
+/** Outcome of a worker release attempt (Tier 2 item 15). */
+export interface WorkerReleaseOutcome {
+  released: boolean;
+  reason: "removed" | "no-worker" | "remove-failed";
+  error?: string;
 }
 
 /**
@@ -3189,32 +3241,66 @@ function removePoolAllocation(ctx: OpContext, record: SessionRecord): void {
  * This is the SINGLE choke point where allocations are freed — the queue
  * drain lives here so every release path (apply, keep, destroy, reaper)
  * also admits parked ensureWorker requests.
+ *
+ * The outcome is TYPED so no caller can record `workerState: "DESTROYED"` (or
+ * clear `workerName`) without a confirmed removal. A failed removal keeps the
+ * record's ownership, the pool allocation, and the config dir, logs
+ * `release_worker_failed`, and does NOT drain the queue, so the next sweep
+ * retries the same worker instead of orphaning the VM (Tier 2 item 15).
  */
 export async function releaseWorker(
   ctx: OpContext,
   record: SessionRecord,
-): Promise<void> {
-  if (
-    record.workerName &&
+): Promise<WorkerReleaseOutcome> {
+  const hasLiveWorker =
+    !!record.workerName &&
     record.workerState !== "DESTROYED" &&
-    record.workerState !== "FAILED"
-  ) {
-    // Gate 6 finding: msb remove fails while a guest is still running, so
-    // stop first, then remove; retry once in case removal races the stop.
-    await ctx.adapter.stop(record.workerName).catch(() => undefined);
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        await ctx.adapter.remove(record.workerName);
-        break;
-      } catch {
-        await new Promise((r) => setTimeout(r, 1500));
-      }
-    }
-    await (ctx.adapter as unknown as { removeConfigDir?: (name: string) => Promise<void> }).removeConfigDir?.(record.workerName)?.catch(() => undefined);
+    record.workerState !== "FAILED";
+  if (!hasLiveWorker) {
+    // No VM to remove, but a leaked allocation for this session must still be
+    // reconciled (identity-keyed, idempotent), and a freed slot is drained.
+    removePoolAllocation(ctx, record);
+    drainQueue(ctx);
+    return { released: true, reason: "no-worker" };
   }
+  const workerName = record.workerName as string;
+  // Gate 6 finding: msb remove fails while a guest is still running, so stop
+  // first, then remove; retry once in case removal races the stop.
+  await ctx.adapter.stop(workerName).catch(() => undefined);
+  let lastError: string | undefined;
+  let removed = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await ctx.adapter.remove(workerName);
+      removed = true;
+      break;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  if (!removed) {
+    const error = lastError ?? "worker removal failed";
+    // Logging must never break a release path: several test contexts pass
+    // `logger: {}`, and a real logger can throw on a dead sink.
+    try {
+      ctx.logger?.log?.({
+        sessionID: record.sessionID,
+        operation: "releaseWorker",
+        action: "release_worker_failed",
+        result: "error",
+        error,
+      });
+    } catch {
+      // A logging failure must not turn a retained worker into a lost one.
+    }
+    return { released: false, reason: "remove-failed", error };
+  }
+  await (ctx.adapter as unknown as { removeConfigDir?: (name: string) => Promise<void> }).removeConfigDir?.(workerName)?.catch(() => undefined);
   removePoolAllocation(ctx, record);
   // Feature 2: a slot just freed — admit parked requests (fire-and-forget).
   drainQueue(ctx);
+  return { released: true, reason: "removed" };
 }
 
 /**
@@ -3233,14 +3319,18 @@ async function releaseRetainedWorker(
   if (!record?.workerName) return;
   if (record.workerState === "DESTROYED" || record.workerState === "FAILED") return;
   try {
-    await releaseWorker(ctx, record);
+    // Destruction derives from a CONFIRMED removal. On failure releaseWorker
+    // already logged `release_worker_failed`; the record keeps workerName so
+    // the idle sweep retries, and the landed commit still succeeds.
+    const outcome = await releaseWorker(ctx, record);
+    if (!outcome.released) return;
     ctx.store.touch(sessionID, {
       workerName: undefined,
       workerState: "DESTROYED",
     });
   } catch (err) {
-    // Not fatal, but not silent either: the idle sweep recovers a terminal-state
-    // session that still holds a worker, and this line shows it needed to.
+    // Not fatal, but not silent either: the state write itself can fail after
+    // a successful removal, and the idle sweep recovers that orphaned worker.
     try {
       ctx.logger?.log?.({
         sessionID,

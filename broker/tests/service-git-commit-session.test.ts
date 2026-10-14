@@ -520,7 +520,7 @@ describe("gitCommit releases the committed result's worker", () => {
         stop: async (name: string) => { stopped.push(name); },
         remove: async (name: string) => { removed.push(name); },
       },
-      pool: { allocations: [{ cpu: 2, memBytes: 2 * GiB }] },
+      pool: { allocations: [{ cpu: 2, memBytes: 2 * GiB, sessionID: "worker-7" }] },
     });
     const req = request({ projectDir: projectRoot, message: "fix: delegated", sandboxSessionID: "worker-7" });
     return { calls, ctx, records, removed, req, stopped };

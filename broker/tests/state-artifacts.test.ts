@@ -517,6 +517,13 @@ describe("terminal transition removes artifacts immediately", () => {
         runnerMode: "planned",
         spawn: async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }),
       },
+      // discardResult now routes the (absent) worker through releaseWorker,
+      // which reconciles the identity-keyed pool allocation (Tier 2 item 15).
+      adapter: {
+        stop: async () => undefined,
+        remove: async () => undefined,
+      },
+      pool: { allocations: [] },
       logger: { log: () => {} },
     } as unknown as OpContext;
 

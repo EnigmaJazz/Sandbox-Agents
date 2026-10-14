@@ -63,6 +63,7 @@ export interface ReaperLogEntry {
     | "reaped_active_unsaved"
     | "reaped_terminal"
     | "auto_finished"
+    | "auto_finished_retained"
     | "swept_artifact"
     | "error";
   detail?: string;
@@ -387,7 +388,10 @@ export async function sweepIdle(
       if (record.workerState === "DESTROYED" || record.workerState === "FAILED") continue;
       if (isTerminalState(record.state)) {
         // The session is finished, so there is no idle period to wait out.
-        await releaseWorker(ctx, record);
+        const outcome = await releaseWorker(ctx, record);
+        // A failed removal keeps the record for the next sweep; releaseWorker
+        // already logged it. Never record DESTROYED without a confirmed release.
+        if (!outcome.released) continue;
         ctx.store.touch(record.sessionID, {
           workerName: undefined,
           workerState: "DESTROYED",
@@ -404,7 +408,8 @@ export async function sweepIdle(
       if (record.state === "RESULT_READY") {
         // The result lives on the host (ref + bundle): release the transient
         // worker but KEEP the state so apply/preview/retain/discard work.
-        await releaseWorker(ctx, record);
+        const outcome = await releaseWorker(ctx, record);
+        if (!outcome.released) continue;
         ctx.store.touch(record.sessionID, {
           workerName: undefined,
           workerState: "DESTROYED",
@@ -413,7 +418,8 @@ export async function sweepIdle(
         safeLog(onLog, { sessionID: record.sessionID, action: "reaped_result_ready" }, onDrop);
         reaped++;
       } else if (record.state === "SANDBOX_ACTIVE") {
-        await releaseWorker(ctx, record);
+        const outcome = await releaseWorker(ctx, record);
+        if (!outcome.released) continue;
         ctx.store.touch(record.sessionID, {
           workerName: undefined,
           workerState: "DESTROYED",
@@ -475,7 +481,16 @@ async function finishOrReleaseActive(
     hasChanges = true;
   }
   if (!hasChanges) {
-    await releaseWorker(ctx, record);
+    const outcome = await releaseWorker(ctx, record);
+    // Only a confirmed removal clears the worker. A failure keeps it (and
+    // releaseWorker already logged) for the next sweep.
+    if (!outcome.released) {
+      return {
+        sessionID: record.sessionID,
+        action: "error",
+        detail: "worker release failed; retained for the next sweep",
+      };
+    }
     ctx.store.touch(record.sessionID, {
       workerName: undefined,
       workerState: "DESTROYED",
@@ -484,12 +499,25 @@ async function finishOrReleaseActive(
     return { sessionID: record.sessionID, action: "reaped_active", detail: cleanDetail };
   }
   const ref = await prepare(ctx, record.sessionID);
-  await releaseWorker(ctx, record);
+  const outcome = await releaseWorker(ctx, record);
+  // The edits are safe in the result ref either way; keep workerName + ACTIVE
+  // when removal did not succeed so a later sweep retries it.
   ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", {
     resultRef: ref,
-    workerName: undefined,
-    workerState: "DESTROYED",
+    ...(outcome.released
+      ? { workerName: undefined, workerState: "DESTROYED" as const }
+      : {}),
   });
+  // A distinct action when the export landed but the worker could not be
+  // removed: the session is auto-finished, but a worker is still retained and
+  // must not be reported as a fully-released worker (auto_finished).
+  if (!outcome.released) {
+    return {
+      sessionID: record.sessionID,
+      action: "auto_finished_retained",
+      detail: `${ref} (worker retained for the next sweep)`,
+    };
+  }
   return { sessionID: record.sessionID, action: "auto_finished", detail: ref };
 }
 
@@ -524,8 +552,11 @@ export async function sweepUnfinished(
       if (record.workerState === "DESTROYED" || record.workerState === "FAILED") continue;
       const age = now - Date.parse(record.updatedAt);
       if (!(age > idleMs)) continue;
-      safeLog(onLog, await finishOrReleaseActive(ctx, record, "idle clean worker released", prepare), onDrop);
-      finished++;
+      const entry = await finishOrReleaseActive(ctx, record, "idle clean worker released", prepare);
+      safeLog(onLog, entry, onDrop);
+      // A failed release (action "error") must NOT count as finished: the
+      // session still holds its worker and the sweep must retry it.
+      if (entry.action !== "error") finished++;
     } catch (err) {
       safeLog(onLog, {
         sessionID: record.sessionID,

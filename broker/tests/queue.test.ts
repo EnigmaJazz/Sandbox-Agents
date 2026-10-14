@@ -107,10 +107,13 @@ function makeHarness(
     },
   } as unknown as OpContext;
 
-  // Fill the pool to maxWorkers so ensureWorker parks.
-  ctx.pool.allocations = Array.from({ length: 4 }, () => ({
+  // Fill the pool to maxWorkers so ensureWorker parks. Allocations are keyed
+  // by sessionID (Tier 2 item 15): releaseWorker frees exactly the victim's
+  // own slot, never a value-matched neighbour.
+  ctx.pool.allocations = ["victim", "x", "y", "z"].map((sessionID) => ({
     cpu: 2,
     memBytes: 2 * GiB,
+    sessionID,
   }));
 
   const ensureWorker = (sessionID: string) =>

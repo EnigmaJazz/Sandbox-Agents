@@ -20,6 +20,12 @@ export interface HostResources {
 export interface WorkerAllocation {
   cpu: number;
   memBytes: number;
+  /**
+   * Owning session (worker identity). Allocation removal matches on this, not
+   * on cpu/mem values, so a repeat release cannot debit another session's
+   * equal-sized allocation (Tier 2 item 15).
+   */
+  sessionID?: string;
 }
 
 export interface WorkerPool {
