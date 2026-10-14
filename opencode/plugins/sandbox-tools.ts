@@ -361,8 +361,8 @@ export default function sandboxToolsPlugin() {
 
       sandbox_diff: tool({
         description:
-          "Show the committed baseline-to-worker HEAD diff (B→C). Requires an ACTIVE worker and " +
-          "never activates one. Run sandbox_finish first if current uncommitted edits must be included.",
+          "Show the active worker diff, including uncommitted changes, or the prepared/retained " +
+          "result diff. Active mode requires a live worker; retained mode reads the exported result.",
         args: {},
         execute: async (_args, ctx) => {
           assertNotOrchestrator(ctx.agent, "sandbox_diff");

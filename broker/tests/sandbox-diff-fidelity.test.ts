@@ -83,6 +83,21 @@ function makeHarness() {
     }),
     store: { get: () => record },
     adapter,
+    git: {
+      runnerMode: "real",
+      spawn: async (argv: string[], opts?: { cwd?: string }) => {
+        const result = spawnSync(argv[0]!, argv.slice(1), {
+          cwd: opts?.cwd ?? workerDir,
+          encoding: "utf8",
+        });
+        return {
+          status: result.status ?? 1,
+          stdout: result.stdout ?? "",
+          stderr: result.stderr ?? "",
+          timedOut: false,
+        };
+      },
+    },
   } as unknown as OpContext;
   const request: BrokerRequestEnvelope = {
     version: 1,
@@ -91,7 +106,7 @@ function makeHarness() {
     sessionID: record.sessionID,
   };
   const indexPath = join(workerDir, ".git", "index");
-  return { workerDir, stateDir, indexPath, ctx, request };
+  return { workerDir, stateDir, indexPath, record, ctx, request };
 }
 
 async function getDiff(harness: ReturnType<typeof makeHarness>) {
@@ -126,6 +141,42 @@ describe("active sandbox diff fidelity with real Git", () => {
     expect(result.applyPreview.preview).toContain("new-file.txt");
   });
 
+  test("a tracked edit and untracked file appear together in one diff", async () => {
+    const h = makeHarness();
+    writeFileSync(join(h.workerDir, "tracked.txt"), "edited\n");
+    writeFileSync(join(h.workerDir, "new-file.txt"), "new content\n");
+
+    const result = await getDiff(h);
+
+    expect(result.diff).toContain("-base");
+    expect(result.diff).toContain("+edited");
+    expect(result.diff).toContain("new-file.txt");
+    expect(result.changedPaths).toContain("tracked.txt");
+    expect(result.changedPaths).toContain("new-file.txt");
+  });
+
+  test("an oversized diff is refused instead of returned partially", async () => {
+    const h = makeHarness();
+    writeFileSync(join(h.workerDir, "tracked.txt"), `${"x".repeat(600 * 1024)}\n`);
+
+    await expect(getDiff(h)).rejects.toThrow("diff refused: diff output exceeds 524288 bytes");
+  });
+
+  test("an oversized retained diff is refused instead of returned partially", async () => {
+    const h = makeHarness();
+    writeFileSync(join(h.workerDir, "tracked.txt"), `${"x".repeat(600 * 1024)}\n`);
+    git(h.workerDir, ["add", "tracked.txt"]);
+    git(h.workerDir, ["commit", "-q", "-m", "large result"]);
+    h.record.state = "RETAINED";
+    h.record.projectID = "repo";
+    h.record.resultRef = git(h.workerDir, ["rev-parse", "HEAD"]).stdout.trim();
+
+    const request = { ...h.request, payload: { mode: "retained" } };
+    await expect(buildDiffOp(h.ctx)(request)).rejects.toThrow(
+      "diff refused: diff output exceeds 524288 bytes",
+    );
+  });
+
   test(".broker-tmp files are excluded from changed paths", async () => {
     const h = makeHarness();
     mkdirSync(join(h.workerDir, ".broker-tmp"), { recursive: true });
@@ -134,6 +185,9 @@ describe("active sandbox diff fidelity with real Git", () => {
     const result = await getDiff(h);
 
     expect(result.changedPaths).not.toContain(".broker-tmp/scratch.txt");
+    expect(result.diff).not.toContain("scratch.txt");
+    expect(result.stat).not.toContain("scratch.txt");
+    expect(result.applyPreview.preview).not.toContain("scratch.txt");
   });
 
   test("a deleted tracked file appears as deleted", async () => {

@@ -351,7 +351,7 @@ broker-side (e.g. `ensureWorker` refuses orchestrator,
 | `sandbox_edit` | mutation (worker-local) | allow | orchestrator-denied only | `sandbox-tools.ts:290,298` |
 | `sandbox_apply_patch` | mutation (worker-local) | allow | orchestrator-denied only | `sandbox-tools.ts:305,315` |
 | `sandbox_bash` | mutation (worker-local) | allow | orchestrator-denied only | `sandbox-tools.ts:322,334` |
-| `sandbox_diff` | read | allow | orchestrator-denied only | `sandbox-tools.ts:350,356` |
+| `sandbox_diff` | read | allow | orchestrator-denied only | `sandbox-tools.ts:362-372` |
 | `sandbox_finish` | mutation (worker-local) | allow | orchestrator-denied only | `sandbox-tools.ts:362,369` |
 | `sandbox_apply` | host mutation | ask | orchestrator-denied only + `ctx.ask` + broker S16/§19 | `sandbox-tools.ts:375,384,396-401` |
 | `sandbox_copy_out` | host mutation | **MISSING from fragment** | orchestrator-denied only + `ctx.ask` | `sandbox-tools.ts:406,417,424-433` |

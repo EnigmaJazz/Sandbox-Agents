@@ -372,7 +372,8 @@ export function defaultConfig(
         "TMPDIR",
         "CI",
         "NO_COLOR",
-        "GIT_*",
+        // assertWorkerEnv uses exact membership; never add a GIT_* wildcard because GIT_SSH_COMMAND and GIT_EXTERNAL_DIFF execute commands.
+        "GIT_INDEX_FILE",
         "GIT_CONFIG_COUNT",
         "GIT_CONFIG_KEY_0",
         "GIT_CONFIG_VALUE_0",
