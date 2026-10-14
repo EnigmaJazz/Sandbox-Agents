@@ -28,7 +28,10 @@ adjudication; they never get authority to issue keys. Plan:
     `writeFile`, `applyPatch`, `listDir`, `grep`, `diff`. Everything else is refused.
   - The main socket refuses any `advisor-*` session id.
   - Disconnect reaps the advisor session through the existing disconnect clean-up.
-- [ ] **A2 — Snapshot pinning, identity, evidence export.** See the plan.
+- [x] **A2 — Snapshot pinning, identity, evidence export.** See the plan.
+  - [x] **A2a** — commit `1b3d246`.
+  - [x] **A2b** — commit `deecdeb`.
+  - [x] **A2c** — commit `04322bd`.
   - **Advisor dispatch (pre-code):** `advisor-security`, model `opencode-go/deepseek-v4.1-flash`.
     Question: “What is wrong or missing in this approach, what should change before implementation,
     and what evidence supports that?” Frozen evidence: `docs/advisor/plan-sandbox-integration.md`
@@ -164,7 +167,7 @@ Started 2026-10-02 with A1.
 
 ## Next step
 
-The security core (A1, A3, A4) is complete. Remaining: A2 (snapshot pinning and evidence export), A5 (OpenCode host tools), A6 (advisor MCP server), A7/A8 (launchers, behind their config-isolation gates), A9 (confinement). These can be handed off from test-first specs; the user installs. A2 and A5 can be handed off from test-first specs. Slices A2, A3 and A5 can be handed off from test-first specs; A4 stays with Claude.
+The security core (A1, A2, A3, A4) is complete. Remaining: A5 (OpenCode host tools), A6 (advisor MCP server), A7/A8 (launchers, behind their config-isolation gates), and A9 (confinement). These can be handed off from test-first specs; the user installs. A5 can be handed off from test-first specs; A4 stays with Claude.
 
 ## A2a review and follow-up
 

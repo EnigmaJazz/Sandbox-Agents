@@ -13,7 +13,7 @@ One response that never completes must not break a session: the client must resy
 
 ## Not established
 
-Why the large frame never completes is unknown. A partial write, a capped write, and a lost tail are all consistent with the evidence. Do not assert any of them as the cause. Bun buffers internally, so backpressure is a candidate, not a proven cause. The residual-`rx` diagnostic exists to distinguish a large residual (frame truncated in transit / send-side evidence) from an empty or tiny residual (nothing arrived / response was never written); neither observation alone should be overstated as proof of the underlying cause.
+Why the large frame never completes is unknown. A partial write, a capped write, and a lost tail are all consistent with the evidence. Do not assert any of them as the cause. Bun does not buffer writes internally: in-memory Bun 1.3.14 abstract-Unix-socket tests delivered only 219 KB of 300 KB and 600 KB writes, matching the kernel send-buffer ceiling and demonstrating transport truncation. The queued-write/drain fix is owned by `odd/tasks/socket-write-drain.md`. The residual-`rx` diagnostic exists to distinguish a large residual (frame truncated in transit / send-side evidence) from an empty or tiny residual (nothing arrived / response was never written); neither observation alone should be overstated as proof of the underlying cause.
 
 ## Scope
 
