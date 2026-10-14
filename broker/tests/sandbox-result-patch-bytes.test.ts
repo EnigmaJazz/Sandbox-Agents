@@ -70,9 +70,10 @@ function makeHarness(resultChanges: { path: string; content: string }[] = []) {
       encoding: "utf8",
       env: { ...process.env, ...(options?.env ?? {}) },
     });
+    const maxOutputBytes = options?.maxOutputBytes ?? Number.POSITIVE_INFINITY;
     return {
       status: result.status ?? 1,
-      stdout: result.stdout ?? "",
+      stdout: (result.stdout ?? "").slice(0, maxOutputBytes),
       stderr: result.stderr ?? "",
       timedOut: false,
     };
@@ -97,8 +98,10 @@ async function getResult(harness: ReturnType<typeof makeHarness>) {
   return (await buildSandboxResultOp(harness.ctx)(harness.request)) as {
     changedPaths: { path: string; added: number | null; removed: number | null }[];
     patch: string;
-    patchBytes: number;
+    patchBytes?: number;
+    patchBytesTruncated: boolean;
     authoredChangedLines: number;
+    applyPreviewFiles?: unknown;
   };
 }
 
@@ -110,6 +113,7 @@ describe("sandbox result patch byte receipt with real Git", () => {
 
     expect(result.changedPaths.map(({ path }) => path)).toEqual(["new-file.txt"]);
     expect(result.patchBytes).toBeGreaterThan(0);
+    expect(result.patchBytesTruncated).toBe(false);
   });
 
   test("patch bytes equal the UTF-8 byte length of the reported patch", async () => {
@@ -118,6 +122,7 @@ describe("sandbox result patch byte receipt with real Git", () => {
     const result = await getResult(h);
 
     expect(result.patchBytes).toBe(Buffer.byteLength(result.patch, "utf8"));
+    expect(result.patchBytesTruncated).toBe(false);
   });
 
   test("a no-change result reports zero patch bytes", async () => {
@@ -126,6 +131,17 @@ describe("sandbox result patch byte receipt with real Git", () => {
     const result = await getResult(h);
 
     expect(result.patchBytes).toBe(0);
+    expect(result.patchBytesTruncated).toBe(false);
+  });
+
+  test("a patch over the git output cap omits its byte count and apply preview", async () => {
+    const h = makeHarness([{ path: "large-file.txt", content: "a".repeat(512 * 1024 + 1) }]);
+
+    const result = await getResult(h);
+
+    expect(result.patchBytes).toBeUndefined();
+    expect(result.patchBytesTruncated).toBe(true);
+    expect(result.applyPreviewFiles).toBeUndefined();
   });
 
   test("authored changed lines equal the added and removed path counts", async () => {

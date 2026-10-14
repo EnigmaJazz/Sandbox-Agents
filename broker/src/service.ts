@@ -2846,15 +2846,18 @@ export function buildSandboxResultOp(ctx: OpContext): OpHandler {
         : (payload.sandboxSessionID as string);
     const readResult = await readSandboxResult(ctx, projectRoot, sessionID, baseline, result, comparison);
     const completePatch = await ctx.git.spawn(buildResultPatchArgv(baseline, result), { cwd: projectRoot, timeoutMs: 60_000, maxOutputBytes: GIT_OUTPUT_MAX_BYTES });
+    const patchBytes = Buffer.byteLength(completePatch.stdout, "utf8");
+    const patchComplete = completePatch.status === 0 && patchBytes < GIT_OUTPUT_MAX_BYTES;
     const patchMetrics: SandboxResultPatchMetrics = {
-      patchBytes: Buffer.byteLength(completePatch.stdout, "utf8"),
+      ...(patchComplete ? { patchBytes } : {}),
+      patchBytesTruncated: !patchComplete,
       authoredChangedLines: readResult.changedPaths.reduce(
         (total, change) => total + (change.added ?? 0) + (change.removed ?? 0),
         0,
       ),
     };
     let applyPreviewFiles: ApplyPreviewFiles | undefined;
-    if (completePatch.status === 0 && Buffer.byteLength(completePatch.stdout, "utf8") < GIT_OUTPUT_MAX_BYTES) {
+    if (patchComplete) {
       try {
         applyPreviewFiles = ensureCompleteApplyPreview(ctx.config.stateDir, sessionID, completePatch.stdout);
       } catch {
