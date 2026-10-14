@@ -86,13 +86,29 @@ describe("broker diff metadata", () => {
     expect(calls).toContainEqual([
       "git",
       "diff",
+      "--cached",
       "--name-only",
       "--no-renames",
       "-z",
       "refs/opencode-sandbox/baseline/diff-session",
-      "HEAD",
       "--",
       ".",
+      ":(exclude).broker-tmp",
+      ":(exclude)*.bundle",
+    ]);
+    expect(calls).toContainEqual([
+      "git",
+      "read-tree",
+      "refs/opencode-sandbox/baseline/diff-session",
+    ]);
+    expect(calls).toContainEqual([
+      "git",
+      "add",
+      "-A",
+      "--",
+      ".",
+      ":(exclude).broker-tmp",
+      ":(exclude)*.bundle",
     ]);
   });
 

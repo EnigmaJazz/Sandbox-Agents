@@ -25,6 +25,7 @@ import {
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { BrokerConfig } from "./config.ts";
+import { RESULT_EXCLUDE_PATHS } from "./diff-spec.ts";
 import type { SessionStore } from "./state.ts";
 import type { MsbAdapter } from "./msb.ts";
 import type { HostReadExecutor } from "./hostread.ts";
@@ -1574,89 +1575,138 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
     if (mode === "retained") return buildRetainedDiff(ctx, record);
     const worker = requireActiveWorker(record);
     const ref = record.baselineRef ?? baselineRef(record.sessionID);
-    const stat = await ctx.adapter.exec(
-      worker,
-      ["git", "diff", "--stat", ref, "HEAD"],
-      {
-        cwd: "/work",
-        timeoutMs: 60_000,
-      },
-    );
-    const diff = await ctx.adapter.exec(worker, ["git", "diff", ref, "HEAD"], {
-      cwd: "/work",
-      timeoutMs: 60_000,
-    });
-    // Gate 6 follow-up: for whole-file temps (added paths ending in ".new"),
-    // also report the diff against the sibling original (or a
-    // .broker-tmp/ref-<added> delivery reference) so the approval prompt
-    // shows the real change instead of the full new file.
-    let compare = "";
-    const nameStatus = await ctx.adapter.exec(
-      worker,
-      ["git", "diff", "--name-status", ref, "HEAD"],
-      {
-        cwd: "/work",
-        timeoutMs: 60_000,
-      },
-    );
-    for (const line of nameStatus.stdout.split("\n")) {
-      const m = /^A[\t ]+(.+)$/.exec(line.trim());
-      if (!m) continue;
-      const added = m[1]!;
-      if (!added.endsWith(".new")) continue;
-      const candidates = [added.slice(0, -4), `.broker-tmp/ref-${added}`];
-      for (const cand of candidates) {
-        // Gate 6 finding: git diff --no-index treats a MISSING path as
-        // empty and exits 1, so a non-existent sibling would be accepted
-        // as a full-file diff and shadow the ref. Probe existence first.
-        const exists = await ctx.adapter.exec(worker, ["test", "-e", cand], {
-          cwd: "/work",
-          timeoutMs: 30_000,
-        });
-        if (exists.status !== 0) continue;
-        const cmp = await ctx.adapter.exec(
-          worker,
-          ["git", "diff", "--no-index", "--", cand, added],
-          {
-            cwd: "/work",
-            timeoutMs: 60_000,
-          },
-        );
-        // exit 0 = identical, 1 = differences; anything else skips.
-        if (cmp.status !== 0 && cmp.status !== 1) continue;
-        compare += cmp.stdout + "\n";
-        break;
-      }
-    }
-    const changedPathResult = await ctx.adapter.exec(
-      worker,
-      buildChangedPathsArgv(ref, "HEAD"),
-      {
-        cwd: "/work",
-        timeoutMs: 60_000,
-      },
-    );
-    const parsedChangedPaths =
-      changedPathResult.status === 0
-        ? parseNulDelimitedPaths(changedPathResult.stdout)
-        : { paths: [], complete: false };
-    const applyPreviewDiff = compare.trim().length > 0 ? compare : diff.stdout;
-    const applyPreviewFiles = writeApplyPreviewFiles(
-      ctx.config.stateDir,
-      req.sessionID,
-      applyPreviewDiff,
-    );
-    return {
-      stat: stat.stdout,
-      diff: diff.stdout,
-      compare,
-      applyPreview: buildApplyPreview(applyPreviewDiff),
-      applyPreviewFiles,
-      changedPaths: parsedChangedPaths.paths,
-      changedPathsComplete:
-        changedPathResult.status === 0 && parsedChangedPaths.complete,
-      exitCode: diff.status,
+    const tmpIndex = `/work/.broker-tmp/diff-${randomUUID()}.index`;
+    const diffEnv = {
+      GIT_INDEX_FILE: tmpIndex,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "safe.directory",
+      GIT_CONFIG_VALUE_0: "/work",
     };
+    const runDiffGit = (argv: string[]) =>
+      ctx.adapter.exec(worker, argv, {
+        cwd: "/work",
+        timeoutMs: 60_000,
+        env: diffEnv,
+      });
+    const stagingDir = await ctx.adapter.exec(
+      worker,
+      ["mkdir", "-p", "/work/.broker-tmp"],
+      { cwd: "/work", timeoutMs: 30_000 },
+    );
+    if (stagingDir.status !== 0) {
+      throw new MsbError(`diff staging directory failed: ${trimErr(stagingDir.stderr)}`);
+    }
+    try {
+      const seeded = await runDiffGit(["git", "read-tree", ref]);
+      if (seeded.status !== 0) {
+        throw new MsbError(`diff baseline staging failed: ${trimErr(seeded.stderr)}`);
+      }
+      const staged = await runDiffGit([
+        "git",
+        "add",
+        "-A",
+        "--",
+        ".",
+        ...RESULT_EXCLUDE_PATHS,
+      ]);
+      if (staged.status !== 0) {
+        throw new MsbError(`diff working-tree staging failed: ${trimErr(staged.stderr)}`);
+      }
+      const diffPathspecs = ["--", ".", ...RESULT_EXCLUDE_PATHS];
+      const stat = await runDiffGit([
+        "git",
+        "diff",
+        "--cached",
+        "--stat",
+        ref,
+        ...diffPathspecs,
+      ]);
+      const diff = await runDiffGit([
+        "git",
+        "diff",
+        "--cached",
+        ref,
+        ...diffPathspecs,
+      ]);
+      // Gate 6 follow-up: for whole-file temps (added paths ending in ".new"),
+      // also report the diff against the sibling original (or a
+      // .broker-tmp/ref-<added> delivery reference) so the approval prompt
+      // shows the real change instead of the full new file.
+      let compare = "";
+      const nameStatus = await runDiffGit([
+        "git",
+        "diff",
+        "--cached",
+        "--name-status",
+        ref,
+        ...diffPathspecs,
+      ]);
+      for (const line of nameStatus.stdout.split("\n")) {
+        const m = /^A[\t ]+(.+)$/.exec(line.trim());
+        if (!m) continue;
+        const added = m[1]!;
+        if (!added.endsWith(".new")) continue;
+        const candidates = [added.slice(0, -4), `.broker-tmp/ref-${added}`];
+        for (const cand of candidates) {
+          // Gate 6 finding: git diff --no-index treats a MISSING path as
+          // empty and exits 1, so a non-existent sibling would be accepted
+          // as a full-file diff and shadow the ref. Probe existence first.
+          const exists = await ctx.adapter.exec(worker, ["test", "-e", cand], {
+            cwd: "/work",
+            timeoutMs: 30_000,
+          });
+          if (exists.status !== 0) continue;
+          const cmp = await ctx.adapter.exec(
+            worker,
+            ["git", "diff", "--no-index", "--", cand, added],
+            {
+              cwd: "/work",
+              timeoutMs: 60_000,
+            },
+          );
+          // exit 0 = identical, 1 = differences; anything else skips.
+          if (cmp.status !== 0 && cmp.status !== 1) continue;
+          compare += cmp.stdout + "\n";
+          break;
+        }
+      }
+      const changedPathResult = await runDiffGit([
+        "git",
+        "diff",
+        "--cached",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        ref,
+        ...diffPathspecs,
+      ]);
+      const parsedChangedPaths =
+        changedPathResult.status === 0
+          ? parseNulDelimitedPaths(changedPathResult.stdout)
+          : { paths: [], complete: false };
+      const applyPreviewDiff = compare.trim().length > 0 ? compare : diff.stdout;
+      const applyPreviewFiles = writeApplyPreviewFiles(
+        ctx.config.stateDir,
+        req.sessionID,
+        applyPreviewDiff,
+      );
+      return {
+        stat: stat.stdout,
+        diff: diff.stdout,
+        compare,
+        applyPreview: buildApplyPreview(applyPreviewDiff),
+        applyPreviewFiles,
+        changedPaths: parsedChangedPaths.paths,
+        changedPathsComplete:
+          changedPathResult.status === 0 && parsedChangedPaths.complete,
+        exitCode: diff.status,
+      };
+    } finally {
+      await ctx.adapter.exec(worker, ["rm", "-f", "--", tmpIndex], {
+        cwd: "/work",
+        timeoutMs: 30_000,
+      });
+    }
   };
 }
 
@@ -1718,8 +1768,7 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
       "-A",
       "--",
       ".",
-      ":(exclude).broker-tmp",
-      ":(exclude)*.bundle",
+      ...RESULT_EXCLUDE_PATHS,
     ],
     {
       cwd: "/work",
