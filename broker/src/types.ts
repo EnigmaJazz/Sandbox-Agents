@@ -310,6 +310,14 @@ export interface BrokerResponseEnvelope {
   error?: BrokerError;
 }
 
+/** Broker-computed receipt metrics for the complete committed result patch. */
+export interface SandboxResultPatchMetrics {
+  /** UTF-8 byte length of the complete B→C patch used for the apply preview. */
+  patchBytes: number;
+  /** Numeric additions plus deletions; binary path counts contribute zero. */
+  authoredChangedLines: number;
+}
+
 // ---------------------------------------------------------------------------
 // Per-operation payloads (validated by validation.ts against exact key sets)
 // ---------------------------------------------------------------------------

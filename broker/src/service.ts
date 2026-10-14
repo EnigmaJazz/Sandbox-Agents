@@ -123,6 +123,7 @@ import type {
   MetricsRecord,
   PolicyRecord,
   Operation,
+  SandboxResultPatchMetrics,
   SessionState,
 } from "./types.ts";
 
@@ -2816,6 +2817,13 @@ export function buildSandboxResultOp(ctx: OpContext): OpHandler {
         : (payload.sandboxSessionID as string);
     const readResult = await readSandboxResult(ctx, projectRoot, sessionID, baseline, result, comparison);
     const completePatch = await ctx.git.spawn(buildResultPatchArgv(baseline, result), { cwd: projectRoot, timeoutMs: 60_000, maxOutputBytes: GIT_OUTPUT_MAX_BYTES });
+    const patchMetrics: SandboxResultPatchMetrics = {
+      patchBytes: Buffer.byteLength(completePatch.stdout, "utf8"),
+      authoredChangedLines: readResult.changedPaths.reduce(
+        (total, change) => total + (change.added ?? 0) + (change.removed ?? 0),
+        0,
+      ),
+    };
     let applyPreviewFiles: ApplyPreviewFiles | undefined;
     if (completePatch.status === 0 && Buffer.byteLength(completePatch.stdout, "utf8") < GIT_OUTPUT_MAX_BYTES) {
       try {
@@ -2824,7 +2832,7 @@ export function buildSandboxResultOp(ctx: OpContext): OpHandler {
         // The install approval guard refuses a truncated preview without this artifact.
       }
     }
-    return { ...readResult, ...(applyPreviewFiles ? { applyPreviewFiles } : {}) };
+    return { ...readResult, ...patchMetrics, ...(applyPreviewFiles ? { applyPreviewFiles } : {}) };
   };
 }
 
