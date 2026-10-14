@@ -90,5 +90,9 @@ Use real-Git integration tests, not mocked adapters, for each falsifying case:
 - Existing `.broker-tmp` and deleted-file cases passed; `.broker-tmp` was strengthened to assert absence from diff, stat, changed paths, and apply preview.
 - Exact-description literal search over the registered project found no old-description assertion requiring edits outside the allowed surfaces.
 
+## Review and closure
+- Tracker complete; T1–T5 remain complete. Native review lineage `review-fe7cae5a7ddc98d0` approved and acknowledged; authority was burned via `review.acknowledge-approved`. The consumed revision is `sha256:2e0ccdff8857a05429858367a55175669f70303dff3f288d43935e909f51d911`. Candidate: base `e87dc1bab5321f625aab3d4c3e5697270ab732bc` to `899aee290f72f20c3ba227d8da5411c1cf805faf`, 29 paths, 882 changed lines, medium risk. The bounded plan selected only `review-reliability`; no refuter ran, so there is no refuter verdict to record. New reviewed boundary: `05b54fa`.
+- Queued non-blocking advisory `R3-patch-bytes-cap` in Tier 4 of `docs/TODO.md`: `patchBytes` is derived from `completePatch.stdout`, bounded by `GIT_OUTPUT_MAX_BYTES`; at the cap the value may report a truncated byte count, and no oversized-result test covers that boundary, leaving receipt accuracy for large results unproved. The metric at `broker/src/service.ts:2848` is computed unconditionally, while lines 2856–2863 gate the apply preview on being under the cap. Provider classification: WARNING, disposition `informational`, evidence class `inferential`, reported as `introduced`.
+
 ## Next step
-T4 and T5 are complete. The result is S17-protected (`broker/src/**` and `opencode/plugins/**`); the owner must review and manually apply/commit the retained diff. No files outside the allowed edit surfaces were changed.
+The tracker is complete. The reviewed candidate contains S17-protected paths (`broker/src/**` and `opencode/plugins/**`); the owner must manually apply/commit the retained diff. No files outside the allowed edit surfaces were changed.

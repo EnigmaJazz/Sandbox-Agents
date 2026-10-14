@@ -164,6 +164,8 @@ All Tier 1 items are implemented and committed.
 
 55. **`gcSessionArtifacts` logger failures can escape its never-throws contract** — **OPEN / advisory follow-up**; owner **A**. `gcSessionArtifacts` documents a never-throws contract but calls `ctx.logger?.log?.()` without protection at `broker/src/service.ts:893,900,909`; a synchronous logger throw can violate the contract. Tier 4 because this is a separate latent failure from `releaseRetainedWorker` and is not changed here. Source: `broker/src/service.ts:864,893,900,909`; lineage `review-3a285dbad4589d87`.
 
+56. **`R3-patch-bytes-cap` (WARNING; lineage `review-fe7cae5a7ddc98d0`)** — **OPEN / advisory follow-up**; owner **A**. `patchBytes` is derived from `completePatch.stdout`, which is bounded by `GIT_OUTPUT_MAX_BYTES`; when a result patch reaches that cap, the reported byte count may reflect truncated output. No oversized-result test covers this boundary, so receipt accuracy for large results is unproved. The metric is computed unconditionally at `broker/src/service.ts:2848`, while lines 2856–2863 gate the apply preview on being under the cap. Provider disposition: *informational*; evidence class: *inferential*; reported as *introduced*. Tier 4 because this is non-blocking later work from an approved review. Source: `odd/tasks/sandbox-diff-receipt-bytes.md`.
+
 ## Completed
 
 - **Reviewer relay deadline** — Raised the finite, bounded end-to-end relay deadline from 600 seconds to 2,700 seconds (45 minutes); the per-call `deadlineMs` override remains unchanged.
