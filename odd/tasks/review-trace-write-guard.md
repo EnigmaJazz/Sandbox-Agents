@@ -4,6 +4,8 @@
 - **Project:** `sandbox-integration` (`/home/james/agent-sandbox-integration`)
 - **Status:** Complete; committed as `f048a67` on `feat/review-and-state-hardening`
 
+- **Archived:** 2026-10-14 — complete; read-only history.
+
 ## Objective
 
 A provider- or caller-supplied `trace` value must not cause a file to be written inside the project during a review lifecycle, because that moves the untracked inventory mid-flow and invalidates the consent gate's own precondition.

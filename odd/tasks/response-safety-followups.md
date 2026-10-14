@@ -1,5 +1,7 @@
 # Response-safety follow-ups
 
+- **Archived:** 2026-10-14 — complete; read-only history. Residual (user-owned): install the broker changes and restart the broker.
+
 ## Objective
 Close the four non-blocking advisories left by the approved review lineage `review-e88a985fad223e87` (reviewed boundary `bf3c792`), which corrected the dispatch response-safety defects in `broker/src/server.ts`.
 

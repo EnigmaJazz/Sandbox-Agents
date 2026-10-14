@@ -4,6 +4,8 @@
 - **Project:** `sandbox-integration` (`/home/james/agent-sandbox-integration`)
 - **Status:** COMPLETE
 
+- **Archived:** 2026-10-14 — complete; read-only history.
+
 ## Objective
 
 Installing a sandbox result must not silently overwrite a change made to a target path after the result's baseline was captured. Where the host's current bytes differ from what the result started from, the install must refuse (or require an explicit override) and name the divergent paths.

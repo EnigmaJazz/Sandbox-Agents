@@ -1,5 +1,7 @@
 # Broker socket write drain and complete-file integrity
 
+- **Archived:** 2026-10-14 — complete; read-only history.
+
 ## Objective
 
 A large broker/plugin message must survive the round trip in both directions, and no partially-read file must ever be returned or written back.

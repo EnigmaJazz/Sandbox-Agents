@@ -7,6 +7,8 @@
 - **Delivery strategy:** `ask-on-risk`
 - **Chain strategy:** `stacked-to-main` (the user's standing choice)
 
+- **Archived:** 2026-10-14 — complete; read-only history.
+
 ## Objective
 
 Add a broker-side host tool surface that lets the orchestrator read and install a

@@ -1,5 +1,7 @@
 # Request-line cap and client receive fixes
 
+- **Archived:** 2026-10-14 — complete; read-only history. Residual (user-owned): install the broker and plugin changes and restart the broker.
+
 ## Objective
 
 Large but valid broker requests must succeed, and an oversize request must fail on its own

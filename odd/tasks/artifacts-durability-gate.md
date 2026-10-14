@@ -5,6 +5,8 @@
 - **Status:** COMPLETE
 - **Implementation commit:** `682065e` on `feat/review-and-state-hardening`
 
+- **Archived:** 2026-10-14 — complete; read-only history.
+
 ## Objective
 
 Make the artifact-removal predicate honest: a terminal record with no `resultRef` must not be assumed to have produced no result. Where a bundle was produced but never imported, the bundle is the only copy of the work and must not be deleted without proof of a durable ref.

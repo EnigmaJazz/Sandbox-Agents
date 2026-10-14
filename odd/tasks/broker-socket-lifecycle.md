@@ -1,5 +1,7 @@
 # Broker socket lifecycle — recover stale sockets, refuse live ones, unlink on shutdown
 
+- **Archived:** 2026-10-14 — complete; read-only history.
+
 ## Objective
 Make the broker's Unix socket binding survive an unclean process death: recover a socket
 file left behind by a crashed or suspended broker, refuse to steal a socket owned by a

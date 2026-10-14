@@ -4,6 +4,8 @@
 - **Project:** `sandbox-integration` (`/home/james/agent-sandbox-integration`)
 - **Status:** Implementation, checks, commits, and scoped native review complete; provider acknowledged approval and burned authority. The reviewed boundary has advanced to `ee831ace..HEAD`; the older range is accepted-by-deferral and will not be re-reviewed.
 
+- **Archived:** 2026-10-14 — complete; read-only history. Residual (user-owned): verify restart of secure OpenCode after installing the plugin bytes.
+
 ## Objective
 
 Let the reviewer relay work for a session whose repository **is** the secure OpenCode server's own working directory, while preserving fail-closed behaviour when the session lookup genuinely fails.
