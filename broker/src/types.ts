@@ -314,8 +314,8 @@ export interface BrokerResponseEnvelope {
 export interface SandboxResultPatchMetrics {
   /** UTF-8 byte length, present only when the raw B→C patch was read complete. */
   patchBytes?: number;
-  /** Whether the raw patch reached the output cap; distinct from patchTruncated, which describes the bounded preview patch. */
-  patchBytesTruncated: boolean;
+  /** Whether reading the raw patch reached the output cap; distinct from patchTruncated, which describes the bounded preview patch. */
+  rawPatchTruncated: boolean;
   /** Numeric additions plus deletions; binary path counts contribute zero. */
   authoredChangedLines: number;
 }

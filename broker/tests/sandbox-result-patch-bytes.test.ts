@@ -99,7 +99,7 @@ async function getResult(harness: ReturnType<typeof makeHarness>) {
     changedPaths: { path: string; added: number | null; removed: number | null }[];
     patch: string;
     patchBytes?: number;
-    patchBytesTruncated: boolean;
+    rawPatchTruncated: boolean;
     authoredChangedLines: number;
     applyPreviewFiles?: unknown;
   };
@@ -113,7 +113,7 @@ describe("sandbox result patch byte receipt with real Git", () => {
 
     expect(result.changedPaths.map(({ path }) => path)).toEqual(["new-file.txt"]);
     expect(result.patchBytes).toBeGreaterThan(0);
-    expect(result.patchBytesTruncated).toBe(false);
+    expect(result.rawPatchTruncated).toBe(false);
   });
 
   test("patch bytes equal the UTF-8 byte length of the reported patch", async () => {
@@ -122,7 +122,7 @@ describe("sandbox result patch byte receipt with real Git", () => {
     const result = await getResult(h);
 
     expect(result.patchBytes).toBe(Buffer.byteLength(result.patch, "utf8"));
-    expect(result.patchBytesTruncated).toBe(false);
+    expect(result.rawPatchTruncated).toBe(false);
   });
 
   test("a no-change result reports zero patch bytes", async () => {
@@ -131,7 +131,7 @@ describe("sandbox result patch byte receipt with real Git", () => {
     const result = await getResult(h);
 
     expect(result.patchBytes).toBe(0);
-    expect(result.patchBytesTruncated).toBe(false);
+    expect(result.rawPatchTruncated).toBe(false);
   });
 
   test("a patch over the git output cap omits its byte count and apply preview", async () => {
@@ -140,7 +140,7 @@ describe("sandbox result patch byte receipt with real Git", () => {
     const result = await getResult(h);
 
     expect(result.patchBytes).toBeUndefined();
-    expect(result.patchBytesTruncated).toBe(true);
+    expect(result.rawPatchTruncated).toBe(true);
     expect(result.applyPreviewFiles).toBeUndefined();
   });
 

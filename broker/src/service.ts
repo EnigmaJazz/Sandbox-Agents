@@ -2850,7 +2850,7 @@ export function buildSandboxResultOp(ctx: OpContext): OpHandler {
     const patchComplete = completePatch.status === 0 && patchBytes < GIT_OUTPUT_MAX_BYTES;
     const patchMetrics: SandboxResultPatchMetrics = {
       ...(patchComplete ? { patchBytes } : {}),
-      patchBytesTruncated: !patchComplete,
+      rawPatchTruncated: !patchComplete,
       authoredChangedLines: readResult.changedPaths.reduce(
         (total, change) => total + (change.added ?? 0) + (change.removed ?? 0),
         0,
