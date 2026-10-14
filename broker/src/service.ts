@@ -1587,8 +1587,16 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
       ctx.adapter.exec(worker, argv, {
         cwd: "/work",
         timeoutMs: 60_000,
+        maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
         env: diffEnv,
       });
+    const assertCompleteOutput = (label: string, output: string) => {
+      if (Buffer.byteLength(output, "utf8") >= GIT_OUTPUT_MAX_BYTES) {
+        throw new ValidationError(
+          `diff refused: ${label} output exceeds ${GIT_OUTPUT_MAX_BYTES} bytes`,
+        );
+      }
+    };
     const stagingDir = await ctx.adapter.exec(
       worker,
       ["mkdir", "-p", "/work/.broker-tmp"],
@@ -1622,6 +1630,7 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
         ref,
         ...diffPathspecs,
       ]);
+      assertCompleteOutput("stat", stat.stdout);
       const diff = await runDiffGit([
         "git",
         "diff",
@@ -1629,6 +1638,7 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
         ref,
         ...diffPathspecs,
       ]);
+      assertCompleteOutput("diff", diff.stdout);
       // Gate 6 follow-up: for whole-file temps (added paths ending in ".new"),
       // also report the diff against the sibling original (or a
       // .broker-tmp/ref-<added> delivery reference) so the approval prompt
@@ -1642,6 +1652,7 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
         ref,
         ...diffPathspecs,
       ]);
+      assertCompleteOutput("name-status", nameStatus.stdout);
       for (const line of nameStatus.stdout.split("\n")) {
         const m = /^A[\t ]+(.+)$/.exec(line.trim());
         if (!m) continue;
@@ -1663,8 +1674,10 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
             {
               cwd: "/work",
               timeoutMs: 60_000,
+              maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
             },
           );
+          assertCompleteOutput("compare", cmp.stdout);
           // exit 0 = identical, 1 = differences; anything else skips.
           if (cmp.status !== 0 && cmp.status !== 1) continue;
           compare += cmp.stdout + "\n";
@@ -1681,10 +1694,12 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
         ref,
         ...diffPathspecs,
       ]);
+      assertCompleteOutput("changed-paths", changedPathResult.stdout);
       const parsedChangedPaths =
         changedPathResult.status === 0
           ? parseNulDelimitedPaths(changedPathResult.stdout)
           : { paths: [], complete: false };
+      assertCompleteOutput("compare", compare);
       const applyPreviewDiff = compare.trim().length > 0 ? compare : diff.stdout;
       const applyPreviewFiles = writeApplyPreviewFiles(
         ctx.config.stateDir,
@@ -2133,10 +2148,24 @@ async function buildRetainedDiff(
   const result = record.resultRef;
   if (!result) throw new StateError("retained result has no result ref");
   const run = (argv: string[]) =>
-    ctx.git.spawn(argv, { cwd: project.path, timeoutMs: 60_000 });
+    ctx.git.spawn(argv, {
+      cwd: project.path,
+      timeoutMs: 60_000,
+      maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
+    });
+  const assertCompleteOutput = (label: string, output: string) => {
+    if (Buffer.byteLength(output, "utf8") >= GIT_OUTPUT_MAX_BYTES) {
+      throw new ValidationError(
+        `diff refused: ${label} output exceeds ${GIT_OUTPUT_MAX_BYTES} bytes`,
+      );
+    }
+  };
   const stat = await run(["git", "diff", "--stat", baseline, result]);
+  assertCompleteOutput("stat", stat.stdout);
   const diff = await run(["git", "diff", baseline, result]);
+  assertCompleteOutput("diff", diff.stdout);
   const changedPathResult = await run(buildChangedPathsArgv(baseline, result));
+  assertCompleteOutput("changed-paths", changedPathResult.stdout);
   const parsedChangedPaths =
     changedPathResult.status === 0
       ? parseNulDelimitedPaths(changedPathResult.stdout)
