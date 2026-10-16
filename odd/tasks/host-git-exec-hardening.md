@@ -101,7 +101,7 @@ Pre-code advice (two internal first-pass advisors, plus two independent external
   - The remote-transport gap (`ext::`/`!cmd` remote URLs) was reported by the
     unit-1 writer and by the orchestrator's own inspection — not by the review —
     and is closed by unit 2's O3.
-- 2026-10-16 — **Unit 2 delivered** (uncommitted; exported as a sandbox result):
+- 2026-10-16 — **Unit 2 delivered**:
   - O1 guard/child environment invariant (`GIT_DIR`, `GIT_COMMON_DIR` resolved
     from the same effective environment the child receives);
   - O2 caller `-c`/`-C` override refusal (global-option region only);
