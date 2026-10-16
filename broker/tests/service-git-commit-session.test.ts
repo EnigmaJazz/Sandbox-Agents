@@ -5,6 +5,7 @@ import { ADVISOR_ALLOWED_OPERATIONS } from "../src/advisor-socket.ts";
 import { StateError } from "../src/state.ts";
 import { ALLOWED_PAYLOAD_KEYS, HOST_MUTATION_OPERATIONS, HostToolPolicy, ValidationError } from "../src/validation.ts";
 import { OPERATIONS, type BrokerRequestEnvelope, type SessionRecord } from "../src/types.ts";
+import { gitSubcommand } from "../src/gitguard.ts";
 
 const ORCHESTRATOR = "gentle-orchestrator";
 const projectRoot = process.cwd();
@@ -197,7 +198,7 @@ describe("gitClearCommitIntent", () => {
     await buildGitClearCommitIntentOp(ctx)({ ...request({ projectDir: projectRoot }), operation: "gitClearCommitIntent" });
     const result = await buildGitCommitOp(ctx)(request({ projectDir: projectRoot, message: "fix: recover" }));
     expect(result).toMatchObject({ committed: true, alreadyCommitted: false });
-    expect(calls.some((argv) => argv[1] === "commit")).toBe(true);
+    expect(calls.some((argv) => gitSubcommand(argv) === "commit")).toBe(true);
   });
 });
 
@@ -229,7 +230,18 @@ describe("gitCommit cross-session applied result", () => {
       ".",
     ]);
     expect(calls).toContainEqual(["git", "add", "--", "a.ts"]);
-    expect(calls).toContainEqual(["git", "commit", "-m", "fix: delegated", "--", "a.ts"]);
+    expect(calls).toContainEqual([
+      "git",
+      "-c",
+      "user.name=opencode-sandbox",
+      "-c",
+      "user.email=sandbox@local",
+      "commit",
+      "-m",
+      "fix: delegated",
+      "--",
+      "a.ts",
+    ]);
     expect(calls.flatMap((c) => c).join(" ")).not.toContain("-A");
   });
 
@@ -241,7 +253,7 @@ describe("gitCommit cross-session applied result", () => {
         request({ projectDir: projectRoot, message: "m", sandboxSessionID: "ghost" }),
       ),
     ).rejects.toThrow(StateError);
-    expect(calls.some((c) => c[1] === "commit")).toBe(false);
+    expect(calls.some((c) => gitSubcommand(c) === "commit")).toBe(false);
   });
 
   test("refuses a sandboxSessionID that has no applied result", async () => {
@@ -312,7 +324,7 @@ describe("gitCommit cross-session applied result", () => {
         request({ projectDir: projectRoot, message: "m", sandboxSessionID: "worker-7" }),
       ),
     ).rejects.toThrow(StateError);
-    expect(calls.some((c) => c[1] === "commit")).toBe(false);
+    expect(calls.some((c) => gitSubcommand(c) === "commit")).toBe(false);
   });
 
   test("commits an installed RESULT_READY result and returns alreadyCommitted on retry", async () => {
@@ -350,7 +362,7 @@ describe("gitCommit cross-session applied result", () => {
       sandboxSessionID: "worker-7",
     }))) as { committed?: boolean; alreadyCommitted?: boolean };
     expect(retry.alreadyCommitted).toBe(true);
-    expect(calls.filter((call) => call[1] === "commit")).toHaveLength(1);
+    expect(calls.filter((call) => gitSubcommand(call) === "commit")).toHaveLength(1);
   });
 
   test("retries a failed commit when HEAD remains at the recorded parent", async () => {
@@ -367,7 +379,7 @@ describe("gitCommit cross-session applied result", () => {
       if (argv.includes("--name-only")) stdout = "a.ts\0";
       else if (argv[1] === "rev-parse" && argv[3]?.includes("result/") && argv[3]?.endsWith("^{commit}")) stdout = `${installedCommit}\n`;
       else if (argv[1] === "rev-parse" && argv[2] === "HEAD") stdout = `${commitSucceeded ? committedCommit : parentCommit}\n`;
-      else if (argv[1] === "commit") {
+      else if (gitSubcommand(argv) === "commit") {
         commitAttempts += 1;
         if (commitAttempts === 1) status = 1;
         else commitSucceeded = true;
@@ -401,7 +413,7 @@ describe("gitCommit cross-session applied result", () => {
       if (argv.includes("--name-only")) stdout = "a.ts\0";
       else if (argv[1] === "rev-parse" && argv[3]?.includes("result/") && argv[3]?.endsWith("^{commit}")) stdout = `${installedCommit}\n`;
       else if (argv[1] === "rev-parse" && argv[2] === "HEAD^") stdout = `${baseCommit}\n`;
-      else if (argv[1] === "commit") commitRan = true;
+      else if (gitSubcommand(argv) === "commit") commitRan = true;
       else if (argv[1] === "rev-parse" && argv[2] === "HEAD") stdout = `${commitRan ? committedCommit : baseCommit}\n`;
       else if (argv[1] === "diff" && argv[2] === "--quiet") return { status: 0, stdout: "", stderr: "", timedOut: false };
       return { status: 0, stdout, stderr: "", timedOut: false };
@@ -426,7 +438,7 @@ describe("gitCommit cross-session applied result", () => {
     const retry = (await op(req)) as { alreadyCommitted?: boolean; committedCommit?: string };
     expect(retry.alreadyCommitted).toBe(true);
     expect(retry.committedCommit).toBe(committedCommit);
-    expect(calls.filter((call) => call[1] === "commit")).toHaveLength(1);
+    expect(calls.filter((call) => gitSubcommand(call) === "commit")).toHaveLength(1);
     expect(records["worker-7"]?.pendingCommit).toBeUndefined();
   });
 
@@ -452,7 +464,7 @@ describe("gitCommit cross-session applied result", () => {
     await expect(buildGitCommitOp(makeCtx(spawn, records))(
       request({ projectDir: projectRoot, message: "fix: delegated", sandboxSessionID: "worker-7" }),
     )).rejects.toThrow(/ambiguous|does not carry/);
-    expect(calls.some((call) => call[1] === "commit")).toBe(false);
+    expect(calls.some((call) => gitSubcommand(call) === "commit")).toBe(false);
     expect(records["worker-7"]?.pendingCommit).toBeDefined();
   });
 
@@ -474,7 +486,7 @@ describe("gitCommit cross-session applied result", () => {
         sandboxSessionID: "worker-7",
       })),
     ).rejects.toThrow(StateError);
-    expect(calls.some((call) => call[1] === "commit")).toBe(false);
+    expect(calls.some((call) => gitSubcommand(call) === "commit")).toBe(false);
   });
 
   test("refuses an empty resolved result", async () => {
@@ -488,7 +500,7 @@ describe("gitCommit cross-session applied result", () => {
         request({ projectDir: projectRoot, message: "m", sandboxSessionID: "worker-7" }),
       ),
     ).rejects.toThrow(StateError);
-    expect(calls.some((c) => c[1] === "commit")).toBe(false);
+    expect(calls.some((c) => gitSubcommand(c) === "commit")).toBe(false);
   });
 });
 
@@ -650,7 +662,7 @@ describe("gitCommit without an explicit identifier", () => {
     await expect(
       buildGitCommitOp(ctx)(request({ projectDir: projectRoot, message: "m" })),
     ).rejects.toThrow(/not bound to this project/);
-    expect(calls.some((c) => c[1] === "commit")).toBe(false);
+    expect(calls.some((c) => gitSubcommand(c) === "commit")).toBe(false);
   });
 
   test("still refuses a caller with no applied result", async () => {

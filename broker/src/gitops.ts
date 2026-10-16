@@ -387,6 +387,20 @@ export interface GitCommitArgvInput {
 }
 
 /**
+ * Broker-owned deterministic commit identity. The snapshot path passes the same
+ * values through `GIT_AUTHOR_*`/`GIT_COMMITTER_*` (`service.ts`); the commit
+ * argv supplies them as command-line `-c` so a repository without a local
+ * `user.name` still commits, and command-line precedence keeps a
+ * repository-local identity from overriding the broker's own.
+ */
+const GIT_COMMIT_IDENTITY: readonly string[] = [
+  "-c",
+  "user.name=opencode-sandbox",
+  "-c",
+  "user.email=sandbox@local",
+];
+
+/**
  * The ONLY permitted commit argv: stage exactly the B→C paths, then commit
  * exactly those paths. Never `git add -A`, never `-a`, and never a bare
  * `git commit` that could sweep unrelated staged work.
@@ -397,7 +411,7 @@ export function buildGitCommitArgv(input: GitCommitArgvInput): string[][] {
   const paths = [...input.paths];
   return [
     ["git", "add", "--", ...paths],
-    ["git", "commit", "-m", input.message, "--", ...paths],
+    ["git", ...GIT_COMMIT_IDENTITY, "commit", "-m", input.message, "--", ...paths],
   ];
 }
 

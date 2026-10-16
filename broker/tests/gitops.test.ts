@@ -192,7 +192,18 @@ describe("host git commit argv (§31) — ref-scoped, never sweeps", () => {
     const steps = buildGitCommitArgv({ paths, message: "fix: scoped" });
     expect(steps).toEqual([
       ["git", "add", "--", ...paths],
-      ["git", "commit", "-m", "fix: scoped", "--", ...paths],
+      [
+        "git",
+        "-c",
+        "user.name=opencode-sandbox",
+        "-c",
+        "user.email=sandbox@local",
+        "commit",
+        "-m",
+        "fix: scoped",
+        "--",
+        ...paths,
+      ],
     ]);
     const flat = steps.flat();
     expect(steps[1]!.filter((t) => t === "-m")).toHaveLength(1);
