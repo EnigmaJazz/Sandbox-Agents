@@ -85,16 +85,22 @@ Pre-code advice (two internal first-pass advisors, plus two independent external
     never launches a pager on the non-tty pipes `spawnArgv` uses).
   - `R3-003` — advisory recorded as a **documented residual** (see the native
     review record `review-6ce3226ef4a426ec`).
-  - `R4-001` — the module header over-claimed that LFS filter drivers keep
-    working: **fixed in unit 2** (only GLOBALLY scoped filters keep working; a
-    repo-local filter is refused).
-  - `R4-002` — `WARNING`, a real fail-open: the guard resolved only
-    `opts.env.GIT_DIR` while the child merged `process.env`, so the guard could
-    inspect a different repository than git reads: **fixed in unit 2**.
-  - `R4-003` — caller `-c`/`-C` could defeat the neutralization splice:
-    **fixed in unit 2**.
-  - `R4-004` — remote-helper/shell remote transports were not covered:
-    **fixed in unit 2** (value-aware allowlist guard).
+  - `R4-001` (resilience, WARNING) — no fix-forward path for a repository whose
+    local config legitimately carries a refused-class key; the module header
+    over-claimed that LFS filter drivers keep working. **Fixed in unit 2** (the
+    header now states that only GLOBALLY scoped filters keep working and a
+    repository-local one is refused).
+  - `R4-002` (resilience, WARNING) — the guard resolved only `opts.env.GIT_DIR`
+    while the child merged `process.env`, so the guard could inspect a different
+    repository than git reads: **fixed in unit 2**.
+  - `R4-003` (resilience, WARNING) — the TOCTOU between the guard's config read
+    and git's own read (a duplicate of reliability `R3-003`): **documented
+    residual** in `docs/threat-model.md`.
+  - `R4-004` (resilience, SUGGESTION) — a caller-supplied `-c`/`-C` could defeat
+    the neutralization splice: **fixed in unit 2**.
+  - The remote-transport gap (`ext::`/`!cmd` remote URLs) was reported by the
+    unit-1 writer and by the orchestrator's own inspection — not by the review —
+    and is closed by unit 2's O3.
 - 2026-10-16 — **Unit 2 delivered** (uncommitted; exported as a sandbox result):
   - O1 guard/child environment invariant (`GIT_DIR`, `GIT_COMMON_DIR` resolved
     from the same effective environment the child receives);
@@ -105,8 +111,35 @@ Pre-code advice (two internal first-pass advisors, plus two independent external
   - O6 commit-failure message names the real subcommand;
   - O7 threat-model rewrite (`.git` analysis + host-git checklist);
   - O8 these records.
-  - Focused `bun --cwd broker test --reporter=dot tests/host-git-guard-u2.test.ts`
-    → 21 pass / 0 fail (RED before the fixes: 8 pass / 13 fail).
+  - Committed as `4debc59` (8 files, +765/−14) after the owner-reviewed size
+    exception: 707 authored lines and 42.7 KiB against the 400-line per-commit
+    cap (334 of the lines are the new `host-git-guard-u2.test.ts`); owner
+    approved one commit rather than a slice.
+  - Full suite `bun --cwd broker test --reporter=dot` → **917 pass / 0 fail**
+    (896 baseline + 21 new); from `broker`, `bun build --target=bun src/main.ts`
+    → exit 0. Focused 4-file run → 84 pass / 0 fail.
+  - Native review `review-e7d46dbde3ef5d0b` — **approved, authority burned**,
+    consumed revision
+    `sha256:359c07d8e9f25aeaa0957825e84465d1cc2268501237e486b196b43b0b60aca2`,
+    target `sha256:80c8fd6fed5e6ef18646ac7f26a52e89f1ec4eb97cdb0aac2c155d568001fcee`,
+    tier medium (8 files, 779 lines), one lens (`review-reliability`),
+    correction budget 200.
+    - The lens raised one **BLOCKER**, `R3-CallerConfigConcatBypass`
+      (`gitguard.ts:220-237`): `assertNoCallerConfigOverride` matches only the
+      exact `-c`/`-C` tokens, so the concatenated `-ckey=value` / `-Cpath` forms
+      would survive the splice and defeat the neutralization. **Refuted by the
+      provider refuter** — non-blocking, no correction opened, this review is
+      not reopened for it.
+    - Refutation basis, independently checkable: the unit-2 writer observed on
+      git 2.47.3 that the joined form is rejected outright
+      (`unknown option: -ccore.pager=cat`), and only the space-separated
+      `-c name=value` form supplies config. **Advisory residual:** that
+      observation was made inside the worker, while the guard runs against the
+      host git; refusing a `-c`-prefixed token outright would make the refusal
+      explicit instead of depending on git's option parser. Cheap hardening for
+      a later unit, not a correction to this candidate.
 
 ## Next step
-T1: build the empirical probe and record which markers execute with no neutralization.
+None for this unit: unit 1 and unit 2 are committed and reviewed, and
+acceptance criteria 1-6 are met (`docs/threat-model.md` now records the
+analyzed risk, the mitigations, the scoped posture and the residual risks).
