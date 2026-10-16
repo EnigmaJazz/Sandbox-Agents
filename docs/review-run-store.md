@@ -107,6 +107,10 @@ mirror staying current.
 - Byte caps are measured with `Buffer.byteLength` (never `String.length`) and
   enforced before publication: an over-cap artifact is a named refusal that
   names the cap and the observed size — never a truncated file.
+- `metadata.json` is reserved for the run record (`REVIEW_RUN_METADATA_NAME`).
+  The artifact-name validator refuses it and every case variant of it
+  (`review_run_artifact_name_reserved`), so an artifact can never overwrite the
+  run record; only the record itself publishes that name.
 
 ## Not in this slice
 
