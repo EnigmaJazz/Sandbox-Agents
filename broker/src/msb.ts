@@ -56,17 +56,34 @@ export function memSizeString(bytes: number): string {
  * Generic direct-process spawner: argv[0] is the absolute executable path,
  * remaining entries are argument vectors. No shell is ever involved.
  */
+/**
+ * The effective child environment: `{ ...process.env, ...env }` when `env` is
+ * given, else the inherited `process.env`. The guard and the spawned child must
+ * read the SAME environment, so both use this merge (mirrors the spawn below).
+ */
+export function childEnvironment(
+  env: Record<string, string> | undefined,
+): Record<string, string | undefined> {
+  return env ? { ...process.env, ...env } : process.env;
+}
+
 export function spawnArgv(argv: readonly string[], opts: SpawnOptions = {}): Promise<SpawnResult> {
   const binary = argv[0];
   if (!binary || binary.includes("\u0000")) {
     return Promise.reject(new ValidationError("invalid executable path"));
   }
+  // Resolve the guard from the SAME environment the child receives: a bare
+  // `opts.env.GIT_DIR` lookup would miss an INHERITED `process.env.GIT_DIR` (or
+  // `GIT_COMMON_DIR`) that the merge forwards to git, so the guard could inspect
+  // a DIFFERENT repository than git reads and degrade the fail-closed refusal to
+  // fail-open (native review R4-002).
+  const env = childEnvironment(opts.env);
   let args: readonly string[];
   try {
     // Host git is hardened at this single choke point: repository-local hooks,
     // fsmonitor and pager are neutralized via `-c`, and an execution-bearing
     // subcommand carrying a repository-local exec key is refused before spawn.
-    args = hardenGitArgv(argv, { cwd: opts.cwd, env: opts.env }).slice(1);
+    args = hardenGitArgv(argv, { cwd: opts.cwd, env }).slice(1);
   } catch (err) {
     return Promise.reject(err);
   }
@@ -74,7 +91,7 @@ export function spawnArgv(argv: readonly string[], opts: SpawnOptions = {}): Pro
     const child = spawn(binary, args, {
       shell: false,
       cwd: opts.cwd,
-      env: opts.env ? { ...process.env, ...opts.env } : process.env,
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";

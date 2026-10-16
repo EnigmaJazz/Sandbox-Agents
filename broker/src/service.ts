@@ -26,6 +26,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { BrokerConfig } from "./config.ts";
 import { RESULT_EXCLUDE_PATHS } from "./diff-spec.ts";
+import { gitSubcommand } from "./gitguard.ts";
 import type { SessionStore } from "./state.ts";
 import type { MsbAdapter } from "./msb.ts";
 import type { HostReadExecutor } from "./hostread.ts";
@@ -2760,7 +2761,7 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
       const step = await runHostStep(ctx, argv, projectRoot);
       results.push(step);
       if (step.status !== 0) {
-        throw new MsbError(`git commit failed (${argv[1]}): ${step.stderr}`);
+        throw new MsbError(`git commit failed (${gitSubcommand(argv) ?? argv[1]}): ${step.stderr}`);
       }
     }
     const committedHead = await runHostStep(ctx, ["git", "rev-parse", "HEAD"], projectRoot);
