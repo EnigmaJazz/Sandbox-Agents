@@ -173,9 +173,38 @@ unless the caller passes `allowRecord: true`. Named refusals:
 `review_run_artifact_not_regular`, `review_run_artifact_not_found`,
 `review_run_artifact_cap`, and the existing `review_run_artifact_name_reserved`.
 
-## Not in this slice
+## U1b-3 — installed review-helper pin
 
-The pinning act (U1b-3: extending `scripts/install-user-files`) is not
-implemented here; U1b-2 supplies the verifier (`assertPinnedReviewHelper`) it
-will drive. No model-facing host tool routes to this store yet.
+The installer pins exactly `validate-review.mjs` from the highest installed
+numeric `major.minor.patch` version under `$HOME/.cache/opencode/packages/`,
+comparing components numerically. Unversioned `systematic/` and `latest/` entries
+are ignored and can never override a concrete version. It does
+not pin `ensure-ignore.mjs`: the broker performs the ignore check itself.
+The destination is `$BROKER_STATE_DIR/review-helper/validate-review.mjs`,
+defaulting to `$HOME/.local/state/opencode-sandbox/review-helper/`; the
+containing directory is forced to mode `0700` and the file to `0600`. The
+installer records the source version and path in `pin.json` and writes
+`BROKER_REVIEW_HELPER_PATH` plus `BROKER_REVIEW_HELPER_SHA256` into
+`$HOME/.config/opencode-sandbox/broker.env`. `systemd-user/sandbox-broker.service`
+loads that file using `EnvironmentFile`, and `broker/src/config.ts` reads those
+environment keys into `reviewHelperPath` and `reviewHelperSha256`.
+
+This state path is deliberately outside the confined agent's writable set:
+the profile grants `$HOME/.local/state/opencode`, not the distinct
+`$HOME/.local/state/opencode-sandbox`. The same confinement probe above remains
+the evidence requirement; the installer enforces private owner-only modes but
+does not itself prove Nono confinement.
+
+`--verify` checks the pin's regular-file type, 0600 file mode and 0700 parent
+directory, compares the pinned file's SHA-256 with the value in the live broker
+environment file, compares it again with the current highest-version cache
+source, and checks the recorded version in `pin.json`. It reports each mismatch
+as `DRIFT` and exits non-zero. Bare invocation only reports the selected source
+version/path and computed digest; `--apply` performs the copy and journals it.
+When the highest available cache version differs from `pin.json`, verification
+reports the version change and requires a deliberate `--apply`; it never
+repins automatically. The installer pins only the validator because
+`assertPinnedReviewHelper` (U1b-2) verifies the configured path and digest for
+each execution, while the broker owns the ignore check. No model-facing host
+tool routes to this store yet.
 

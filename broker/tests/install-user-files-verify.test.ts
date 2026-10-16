@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
@@ -55,16 +55,31 @@ function fixture() {
     copyFileSync(resolve(repoRoot, source), destination);
     chmodSync(destination, 0o644);
   };
+  const stateDir = resolve(home, ".state-that-must-not-be-created");
   const nonoSource = resolve(repoRoot, "nono/profile/opencode-secure.json");
   const nonoDest = resolve(home, ".config/nono/profiles/opencode-secure.json");
   mkdirSync(resolve(nonoDest, ".."), { recursive: true });
   symlinkSync(nonoSource, nonoDest);
   install("systemd-user/sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
   install("systemd-user/broker.env", resolve(home, ".config/opencode-sandbox/broker.env"));
+  const sourceVersion = "3.21.0";
+  const helperSource = resolve(home, `.cache/opencode/packages/@fro.bot/systematic@${sourceVersion}/node_modules/@fro.bot/systematic/skills/ce-review/scripts/validate-review.mjs`);
+  const helperBytes = Buffer.from("// legacy installer verification fixture\n");
+  mkdirSync(resolve(helperSource, ".."), { recursive: true });
+  writeFileSync(helperSource, helperBytes, { mode: 0o600 });
+  const pinDir = resolve(stateDir, "review-helper");
+  mkdirSync(pinDir, { recursive: true, mode: 0o700 });
+  chmodSync(pinDir, 0o700);
+  const helperDest = resolve(pinDir, "validate-review.mjs");
+  copyFileSync(helperSource, helperDest);
+  chmodSync(helperDest, 0o600);
+  const helperSha256 = createHash("sha256").update(helperBytes).digest("hex");
+  writeFileSync(resolve(pinDir, "pin.json"), JSON.stringify({ version: sourceVersion, source: helperSource, sha256: helperSha256 }) + "\n", { mode: 0o600 });
+  chmodSync(resolve(pinDir, "pin.json"), 0o600);
+  writeFileSync(resolve(home, ".config/opencode-sandbox/broker.env"), `BROKER_REVIEW_HELPER_PATH=${helperDest}\nBROKER_REVIEW_HELPER_SHA256=${helperSha256}\n`, { flag: "a" });
   for (const file of pluginFiles) {
     install(`opencode/plugins/${file}`, resolve(home, ".config/opencode/plugins", file));
   }
-  const stateDir = resolve(home, ".state-that-must-not-be-created");
   const journal = (action: string, source: string, destination: string) => {
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(
@@ -260,7 +275,7 @@ describe("install-user-files --verify", () => {
     journal("file", "sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
     const result = run();
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("verification passed: 13 installed files verified");
+    expect(result.stdout).toContain("verification passed: 14 installed files verified");
     expect(result.stdout).toContain("config fragment excluded (manual merge; no installed counterpart)");
   });
 
@@ -283,7 +298,7 @@ describe("install-user-files --verify", () => {
     const result = run();
     expect(result.status).not.toBe(0);
     expect(snapshotTree(home)).toEqual(before);
-    expect(() => lstatSync(stateDir)).toThrow();
+    expect(lstatSync(stateDir).isDirectory()).toBe(true);
   });
 
   test("verify reports the installer backup count in its pass line", () => {
@@ -295,7 +310,7 @@ describe("install-user-files --verify", () => {
     }
     const result = run();
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("verification passed: 13 installed files verified; 2 installer backups");
+    expect(result.stdout).toContain("verification passed: 14 installed files verified; 2 installer backups");
   });
 
   test("backup enumeration uses escaped, end-anchored installer names", () => {
@@ -354,7 +369,7 @@ describe("install-user-files --verify", () => {
     expect(result.status, result.stderr).toBe(2);
     expect(result.stderr).toContain("[install] --dry-run cannot be combined with --apply");
     expect(snapshotTree(home)).toEqual(before);
-    expect(lstatSync(stateDir, { throwIfNoEntry: false })).toBeUndefined();
+    expect(lstatSync(stateDir).isDirectory()).toBe(true);
   });
 
   test("dry-run backup pruning reports deletions without deleting backups", () => {

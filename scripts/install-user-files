@@ -177,6 +177,8 @@ install_file() { # src dest mode
     elif [[ ! -f "$dest" ]]; then
       log "drift $dest: type differs (expected regular file)"
       DRIFT=1
+    elif [[ "$dest" == "$HOME/.config/opencode-sandbox/broker.env" ]] && cmp -s "$src" <(grep -v '^BROKER_REVIEW_HELPER_' "$dest"); then
+      VERIFIED_COUNT=$((VERIFIED_COUNT + 1))
     elif ! cmp -s "$src" "$dest"; then
       log "drift $dest: content differs"
       DRIFT=1
@@ -272,6 +274,106 @@ if [[ "$VERIFY" != "1" ]]; then mkdir -p "$PLUGIN_DEST/lib"; fi
 for f in sandbox-tools.ts routing-guard.ts lib/broker-client.ts lib/reviewer-relay-core.ts lib/session-agent-binding.ts reviewer-relay-transport.ts lib/host-tool-approval.ts lib/apply-preview-guard.ts lib/sandbox-edit-core.ts lib/legacy-sdd-tools.ts; do
   install_file "$REPO_ROOT/opencode/plugins/$f" "$PLUGIN_DEST/$f" 0644
 done
+
+# --- 5. pinned ce:review validator helper ------------------------------------
+log "step 5: pinned ce:review validator helper"
+REVIEW_HELPER_DIR="$STATE_DIR/review-helper"
+REVIEW_HELPER_DEST="$REVIEW_HELPER_DIR/validate-review.mjs"
+REVIEW_HELPER_PIN="$REVIEW_HELPER_DIR/pin.json"
+BROKER_ENV_DEST="$HOME/.config/opencode-sandbox/broker.env"
+REVIEW_HELPER_CACHE="$HOME/.cache/opencode/packages"
+mapfile -t REVIEW_HELPER_CANDIDATES < <(/usr/bin/find "$REVIEW_HELPER_CACHE" -type f -path '*/skills/ce-review/scripts/validate-review.mjs' -print 2>/dev/null)
+REVIEW_HELPER_SOURCES=()
+REVIEW_HELPER_VERSIONS=()
+REVIEW_HELPER_SOURCE=""
+REVIEW_HELPER_VERSION=""
+version_is_greater() {
+  local candidate="$1" selected="$2" c_major c_minor c_patch s_major s_minor s_patch
+  IFS=. read -r c_major c_minor c_patch <<<"$candidate"
+  IFS=. read -r s_major s_minor s_patch <<<"$selected"
+  (( 10#$c_major > 10#$s_major )) && return 0
+  (( 10#$c_major < 10#$s_major )) && return 1
+  (( 10#$c_minor > 10#$s_minor )) && return 0
+  (( 10#$c_minor < 10#$s_minor )) && return 1
+  (( 10#$c_patch > 10#$s_patch ))
+}
+for helper_source in "${REVIEW_HELPER_CANDIDATES[@]}"; do
+  if [[ "$helper_source" =~ /systematic@([0-9]+\.[0-9]+\.[0-9]+)/ ]]; then
+    candidate_version="${BASH_REMATCH[1]}"
+    REVIEW_HELPER_SOURCES+=("$helper_source")
+    REVIEW_HELPER_VERSIONS+=("$candidate_version")
+    if [[ -z "$REVIEW_HELPER_SOURCE" ]] || version_is_greater "$candidate_version" "$REVIEW_HELPER_VERSION"; then
+      REVIEW_HELPER_SOURCE="$helper_source"
+      REVIEW_HELPER_VERSION="$candidate_version"
+    fi
+  else
+    log "review helper ignored non-version package source: $helper_source"
+  fi
+done
+if [[ -z "$REVIEW_HELPER_SOURCE" ]]; then
+  log "error: REVIEW_HELPER_SOURCE_MISSING: no versioned ce:review validate-review.mjs found under $REVIEW_HELPER_CACHE"
+  exit 1
+fi
+REVIEW_HELPER_SHA256="$(sha256sum "$REVIEW_HELPER_SOURCE" | cut -d ' ' -f 1)"
+for helper_source in "${REVIEW_HELPER_SOURCES[@]}"; do
+  [[ "$helper_source" == "$REVIEW_HELPER_SOURCE" ]] || log "review helper other version/source seen: $helper_source"
+done
+if [[ "$VERIFY" == "1" ]]; then
+  VERIFY_EXPECTED_DESTINATIONS+=("$REVIEW_HELPER_DEST")
+  if [[ ! -f "$REVIEW_HELPER_PIN" || -L "$REVIEW_HELPER_PIN" ]]; then
+    log "DRIFT $REVIEW_HELPER_PIN: pin record absent or not a regular file"
+    DRIFT=1
+  else
+    RECORDED_VERSION="$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$REVIEW_HELPER_PIN")"
+    if [[ "$RECORDED_VERSION" != "$REVIEW_HELPER_VERSION" ]]; then
+      log "DRIFT review helper version changed: recorded $RECORDED_VERSION, cache has $REVIEW_HELPER_VERSION; deliberate --apply required"
+      DRIFT=1
+    fi
+  fi
+  if [[ ! -f "$REVIEW_HELPER_DEST" || -L "$REVIEW_HELPER_DEST" ]]; then
+    log "DRIFT $REVIEW_HELPER_DEST: absent or not a regular file"
+    DRIFT=1
+  elif [[ "$(stat -c '%a' "$REVIEW_HELPER_DEST")" != "600" ]]; then
+    log "DRIFT $REVIEW_HELPER_DEST: mode differs (expected 0600)"
+    DRIFT=1
+  fi
+  if [[ ! -d "$REVIEW_HELPER_DIR" || "$(stat -c '%a' "$REVIEW_HELPER_DIR" 2>/dev/null || true)" != "700" ]]; then
+    log "DRIFT $REVIEW_HELPER_DIR: mode differs (expected directory 0700)"
+    DRIFT=1
+  fi
+  RECORDED_PATH="$(sed -n 's/^BROKER_REVIEW_HELPER_PATH=//p' "$BROKER_ENV_DEST" 2>/dev/null | tail -n 1)"
+  if [[ "$RECORDED_PATH" != "$REVIEW_HELPER_DEST" ]]; then
+    log "DRIFT $BROKER_ENV_DEST: live config helper path differs from pinned destination"
+    DRIFT=1
+  fi
+  RECORDED_HASH="$(sed -n 's/^BROKER_REVIEW_HELPER_SHA256=//p' "$BROKER_ENV_DEST" 2>/dev/null | tail -n 1)"
+  PINNED_HASH="$(sha256sum "$REVIEW_HELPER_DEST" 2>/dev/null | cut -d ' ' -f 1 || true)"
+  if [[ -z "$RECORDED_HASH" || "$PINNED_HASH" != "$RECORDED_HASH" ]]; then
+    log "DRIFT $REVIEW_HELPER_DEST: live config hash differs from pinned bytes"
+    DRIFT=1
+  fi
+  if [[ "$PINNED_HASH" != "$REVIEW_HELPER_SHA256" ]]; then
+    log "DRIFT $REVIEW_HELPER_DEST: pinned sha256 differs from current package-cache source"
+    DRIFT=1
+  fi
+  if [[ "$DRIFT" == "0" ]]; then
+    VERIFIED_COUNT=$((VERIFIED_COUNT + 1))
+    log "review helper pin verified: selected $REVIEW_HELPER_VERSION $REVIEW_HELPER_SOURCE sha256 $REVIEW_HELPER_SHA256"
+  fi
+else
+  log "review helper selected $REVIEW_HELPER_VERSION $REVIEW_HELPER_SOURCE; sha256 $REVIEW_HELPER_SHA256"
+  if [[ "$APPLY" == "1" ]]; then
+    mkdir -p "$REVIEW_HELPER_DIR"
+    chmod 700 "$REVIEW_HELPER_DIR"
+    cp "$REVIEW_HELPER_SOURCE" "$REVIEW_HELPER_DEST"
+    chmod 600 "$REVIEW_HELPER_DEST"
+    printf '{"version":"%s","source":"%s","sha256":"%s"}\n' "$REVIEW_HELPER_VERSION" "$REVIEW_HELPER_SOURCE" "$REVIEW_HELPER_SHA256" >"$REVIEW_HELPER_PIN"
+    chmod 600 "$REVIEW_HELPER_PIN"
+    sed -i '/^BROKER_REVIEW_HELPER_PATH=/d; /^BROKER_REVIEW_HELPER_SHA256=/d' "$BROKER_ENV_DEST"
+    printf 'BROKER_REVIEW_HELPER_PATH=%s\nBROKER_REVIEW_HELPER_SHA256=%s\n' "$REVIEW_HELPER_DEST" "$REVIEW_HELPER_SHA256" >>"$BROKER_ENV_DEST"
+    journal "review-helper-pin" "$REVIEW_HELPER_SOURCE" "$REVIEW_HELPER_DEST" "$REVIEW_HELPER_VERSION $REVIEW_HELPER_SHA256"
+  fi
+fi
 
 verify_stale_destinations() {
   local timestamp action source destination detail expected expected_dest
