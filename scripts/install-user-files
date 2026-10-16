@@ -26,6 +26,10 @@ source "$SCRIPT_DIR/secure-launcher.conf"
 
 STATE_DIR="${BROKER_STATE_DIR:-$HOME/.local/state/opencode-sandbox}"
 JOURNAL="$STATE_DIR/install-journal.tsv"
+BROKER_ENV_DEST="$HOME/.config/opencode-sandbox/broker.env"
+BROKER_REVIEW_HELPER_PATH_VALUE=""
+BROKER_REVIEW_HELPER_SHA256_VALUE=""
+PIN_JSON_RUNTIME=""
 
 reject_symlink_path() {
   local path="$1" cursor="" component
@@ -38,6 +42,55 @@ reject_symlink_path() {
       return 1
     fi
   done
+}
+
+validate_helper_config() {
+  local line path_count=0 hash_count=0 value
+  BROKER_REVIEW_HELPER_PATH_VALUE=""
+  BROKER_REVIEW_HELPER_SHA256_VALUE=""
+  [[ -e "$BROKER_ENV_DEST" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      BROKER_REVIEW_HELPER_PATH=*)
+        path_count=$((path_count + 1))
+        if (( path_count > 1 )); then
+          printf '[install] error: duplicate BROKER_REVIEW_HELPER_PATH assignment in %s\n' "$BROKER_ENV_DEST" >&2
+          return 1
+        fi
+        value="${line#*=}"
+        if [[ ! "$value" =~ ^/[A-Za-z0-9._/@:+-]+$ ]]; then
+          printf '[install] error: malformed BROKER_REVIEW_HELPER_PATH assignment in %s\n' "$BROKER_ENV_DEST" >&2
+          return 1
+        fi
+        BROKER_REVIEW_HELPER_PATH_VALUE="$value"
+        ;;
+      BROKER_REVIEW_HELPER_SHA256=*)
+        hash_count=$((hash_count + 1))
+        if (( hash_count > 1 )); then
+          printf '[install] error: duplicate BROKER_REVIEW_HELPER_SHA256 assignment in %s\n' "$BROKER_ENV_DEST" >&2
+          return 1
+        fi
+        value="${line#*=}"
+        if [[ ! "$value" =~ ^[0-9a-f]{64}$ ]]; then
+          printf '[install] error: malformed BROKER_REVIEW_HELPER_SHA256 assignment in %s\n' "$BROKER_ENV_DEST" >&2
+          return 1
+        fi
+        BROKER_REVIEW_HELPER_SHA256_VALUE="$value"
+        ;;
+    esac
+  done <"$BROKER_ENV_DEST"
+}
+
+# Prefer Bun, the broker runtime; fall back to Node only when Bun is unavailable.
+resolve_pin_json_runtime() {
+  if PIN_JSON_RUNTIME="$(command -v bun 2>/dev/null)" && [[ -n "$PIN_JSON_RUNTIME" ]]; then return 0; fi
+  if PIN_JSON_RUNTIME="$(command -v node 2>/dev/null)" && [[ -n "$PIN_JSON_RUNTIME" ]]; then return 0; fi
+  printf '[install] error: REVIEW_HELPER_JSON_RUNTIME_MISSING: neither bun nor node is available on PATH\n' >&2
+  return 1
+}
+
+read_pin_field() {
+  "$PIN_JSON_RUNTIME" -e 'const fs = require("node:fs"); const [path, field] = process.argv.slice(-2); let record; try { record = JSON.parse(fs.readFileSync(path, "utf8")); } catch { process.exit(2); } if (!record || typeof record !== "object" || Array.isArray(record) || !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(record.version) || typeof record.source !== "string" || !/^\/[A-Za-z0-9._/@:+-]+$/.test(record.source) || !/^[0-9a-f]{64}$/.test(record.sha256) || !["version", "source", "sha256"].includes(field) || typeof record[field] !== "string") process.exit(2); process.stdout.write(record[field]);' "$1" "$2"
 }
 
 APPLY=0
@@ -99,11 +152,23 @@ if [[ "$APPLY" == "1" ]]; then
     helper_relative="${helper_source#"$REVIEW_HELPER_CACHE/"}"
     if [[ "$helper_relative" =~ ^@fro\.bot/systematic@([0-9]+\.[0-9]+\.[0-9]+)/node_modules/@fro\.bot/systematic/skills/ce-review/scripts/validate-review\.mjs$ ]]; then
       PREFLIGHT_HELPER_FOUND=1
+      PREFLIGHT_HELPER_SOURCE="$helper_source"
       break
     fi
   done
   if [[ "$PREFLIGHT_HELPER_FOUND" != "1" ]]; then
     printf '[install] error: REVIEW_HELPER_SOURCE_MISSING: no trusted versioned ce:review validate-review.mjs found under %s\n' "$REVIEW_HELPER_CACHE" >&2
+    exit 1
+  fi
+  REVIEW_HELPER_DEST="$STATE_DIR/review-helper/validate-review.mjs"
+  if [[ ! "$REVIEW_HELPER_DEST" =~ ^/[A-Za-z0-9._/@:+-]+$ ]]; then
+    printf '[install] error: unsupported review helper path value before writes: %s\n' "$REVIEW_HELPER_DEST" >&2
+    exit 1
+  fi
+  if ! validate_helper_config; then exit 1; fi
+  PREFLIGHT_HELPER_SHA256="$(sha256sum "$PREFLIGHT_HELPER_SOURCE" | cut -d ' ' -f 1)"
+  if [[ ! "$PREFLIGHT_HELPER_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    printf '[install] error: unsupported review helper digest before writes\n' >&2
     exit 1
   fi
 fi
@@ -354,7 +419,6 @@ if [[ "$APPLY" == "1" ]]; then
 fi
 REVIEW_HELPER_DEST="$REVIEW_HELPER_DIR/validate-review.mjs"
 REVIEW_HELPER_PIN="$REVIEW_HELPER_DIR/pin.json"
-BROKER_ENV_DEST="$HOME/.config/opencode-sandbox/broker.env"
 REVIEW_HELPER_CACHE="$HOME/.cache/opencode/packages"
 REVIEW_HELPER_SOURCE_UNAVAILABLE=0
 REVIEW_HELPER_PIN_PRESENT=0
@@ -364,6 +428,7 @@ fi
 if [[ -f "$BROKER_ENV_DEST" ]] && grep -Eq '^BROKER_REVIEW_HELPER_(PATH|SHA256)=' "$BROKER_ENV_DEST"; then
   REVIEW_HELPER_PIN_PRESENT=1
 fi
+if ! validate_helper_config; then DRIFT=1; fi
 mapfile -t REVIEW_HELPER_CANDIDATES < <(/usr/bin/find "$REVIEW_HELPER_CACHE" -type f -path "$REVIEW_HELPER_CACHE/@fro.bot/systematic@*/node_modules/@fro.bot/systematic/skills/ce-review/scripts/validate-review.mjs" -print 2>/dev/null)
 REVIEW_HELPER_SOURCES=()
 REVIEW_HELPER_VERSIONS=()
@@ -417,10 +482,24 @@ if [[ "$VERIFY" == "1" && "$REVIEW_HELPER_PIN_PRESENT" == "1" ]]; then
     log "DRIFT $REVIEW_HELPER_PIN: pin record absent or not a regular file"
     DRIFT=1
   else
-    RECORDED_VERSION="$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$REVIEW_HELPER_PIN")"
-    if [[ "$REVIEW_HELPER_SOURCE_UNAVAILABLE" == "0" && "$RECORDED_VERSION" != "$REVIEW_HELPER_VERSION" ]]; then
-      log "DRIFT review helper version changed: recorded $RECORDED_VERSION, cache has $REVIEW_HELPER_VERSION; deliberate --apply required"
+    if ! resolve_pin_json_runtime; then
+      log "DRIFT $REVIEW_HELPER_PIN: REVIEW_HELPER_JSON_RUNTIME_MISSING"
       DRIFT=1
+    else
+      log "review helper pin parser runtime: ${PIN_JSON_RUNTIME##*/}"
+      if ! RECORDED_VERSION="$(read_pin_field "$REVIEW_HELPER_PIN" version)" || ! RECORDED_SOURCE="$(read_pin_field "$REVIEW_HELPER_PIN" source)" || ! RECORDED_PIN_HASH="$(read_pin_field "$REVIEW_HELPER_PIN" sha256)"; then
+        log "DRIFT $REVIEW_HELPER_PIN: pin record malformed"
+        DRIFT=1
+      else
+        if [[ "$REVIEW_HELPER_SOURCE_UNAVAILABLE" == "0" && "$RECORDED_VERSION" != "$REVIEW_HELPER_VERSION" ]]; then
+          log "DRIFT review helper version changed: recorded $RECORDED_VERSION, cache has $REVIEW_HELPER_VERSION; deliberate --apply required"
+          DRIFT=1
+        fi
+        if [[ "$REVIEW_HELPER_SOURCE_UNAVAILABLE" == "0" && "$RECORDED_SOURCE" != "$REVIEW_HELPER_SOURCE" ]]; then
+          log "DRIFT $REVIEW_HELPER_PIN: recorded source differs from selected package-cache source"
+          DRIFT=1
+        fi
+      fi
     fi
   fi
   if [[ ! -f "$REVIEW_HELPER_DEST" || -L "$REVIEW_HELPER_DEST" ]]; then
@@ -434,12 +513,16 @@ if [[ "$VERIFY" == "1" && "$REVIEW_HELPER_PIN_PRESENT" == "1" ]]; then
     log "DRIFT $REVIEW_HELPER_DIR: mode differs (expected directory 0700)"
     DRIFT=1
   fi
-  RECORDED_PATH="$(sed -n 's/^BROKER_REVIEW_HELPER_PATH=//p' "$BROKER_ENV_DEST" 2>/dev/null | tail -n 1)"
+  RECORDED_PATH="$BROKER_REVIEW_HELPER_PATH_VALUE"
   if [[ "$RECORDED_PATH" != "$REVIEW_HELPER_DEST" ]]; then
     log "DRIFT $BROKER_ENV_DEST: live config helper path differs from pinned destination"
     DRIFT=1
   fi
-  RECORDED_HASH="$(sed -n 's/^BROKER_REVIEW_HELPER_SHA256=//p' "$BROKER_ENV_DEST" 2>/dev/null | tail -n 1)"
+  RECORDED_HASH="$BROKER_REVIEW_HELPER_SHA256_VALUE"
+  if [[ -n "${RECORDED_PIN_HASH:-}" && "$RECORDED_PIN_HASH" != "$RECORDED_HASH" ]]; then
+    log "DRIFT $REVIEW_HELPER_PIN: recorded digest differs from live broker configuration"
+    DRIFT=1
+  fi
   PINNED_HASH="$(sha256sum "$REVIEW_HELPER_DEST" 2>/dev/null | cut -d ' ' -f 1 || true)"
   if [[ -z "$RECORDED_HASH" || "$PINNED_HASH" != "$RECORDED_HASH" ]]; then
     log "DRIFT $REVIEW_HELPER_DEST: live config hash differs from pinned bytes"
