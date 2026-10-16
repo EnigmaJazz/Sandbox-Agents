@@ -5,6 +5,7 @@ import { authorizeHostDispatch } from "../src/service.ts";
 import { buildGhIssueCreateOp, buildGitCommitOp, buildGitPushOp, buildRegisterProjectOp } from "../src/service.ts";
 import { MsbError } from "../src/msb.ts";
 import { StateError } from "../src/state.ts";
+import { gitSubcommand } from "../src/gitguard.ts";
 import {
   existsSync,
   mkdirSync,
@@ -489,7 +490,18 @@ describe("host git/GH handlers", () => {
     expect(result.committed).toBe(true);
     expect(result.paths).toEqual(["a.ts"]);
     expect(calls).toContainEqual(["git", "add", "--", "a.ts"]);
-    expect(calls).toContainEqual(["git", "commit", "-m", "fix: scoped", "--", "a.ts"]);
+    expect(calls).toContainEqual([
+      "git",
+      "-c",
+      "user.name=opencode-sandbox",
+      "-c",
+      "user.email=sandbox@local",
+      "commit",
+      "-m",
+      "fix: scoped",
+      "--",
+      "a.ts",
+    ]);
     expect(calls.flatMap((c) => c).join(" ")).not.toContain("-A");
   });
 
@@ -502,7 +514,7 @@ describe("host git/GH handlers", () => {
     await expect(
       buildGitCommitOp(ctx)(request("gitCommit", { projectDir: projectRoot, message: "m" }, ORCHESTRATOR)),
     ).rejects.toThrow(StateError);
-    expect(calls.some((c) => c[1] === "commit")).toBe(false);
+    expect(calls.some((c) => gitSubcommand(c) === "commit")).toBe(false);
   });
 
   test("gitCommit rejects an empty B→C result", async () => {

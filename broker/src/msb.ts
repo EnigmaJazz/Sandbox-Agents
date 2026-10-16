@@ -7,6 +7,8 @@
  * - No secrets are ever passed to workers (S8/S9): env is restricted to a
  *   static allowlist and keys matching credential patterns are rejected.
  * - Timeouts are enforced by killing the spawned process (SIGTERM -> SIGKILL).
+ * - Host `git` argv is hardened here (`hardenGitArgv`): repository-local
+ *   execution vectors are neutralized or refused at this single choke point.
  * - The spawn function is injectable for unit tests (fake spawn). The fake is
  *   used by broker/tests/msb.test.ts ONLY; production uses `spawnFromHost`.
  */
@@ -16,6 +18,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import type { BrokerConfig } from "./config.ts";
 import type { WorkerState } from "./types.ts";
 import { ValidationError } from "./validation.ts";
+import { hardenGitArgv } from "./gitguard.ts";
 
 export interface SpawnResult {
   status: number | null;
@@ -58,8 +61,17 @@ export function spawnArgv(argv: readonly string[], opts: SpawnOptions = {}): Pro
   if (!binary || binary.includes("\u0000")) {
     return Promise.reject(new ValidationError("invalid executable path"));
   }
+  let args: readonly string[];
+  try {
+    // Host git is hardened at this single choke point: repository-local hooks,
+    // fsmonitor and pager are neutralized via `-c`, and an execution-bearing
+    // subcommand carrying a repository-local exec key is refused before spawn.
+    args = hardenGitArgv(argv, { cwd: opts.cwd, env: opts.env }).slice(1);
+  } catch (err) {
+    return Promise.reject(err);
+  }
   return new Promise<SpawnResult>((resolve) => {
-    const child = spawn(binary, argv.slice(1), {
+    const child = spawn(binary, args, {
       shell: false,
       cwd: opts.cwd,
       env: opts.env ? { ...process.env, ...opts.env } : process.env,
