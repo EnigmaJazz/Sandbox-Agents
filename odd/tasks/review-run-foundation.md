@@ -1,0 +1,96 @@
+# ODD task — review-run-foundation
+
+## Objective
+Build the broker-owned foundation a later `host_review_*` pipeline needs: private run storage, byte-capped bounded artifacts, a pinned helper identity, run metadata with owner-session access, and retention — so the model-facing tools never invent a trust decision at the point of use.
+
+## Problem (verified 2026-10-16)
+`ce:review` cannot run from the secure orchestrator. The brief at `docs/PLAN.md:39-107` records one real degraded run on another repo: the diff was obtainable only by brute force (4 worker delegations, 2 returns truncated), **7 of 7 reviewers returned DIFF_UNAVAILABLE**, the packaged helper pipeline (`screen`/`prepare`/`merge`/`finalize`/`artifact`) never ran, and `review-summary.json` was never written. Root causes: no non-mutating way to obtain a git range as data; no shared scratch surface between worker sessions; no execution surface for the bundled helpers; no artifact write surface.
+
+The sandbox facts that constrain the fix (all read from `nono/profile/opencode-secure.json` on 2026-10-16):
+- `filesystem.allow` grants the CONFINED agent `$HOME/.cache/opencode` (line 27) — the directory the Systematic helpers live in (`~/.cache/opencode/packages/@fro.bot/systematic@<ver>/…`). The confined side can therefore write the helper bytes, so a helper must NEVER be resolved from that cache at run time.
+- `filesystem.allow` grants `$HOME/.local/state/opencode` (line 26) but NOT `$HOME/.local/state/opencode-sandbox`; the profile also `extends: "default"` (line 8), whose filesystem rules are not visible from this file. The privacy of any run store is therefore NOT settleable by reading config and must be chosen deliberately and proven.
+- `filesystem.allow` grants this repository's `.git` (line 58); hostile repository-local git execution is already neutralized at the spawn choke point by the committed `host-git-exec-hardening` unit (`hardenGitArgv`, applied in `broker/src/msb.ts` for BOTH spawn paths).
+
+Foundation already delivered by the `spawn-output-integrity` unit (committed `afc4c79`), which this unit builds on rather than repeats: byte-exact `Buffer`-based output retention with `outputTruncated`/`stderrTruncated` where exactly-at-cap is NOT truncated (`broker/src/msb.ts:100-202`); one decode at EOF so a split multi-byte code point is not corrupted; `stdin?: Buffer` support; and `spawnExec(argv, opts)` with opt-in `envMode: "merge" | "replace"` sharing the same boundaries and the same git-hardening choke point (`broker/src/msb.ts:218-220`). `spawnExec` currently has no caller — it is this feature's execution seam.
+
+## Scope
+New: a broker-owned foundation module (for example `broker/src/review-run.ts`) plus its tests, and the `scripts/install-user-files` pinning extension.
+Edits: the broker config and/or type surface needed to carry the pinned helper and the store root, `scripts/install-user-files` (and its verify list), `broker/tests/**`, `docs/TODO.md`, the plan/handover docs that record the new tool contracts.
+Out of scope for this unit, and must NOT be built here: any model-facing host tool (`host_review_materialize`, `host_review_slice_read`, `host_review_pipeline_run`), any change to `nono/profile/**`, any new plugin tool definition, any change to the worker environment allowlist, any relaxation of the existing protection lists.
+
+## Constraints
+- S17: `broker/src/**`, `broker/package.json`, `broker/tsconfig.json`, `scripts/**`, `opencode/plugins/**`, `opencode/config-fragments/**`, `nono/profile/**`, `docs/threat-model.md` — `sandbox_apply` and `host_git_commit` refuse these; the result lands through the approval-gated host install and the owner commits by hand.
+- The broker stays dependency-free: `bun:test` + node builtins only, so `bun test` works offline.
+- Security style: explicit types, allowlists, argv vectors, canonical-path checks, atomic state writes, fail closed, no implicit fallback.
+- Fail closed, never truncate silently: an over-cap artifact is a named error, not a truncated file.
+- Every path this unit adds must be resolved, checked and published atomically; a partially written run must never be observable.
+- `spawnExec`'s `envMode: "replace"` exists for the stdin-only helpers; do not widen `spawnArgv`'s merge semantics.
+- Behavioural change only: no unrelated refactors, no reformatting.
+
+## The properties the foundation must satisfy (design gate)
+Derived from two independent external design reviews (Claude and Antigravity, 2026-10-15) and three internal first-pass advisors. Each is a test or a stated, verified property — not an assertion in a comment:
+1. **Pinned helper identity** — the helper path and its sha256 come from broker config, are verified before every run, and fail with a named error on mismatch or absence. Never resolved from the agent-writable package cache.
+2. **Confinement-enforced private storage** — the run store root is chosen so the confined agent cannot write it, with the operator probe that proves it; the broker refuses a store root inside the project.
+3. **Broker-authorized run access** — a run is served only to the session that owns it.
+4. **Race-resistant reads** — a single open with `fstat`, regular-file only, no symlinks, canonical containment against the specific run, byte caps.
+5. **Immutable evidence bundle** — resolved object ids and per-artifact hashes recorded so a later reader can show the reviewers saw the range that was summarized.
+6. **Pre-buffering caps and quotas** — per-run and per-file byte caps, per-session run quota, all enforced before publication.
+7. **Atomic publication** — temp file plus rename (`O_EXCL`), fsync, mode 0600, so no partial run is observable.
+8. **Retention, expiry and recovery** — a TTL, a max-runs bound, and a defined outcome for a run interrupted mid-write.
+
+## Tasks
+### Slice U1b-1 — run identity, private store, caps
+- **T1 — run identity and store.** Broker-generated `runId` (bounded ASCII grammar, unpredictable, bound to the originating session) and a run store resolved from broker config with a default outside the project tree; directories 0700, files 0600; publication by temp file plus rename `O_EXCL` then fsync. The broker refuses a store root inside the project or inside a path the confined agent may write.
+- **T2 — private-storage property.** Record the chosen default root and the operator probe that proves the confined agent cannot write it; add a broker-side refusal for a store root inside the project, and a test that the refusal fires. Property 2.
+- **T3 — caps and quotas.** Per-run byte cap (the materialized range), per-file cap, and a per-session run quota; each fails closed with a named error that names the cap and the observed size, never truncating. Property 6.
+- **T4 — atomic-publication invariant.** A test that an interrupted or failed publication leaves no partially written artifact visible, and that a published artifact is byte-identical to its input. Property 7.
+- **T5 — run metadata.** The run record carries the session id, the base/head tree or object ids, the changed-path manifest digest, per-artifact hashes, timestamps and a state. Properties 3 and 5 (the access check itself lands in T8).
+- **T6 — tests for U1b-1** covering every refusal above. Each test must FAIL if its guard is removed.
+### Slice U1b-2 — helper identity, access, retention
+- **T7 — pinned helper identity.** Broker config carries `{ helperPath, helperSha256 }`; the broker verifies the file's sha256 and that it is a regular file before every helper run, and refuses with a named error on mismatch, absence or non-regular type. Property 1. Do not resolve any helper from the package cache.
+- **T8 — owner-session access.** A run is served only to its owning session; a foreign session's request is refused with a named error. Property 3.
+- **T9 — retention, expiry and recovery.** TTL and max-runs pruning that never removes a run still referenced by an open review; a defined, recorded outcome for a run interrupted mid-write. Property 8.
+- **T10 — race-resistant read helper.** A single open with `fstat`, regular-file only, no symlinks, canonical containment against the specific run, and a byte cap. Property 4.
+- **T11 — tests for U1b-2** covering every refusal and the interrupted-run outcome.
+
+### Slice U1b-3 — the pinning act
+- **T12 — extend `scripts/install-user-files` to pin the helper.** It copies the ce:review helper(s) into a broker-private directory (owner-only, outside every path the confined agent may write), records the path and the sha256 in broker config, and verifies them; `--apply` performs it, bare invocation stays a dry run, and `--verify` checks the pinned hash matches the source and the live config. Re-running after a Systematic upgrade must repin deliberately and report the version change. Owner decision (2026-10-16): pin through the existing reviewed installer rather than a broker-side first-use bootstrap, so the pinned bytes are chosen at a moment the owner controls instead of trusting whatever is in the agent-writable cache at first use.
+- **T13 — tests for the pinning act** that fail if the recorded hash does not match the pinned bytes, and that fail if the pin is silently accepted from the package cache.
+
+### Records
+- **T14 — records.** Update this tracker's Progress with observed results after each slice, and record each slice's commit and native review outcome. Update `docs/TODO.md` and the plan/handover docs that describe the pipeline tool contracts.
+
+## Acceptance criteria
+1. Every property 1-8 above is either enforced by a test that fails when its guard is removed, or recorded with the observed evidence that establishes it.
+2. An over-cap artifact produces a named refusal, never a truncated file; a partial run is never observable.
+3. The broker never resolves a helper from `$HOME/.cache/opencode` at run time.
+4. `bun --cwd broker test --reporter=dot` — baseline 927 pass / 0 fail, must stay 0 fail. From `broker`: `bun build --target=bun src/main.ts` succeeds.
+5. No model-facing host tool is introduced by this unit.
+
+## Checks
+- Focused: `bun --cwd broker test --reporter=dot` on the changed test files.
+- Full: `bun --cwd broker test --reporter=dot`.
+- Build: from `broker`, `bun build --target=bun src/main.ts`.
+- `sandbox_bash` is argv-only (no pipes, redirects, globs, `&&`, `;`).
+
+## Delivery strategy
+Forecast at tracker creation: about 1,000 authored changed lines across three slices (U1b-1 about 450, U1b-2 about 400, U1b-3 about 150), excluding generated files. Strategy: `ask-on-risk` (default). Each slice is an independently coherent behaviour slice that keeps its own tests; the per-commit cap of 400 authored changed lines and 100 KiB authored patch applies to each commit, and a slice that cannot fit is split further rather than shrunk. Delivery remains the owner's decision; push/PR/merge are not authorized here.
+
+## Route and pre-code advice
+Route: authorized change, substantial feature, ODD, delegated. Triggers: mutation, execution, preparation, route declaration.
+Thinking layers: `ce:plan` is satisfied by the existing plan brief (`docs/PLAN.md:39-107`) plus two independent external design reviews and three internal first-pass advisors; `ce:brainstorm` is satisfied by that record. `ce:review` is unavailable in this sandbox (its helper pipeline is stdin-only and the sandbox is argv-only), so the post-code advisory substitutes and the native RDD review is the independent check.
+Pre-code advice (2026-10-15/16):
+- External (Claude): the broker would execute code the confined side can write; pin the helper, neutralize git config, cut the free-content artifact writer (`finalize` already emits `.artifact`), keep phase stdout by reference rather than inline, make slices mandatory and reviewer-sized, and send payloads inline on the child's stdin instead of via a project-relative `inputPath` (which the orchestrator cannot create at all, since it has no write surface, and which loses provenance).
+- External (Antigravity): `.context/` is not gitignored; `ensure-ignore` writes outside the declared roots and should be cut; scratch belongs in the broker state directory so materialization writes nothing into the project and needs no approval; `spawnArgv` must not be widened.
+- Internal `advisor-security-pre` supplied the eight-property gate above and required that a `pipeline_run`-class tool must NOT be approval-free.
+- Internal `advisor-integration-pre` supplied the spawn-boundary must-fixes that became the `spawn-output-integrity` unit (committed `afc4c79`), including that `MsbAdapter` routes every worker invocation through the same spawn and that the existing byte-checking callers trust UTF-8 bytes.
+- Internal `advisor-design-pre` returned `EXTERNAL_CONTEXT_REQUIRED` for the installed Systematic helper contract; that evidence is held by the orchestrator and was folded into the external prompts.
+
+## RDD mode
+Effective mode at route entry: **on**, deciding source **global** (read 2026-10-16). Not toggled by this unit.
+
+## Progress
+- 2026-10-16 — tracker created. U1b-1 not started.
+
+## Next step
+T1: implement run identity and the private run store, test-first, with the §T2 privacy refusal in place before any store path is written.
