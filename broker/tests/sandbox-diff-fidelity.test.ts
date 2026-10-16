@@ -43,6 +43,17 @@ function initRepo(dir: string): void {
   git(dir, ["update-ref", "refs/opencode-sandbox/baseline/diff-fidelity", "HEAD"]);
 }
 
+/** Byte-accurate cap for every fake spawn in this file (Tier 4 item 58). */
+function capped(text: string | null, cap: number): { text: string; truncated: boolean } {
+  const value = text ?? "";
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes <= cap) return { text: value, truncated: false };
+  return {
+    text: Buffer.from(value, "utf8").subarray(0, cap).toString("utf8"),
+    truncated: true,
+  };
+}
+
 function makeHarness() {
   const root = tempDir("sandbox-diff-fidelity-");
   const workerDir = join(root, "worker");
@@ -61,18 +72,23 @@ function makeHarness() {
     exec: async (
       _worker: string,
       argv: string[],
-      opts?: { cwd?: string; env?: Record<string, string> },
+      opts?: { cwd?: string; env?: Record<string, string>; maxOutputBytes?: number },
     ) => {
       const result = spawnSync(argv[0]!, argv.slice(1), {
         cwd: opts?.cwd === "/work" ? workerDir : workerDir,
         encoding: "utf8",
         env: { ...process.env, ...(opts?.env ?? {}) },
       });
+      const cap = opts?.maxOutputBytes ?? Number.POSITIVE_INFINITY;
+      const stdout = capped(result.stdout, cap);
+      const stderr = capped(result.stderr, cap);
       return {
         status: result.status ?? 1,
-        stdout: result.stdout ?? "",
-        stderr: result.stderr ?? "",
+        stdout: stdout.text,
+        stderr: stderr.text,
         timedOut: false,
+        outputTruncated: stdout.truncated,
+        stderrTruncated: stderr.truncated,
       };
     },
   };
@@ -85,16 +101,21 @@ function makeHarness() {
     adapter,
     git: {
       runnerMode: "real",
-      spawn: async (argv: string[], opts?: { cwd?: string }) => {
+      spawn: async (argv: string[], opts?: { cwd?: string; maxOutputBytes?: number }) => {
         const result = spawnSync(argv[0]!, argv.slice(1), {
           cwd: opts?.cwd ?? workerDir,
           encoding: "utf8",
         });
+        const cap = opts?.maxOutputBytes ?? Number.POSITIVE_INFINITY;
+        const stdout = capped(result.stdout, cap);
+        const stderr = capped(result.stderr, cap);
         return {
           status: result.status ?? 1,
-          stdout: result.stdout ?? "",
-          stderr: result.stderr ?? "",
+          stdout: stdout.text,
+          stderr: stderr.text,
           timedOut: false,
+          outputTruncated: stdout.truncated,
+          stderrTruncated: stderr.truncated,
         };
       },
     },

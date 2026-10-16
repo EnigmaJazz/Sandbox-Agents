@@ -25,6 +25,14 @@ export interface SpawnResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /**
+   * True when stdout exceeded `maxOutputBytes`: the retained text is a
+   * byte-capped prefix and the tail was dropped. Absent only on results from a
+   * fake spawn that does not model the cap. Exactly-at-cap is NOT truncated.
+   */
+  outputTruncated?: boolean;
+  /** True when stderr exceeded `maxOutputBytes` (see {@link outputTruncated}). */
+  stderrTruncated?: boolean;
 }
 
 export interface SpawnOptions {
@@ -32,6 +40,17 @@ export interface SpawnOptions {
   cwd?: string;
   env?: Record<string, string>;
   maxOutputBytes?: number;
+  /** When present, the child receives these bytes on stdin (stdio[0] = "pipe"). */
+  stdin?: Buffer;
+}
+
+export interface SpawnExecOptions extends SpawnOptions {
+  /**
+   * `"merge"` (default) inherits `process.env` and applies `env` on top
+   * (`childEnvironment`); `"replace"` forwards ONLY `env`. Replacement is
+   * OPT-IN and exists for the stdin-only review-pipeline helpers.
+   */
+  envMode?: "merge" | "replace";
 }
 
 export type SpawnFn = (args: string[], opts: SpawnOptions) => Promise<SpawnResult>;
@@ -67,7 +86,22 @@ export function childEnvironment(
   return env ? { ...process.env, ...env } : process.env;
 }
 
-export function spawnArgv(argv: readonly string[], opts: SpawnOptions = {}): Promise<SpawnResult> {
+/**
+ * Byte-exact spawn core shared by `spawnArgv` and `spawnExec`.
+ *
+ * stdout/stderr accumulate as `Buffer`s, are RETAINED only up to
+ * `maxOutputBytes`, and are decoded ONCE at EOF: per-chunk `toString("utf8")`
+ * corrupts a multi-byte code point split across `data` events, and a string
+ * length cap counts UTF-16 units rather than the UTF-8 BYTES every caller
+ * checks. Once the cap is reached the stream keeps DRAINING (the child is
+ * never killed on overflow) so the child cannot block on a full pipe; only
+ * retention stops. Exactly-at-cap is not truncated; one byte over is.
+ */
+function spawnCore(
+  argv: readonly string[],
+  opts: SpawnOptions,
+  envMode: "merge" | "replace",
+): Promise<SpawnResult> {
   const binary = argv[0];
   if (!binary || binary.includes("\u0000")) {
     return Promise.reject(new ValidationError("invalid executable path"));
@@ -76,13 +110,15 @@ export function spawnArgv(argv: readonly string[], opts: SpawnOptions = {}): Pro
   // `opts.env.GIT_DIR` lookup would miss an INHERITED `process.env.GIT_DIR` (or
   // `GIT_COMMON_DIR`) that the merge forwards to git, so the guard could inspect
   // a DIFFERENT repository than git reads and degrade the fail-closed refusal to
-  // fail-open (native review R4-002).
-  const env = childEnvironment(opts.env);
+  // fail-open (native review R4-002). `"replace"` passes the caller's env
+  // verbatim, so the guard and the child still read the same environment.
+  const env = envMode === "replace" ? (opts.env ?? {}) : childEnvironment(opts.env);
   let args: readonly string[];
   try {
-    // Host git is hardened at this single choke point: repository-local hooks,
-    // fsmonitor and pager are neutralized via `-c`, and an execution-bearing
-    // subcommand carrying a repository-local exec key is refused before spawn.
+    // Host git is hardened at this single choke point for BOTH spawn paths, so
+    // no future git caller can bypass it: repository-local hooks, fsmonitor and
+    // pager are neutralized via `-c`, and an execution-bearing subcommand
+    // carrying a repository-local exec key is refused before spawn.
     args = hardenGitArgv(argv, { cwd: opts.cwd, env }).slice(1);
   } catch (err) {
     return Promise.reject(err);
@@ -92,24 +128,64 @@ export function spawnArgv(argv: readonly string[], opts: SpawnOptions = {}): Pro
       shell: false,
       cwd: opts.cwd,
       env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [opts.stdin ? "pipe" : "ignore", "pipe", "pipe"],
     });
-    let stdout = "";
-    let stderr = "";
     const cap = opts.maxOutputBytes ?? 512 * 1024;
-    child.stdout.on("data", (chunk: Buffer) => {
-      if (stdout.length < cap) stdout += chunk.toString("utf8");
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      if (stderr.length < cap) stderr += chunk.toString("utf8");
-    });
+    // One byte-accurate sink per stream: retain up to `cap` BYTES, then keep
+    // draining without retaining and remember that truncation happened.
+    const sink = () => {
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      let truncated = false;
+      return {
+        push(chunk: Buffer): void {
+          if (truncated) return;
+          const remaining = cap - bytes;
+          if (chunk.length <= remaining) {
+            chunks.push(chunk);
+            bytes += chunk.length;
+            return;
+          }
+          if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+          bytes = cap;
+          truncated = true;
+        },
+        text(): string {
+          return Buffer.concat(chunks).toString("utf8");
+        },
+        truncated(): boolean {
+          return truncated;
+        },
+      };
+    };
+    const stdout = sink();
+    const stderr = sink();
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    let spawnErrorText: string | null = null;
+    if (opts.stdin && child.stdin) {
+      // A child that exits without reading stdin fails the write with EPIPE.
+      // That is expected for an early-exiting child: it must not crash the
+      // broker or reject the spawn (the child's close status is authoritative).
+      child.stdin.on("error", () => {
+        /* tolerate EPIPE and every other stdin write failure */
+      });
+      child.stdin.end(opts.stdin);
+    }
     let timedOut = false;
     let settled = false;
     const finish = (status: number | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ status, stdout, stderr, timedOut });
+      resolve({
+        status,
+        stdout: stdout.text(),
+        stderr: spawnErrorText ?? stderr.text(),
+        timedOut,
+        outputTruncated: stdout.truncated(),
+        stderrTruncated: stderr.truncated(),
+      });
     };
     const timer = setTimeout(() => {
       timedOut = true;
@@ -118,11 +194,29 @@ export function spawnArgv(argv: readonly string[], opts: SpawnOptions = {}): Pro
     }, opts.timeoutMs ?? 120_000);
     timer.unref();
     child.on("error", (err) => {
-      stderr = `spawn error: ${err.message}`;
+      spawnErrorText = `spawn error: ${err.message}`;
       finish(null);
     });
     child.on("close", (code) => finish(code));
   });
+}
+
+/**
+ * Worker-VM spawn path. Environment is `{ ...process.env, ...opts.env }`
+ * (`childEnvironment`); five callers depend on inheriting `process.env`.
+ */
+export function spawnArgv(argv: readonly string[], opts: SpawnOptions = {}): Promise<SpawnResult> {
+  return spawnCore(argv, opts, "merge");
+}
+
+/**
+ * Review-pipeline spawn entry point: identical byte-exact boundaries and the
+ * same git-hardening choke point as {@link spawnArgv}, plus an explicit
+ * `envMode`. Default `"merge"` keeps spawnArgv's semantics; `"replace"` is
+ * OPT-IN and forwards only `opts.env`.
+ */
+export function spawnExec(argv: readonly string[], opts: SpawnExecOptions = {}): Promise<SpawnResult> {
+  return spawnCore(argv, opts, opts.envMode ?? "merge");
 }
 
 // ---------------------------------------------------------------------------

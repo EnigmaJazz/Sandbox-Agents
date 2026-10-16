@@ -374,11 +374,32 @@ export function coloriseDiff(diff: string): string {
 /** Host git/gh stdout/stderr cap (512 KiB). */
 export const GIT_OUTPUT_MAX_BYTES = 512 * 1024;
 
+export interface CapAndRedactResult {
+  text: string;
+  /** True when the byte cap actually dropped a tail (exactly-at-cap is not). */
+  truncated: boolean;
+}
+
+/**
+ * Redact secret-shaped data FIRST, then truncate to the byte cap, reporting
+ * whether the cap dropped a tail. Callers use this flag instead of re-measuring
+ * UTF-8 bytes (Tier 4 item 56: exactly-at-cap is not truncated).
+ */
+export function capAndRedactWithFlag(
+  text: string,
+  maxBytes = GIT_OUTPUT_MAX_BYTES,
+): CapAndRedactResult {
+  const redacted = redact(text);
+  if (Buffer.byteLength(redacted, "utf8") <= maxBytes) return { text: redacted, truncated: false };
+  return {
+    text: Buffer.from(redacted, "utf8").subarray(0, maxBytes).toString("utf8"),
+    truncated: true,
+  };
+}
+
 /** Redact secret-shaped data FIRST, then truncate to the byte cap. */
 export function capAndRedact(text: string, maxBytes = GIT_OUTPUT_MAX_BYTES): string {
-  const redacted = redact(text);
-  if (Buffer.byteLength(redacted, "utf8") <= maxBytes) return redacted;
-  return Buffer.from(redacted, "utf8").subarray(0, maxBytes).toString("utf8");
+  return capAndRedactWithFlag(text, maxBytes).text;
 }
 
 export interface GitCommitArgvInput {

@@ -48,7 +48,20 @@ function makeApplyContext(
     },
   };
 
-  const ok = (stdout = "") => ({ status: 0, stdout, stderr: "", timedOut: false });
+  // Model the byte cap and overflow flag the REAL spawn boundary emits so an
+  // over-cap output is refused rather than silently completed (Tier 4 item 58).
+  const ok = (stdout = "", opts?: { maxOutputBytes?: number }) => {
+    const cap = opts?.maxOutputBytes ?? Number.POSITIVE_INFINITY;
+    const bytes = Buffer.byteLength(stdout, "utf8");
+    return {
+      status: 0,
+      stdout: bytes > cap ? Buffer.from(stdout, "utf8").subarray(0, cap).toString("utf8") : stdout,
+      stderr: "",
+      timedOut: false,
+      outputTruncated: bytes > cap,
+      stderrTruncated: false,
+    };
+  };
 
   return {
     config: defaultConfig({
@@ -67,18 +80,18 @@ function makeApplyContext(
     budget: {},
     git: {
       runnerMode: "real",
-      spawn: async (argv: string[]) => {
+      spawn: async (argv: string[], opts?: { maxOutputBytes?: number }) => {
         calls.push(argv);
         if (argv.includes("add")) {
           onGitAdd?.();
-          return ok();
+          return ok("", opts);
         }
-        if (argv.includes("ls-files")) return ok("100644 base 0\topenspec/link\n");
-        if (argv.includes("ls-tree")) return ok("100644 blob base\topenspec/link\n");
-        if (argv.includes("--name-only")) return ok("openspec/link\u0000");
-        if (argv.includes("--raw")) return ok(rawDiff);
-        if (argv.includes("diff")) return ok(patchStdout);
-        return ok();
+        if (argv.includes("ls-files")) return ok("100644 base 0\topenspec/link\n", opts);
+        if (argv.includes("ls-tree")) return ok("100644 blob base\topenspec/link\n", opts);
+        if (argv.includes("--name-only")) return ok("openspec/link\u0000", opts);
+        if (argv.includes("--raw")) return ok(rawDiff, opts);
+        if (argv.includes("diff")) return ok(patchStdout, opts);
+        return ok("", opts);
       },
     },
   } as unknown as OpContext;

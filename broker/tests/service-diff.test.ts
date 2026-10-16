@@ -6,6 +6,16 @@ import { defaultConfig } from "../src/config.ts";
 import { buildDiffOp, type OpContext } from "../src/service.ts";
 import type { BrokerRequestEnvelope, SessionRecord } from "../src/types.ts";
 
+/** Byte-accurate cap for every fake spawn in this file (Tier 4 item 58). */
+function capped(text: string, cap: number): { text: string; truncated: boolean } {
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes <= cap) return { text, truncated: false };
+  return {
+    text: Buffer.from(text, "utf8").subarray(0, cap).toString("utf8"),
+    truncated: true,
+  };
+}
+
 function makeDiffContext(calls: string[][]): OpContext {
   const record: SessionRecord = {
     sessionID: "diff-session",
@@ -23,13 +33,25 @@ function makeDiffContext(calls: string[][]): OpContext {
     }),
     store: { get: () => record },
     adapter: {
-      exec: async (_worker: string, argv: string[]) => {
+      exec: async (_worker: string, argv: string[], opts?: { maxOutputBytes?: number }) => {
         calls.push(argv);
-        if (argv.includes("--stat")) return { status: 0, stdout: "1 file changed", stderr: "", timedOut: false };
+        const cap = opts?.maxOutputBytes ?? Number.POSITIVE_INFINITY;
+        const respond = (stdout: string) => {
+          const out = capped(stdout, cap);
+          return {
+            status: 0,
+            stdout: out.text,
+            stderr: "",
+            timedOut: false,
+            outputTruncated: out.truncated,
+            stderrTruncated: false,
+          };
+        };
+        if (argv.includes("--stat")) return respond("1 file changed");
         if (argv.includes("--name-only")) {
-          return { status: 0, stdout: "openspec/spec.md\u0000", stderr: "", timedOut: false };
+          return respond("openspec/spec.md\u0000");
         }
-        return { status: 0, stdout: "", stderr: "", timedOut: false };
+        return respond("");
       },
     },
   } as unknown as OpContext;
@@ -48,16 +70,26 @@ function makeRetainedDiffContext(calls: string[]): OpContext {
     updatedAt: "2026-01-01T00:00:00.000Z",
   };
 
-  const ok = (stdout = "") => ({ status: 0, stdout, stderr: "", timedOut: false });
+  const ok = (stdout = "", opts?: { maxOutputBytes?: number }) => {
+    const out = capped(stdout, opts?.maxOutputBytes ?? Number.POSITIVE_INFINITY);
+    return {
+      status: 0,
+      stdout: out.text,
+      stderr: "",
+      timedOut: false,
+      outputTruncated: out.truncated,
+      stderrTruncated: false,
+    };
+  };
   return {
     config: defaultConfig({ projects: [{ id: "repo", path: "/repo" }] }),
     store: { get: () => record },
     git: {
-      spawn: async (argv: string[]) => {
+      spawn: async (argv: string[], opts?: { maxOutputBytes?: number }) => {
         calls.push(argv.join(" "));
-        if (argv.includes("--stat")) return ok("1 file changed");
-        if (argv.includes("--name-only")) return ok("openspec/spec.md\u0000");
-        return ok("openspec diff");
+        if (argv.includes("--stat")) return ok("1 file changed", opts);
+        if (argv.includes("--name-only")) return ok("openspec/spec.md\u0000", opts);
+        return ok("openspec diff", opts);
       },
     },
   } as unknown as OpContext;
