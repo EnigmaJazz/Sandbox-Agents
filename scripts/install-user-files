@@ -27,6 +27,19 @@ source "$SCRIPT_DIR/secure-launcher.conf"
 STATE_DIR="${BROKER_STATE_DIR:-$HOME/.local/state/opencode-sandbox}"
 JOURNAL="$STATE_DIR/install-journal.tsv"
 
+reject_symlink_path() {
+  local path="$1" cursor="" component
+  IFS=/ read -r -a components <<<"$path"
+  for component in "${components[@]}"; do
+    [[ -n "$component" ]] || continue
+    cursor="$cursor/$component"
+    if [[ -L "$cursor" ]]; then
+      printf '[install] error: symlink destination path refused: %s\n' "$cursor" >&2
+      return 1
+    fi
+  done
+}
+
 APPLY=0
 VERIFY=0
 PRUNE_BACKUPS=0
@@ -56,8 +69,58 @@ if [[ "$APPLY" != "1" && "$VERIFY" != "1" && "$PRUNE_BACKUPS" != "1" ]]; then
   DRY_RUN=1
 fi
 
+# Reject an unavailable helper source before any deployment/configuration write.
+if [[ "$APPLY" == "1" ]]; then
+  STATE_DIR="$(realpath -m -s -- "$STATE_DIR")"
+  JOURNAL="$STATE_DIR/install-journal.tsv"
+  if [[ -L "$STATE_DIR" ]]; then
+    printf '[install] error: symlink destination directory refused: %s\n' "$STATE_DIR" >&2
+    exit 1
+  fi
+  reject_symlink_path "$STATE_DIR"
+  if [[ -e "$STATE_DIR" && ! -d "$STATE_DIR" ]]; then
+    printf '[install] error: destination is not a directory: %s\\n' "$STATE_DIR" >&2
+    exit 1
+  fi
+  REVIEW_HELPER_DIR="$STATE_DIR/review-helper"
+  if [[ -L "$REVIEW_HELPER_DIR" ]]; then
+    printf '[install] error: symlink destination directory refused: %s\n' "$REVIEW_HELPER_DIR" >&2
+    exit 1
+  fi
+  reject_symlink_path "$REVIEW_HELPER_DIR"
+  if [[ -e "$REVIEW_HELPER_DIR" && ! -d "$REVIEW_HELPER_DIR" ]]; then
+    printf '[install] error: destination is not a directory: %s\\n' "$REVIEW_HELPER_DIR" >&2
+    exit 1
+  fi
+  REVIEW_HELPER_CACHE="$HOME/.cache/opencode/packages"
+  mapfile -t PREFLIGHT_HELPER_CANDIDATES < <(/usr/bin/find "$REVIEW_HELPER_CACHE" -type f -path "$REVIEW_HELPER_CACHE/@fro.bot/systematic@*/node_modules/@fro.bot/systematic/skills/ce-review/scripts/validate-review.mjs" -print 2>/dev/null)
+  PREFLIGHT_HELPER_FOUND=0
+  for helper_source in "${PREFLIGHT_HELPER_CANDIDATES[@]}"; do
+    helper_relative="${helper_source#"$REVIEW_HELPER_CACHE/"}"
+    if [[ "$helper_relative" =~ ^@fro\.bot/systematic@([0-9]+\.[0-9]+\.[0-9]+)/node_modules/@fro\.bot/systematic/skills/ce-review/scripts/validate-review\.mjs$ ]]; then
+      PREFLIGHT_HELPER_FOUND=1
+      break
+    fi
+  done
+  if [[ "$PREFLIGHT_HELPER_FOUND" != "1" ]]; then
+    printf '[install] error: REVIEW_HELPER_SOURCE_MISSING: no trusted versioned ce:review validate-review.mjs found under %s\n' "$REVIEW_HELPER_CACHE" >&2
+    exit 1
+  fi
+fi
+
 # Only an applying install may create or modify installer state.
 if [[ "$APPLY" == "1" ]]; then
+  reject_symlink_path "$STATE_DIR"
+  STATE_DIR="$(realpath -m -s -- "$STATE_DIR")"
+  if [[ -L "$STATE_DIR" ]]; then
+    printf '[install] error: symlink destination directory refused: %s\n' "$STATE_DIR" >&2
+    exit 1
+  fi
+  reject_symlink_path "$STATE_DIR"
+  if [[ -e "$STATE_DIR" && ! -d "$STATE_DIR" ]]; then
+    printf '[install] error: destination is not a directory: %s\n' "$STATE_DIR" >&2
+    exit 1
+  fi
   mkdir -p "$STATE_DIR"
   chmod 700 "$STATE_DIR"
 fi
@@ -278,11 +341,30 @@ done
 # --- 5. pinned ce:review validator helper ------------------------------------
 log "step 5: pinned ce:review validator helper"
 REVIEW_HELPER_DIR="$STATE_DIR/review-helper"
+if [[ "$APPLY" == "1" ]]; then
+  if [[ -L "$REVIEW_HELPER_DIR" ]]; then
+    printf '[install] error: symlink destination directory refused: %s\n' "$REVIEW_HELPER_DIR" >&2
+    exit 1
+  fi
+  reject_symlink_path "$REVIEW_HELPER_DIR"
+  if [[ -e "$REVIEW_HELPER_DIR" && ! -d "$REVIEW_HELPER_DIR" ]]; then
+    printf '[install] error: destination is not a directory: %s\n' "$REVIEW_HELPER_DIR" >&2
+    exit 1
+  fi
+fi
 REVIEW_HELPER_DEST="$REVIEW_HELPER_DIR/validate-review.mjs"
 REVIEW_HELPER_PIN="$REVIEW_HELPER_DIR/pin.json"
 BROKER_ENV_DEST="$HOME/.config/opencode-sandbox/broker.env"
 REVIEW_HELPER_CACHE="$HOME/.cache/opencode/packages"
-mapfile -t REVIEW_HELPER_CANDIDATES < <(/usr/bin/find "$REVIEW_HELPER_CACHE" -type f -path '*/skills/ce-review/scripts/validate-review.mjs' -print 2>/dev/null)
+REVIEW_HELPER_SOURCE_UNAVAILABLE=0
+REVIEW_HELPER_PIN_PRESENT=0
+if [[ -e "$REVIEW_HELPER_DIR" || -L "$REVIEW_HELPER_DIR" || -e "$REVIEW_HELPER_PIN" || -L "$REVIEW_HELPER_PIN" ]]; then
+  REVIEW_HELPER_PIN_PRESENT=1
+fi
+if [[ -f "$BROKER_ENV_DEST" ]] && grep -Eq '^BROKER_REVIEW_HELPER_(PATH|SHA256)=' "$BROKER_ENV_DEST"; then
+  REVIEW_HELPER_PIN_PRESENT=1
+fi
+mapfile -t REVIEW_HELPER_CANDIDATES < <(/usr/bin/find "$REVIEW_HELPER_CACHE" -type f -path "$REVIEW_HELPER_CACHE/@fro.bot/systematic@*/node_modules/@fro.bot/systematic/skills/ce-review/scripts/validate-review.mjs" -print 2>/dev/null)
 REVIEW_HELPER_SOURCES=()
 REVIEW_HELPER_VERSIONS=()
 REVIEW_HELPER_SOURCE=""
@@ -298,7 +380,7 @@ version_is_greater() {
   (( 10#$c_patch > 10#$s_patch ))
 }
 for helper_source in "${REVIEW_HELPER_CANDIDATES[@]}"; do
-  if [[ "$helper_source" =~ /systematic@([0-9]+\.[0-9]+\.[0-9]+)/ ]]; then
+  if [[ "$helper_source" =~ ^${REVIEW_HELPER_CACHE}/@fro\.bot/systematic@([0-9]+\.[0-9]+\.[0-9]+)/node_modules/@fro\.bot/systematic/skills/ce-review/scripts/validate-review\.mjs$ ]]; then
     candidate_version="${BASH_REMATCH[1]}"
     REVIEW_HELPER_SOURCES+=("$helper_source")
     REVIEW_HELPER_VERSIONS+=("$candidate_version")
@@ -311,21 +393,32 @@ for helper_source in "${REVIEW_HELPER_CANDIDATES[@]}"; do
   fi
 done
 if [[ -z "$REVIEW_HELPER_SOURCE" ]]; then
-  log "error: REVIEW_HELPER_SOURCE_MISSING: no versioned ce:review validate-review.mjs found under $REVIEW_HELPER_CACHE"
-  exit 1
+  if [[ "$VERIFY" == "1" ]]; then
+    REVIEW_HELPER_SOURCE_UNAVAILABLE=1
+    if [[ "$REVIEW_HELPER_PIN_PRESENT" == "1" ]]; then
+      log "verification incomplete: pinned review helper source comparison unavailable (cache source missing)"
+    else
+      log "review helper unconfigured: no installed pin or helper config; not verified"
+    fi
+    REVIEW_HELPER_SHA256=""
+  else
+    log "error: REVIEW_HELPER_SOURCE_MISSING: no versioned ce:review validate-review.mjs found under $REVIEW_HELPER_CACHE"
+    exit 1
+  fi
+else
+  REVIEW_HELPER_SHA256="$(sha256sum "$REVIEW_HELPER_SOURCE" | cut -d ' ' -f 1)"
 fi
-REVIEW_HELPER_SHA256="$(sha256sum "$REVIEW_HELPER_SOURCE" | cut -d ' ' -f 1)"
 for helper_source in "${REVIEW_HELPER_SOURCES[@]}"; do
   [[ "$helper_source" == "$REVIEW_HELPER_SOURCE" ]] || log "review helper other version/source seen: $helper_source"
 done
-if [[ "$VERIFY" == "1" ]]; then
+if [[ "$VERIFY" == "1" && "$REVIEW_HELPER_PIN_PRESENT" == "1" ]]; then
   VERIFY_EXPECTED_DESTINATIONS+=("$REVIEW_HELPER_DEST")
   if [[ ! -f "$REVIEW_HELPER_PIN" || -L "$REVIEW_HELPER_PIN" ]]; then
     log "DRIFT $REVIEW_HELPER_PIN: pin record absent or not a regular file"
     DRIFT=1
   else
     RECORDED_VERSION="$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$REVIEW_HELPER_PIN")"
-    if [[ "$RECORDED_VERSION" != "$REVIEW_HELPER_VERSION" ]]; then
+    if [[ "$REVIEW_HELPER_SOURCE_UNAVAILABLE" == "0" && "$RECORDED_VERSION" != "$REVIEW_HELPER_VERSION" ]]; then
       log "DRIFT review helper version changed: recorded $RECORDED_VERSION, cache has $REVIEW_HELPER_VERSION; deliberate --apply required"
       DRIFT=1
     fi
@@ -352,15 +445,15 @@ if [[ "$VERIFY" == "1" ]]; then
     log "DRIFT $REVIEW_HELPER_DEST: live config hash differs from pinned bytes"
     DRIFT=1
   fi
-  if [[ "$PINNED_HASH" != "$REVIEW_HELPER_SHA256" ]]; then
+  if [[ "$REVIEW_HELPER_SOURCE_UNAVAILABLE" == "0" && "$PINNED_HASH" != "$REVIEW_HELPER_SHA256" ]]; then
     log "DRIFT $REVIEW_HELPER_DEST: pinned sha256 differs from current package-cache source"
     DRIFT=1
   fi
-  if [[ "$DRIFT" == "0" ]]; then
+  if [[ "$DRIFT" == "0" && "$REVIEW_HELPER_SOURCE_UNAVAILABLE" == "0" ]]; then
     VERIFIED_COUNT=$((VERIFIED_COUNT + 1))
     log "review helper pin verified: selected $REVIEW_HELPER_VERSION $REVIEW_HELPER_SOURCE sha256 $REVIEW_HELPER_SHA256"
   fi
-else
+elif [[ "$VERIFY" != "1" ]]; then
   log "review helper selected $REVIEW_HELPER_VERSION $REVIEW_HELPER_SOURCE; sha256 $REVIEW_HELPER_SHA256"
   if [[ "$APPLY" == "1" ]]; then
     mkdir -p "$REVIEW_HELPER_DIR"
@@ -373,6 +466,8 @@ else
     printf 'BROKER_REVIEW_HELPER_PATH=%s\nBROKER_REVIEW_HELPER_SHA256=%s\n' "$REVIEW_HELPER_DEST" "$REVIEW_HELPER_SHA256" >>"$BROKER_ENV_DEST"
     journal "review-helper-pin" "$REVIEW_HELPER_SOURCE" "$REVIEW_HELPER_DEST" "$REVIEW_HELPER_VERSION $REVIEW_HELPER_SHA256"
   fi
+else
+  log "review helper unconfigured: no installed pin or helper config; not verified"
 fi
 
 verify_stale_destinations() {
@@ -420,6 +515,10 @@ if [[ "$VERIFY" == "1" ]]; then
   if [[ "$DRIFT" == "1" ]]; then
     log "verification failed: installed files differ from repository"
     exit 1
+  fi
+  if [[ "$REVIEW_HELPER_PIN_PRESENT" == "1" && "$REVIEW_HELPER_SOURCE_UNAVAILABLE" == "1" ]]; then
+    log "verification incomplete: helper pin is consistent but cache source comparison is unavailable; pin not counted as verified"
+    exit 2
   fi
   if [[ "$VERIFY_STALE_CHECK_SKIPPED" == "1" ]]; then
     # Exit 2 distinguishes a fresh-install journal absence from full verification.

@@ -208,3 +208,10 @@ repins automatically. The installer pins only the validator because
 each execution, while the broker owns the ignore check. No model-facing host
 tool routes to this store yet.
 
+The installer rejects a statically symlinked destination directory, including a
+dangling link, and checks its path ancestors before creating the pin. This closes
+the static symlink case only: a check-then-`mkdir -p`/`chmod`/`cp` sequence is
+NOT race-free against a writable ancestor. The confinement property in design
+gate #2, verified by the operator probe above, is what closes that boundary —
+not another bash check.
+

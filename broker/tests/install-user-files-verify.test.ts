@@ -132,6 +132,40 @@ describe("install-user-files --verify", () => {
     expect(result.stdout).not.toContain("drift");
   });
 
+  test("legacy verify accepts absent helper pin and config keys without counting a pin", () => {
+    const { home, stateDir, journal, run } = fixture();
+    rmSync(resolve(stateDir, "review-helper"), { recursive: true, force: true });
+    const env = resolve(home, ".config/opencode-sandbox/broker.env");
+    writeFileSync(env, readFileSync(env, "utf8").replace(/^BROKER_REVIEW_HELPER_.*\n/gm, ""));
+    journal("file", "sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
+    const result = run();
+    expect(result.status, result.stderr + result.stdout).toBe(0);
+    expect(result.stdout).toContain("review helper unconfigured");
+    expect(result.stdout).toContain("not verified");
+    expect(result.stdout).not.toContain("review helper pin verified");
+  });
+
+  test("helper config without a pin activates installed-pin consistency checks", () => {
+    const { stateDir, run } = fixture();
+    rmSync(resolve(stateDir, "review-helper"), { recursive: true, force: true });
+    const result = run();
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("pin record absent or not a regular file");
+    expect(result.stdout).toContain("verification failed");
+  });
+
+  test("valid installed pin without a cache source is incomplete, not byte drift", () => {
+    const { home, journal, run } = fixture();
+    rmSync(resolve(home, ".cache/opencode"), { recursive: true, force: true });
+    journal("file", "sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
+    const result = run();
+    expect(result.status, result.stderr + result.stdout).toBe(2);
+    expect(result.stdout).toContain("source comparison unavailable");
+    expect(result.stdout).not.toContain("pinned sha256 differs from current package-cache source");
+    expect(result.stdout).not.toContain("review helper pin verified");
+    expect(result.stdout).not.toContain("verification failed");
+  });
+
   test("reports a skipped stale check and returns the documented distinct status when the journal is absent", () => {
     const { run } = fixture();
     const result = run();

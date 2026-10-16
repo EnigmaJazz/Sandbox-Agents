@@ -2,11 +2,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -95,6 +97,49 @@ describe("review helper installer pin", () => {
     expect(result.stdout).toContain("3.20.0");
   });
 
+  test("refuses a symlinked state ancestor without changing the external target", () => {
+    const { home, stateDir, run } = fixture();
+    const external = resolve(home, "external-state");
+    mkdirSync(external);
+    const target = resolve(external, "opencode-sandbox");
+    mkdirSync(target);
+    const marker = resolve(target, "marker");
+    writeFileSync(marker, "external bytes\\n", { mode: 0o640 });
+    const localStateParent = resolve(home, ".local/state");
+    rmSync(localStateParent, { recursive: true, force: true });
+    mkdirSync(resolve(home, ".local"));
+    symlinkSync(external, localStateParent);
+    const before = statSync(marker).mode & 0o777;
+    const result = run("--apply");
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toContain("symlink destination path refused");
+    expect(readFileSync(marker, "utf8")).toBe("external bytes\\n");
+    expect(statSync(marker).mode & 0o777).toBe(before);
+    expect(() => statSync(destination(stateDir))).toThrow();
+  });
+
+  test("rejects a dangling symlink at the helper destination directory", () => {
+    const { stateDir, run } = fixture();
+    mkdirSync(stateDir, { recursive: true });
+    const helperDir = resolve(stateDir, "review-helper");
+    symlinkSync(resolve(stateDir, "missing-target"), helperDir);
+    const result = run("--apply");
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("symlink destination directory refused");
+    expect(lstatSync(helperDir).isSymbolicLink()).toBe(true);
+  });
+
+  test("rejects a non-directory helper destination entry", () => {
+    const { stateDir, run } = fixture();
+    mkdirSync(stateDir, { recursive: true });
+    const helperDir = resolve(stateDir, "review-helper");
+    writeFileSync(helperDir, "not a directory\\n");
+    const result = run("--apply");
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("destination is not a directory");
+    expect(readFileSync(helperDir, "utf8")).toBe("not a directory\\n");
+  });
+
   test("verify succeeds after apply", () => {
     const { run } = fixture();
     expect(run("--apply").status).toBe(0);
@@ -163,6 +208,20 @@ describe("review helper installer pin", () => {
     expect(() => statSync(destination(stateDir))).toThrow();
   });
 
+  test("refused apply preserves the existing helper, pin record, and broker configuration", () => {
+    const { home, stateDir, run } = fixture();
+    expect(run("--apply").status).toBe(0);
+    const helper = destination(stateDir);
+    const pin = resolve(stateDir, "review-helper/pin.json");
+    const env = config(home);
+    const before = [helper, pin, env].map((path) => ({ bytes: readFileSync(path), mode: statSync(path).mode & 0o777 }));
+    rmSync(resolve(home, ".cache/opencode"), { recursive: true, force: true });
+    const result = run("--apply");
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toContain("REVIEW_HELPER_SOURCE_MISSING");
+    expect([helper, pin, env].map((path) => ({ bytes: readFileSync(path), mode: statSync(path).mode & 0o777 }))).toEqual(before);
+  });
+
   test("selects the highest concrete version from the reported cache inventory", () => {
     const { stateDir, sources, run } = fixture({
       versions: ["3.18.4", "3.18.5", "3.18.6", "3.18.10", "3.20.0", "3.21.0", "3.21.5", "3.21.8", "3.22.4"],
@@ -196,21 +255,36 @@ describe("review helper installer pin", () => {
     expect(result.status).toBe(0);
     expect(readFileSync(destination(stateDir))).toEqual(readFileSync(sources.get("3.21.8")!));
     expect(result.stdout).toContain("selected 3.21.8");
-    expect(result.stdout).toContain("ignored non-version package source");
+    expect(result.stdout).not.toContain("selected latest");
     expect(result.stdout).not.toContain("selected latest");
     expect(result.stdout).not.toContain("selected systematic");
   });
 
-  test("chooses the configured highest-version source and never the decoy", () => {
+  test("anchors version selection to the intended package root despite an enumerated nested decoy", () => {
     const { home, stateDir, sources, run } = fixture({ versions: ["3.20.0", "3.21.0"] });
-    const decoy = resolve(home, ".cache/opencode/decoy/validate-review.mjs");
+    const packages = resolve(home, ".cache/opencode/packages");
+    const decoy = resolve(packages, "other-package/node_modules/@fro.bot/systematic@9.99.99/skills/ce-review/scripts/validate-review.mjs");
     mkdirSync(resolve(decoy, ".."), { recursive: true });
-    writeFileSync(decoy, "not the selected source\n");
+    writeFileSync(decoy, "distinct decoy bytes: nested version 9.99.99\n");
+    const enumeration = spawnSync("/usr/bin/find", [packages, "-type", "f", "-path", "*/skills/ce-review/scripts/validate-review.mjs", "-print"], { encoding: "utf8" });
+    expect(enumeration.status).toBe(0);
+    expect(enumeration.stdout.trim().split("\n")).toContain(decoy);
     const result = run("--apply");
     expect(result.status).toBe(0);
     expect(readFileSync(destination(stateDir))).toEqual(readFileSync(sources.get("3.21.0")!));
     expect(readFileSync(destination(stateDir))).not.toEqual(readFileSync(decoy));
     expect(result.stdout).toContain(sources.get("3.21.0")!);
     expect(result.stdout).toContain("selected 3.21.0");
+    const unanchoredScript = resolve(home, "install-user-files-unanchored");
+    const unanchored = readFileSync(installer, "utf8")
+      .replace(/^mapfile -t REVIEW_HELPER_CANDIDATES.*$/m, 'mapfile -t REVIEW_HELPER_CANDIDATES < <(/usr/bin/find "$REVIEW_HELPER_CACHE" -type f -path "*/skills/ce-review/scripts/validate-review.mjs" -print 2>/dev/null)')
+      .replace(/  if .*REVIEW_HELPER_CACHE.*/m, '  if [[ "$helper_source" =~ /systematic@([0-9]+\\.[0-9]+\\.[0-9]+)/ ]]; then');
+    writeFileSync(unanchoredScript, unanchored
+      .replace('SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"', `SCRIPT_DIR="${resolve(repoRoot, "scripts")}"`)
+      .replace('source "$SCRIPT_DIR/secure-launcher.conf"', 'source "$SCRIPT_DIR/secure-launcher.conf"\nNONO_BIN="/bin/true"'), { mode: 0o755 });
+    const reverted = spawnSync("bash", [unanchoredScript, "--apply"], { encoding: "utf8", env: { ...process.env, HOME: home, BROKER_STATE_DIR: stateDir } });
+    expect(reverted.status, reverted.stderr + reverted.stdout).toBe(0);
+    expect(reverted.stdout).toContain("selected 9.99.99");
+    expect(readFileSync(destination(stateDir))).toEqual(readFileSync(decoy));
   });
 });
