@@ -10,6 +10,7 @@
  */
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { DEFAULT_REVIEW_RUN_CAPS } from "./review-run.ts";
 
 export const BROKER_VERSION = 1;
 
@@ -113,6 +114,25 @@ export interface RoleModelsConfig {
 export interface BrokerConfig {
   socketPath: string;
   stateDir: string;
+  /**
+   * Broker-private review-run store root (review-run-foundation U1b-1).
+   * Defaults to <stateDir>/review-runs, a directory the confined OpenCode
+   * profile does NOT grant; see docs/review-run-store.md for the probe that
+   * establishes confinement (the broker does not assert it).
+   */
+  reviewRunRoot: string;
+  /**
+   * Canonical prefixes a review-run store root must not sit under (mirrors the
+   * profile's agent-writable entries); the effective $TMPDIR is always refused
+   * independently of this list.
+   */
+  reviewRunDeniedPrefixes: string[];
+  /** Whole-run byte cap; enforced before publication, never truncates. */
+  reviewRunMaxBytes: number;
+  /** Single-artifact byte cap; exactly-at-cap is accepted. */
+  reviewRunMaxFileBytes: number;
+  /** Maximum review runs per owning session. */
+  reviewRunMaxPerSession: number;
   /** Optional JSONL log file; defaults to stdout (§26). */
   logPath?: string;
   msbBinary: string;
@@ -320,6 +340,22 @@ export function defaultConfig(
   const cfg: BrokerConfig = {
     socketPath: join(runtimeDir, "opencode-sandbox-broker.sock"),
     stateDir,
+    reviewRunRoot: resolve(
+      process.env.BROKER_REVIEW_RUN_ROOT ?? join(stateDir, "review-runs"),
+    ),
+    reviewRunDeniedPrefixes: [],
+    reviewRunMaxBytes: positiveIntEnv(
+      "BROKER_REVIEW_RUN_MAX_BYTES",
+      DEFAULT_REVIEW_RUN_CAPS.maxBytes,
+    ),
+    reviewRunMaxFileBytes: positiveIntEnv(
+      "BROKER_REVIEW_RUN_MAX_FILE_BYTES",
+      DEFAULT_REVIEW_RUN_CAPS.maxFileBytes,
+    ),
+    reviewRunMaxPerSession: positiveIntEnv(
+      "BROKER_REVIEW_RUN_MAX_PER_SESSION",
+      DEFAULT_REVIEW_RUN_CAPS.maxPerSession,
+    ),
     logPath: process.env.BROKER_LOG_FILE,
     msbBinary: process.env.MSB_BINARY ?? "/home/james/.local/bin/msb",
     workerImage: process.env.MSB_WORKER_IMAGE ?? "debian",

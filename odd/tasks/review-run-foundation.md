@@ -91,6 +91,11 @@ Effective mode at route entry: **on**, deciding source **global** (read 2026-10-
 
 ## Progress
 - 2026-10-16 — tracker created. U1b-1 not started.
+- 2026-10-16 — U1b-1 implemented (T1–T6), NOT committed; `broker/src/**` is S17, so the result installs only through the approval-gated host path. Files: `broker/src/review-run.ts` (new), `broker/src/config.ts` (`reviewRunRoot`, `reviewRunDeniedPrefixes`, `reviewRunMaxBytes`, `reviewRunMaxFileBytes`, `reviewRunMaxPerSession`), `broker/tests/review-run.test.ts` (new, 17 tests), `docs/review-run-store.md` (root choice, confinement probe, denied-prefix mirror). Observed: focused `bun --cwd broker test tests/review-run.test.ts --reporter=dot` → 17 pass / 0 fail (RED observed first: `Cannot find module '../src/review-run.ts'`, 0 pass / 1 fail); full `bun --cwd broker test --reporter=dot` → 944 pass / 0 fail (baseline 927 + 17); from `broker`, `bun build --target=bun src/main.ts` → bundled 28 modules, exit 0. Guard-removal verification: 16 guards (runId grammar, 3 store-root refusals, per-file cap, exactly-at-cap boundary, per-run cap, session quota, temp cleanup, rename-after-temp ordering, file mode, dir mode, digest+bytes, byte-exact write, evidence grammar, canonical containment) were each temporarily reverted; the named test failed every time and the source was restored byte-identical.
+- U1b-2 (T7–T11) and U1b-3 (T12–T13) not started; no model-facing host tool introduced.
+
+## Review-size exception
+- **U1b-1** — 955 authored changed lines and 39.9 KiB authored patch versus the per-commit cap of 400 authored lines. Owner-approved 2026-10-16, landed as one commit. Technical reason: `broker/src/review-run.ts` is 470 lines of irreducible module (nine typed refusals, canonical boundary-aware containment, atomic publication, byte caps, per-session quota, run metadata) and `broker/tests/review-run.test.ts` is 330 lines of real-filesystem tests; no faithful subset of this module plus its guards' tests fits 400 lines, and thinning the module to fit would delete guards rather than slice behaviour. The byte budget (100 KiB) is comfortably met at 39.9 KiB.
 
 ## Next step
-T1: implement run identity and the private run store, test-first, with the §T2 privacy refusal in place before any store path is written.
+U1b-2 (T7): pinned helper identity — broker config carries `{ helperPath, helperSha256 }`, verified as a regular file with a matching sha256 before every helper run, never resolved from the agent-writable package cache.
