@@ -392,7 +392,10 @@ describe("gitCommit cross-session applied result", () => {
     };
     const op = buildGitCommitOp(makeCtx(spawn, records));
     const req = request({ projectDir: projectRoot, message: "fix: delegated", sandboxSessionID: "worker-7" });
-    await expect(op(req)).rejects.toThrow("temporary hook failure");
+    const firstFailure = op(req);
+    await expect(firstFailure).rejects.toThrow("temporary hook failure");
+    // O6: the failure message names the real subcommand, not the leading `-c`.
+    await expect(firstFailure).rejects.toThrow(/git commit failed \(commit\)/);
     expect(records["worker-7"]?.pendingCommit).toEqual({ resultCommit: installedCommit, parentCommit });
     const retry = (await op(req)) as { committed?: boolean; committedCommit?: string };
     expect(retry.committed).toBe(true);

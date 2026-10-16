@@ -109,6 +109,73 @@ read-write it stops at `materialization_unavailable`; with `<project>/.git`
 read-write it materializes the provider prompt. The project tree itself is
 never granted read-write, and unrelated profile entries are never rewritten.
 
+**Analyzed risk — which mechanisms execute, and under what subcommand.** A
+confined agent that can write `<project>/.git` can plant command execution that
+the unconfined broker's host `git` then runs. Path scoping does NOT mitigate
+this: these keys are repository-global, independent of which paths a subcommand
+touches (§30).
+
+| repository-local mechanism | executes under |
+|---|---|
+| `.git/hooks/*` (`pre-commit`, `commit-msg`, `post-commit`, `post-index-change`, `fsmonitor-watchman`, ...) | `commit`, `add`, `push`, `merge`, `rebase`, ... |
+| `core.hooksPath` | any hook-running subcommand |
+| `core.fsmonitor` (command form) | `status`, `add`, `diff`, `commit` (index refresh) |
+| `filter.<name>.clean`/`smudge`/`process` | `add`/`checkout`/`diff` on matching paths |
+| `diff.<name>.command` / `diff.<name>.textconv` | `diff` |
+| `include.path` / `includeIf.*.path` | any config read |
+| `core.gitProxy`, `core.sshCommand`, `core.editor`, `core.askpass`, `credential.helper`, `merge.<name>.driver`, `gpg.program`, `submodule.<name>.command`, `sequence.editor` | `fetch`/`push`, merges, commits, tag signing, submodule ops |
+| `remote.<name>.url` helper forms (`ext::`, `!cmd`), `remote.<name>.receivepack`/`uploadpack`/`vcs`, `url.<base>.insteadOf` | `push`, `fetch` |
+
+**Mitigations (at the `spawnArgv` choke point, `broker/src/gitguard.ts`).**
+
+1. **Neutralized with command-line `-c`** (highest config precedence, so a
+   repository-local value cannot win): `core.hooksPath=/dev/null`,
+   `core.fsmonitor=false`, `core.pager=cat`. A caller-supplied `-c`/`-C` in the
+   global-option region that would defeat the splice or desync the guard is
+   itself refused.
+2. **Refused fail-closed** (git has no command-line "unset"): execution-bearing
+   subcommands are refused when the repository-local config carries an execution
+   key (filters, diff drivers, include chains, ssh/editor/proxy/helper/merge/
+   submodule/gpg), and remote-touching subcommands (`push`, `fetch`) are refused
+   when a remote URL uses the `ext::`/`!` helper forms or a non-allowlisted
+   transport, when `remote.*.receivepack|uploadpack|vcs` is set, or when a
+   `url.*.insteadOf`/`pushInsteadOf` rewrite exists. Allowed transports are
+   `https://`, `http://`, `ssh://`, `git://`, `file://`, and scp-style
+   `user@host:path`; `remote.*.url` is NOT blanket-refused (this repo's own
+   `remote.origin.url` is `https://…`).
+
+**SCOPED posture and rationale.** The user's global/system git config is trusted
+and NOT agent-writable, so it is left in force (`GIT_CONFIG_NOSYSTEM`/
+`GIT_CONFIG_GLOBAL` are deliberately not used): globally configured
+`credential.helper`, `url.*.insteadOf`, `core.sshCommand` and `commit.gpgsign`
+keep working. Only REPOSITORY-LOCAL keys — the ones the agent can actually
+write — are neutralized or refused. The guard never invokes git; it reads the
+repository-local config as text so it cannot become a vector.
+
+**Honest consequence.** A repository that legitimately carries a local
+refused-class key (for example a tool that wrote a repo-local
+`filter.<name>.clean`, or a local `credential.helper`) now REFUSES every guarded
+subcommand rather than executing. That is the intended fail-closed posture, not
+a regression; remediation is to move the driver to the trusted global config or
+remove the local key. Note the asymmetry: a GLOBALLY scoped LFS filter driver
+keeps working; only a repository-LOCAL one is refused.
+
+**Residual risks.**
+- **TOCTOU between the guard's read and git's read.** The refusal is
+  timing-dependent: the guard stats/reads the config, then `git` re-reads it. An
+  agent that can rewrite `.git/config` in that window could swap a safe key for
+  an execution key after the check. The `-c` NEUTRALIZATIONS are not
+  timing-dependent (command-line precedence beats any later file value), so the
+  hook/fsmonitor/pager vectors close regardless of the race; the refused-class
+  keys retain this window.
+- **Remote-transport allowlist is policy.** `git://` and `http://` are allowed
+  as benign transports; they are unauthenticated/unencrypted, a
+  transport-security choice outside this guard's scope.
+- **Guard/child environment invariant.** The guard resolves the repository from
+  the SAME effective environment the child receives
+  (`{ ...process.env, ...opts.env }`, including inherited `GIT_DIR`/
+  `GIT_COMMON_DIR`); if that merge ever diverges, a refusal can fail open.
+
 Registration never creates `.git`: a synthesized `.git` would be a broken Git
 directory. `git init -b main` runs before the profile writers, so `.git`
 normally exists; when it does not, the grant is skipped with a warning because
@@ -167,6 +234,15 @@ session spoofing (plugin-supplied sessionID) · cross-session access ·
 worker reuse · result-bundle attacks (malformed bundles, ref smuggling) ·
 malicious Git objects · submodules · symlink result application · S17
 self-modification · OpenCode permission bypass · failure-open behaviour.
+
+Host-git (unconfined broker, not worker-scoped): repository-local
+`.git/config` execution keys the broker's host `git` would honor — hooks,
+`core.hooksPath`, `core.fsmonitor`, filters, diff drivers, `include.*`,
+`credential.helper`, ssh/editor/proxy/merge drivers — and remote transports
+(`ext::`, `!cmd`, `remote.*.receivepack|uploadpack|vcs`,
+`url.*.insteadOf`); the `-c` neutralizations and the fail-closed refusal in
+`broker/src/gitguard.ts`; the guard-vs-child environment invariant
+(`GIT_DIR`/`GIT_COMMON_DIR`); and the guard-read / git-read TOCTOU window.
 
 Each finding: severity (high/critical must be resolved before final
 acceptance, §29), evidence, suggested fix, owning gate.

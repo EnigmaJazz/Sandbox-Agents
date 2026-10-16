@@ -20,10 +20,30 @@
  *     drivers. Git has no command-line "unset", so the only safe action is to
  *     not spawn at all.
  *
+ *  3. REFUSE (fail closed) a remote-touching subcommand (`push`, `fetch`) whose
+ *     repository-local config carries a remote-helper/shell transport
+ *     (`ext::`, `!cmd`), a non-allowlisted transport, a remote
+ *     `receivepack`/`uploadpack`/`vcs`, or a `url.*.insteadOf` rewrite.
+ *
+ * A caller-supplied `-c`/`-C` in the global-option region that would defeat the
+ * neutralization or desync the guard is itself refused.
+ *
  * Scoped posture: the user's global/system config is trusted and NOT
  * agent-writable, so `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL` are deliberately
  * NOT used. Globally configured `credential.helper`, `url.*.insteadOf`,
- * `core.sshCommand`, LFS filter drivers and `commit.gpgsign` keep working.
+ * `core.sshCommand` and `commit.gpgsign` keep working.
+ *
+ * The LFS claim needs care: a filter driver keeps working ONLY when it is
+ * GLOBALLY scoped (for example `git lfs install` writes `filter.lfs.clean` /
+ * `filter.lfs.process` to the user's global config). A REPOSITORY-LOCAL
+ * `filter.<name>.clean`/`smudge`/`process` is not neutralizable by `-c` and is
+ * refused, so a repository whose own tooling wrote a local filter driver (or a
+ * local `diff.<name>.command`, `credential.helper`, editor, ...) now refuses
+ * every guarded subcommand. That refusal is the INTENDED fail-closed posture,
+ * not a regression. Two remediation paths: move the driver to the trusted
+ * global config (`git config --global <key> <value>`), or remove the local key
+ * (`git config --local --unset <key>`). There is no per-invocation override,
+ * deliberately: an override would reopen the vector.
  *
  * The guard never invokes git: it reads the repository-local config as text so
  * it cannot itself become a vector.
@@ -61,6 +81,30 @@ export const GIT_NEUTRALIZE_FLAGS: readonly string[] = [
   "-c",
   "core.pager=cat",
 ];
+
+/**
+ * Keys the splice neutralizes with `-c`. A caller argv carrying `-c <key>`
+ * would land AFTER the spliced flags (later `-c` wins), defeating the
+ * neutralization, so it is refused before spawn (native review R4-004).
+ */
+const GIT_NEUTRALIZED_KEYS: ReadonlySet<string> = new Set([
+  "core.hookspath",
+  "core.fsmonitor",
+  "core.pager",
+]);
+
+/**
+ * Repository-local keys with no command-line "unset". A caller `-c <key>`
+ * could supply a benign value that masks a refused local key (the guard reads
+ * the file, git reads the last `-c`), so it is refused too (R4-004).
+ */
+const GIT_UNSETTABLE_KEYS: ReadonlySet<string> = new Set([
+  "core.attributesfile",
+  "core.excludesfile",
+]);
+
+/** Subcommands whose git process reads remote configuration (O3 guard). */
+const GIT_REMOTE_SUBCOMMANDS: ReadonlySet<string> = new Set(["push", "fetch"]);
 
 /**
  * Subcommands that can execute a repository-local command (hooks, filters,
@@ -141,16 +185,58 @@ export function gitSubcommand(argv: readonly string[]): string | null {
  */
 export function hardenGitArgv(
   argv: readonly string[],
-  opts: { cwd?: string; env?: Record<string, string> } = {},
+  opts: { cwd?: string; env?: Record<string, string | undefined> } = {},
 ): readonly string[] {
   const binary = argv[0];
   if (binary === undefined || !isGitBinary(binary)) return argv;
-  const { subcommand } = findGitSubcommand(argv);
+  const { index, subcommand } = findGitSubcommand(argv);
   if (subcommand === null) return argv;
+  // A caller `-c <neutralized-key>` would land after our spliced flags (later
+  // `-c` wins) and a caller `-C` would desync the guard from the repository git
+  // reads: refuse both before spawn (R4-004).
+  assertNoCallerConfigOverride(argv, index, subcommand);
   if (GIT_EXECUTION_SUBCOMMANDS.has(subcommand)) {
     assertRepositoryLocalConfigSafe(opts.cwd, opts.env);
   }
+  if (GIT_REMOTE_SUBCOMMANDS.has(subcommand)) {
+    assertRemoteTransportSafe(opts.cwd, opts.env);
+  }
   return [binary, ...GIT_NEUTRALIZE_FLAGS, ...argv.slice(1)];
+}
+
+/**
+ * Refuse a caller-supplied global override that could defeat the `-c`
+ * neutralization (R4-004). Only the GLOBAL-OPTION region before the subcommand
+ * is inspected, so `git commit -C <commit>` (a subcommand option, not a global
+ * chdir) is never misfired on. `-c user.name`/`-c user.email` are not
+ * neutralized keys and keep working.
+ */
+export function assertNoCallerConfigOverride(
+  argv: readonly string[],
+  subcommandIndex: number,
+  subcommand: string,
+): void {
+  for (let index = 1; index < subcommandIndex; index += 1) {
+    const token = argv[index];
+    if (token === "-C") {
+      throw new GitGuardError(
+        `refusing caller-supplied '-C' on git subcommand '${subcommand}': it can redirect the guard away from the repository git will read`,
+      );
+    }
+    if (token === "-c") {
+      const pair = argv[index + 1];
+      if (pair === undefined) break;
+      const eq = pair.indexOf("=");
+      const key = (eq < 0 ? pair : pair.slice(0, eq)).toLowerCase();
+      if (GIT_NEUTRALIZED_KEYS.has(key) || GIT_UNSETTABLE_KEYS.has(key)) {
+        throw new GitGuardError(
+          `refusing caller-supplied '-c ${key}=...' on git subcommand '${subcommand}': it would override the broker's neutralization or mask a refused repository-local key`,
+          key,
+        );
+      }
+      index += 1;
+    }
+  }
 }
 
 /**
@@ -159,7 +245,7 @@ export function hardenGitArgv(
  */
 export function assertRepositoryLocalConfigSafe(
   cwd: string | undefined,
-  env: Record<string, string> | undefined,
+  env: Record<string, string | undefined> | undefined,
 ): void {
   const gitDir = resolveGitDir(cwd, env);
   if (gitDir === null) {
@@ -167,7 +253,7 @@ export function assertRepositoryLocalConfigSafe(
       "refusing execution-bearing git command: repository git directory could not be resolved",
     );
   }
-  const commonDir = resolveCommonDir(gitDir);
+  const commonDir = resolveCommonDir(gitDir, cwd ?? process.cwd(), env);
   for (const file of localConfigFiles(commonDir, gitDir)) {
     const text = readConfigText(file);
     if (text === null) continue;
@@ -175,6 +261,39 @@ export function assertRepositoryLocalConfigSafe(
     if (key !== null) {
       throw new GitGuardError(
         `refusing execution-bearing git command: repository-local config defines '${key}' in ${file}`,
+        key,
+        file,
+      );
+    }
+  }
+}
+
+/**
+ * Value-aware remote-transport guard (O3). `-c` cannot unset a remote URL and
+ * every real repository stores one, so instead of neutralizing, this REFUSES
+ * before an execution-bearing remote subcommand when the repository-local
+ * config defines a remote-helper/shell transport, a non-allowlisted transport,
+ * a remote `receivepack`/`uploadpack`/`vcs`, or a `url.*.insteadOf` rewrite.
+ * Plain `https`/`ssh`/`file` remotes (this repo's own origin) pass.
+ */
+export function assertRemoteTransportSafe(
+  cwd: string | undefined,
+  env: Record<string, string | undefined> | undefined,
+): void {
+  const gitDir = resolveGitDir(cwd, env);
+  if (gitDir === null) {
+    throw new GitGuardError(
+      "refusing remote-transport git command: repository git directory could not be resolved",
+    );
+  }
+  const commonDir = resolveCommonDir(gitDir, cwd ?? process.cwd(), env);
+  for (const file of localConfigFiles(commonDir, gitDir)) {
+    const text = readConfigText(file);
+    if (text === null) continue;
+    const key = findUnsafeRemoteKey(text);
+    if (key !== null) {
+      throw new GitGuardError(
+        `refusing remote-transport git command: repository-local config defines '${key}' in ${file}`,
         key,
         file,
       );
@@ -255,7 +374,24 @@ export interface GitConfigKey {
  * subsections are lowercased too so a case variant cannot evade the match.
  */
 export function parseLocalConfigKeys(text: string): GitConfigKey[] {
-  const keys: GitConfigKey[] = [];
+  return parseLocalConfigValues(text).map(({ section, subsection, key }) => ({
+    section,
+    subsection,
+    key,
+  }));
+}
+
+export interface GitConfigEntry extends GitConfigKey {
+  /** Raw value after `=`, trimmed with one layer of outer quotes removed. */
+  value: string;
+}
+
+/**
+ * Like {@link parseLocalConfigKeys} but also captures each key's value. Used by
+ * the value-aware remote-transport guard, which must inspect URLs.
+ */
+export function parseLocalConfigValues(text: string): GitConfigEntry[] {
+  const entries: GitConfigEntry[] = [];
   let section = "";
   let subsection: string | null = null;
   const lines = text.split("\n");
@@ -278,9 +414,71 @@ export function parseLocalConfigKeys(text: string): GitConfigKey[] {
     if (section.length === 0) continue;
     const key = parseKeyLine(trimmed);
     if (key === null) continue;
-    keys.push({ section, subsection, key });
+    const eq = indexOfUnquoted(trimmed, "=");
+    const raw = eq < 0 ? "" : trimmed.slice(eq + 1).trim();
+    entries.push({ section, subsection, key, value: unquote(raw) });
   }
-  return keys;
+  return entries;
+}
+
+function unquote(value: string): string {
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    return unescape(value.slice(1, -1));
+  }
+  return value;
+}
+
+/** Benign transports: an explicit allowlisted scheme, or scp-style `host:path`. */
+const GIT_ALLOWED_TRANSPORT_RE = /^(?:https?|ssh|git|file):\/\//i;
+
+/**
+ * True when `value` is a remote URL using an explicitly allowlisted transport
+ * (`https://`, `http://`, `ssh://`, `git://`, `file://`) or scp-style
+ * `[user@]host:path`. Anything else — the `ext::` remote-helper form, a `!cmd`
+ * shell form, or an unknown scheme — is refused.
+ */
+export function isAllowedRemoteTransport(value: string): boolean {
+  const v = value.trim();
+  if (v.length === 0) return false;
+  if (GIT_ALLOWED_TRANSPORT_RE.test(v)) return true;
+  if (v.startsWith("!")) return false;
+  const colon = v.indexOf(":");
+  if (colon <= 0) return false;
+  const host = v.slice(0, colon);
+  const rest = v.slice(colon + 1);
+  if (rest.length === 0 || rest.startsWith(":") || rest.startsWith("//") || v.includes("::")) {
+    return false;
+  }
+  if (host.includes("/") || host.includes(" ") || host.includes("\\")) return false;
+  return true;
+}
+
+/**
+ * First unsafe remote-transport key in a config text, or null. Pure. Matches
+ * every occurrence: git uses the last value, so matching ANY is fail-closed.
+ */
+export function findUnsafeRemoteKey(text: string): string | null {
+  for (const entry of parseLocalConfigValues(text)) {
+    const { section, subsection, key, value } = entry;
+    if (subsection === null) continue;
+    if (section === "url" && (key === "insteadof" || key === "pushinsteadof")) {
+      return `url.${subsection}.${key}`;
+    }
+    if (section === "remote") {
+      if (key === "receivepack" || key === "uploadpack" || key === "vcs") {
+        return `remote.${subsection}.${key}`;
+      }
+      if ((key === "url" || key === "pushurl") && !isAllowedRemoteTransport(value)) {
+        return `remote.${subsection}.${key} (${bounded(value)})`;
+      }
+    }
+  }
+  return null;
+}
+
+function bounded(value: string): string {
+  const v = value.trim();
+  return v.length > 60 ? `${v.slice(0, 60)}…` : v;
 }
 
 // ---------------------------------------------------------------------------
@@ -354,7 +552,7 @@ function unescape(value: string): string {
 
 function resolveGitDir(
   cwd: string | undefined,
-  env: Record<string, string> | undefined,
+  env: Record<string, string | undefined> | undefined,
 ): string | null {
   const base = cwd ?? process.cwd();
   const fromEnv = env?.GIT_DIR;
@@ -375,7 +573,16 @@ function resolveGitDir(
   return isDirectory(dir) ? dir : null;
 }
 
-function resolveCommonDir(gitDir: string): string {
+function resolveCommonDir(
+  gitDir: string,
+  base: string,
+  env: Record<string, string | undefined> | undefined,
+): string {
+  const fromEnv = env?.GIT_COMMON_DIR;
+  if (fromEnv !== undefined && fromEnv.length > 0) {
+    const dir = isAbsolute(fromEnv) ? fromEnv : resolve(base, fromEnv);
+    return isDirectory(dir) ? dir : gitDir;
+  }
   const pointer = join(gitDir, "commondir");
   const stats = statForGuard(pointer);
   if (stats === null || !stats.isFile()) return gitDir;
