@@ -547,6 +547,8 @@ function normalizeObjectId(value: string | undefined, field: string): string | n
 export interface ReviewHelperPinConfig {
   reviewHelperPath: string | null;
   reviewHelperSha256: string | null;
+  /** Test seam for deterministic filesystem failure classification. */
+  lstat?: typeof lstatSync;
 }
 
 export interface PinnedReviewHelper {
@@ -606,9 +608,28 @@ export function assertPinnedReviewHelper(cfg: ReviewHelperPinConfig): PinnedRevi
   const resolved = resolve(configuredPath);
   let stat: ReturnType<typeof lstatSync>;
   try {
-    stat = lstatSync(resolved);
-  } catch {
-    throw new ReviewHelperMissingError(`review helper does not exist: ${resolved}`);
+    stat = (cfg.lstat ?? lstatSync)(resolved);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "ENOENT") {
+      throw new ReviewHelperMissingError(`review helper does not exist: ${resolved}`);
+    }
+    if (code === "EACCES" || code === "EPERM") {
+      throw new ReviewRunError(
+        "review_helper_unreadable",
+        `review helper exists but is not readable: ${resolved} (${code})`,
+      );
+    }
+    if (code === "ENOTDIR") {
+      throw new ReviewRunError(
+        "review_helper_path_component_not_directory",
+        `review helper path has a component that is not a directory: ${resolved}`,
+      );
+    }
+    throw new ReviewRunError(
+      "review_helper_lstat_unexpected",
+      `review helper lstat failed unexpectedly for ${resolved} (code: ${typeof code === "string" ? code : "missing"})`,
+    );
   }
   if (!stat.isFile()) {
     throw new ReviewHelperNotRegularError(
@@ -873,6 +894,10 @@ export interface ReadRunArtifactOptions {
    * false, so an ordinary artifact read can never fetch the record.
    */
   allowRecord?: boolean;
+  /** Override O_NOFOLLOW for deterministic capability testing; null means absent. */
+  noFollowFlag?: number | null;
+  /** Test seam for proving capability refusals occur before open. */
+  open?: typeof openSync;
 }
 
 export interface ReadReviewRunArtifact {
@@ -912,12 +937,24 @@ export function readRunArtifact(opts: ReadRunArtifactOptions): ReadReviewRunArti
       `review run artifact ${show(name)} resolves outside its run directory`,
     );
   }
-  const noFollow = constants.O_NOFOLLOW ?? 0;
+  const noFollow = opts.noFollowFlag === undefined ? constants.O_NOFOLLOW : opts.noFollowFlag;
+  if (noFollow === undefined || noFollow === null || !Number.isSafeInteger(noFollow) || noFollow <= 0) {
+    throw new ReviewRunError(
+      "review_run_artifact_no_follow_unavailable",
+      `review run artifact ${show(name)} cannot be opened safely: no-follow capability is unavailable`,
+    );
+  }
   let fd: number;
   try {
-    fd = openSync(target, constants.O_RDONLY | noFollow);
+    fd = (opts.open ?? openSync)(target, constants.O_RDONLY | noFollow);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EINVAL") {
+      throw new ReviewRunError(
+        "review_run_artifact_no_follow_unavailable",
+        `review run artifact ${show(name)} cannot be opened safely: no-follow capability is unusable`,
+      );
+    }
     if (code === "ELOOP") {
       throw new ReviewRunArtifactSymlinkError(
         `review run artifact ${show(name)} is a symlink; refusing to follow it`,

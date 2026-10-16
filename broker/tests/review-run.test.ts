@@ -15,6 +15,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -495,6 +496,38 @@ describe("pinned helper identity", () => {
     expect(err).toBeInstanceOf(ReviewHelperMissingError);
   });
 
+  test.each([
+    ["EACCES", "review_helper_unreadable", "not readable"],
+    ["EPERM", "review_helper_unreadable", "not readable"],
+    ["ENOTDIR", "review_helper_path_component_not_directory", "component that is not a directory"],
+    ["EIO", "review_helper_lstat_unexpected", "unexpectedly"],
+    [undefined, "review_helper_lstat_unexpected", "unexpectedly"],
+  ])("lstat failure %s has its own refusal", (code, expectedCode, phrase) => {
+    const path = "/synthetic/helper.js";
+    const err = catchError(() => assertPinnedReviewHelper({
+      reviewHelperPath: path,
+      reviewHelperSha256: "a".repeat(64),
+      lstat: () => { throw Object.assign(new Error("synthetic"), { code }); },
+    } as never));
+    expect(err).toBeInstanceOf(ReviewRunError);
+    expect((err as ReviewRunError & { code: string }).code).toBe(expectedCode);
+    expect(err.message).toContain(phrase);
+    expect(err.message).toContain(path);
+    if (code !== undefined && code !== "ENOTDIR") expect(err.message).toContain(code);
+  });
+
+  test("ENOTDIR comes from a real regular-file path component", () => {
+    const base = tempBase("helper-enotdir");
+    const component = join(base, "not-a-directory");
+    writeFileSync(component, "file");
+    const err = catchError(() => assertPinnedReviewHelper({
+      reviewHelperPath: join(component, "helper.js"),
+      reviewHelperSha256: "a".repeat(64),
+    }));
+    expect((err as ReviewRunError & { code: string }).code).toBe("review_helper_path_component_not_directory");
+    expect(err.message).toContain(join(component, "helper.js"));
+  });
+
   test("a directory in place of the helper is refused as not a regular file", () => {
     const dir = tempBase("helper-dir");
     const err = catchError(() =>
@@ -678,6 +711,57 @@ describe("retention, expiry and recovery", () => {
     expect(summary.pruned.every((p) => p.reason === "over-bound")).toBe(true);
   });
 
+  test.each(["missing", "unparseable"] as const)("prune reports a %s metadata run as expired with null state", (kind) => {
+    const { store, writer } = makePublishedRun(`sess-corrupt-${kind}`);
+    const now = Date.now();
+    const metadata = join(writer.runDir, "metadata.json");
+    if (kind === "missing") rmSync(metadata);
+    else writeFileSync(metadata, "{");
+    ageRun(writer.runDir, 8 * DAY, now);
+    const summary = pruneReviewRuns({ root: store.root, ttlMs: 7 * DAY, maxRuns: 64, now });
+    expect(summary.pruned).toContainEqual({
+      sessionID: writer.record.sessionID,
+      runId: writer.record.runId,
+      reason: "expired",
+      state: null,
+    });
+    expect(lstatExists(writer.runDir)).toBe(false);
+  });
+
+  test.each(["missing", "unparseable"] as const)("prune removes a %s metadata run only when globally over bound", (kind) => {
+    const store = makeStore();
+    const writer = store.createRun(`sess-bound-corrupt-${kind}`);
+    writer.publish();
+    const metadata = join(writer.runDir, "metadata.json");
+    if (kind === "missing") rmSync(metadata);
+    else writeFileSync(metadata, "{");
+    const now = Date.now();
+    ageRun(writer.runDir, DAY, now);
+    const summary = pruneReviewRuns({ root: store.root, ttlMs: 7 * DAY, maxRuns: 0, now });
+    expect(summary.pruned).toContainEqual({
+      sessionID: writer.record.sessionID,
+      runId: writer.record.runId,
+      reason: "over-bound",
+      state: null,
+    });
+    expect(lstatExists(writer.runDir)).toBe(false);
+  });
+
+  test.each(["missing", "unparseable"] as const)("recovery skips a %s metadata run and leaves it intact", (kind) => {
+    const store = makeStore();
+    const writer = store.createRun(`sess-recovery-corrupt-${kind}`);
+    const metadata = join(writer.runDir, "metadata.json");
+    if (kind === "missing") rmSync(metadata);
+    else writeFileSync(metadata, "{");
+    const now = Date.now();
+    ageRun(writer.runDir, 8 * DAY, now);
+    const summary = recoverInterruptedRuns({ root: store.root, ttlMs: 7 * DAY, now });
+    expect(summary.recovered).not.toContainEqual({ sessionID: writer.record.sessionID, runId: writer.record.runId });
+    expect(summary.recovered).toEqual([]);
+    expect(lstatExists(writer.runDir)).toBe(true);
+    expect(lstatExists(metadata)).toBe(kind === "unparseable");
+  });
+
   test("the per-session quota behaviour is unchanged after a prune", () => {
     const store = makeStore({ caps: { maxPerSession: 1 } });
     const writer = store.createRun("sess-quota-retained");
@@ -738,6 +822,36 @@ describe("race-resistant read helper", () => {
     symlinkSync(join(runDir, "real.txt"), join(runDir, "alias.txt"));
     const err = catchError(() => readRunArtifact({ runDir, name: "alias.txt", maxFileBytes: 1024 }));
     expect(err).toBeInstanceOf(ReviewRunArtifactSymlinkError);
+  });
+
+  test("missing no-follow capability refuses before open", () => {
+    const runDir = tempBase("read-no-follow-absent");
+    writeArtifact(runDir, "note.txt", "payload");
+    let opens = 0;
+    const err = catchError(() => readRunArtifact({
+      runDir,
+      name: "note.txt",
+      maxFileBytes: 1024,
+      noFollowFlag: null,
+      open: ((...args: Parameters<typeof openSync>) => { opens += 1; return openSync(...args); }) as typeof openSync,
+    }));
+    expect(opens).toBe(0);
+    expect(err).toBeInstanceOf(ReviewRunError);
+    expect((err as ReviewRunError & { code: string }).code).toBe("review_run_artifact_no_follow_unavailable");
+    expect(err.message).toContain("no-follow");
+  });
+
+  test("an unusable no-follow flag is a named refusal", () => {
+    const runDir = tempBase("read-no-follow-unusable");
+    writeArtifact(runDir, "note.txt", "payload");
+    const err = catchError(() => readRunArtifact({
+      runDir,
+      name: "note.txt",
+      maxFileBytes: 1024,
+      open: (() => { throw Object.assign(new Error("unsupported flag"), { code: "EINVAL" }); }) as typeof openSync,
+    }));
+    expect((err as ReviewRunError & { code: string }).code).toBe("review_run_artifact_no_follow_unavailable");
+    expect(err.message).toContain("no-follow capability is unusable");
   });
 
   test("a directory in place of a file is refused as not a regular file", () => {
