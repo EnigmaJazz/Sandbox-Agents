@@ -25,6 +25,7 @@ import { join } from "node:path";
 import {
   DEFAULT_REVIEW_RUN_CAPS,
   ReviewRunCapError,
+  ReviewRunError,
   ReviewRunEvidenceError,
   ReviewRunFileCapError,
   ReviewRunIdError,
@@ -307,6 +308,58 @@ describe("run metadata", () => {
     const err = catchError(() => store.createRun("sess-badevidence", { baseObjectId: "HEAD" }));
     expect(err).toBeInstanceOf(ReviewRunEvidenceError);
     expect(err.message).toContain("baseObjectId");
+  });
+});
+
+describe("reserved run-record name", () => {
+  test("an artifact named exactly like the run record is refused, naming both names", () => {
+    const store = makeStore();
+    const writer = store.createRun("sess-reserved");
+    const err = catchError(() => writer.addArtifact("metadata.json", "hijack"));
+    expect(err).toBeInstanceOf(ReviewRunError);
+    expect((err as ReviewRunError).code).toBe("review_run_artifact_name_reserved");
+    expect(err.message).toContain("metadata.json");
+    // Nothing was published: the run directory still holds only the record.
+    expect(readdirSync(writer.runDir)).toEqual(["metadata.json"]);
+  });
+
+  test("a case variant of the reserved name is refused (case-insensitive filesystems)", () => {
+    const store = makeStore();
+    const writer = store.createRun("sess-reserved-case");
+    const err = catchError(() => writer.addArtifact("Metadata.json", "hijack"));
+    expect(err).toBeInstanceOf(ReviewRunError);
+    expect((err as ReviewRunError).code).toBe("review_run_artifact_name_reserved");
+    expect(err.message).toContain("Metadata.json");
+    expect(err.message).toContain("metadata.json");
+  });
+
+  test("after a reserved-name refusal the run record still matches the files on disk", () => {
+    const store = makeStore();
+    const writer = store.createRun("sess-reserved-intact");
+    writer.addArtifact("payload.bin", Buffer.from("real"));
+    catchError(() => writer.addArtifact("metadata.json", Buffer.from("hijack")));
+    writer.publish();
+
+    const names = readdirSync(writer.runDir).sort();
+    expect(names).toEqual(["metadata.json", "payload.bin"]);
+    const meta = JSON.parse(readFileSync(join(writer.runDir, "metadata.json"), "utf8")) as {
+      artifacts: { name: string }[];
+    };
+    const recorded = meta.artifacts.map((a) => a.name);
+    expect(recorded).toEqual(["payload.bin"]);
+    expect(recorded).toEqual(names.filter((n) => n !== "metadata.json"));
+  });
+
+  test("a name that merely contains the reserved name is accepted (no includes() false positive)", () => {
+    const store = makeStore();
+    const writer = store.createRun("sess-reserved-contains");
+    expect(() => writer.addArtifact("metadata.json.bak", "x")).not.toThrow();
+    expect(() => writer.addArtifact("mymetadata.json", "y")).not.toThrow();
+    expect(readdirSync(writer.runDir).sort()).toEqual([
+      "metadata.json",
+      "metadata.json.bak",
+      "mymetadata.json",
+    ]);
   });
 });
 

@@ -48,6 +48,23 @@ const REVIEW_RUN_ARTIFACT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 /** Persisted run record name inside a run directory. */
 export const REVIEW_RUN_METADATA_NAME = "metadata.json";
 
+/**
+ * File names reserved inside a run directory; an artifact may never take one.
+ * `REVIEW_RUN_METADATA_NAME` is the only reserved name today — the list exists
+ * so a future reserved file is one entry here, not a new guard.
+ */
+const REVIEW_RUN_RESERVED_NAMES: readonly string[] = [REVIEW_RUN_METADATA_NAME];
+
+/**
+ * Case-insensitive reservation test: `Metadata.json` collides with
+ * `metadata.json` on a case-insensitive filesystem, so an exact-case compare
+ * is not sufficient.
+ */
+function isReservedReviewRunName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return REVIEW_RUN_RESERVED_NAMES.some((reserved) => reserved.toLowerCase() === lower);
+}
+
 export interface ReviewRunCaps {
   /** Whole-run byte cap, checked against the run total before publication. */
   maxBytes: number;
@@ -208,6 +225,12 @@ export function assertReviewRunArtifactName(name: unknown): asserts name is stri
       `review run artifact name must be one bounded [A-Za-z0-9._-] segment (got ${show(name)})`,
     );
   }
+  if (isReservedReviewRunName(name)) {
+    throw new ReviewRunError(
+      "review_run_artifact_name_reserved",
+      `review run artifact name ${show(name)} is reserved for the run record (reserved name: ${show(REVIEW_RUN_METADATA_NAME)})`,
+    );
+  }
 }
 
 function sha256Hex(buf: Buffer): string {
@@ -243,6 +266,9 @@ export interface PublishArtifactOptions {
  * O_EXCL (mode 0600), fsync, rename over the destination, fsync the directory.
  * The destination is never written directly, and any failure removes the temp
  * file so no partial artifact is observable.
+ *
+ * The name is validated as a caller-supplied artifact name, so the reserved
+ * run-record name is refused here.
  */
 export function publishArtifactAtomic(
   dir: string,
@@ -251,6 +277,21 @@ export function publishArtifactAtomic(
   opts: PublishArtifactOptions = {},
 ): ReviewRunArtifact {
   assertReviewRunArtifactName(name);
+  return publishValidatedArtifactAtomic(dir, name, data, opts);
+}
+
+/**
+ * Publication core for an already-validated name. Module-private: the run
+ * record itself is the only writer permitted the reserved metadata name, and it
+ * passes the module constant — never caller input — so the reserved-name
+ * refusal stays the sole entry point for a caller-supplied name.
+ */
+function publishValidatedArtifactAtomic(
+  dir: string,
+  name: string,
+  data: Buffer | string,
+  opts: PublishArtifactOptions = {},
+): ReviewRunArtifact {
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
   // A leading dot never matches REVIEW_RUN_ARTIFACT_NAME_RE, so a temp name is
   // always distinguishable from a published artifact name.
@@ -347,7 +388,9 @@ export class ReviewRunWriter {
 
   private persist(state: ReviewRunState): void {
     this.record.state = state;
-    publishArtifactAtomic(
+    // The run record is the one legitimate writer of the reserved metadata
+    // name; it publishes through the validated-name core directly.
+    publishValidatedArtifactAtomic(
       this.runDir,
       REVIEW_RUN_METADATA_NAME,
       `${JSON.stringify(this.record, null, 2)}\n`,
