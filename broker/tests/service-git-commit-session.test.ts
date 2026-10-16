@@ -91,18 +91,36 @@ function spawnStub(
   rules: Array<[RegExp, { status: number; stdout: string; stderr: string }]>,
 ) {
   const calls: string[][] = [];
-  const spawn: OpContext["git"]["spawn"] = async (argv) => {
+  // Model the byte cap and overflow flag the REAL spawn boundary emits so an
+  // over-cap output is refused rather than silently completed (Tier 4 item 58).
+  const respond = (
+    result: { status: number; stdout: string; stderr: string },
+    opts?: { maxOutputBytes?: number },
+  ) => {
+    const cap = opts?.maxOutputBytes ?? Number.POSITIVE_INFINITY;
+    const stdoutBytes = Buffer.byteLength(result.stdout, "utf8");
+    const stderrBytes = Buffer.byteLength(result.stderr, "utf8");
+    return {
+      status: result.status,
+      stdout: stdoutBytes > cap ? Buffer.from(result.stdout, "utf8").subarray(0, cap).toString("utf8") : result.stdout,
+      stderr: stderrBytes > cap ? Buffer.from(result.stderr, "utf8").subarray(0, cap).toString("utf8") : result.stderr,
+      timedOut: false,
+      outputTruncated: stdoutBytes > cap,
+      stderrTruncated: stderrBytes > cap,
+    };
+  };
+  const spawn: OpContext["git"]["spawn"] = async (argv, opts) => {
     calls.push(argv);
     for (const [pattern, result] of rules) {
-      if (pattern.test(argv.join(" "))) return { ...result, timedOut: false };
+      if (pattern.test(argv.join(" "))) return respond(result, opts);
     }
     if (argv.join(" ") === "git rev-parse HEAD") {
-      return { status: 0, stdout: "abcdef0123456789abcdef0123456789abcdef01\n", stderr: "", timedOut: false };
+      return respond({ status: 0, stdout: "abcdef0123456789abcdef0123456789abcdef01\n", stderr: "" }, opts);
     }
     if (argv[1] === "rev-parse" && argv[2] === "--verify") {
-      return { status: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "", timedOut: false };
+      return respond({ status: 0, stdout: "0123456789abcdef0123456789abcdef01234567\n", stderr: "" }, opts);
     }
-    return { status: 0, stdout: "", stderr: "", timedOut: false };
+    return respond({ status: 0, stdout: "", stderr: "" }, opts);
   };
   return { calls, spawn };
 }

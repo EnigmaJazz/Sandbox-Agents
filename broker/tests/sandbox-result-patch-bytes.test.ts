@@ -28,6 +28,17 @@ function git(cwd: string, args: string[]): string {
   return result.stdout.trim();
 }
 
+/** Byte-accurate cap used by every fake spawn: a wrong implementation fails. */
+function capped(text: string | null, cap: number): { text: string; truncated: boolean } {
+  const value = text ?? "";
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes <= cap) return { text: value, truncated: false };
+  return {
+    text: Buffer.from(value, "utf8").subarray(0, cap).toString("utf8"),
+    truncated: true,
+  };
+}
+
 function makeHarness(resultChanges: { path: string; content: string }[] = []) {
   const root = tempDir("sandbox-result-patch-bytes-");
   const repo = join(root, "repo");
@@ -70,12 +81,19 @@ function makeHarness(resultChanges: { path: string; content: string }[] = []) {
       encoding: "utf8",
       env: { ...process.env, ...(options?.env ?? {}) },
     });
-    const maxOutputBytes = options?.maxOutputBytes ?? Number.POSITIVE_INFINITY;
+    // Model the byte cap and overflow flag the REAL spawn boundary emits, so
+    // the over-cap assertions below observe the boundary rather than a string
+    // `.slice` that never fires (Tier 4 item 58).
+    const cap = options?.maxOutputBytes ?? Number.POSITIVE_INFINITY;
+    const stdout = capped(result.stdout, cap);
+    const stderr = capped(result.stderr, cap);
     return {
       status: result.status ?? 1,
-      stdout: (result.stdout ?? "").slice(0, maxOutputBytes),
-      stderr: result.stderr ?? "",
+      stdout: stdout.text,
+      stderr: stderr.text,
       timedOut: false,
+      outputTruncated: stdout.truncated,
+      stderrTruncated: stderr.truncated,
     };
   };
   const ctx = {

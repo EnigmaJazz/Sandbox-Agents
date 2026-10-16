@@ -24,9 +24,20 @@ function installFakeSpawn(): CapturedCall[] {
   setSpawnImpl(async (argv, opts) => {
     const call: CapturedCall = { argv: [...argv], opts: { ...opts } };
     calls.push(call);
-    return (
-      call.respond ?? { status: 0, stdout: "", stderr: "", timedOut: false }
-    );
+    const respond =
+      call.respond ?? { status: 0, stdout: "", stderr: "", timedOut: false };
+    // Model the byte cap and overflow flag the real spawn boundary emits, so a
+    // wrong cap implementation fails a test using this fake (Tier 4 item 58).
+    const cap = opts.maxOutputBytes ?? Number.POSITIVE_INFINITY;
+    const stdoutBytes = Buffer.byteLength(respond.stdout, "utf8");
+    const stderrBytes = Buffer.byteLength(respond.stderr, "utf8");
+    return {
+      ...respond,
+      stdout: stdoutBytes > cap ? Buffer.from(respond.stdout, "utf8").subarray(0, cap).toString("utf8") : respond.stdout,
+      stderr: stderrBytes > cap ? Buffer.from(respond.stderr, "utf8").subarray(0, cap).toString("utf8") : respond.stderr,
+      outputTruncated: stdoutBytes > cap,
+      stderrTruncated: stderrBytes > cap,
+    };
   });
   return calls;
 }
@@ -142,6 +153,8 @@ describe("argv construction", () => {
       stdout: "   • Backend      local\r\n/work\r\n",
       stderr: "",
       timedOut: false,
+      outputTruncated: false,
+      stderrTruncated: false,
     }));
     const res = await adapter.exec("w1", ["pwd"], { cwd: "/work" });
     expect(res.stdout).toBe("   • Backend      local\n/work\n");
@@ -150,12 +163,12 @@ describe("argv construction", () => {
 
 describe("timeout handling", () => {
   test("timed-out exec throws MsbError (fail closed, S14)", async () => {
-    setSpawnImpl(async () => ({ status: null, stdout: "", stderr: "", timedOut: true }));
+    setSpawnImpl(async () => ({ status: null, stdout: "", stderr: "", timedOut: true, outputTruncated: false, stderrTruncated: false }));
     await expect(adapter.exec("w1", ["sleep", "999"])).rejects.toThrow(MsbError);
   });
 
   test("non-zero exit is surfaced, not swallowed", async () => {
-    setSpawnImpl(async () => ({ status: 2, stdout: "err", stderr: "boom", timedOut: false }));
+    setSpawnImpl(async () => ({ status: 2, stdout: "err", stderr: "boom", timedOut: false, outputTruncated: false, stderrTruncated: false }));
     const res = await adapter.exec("w1", ["false"]);
     expect(res.status).toBe(2);
     expect(res.stderr).toBe("boom");

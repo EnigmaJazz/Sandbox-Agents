@@ -32,7 +32,7 @@ import type { MsbAdapter } from "./msb.ts";
 import type { HostReadExecutor } from "./hostread.ts";
 import type { Logger } from "./logging.ts";
 import type { Budget, HostResources, WorkerPool } from "./policy.ts";
-import type { SpawnFn } from "./msb.ts";
+import type { SpawnFn, SpawnResult } from "./msb.ts";
 import {
   assertArgv,
   assertContent,
@@ -66,6 +66,7 @@ import {
   buildGitPushArgv,
   buildGhIssueCreateArgv,
   capAndRedact,
+  capAndRedactWithFlag,
   GIT_OUTPUT_MAX_BYTES,
   classifyRawDiff,
   computeDivergence,
@@ -1592,8 +1593,20 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
         maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
         env: diffEnv,
       });
-    const assertCompleteOutput = (label: string, output: string) => {
-      if (Buffer.byteLength(output, "utf8") >= GIT_OUTPUT_MAX_BYTES) {
+    // The spawn boundary reports byte truncation directly (Tier 4 item 56):
+    // exactly-at-cap is NOT truncated, and a complete non-ASCII payload is
+    // never falsely refused on a UTF-16-length vs UTF-8-byte mismatch.
+    const assertCompleteOutput = (label: string, result: SpawnResult) => {
+      if (result.outputTruncated === true) {
+        throw new ValidationError(
+          `diff refused: ${label} output exceeds ${GIT_OUTPUT_MAX_BYTES} bytes`,
+        );
+      }
+    };
+    // `compare` is a DERIVED concatenation of already-complete diffs, not one
+    // spawn output: bound the accumulation itself (over-cap is truncated).
+    const assertDerivedWithinCap = (label: string, output: string) => {
+      if (Buffer.byteLength(output, "utf8") > GIT_OUTPUT_MAX_BYTES) {
         throw new ValidationError(
           `diff refused: ${label} output exceeds ${GIT_OUTPUT_MAX_BYTES} bytes`,
         );
@@ -1632,7 +1645,7 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
         ref,
         ...diffPathspecs,
       ]);
-      assertCompleteOutput("stat", stat.stdout);
+      assertCompleteOutput("stat", stat);
       const diff = await runDiffGit([
         "git",
         "diff",
@@ -1640,7 +1653,7 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
         ref,
         ...diffPathspecs,
       ]);
-      assertCompleteOutput("diff", diff.stdout);
+      assertCompleteOutput("diff", diff);
       // Gate 6 follow-up: for whole-file temps (added paths ending in ".new"),
       // also report the diff against the sibling original (or a
       // .broker-tmp/ref-<added> delivery reference) so the approval prompt
@@ -1654,7 +1667,7 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
         ref,
         ...diffPathspecs,
       ]);
-      assertCompleteOutput("name-status", nameStatus.stdout);
+      assertCompleteOutput("name-status", nameStatus);
       for (const line of nameStatus.stdout.split("\n")) {
         const m = /^A[\t ]+(.+)$/.exec(line.trim());
         if (!m) continue;
@@ -1679,7 +1692,7 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
               maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
             },
           );
-          assertCompleteOutput("compare", cmp.stdout);
+          assertCompleteOutput("compare", cmp);
           // exit 0 = identical, 1 = differences; anything else skips.
           if (cmp.status !== 0 && cmp.status !== 1) continue;
           compare += cmp.stdout + "\n";
@@ -1696,12 +1709,12 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
         ref,
         ...diffPathspecs,
       ]);
-      assertCompleteOutput("changed-paths", changedPathResult.stdout);
+      assertCompleteOutput("changed-paths", changedPathResult);
       const parsedChangedPaths =
         changedPathResult.status === 0
           ? parseNulDelimitedPaths(changedPathResult.stdout)
           : { paths: [], complete: false };
-      assertCompleteOutput("compare", compare);
+      assertDerivedWithinCap("compare", compare);
       const applyPreviewDiff = compare.trim().length > 0 ? compare : diff.stdout;
       const applyPreviewFiles = writeApplyPreviewFiles(
         ctx.config.stateDir,
@@ -2163,19 +2176,22 @@ async function buildRetainedDiff(
       timeoutMs: 60_000,
       maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
     });
-  const assertCompleteOutput = (label: string, output: string) => {
-    if (Buffer.byteLength(output, "utf8") >= GIT_OUTPUT_MAX_BYTES) {
+  // The spawn boundary reports byte truncation directly (Tier 4 item 56):
+  // exactly-at-cap is NOT truncated; a complete payload is never falsely
+  // refused on a UTF-16-length vs UTF-8-byte mismatch.
+  const assertCompleteOutput = (label: string, result: SpawnResult) => {
+    if (result.outputTruncated === true) {
       throw new ValidationError(
         `diff refused: ${label} output exceeds ${GIT_OUTPUT_MAX_BYTES} bytes`,
       );
     }
   };
   const stat = await run(["git", "diff", "--stat", baseline, result]);
-  assertCompleteOutput("stat", stat.stdout);
+  assertCompleteOutput("stat", stat);
   const diff = await run(["git", "diff", baseline, result]);
-  assertCompleteOutput("diff", diff.stdout);
+  assertCompleteOutput("diff", diff);
   const changedPathResult = await run(buildChangedPathsArgv(baseline, result));
-  assertCompleteOutput("changed-paths", changedPathResult.stdout);
+  assertCompleteOutput("changed-paths", changedPathResult);
   const parsedChangedPaths =
     changedPathResult.status === 0
       ? parseNulDelimitedPaths(changedPathResult.stdout)
@@ -2474,6 +2490,10 @@ interface HostStepResult {
   status: number | null;
   stdout: string;
   stderr: string;
+  /** stdout reached the byte cap (spawn flag or redaction truncation). */
+  stdoutTruncated: boolean;
+  /** stderr reached the byte cap (spawn flag or redaction truncation). */
+  stderrTruncated: boolean;
 }
 
 /** Spawn one host git/gh step with the shared 512-KiB output cap. */
@@ -2488,11 +2508,18 @@ async function runHostStep(
     timeoutMs,
     maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
   });
+  // The spawn's byte-truncation flag is the authority (Tier 4 item 56); the
+  // redaction cap reports its own truncation. Redaction runs FIRST, so a secret
+  // removed from a complete payload is never mistaken for truncation.
+  const stdout = capAndRedactWithFlag(result.stdout);
+  const stderr = capAndRedactWithFlag(result.stderr);
   return {
     argv,
     status: result.status,
-    stdout: capAndRedact(result.stdout),
-    stderr: capAndRedact(result.stderr),
+    stdout: stdout.text,
+    stderr: stderr.text,
+    stdoutTruncated: result.outputTruncated === true || stdout.truncated,
+    stderrTruncated: result.stderrTruncated === true || stderr.truncated,
   };
 }
 
@@ -2895,7 +2922,10 @@ export function buildSandboxResultOp(ctx: OpContext): OpHandler {
     const readResult = await readSandboxResult(ctx, projectRoot, sessionID, baseline, result, comparison);
     const completePatch = await ctx.git.spawn(buildResultPatchArgv(baseline, result), { cwd: projectRoot, timeoutMs: 60_000, maxOutputBytes: GIT_OUTPUT_MAX_BYTES });
     const patchBytes = Buffer.byteLength(completePatch.stdout, "utf8");
-    const patchComplete = completePatch.status === 0 && patchBytes < GIT_OUTPUT_MAX_BYTES;
+    // The spawn's explicit byte-truncation flag is authoritative (Tier 4 item
+    // 56): a complete patch of exactly the cap is NOT truncated, and a
+    // non-ASCII patch is never falsely refused on a UTF-16 vs UTF-8 mismatch.
+    const patchComplete = completePatch.status === 0 && completePatch.outputTruncated !== true;
     const patchMetrics: SandboxResultPatchMetrics = {
       ...(patchComplete ? { patchBytes } : {}),
       rawPatchTruncated: !patchComplete,
@@ -2912,7 +2942,12 @@ export function buildSandboxResultOp(ctx: OpContext): OpHandler {
         // The install approval guard refuses a truncated preview without this artifact.
       }
     }
-    return { ...readResult, ...patchMetrics, ...(applyPreviewFiles ? { applyPreviewFiles } : {}) };
+    // Tier 4 item 57: the inline preview (`readResult.patch`) is read through a
+    // SEPARATE spawn of the SAME argv at the SAME cap, so when that spawn
+    // dropped a tail the preview lost it too even though `readPatch`'s
+    // redaction check cannot observe it. Fold the spawn flag into the signal.
+    const patchTruncated = readResult.patchTruncated || completePatch.outputTruncated === true;
+    return { ...readResult, patchTruncated, ...patchMetrics, ...(applyPreviewFiles ? { applyPreviewFiles } : {}) };
   };
 }
 

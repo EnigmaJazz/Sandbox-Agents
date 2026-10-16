@@ -32,11 +32,28 @@ const configuredProjectRoot = `${projectRoot}/broker/..`;
 
 const revision = "a".repeat(64);
 
+/** Model the real byte cap + overflow flags over any injected fake (item 58). */
+function capSpawn(
+  result: Awaited<ReturnType<SpawnFn>>,
+  opts: { maxOutputBytes?: number },
+): Awaited<ReturnType<SpawnFn>> {
+  const cap = opts.maxOutputBytes ?? Number.POSITIVE_INFINITY;
+  const stdoutBytes = Buffer.byteLength(result.stdout, "utf8");
+  const stderrBytes = Buffer.byteLength(result.stderr, "utf8");
+  return {
+    ...result,
+    stdout: stdoutBytes > cap ? Buffer.from(result.stdout, "utf8").subarray(0, cap).toString("utf8") : result.stdout,
+    stderr: stderrBytes > cap ? Buffer.from(result.stderr, "utf8").subarray(0, cap).toString("utf8") : result.stderr,
+    outputTruncated: stdoutBytes > cap,
+    stderrTruncated: stderrBytes > cap,
+  };
+}
+
 function makeExecutor(spawn: SpawnFn): SddRuntimeExecutor {
   return new SddRuntimeExecutor({
     binary: "gentle-ai",
     projects: [{ id: "repo", path: configuredProjectRoot }],
-    spawn,
+    spawn: (args, opts) => spawn(args, opts).then((result) => capSpawn(result, opts ?? {})),
   });
 }
 
