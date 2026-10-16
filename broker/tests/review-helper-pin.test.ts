@@ -145,6 +145,7 @@ describe("review helper installer pin", () => {
     expect(run("--apply").status).toBe(0);
     const result = run("--verify");
     expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("review helper pin parser runtime: bun");
     expect(result.stdout).toContain("review helper pin verified");
   });
 
@@ -214,12 +215,60 @@ describe("review helper installer pin", () => {
     const helper = destination(stateDir);
     const pin = resolve(stateDir, "review-helper/pin.json");
     const env = config(home);
-    const before = [helper, pin, env].map((path) => ({ bytes: readFileSync(path), mode: statSync(path).mode & 0o777 }));
+    const before = [helper, pin, env].map((path) => {
+      const stat = lstatSync(path);
+      return { bytes: readFileSync(path), type: stat.isFile() ? "file" : "other", mode: stat.mode & 0o777 };
+    });
     rmSync(resolve(home, ".cache/opencode"), { recursive: true, force: true });
     const result = run("--apply");
     expect(result.status).not.toBe(0);
     expect(result.stderr + result.stdout).toContain("REVIEW_HELPER_SOURCE_MISSING");
-    expect([helper, pin, env].map((path) => ({ bytes: readFileSync(path), mode: statSync(path).mode & 0o777 }))).toEqual(before);
+    expect([helper, pin, env].map((path) => {
+      const stat = lstatSync(path);
+      return { bytes: readFileSync(path), type: stat.isFile() ? "file" : "other", mode: stat.mode & 0o777 };
+    })).toEqual(before);
+  });
+
+  test("verification accepts pretty-printed pin JSON with reordered keys", () => {
+    const { stateDir, run } = fixture();
+    expect(run("--apply").status).toBe(0);
+    const pin = resolve(stateDir, "review-helper/pin.json");
+    const record = JSON.parse(readFileSync(pin, "utf8"));
+    writeFileSync(pin, JSON.stringify({ sha256: record.sha256, source: record.source, version: record.version }, null, 2) + "\n");
+    const result = run("--verify");
+    expect(result.status, result.stderr + result.stdout).toBe(0);
+    expect(result.stdout).toContain("review helper pin verified");
+  });
+
+  test("verification names a malformed pin JSON record", () => {
+    const { stateDir, run } = fixture();
+    expect(run("--apply").status).toBe(0);
+    writeFileSync(resolve(stateDir, "review-helper/pin.json"), "{ malformed json }\n");
+    const result = run("--verify");
+    expect(result.status).not.toBe(0);
+    expect(result.stdout + result.stderr).toContain("pin record malformed");
+  });
+
+  test("apply refuses unsupported and duplicate managed environment assignments before writing", () => {
+    for (const value of ["/path with space/helper.mjs", '\"/quoted/helper.mjs\"', "/path\\\\with\\\\backslash/helper.mjs"]) {
+      const { home, stateDir, run } = fixture();
+      expect(run("--apply").status).toBe(0);
+      const env = config(home);
+      const original = readFileSync(env);
+      const helper = destination(stateDir);
+      const pin = resolve(stateDir, "review-helper/pin.json");
+      const before = [helper, pin].map((path) => ({ bytes: readFileSync(path), mode: statSync(path).mode & 0o777 }));
+      writeFileSync(env, original.toString().replace(/BROKER_REVIEW_HELPER_PATH=.*/, `BROKER_REVIEW_HELPER_PATH=${value}`));
+      const malformed = run("--apply");
+      expect(malformed.status).not.toBe(0);
+      expect(malformed.stdout + malformed.stderr).toContain("malformed BROKER_REVIEW_HELPER_PATH assignment");
+      expect([helper, pin].map((path) => ({ bytes: readFileSync(path), mode: statSync(path).mode & 0o777 }))).toEqual(before);
+      writeFileSync(env, original);
+      writeFileSync(env, `${original}BROKER_REVIEW_HELPER_PATH=${destination(stateDir)}\n`);
+      const duplicate = run("--apply");
+      expect(duplicate.status).not.toBe(0);
+      expect(duplicate.stdout + duplicate.stderr).toContain("duplicate BROKER_REVIEW_HELPER_PATH assignment");
+    }
   });
 
   test("selects the highest concrete version from the reported cache inventory", () => {

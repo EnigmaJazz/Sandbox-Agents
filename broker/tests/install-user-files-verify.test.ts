@@ -47,7 +47,7 @@ function snapshotTree(root: string): string[] {
   return entries.sort();
 }
 
-function fixture() {
+function fixture(options: { seedState?: boolean } = {}) {
   const home = mkdtempSync(resolve(tmpdir(), "install-user-files-verify-"));
   tempDirs.push(home);
   const install = (source: string, destination: string) => {
@@ -67,16 +67,18 @@ function fixture() {
   const helperBytes = Buffer.from("// legacy installer verification fixture\n");
   mkdirSync(resolve(helperSource, ".."), { recursive: true });
   writeFileSync(helperSource, helperBytes, { mode: 0o600 });
-  const pinDir = resolve(stateDir, "review-helper");
-  mkdirSync(pinDir, { recursive: true, mode: 0o700 });
-  chmodSync(pinDir, 0o700);
-  const helperDest = resolve(pinDir, "validate-review.mjs");
-  copyFileSync(helperSource, helperDest);
-  chmodSync(helperDest, 0o600);
-  const helperSha256 = createHash("sha256").update(helperBytes).digest("hex");
-  writeFileSync(resolve(pinDir, "pin.json"), JSON.stringify({ version: sourceVersion, source: helperSource, sha256: helperSha256 }) + "\n", { mode: 0o600 });
-  chmodSync(resolve(pinDir, "pin.json"), 0o600);
-  writeFileSync(resolve(home, ".config/opencode-sandbox/broker.env"), `BROKER_REVIEW_HELPER_PATH=${helperDest}\nBROKER_REVIEW_HELPER_SHA256=${helperSha256}\n`, { flag: "a" });
+  if (options.seedState !== false) {
+    const pinDir = resolve(stateDir, "review-helper");
+    mkdirSync(pinDir, { recursive: true, mode: 0o700 });
+    chmodSync(pinDir, 0o700);
+    const helperDest = resolve(pinDir, "validate-review.mjs");
+    copyFileSync(helperSource, helperDest);
+    chmodSync(helperDest, 0o600);
+    const helperSha256 = createHash("sha256").update(helperBytes).digest("hex");
+    writeFileSync(resolve(pinDir, "pin.json"), JSON.stringify({ version: sourceVersion, source: helperSource, sha256: helperSha256 }) + "\n", { mode: 0o600 });
+    chmodSync(resolve(pinDir, "pin.json"), 0o600);
+    writeFileSync(resolve(home, ".config/opencode-sandbox/broker.env"), `BROKER_REVIEW_HELPER_PATH=${helperDest}\nBROKER_REVIEW_HELPER_SHA256=${helperSha256}\n`, { flag: "a" });
+  }
   for (const file of pluginFiles) {
     install(`opencode/plugins/${file}`, resolve(home, ".config/opencode/plugins", file));
   }
@@ -322,8 +324,8 @@ describe("install-user-files --verify", () => {
     expect(result.stdout).toContain(`${target}: mode differs`);
   });
 
-  test("does not mutate any deployed destination while reporting drift", () => {
-    const { home, stateDir, run } = fixture();
+  test("does not create state while reporting drift in an unseeded legacy fixture", () => {
+    const { home, stateDir, run } = fixture({ seedState: false });
     const target = resolve(home, ".config/opencode-sandbox/broker.env");
     writeFileSync(target, "drift marker\n");
     const backup = `${target}.bak-20260101000000`;
@@ -332,7 +334,7 @@ describe("install-user-files --verify", () => {
     const result = run();
     expect(result.status).not.toBe(0);
     expect(snapshotTree(home)).toEqual(before);
-    expect(lstatSync(stateDir).isDirectory()).toBe(true);
+    expect(() => lstatSync(stateDir)).toThrow();
   });
 
   test("verify reports the installer backup count in its pass line", () => {
@@ -382,8 +384,8 @@ describe("install-user-files --verify", () => {
     expect(readFileSync(unmanaged, "utf8")).toBe("unmanaged\n");
   });
 
-  test("dry-run installs create no backup and remove no old backup", () => {
-    const { home, run } = fixture();
+  test("dry-run installs create no state in an unseeded legacy fixture", () => {
+    const { home, stateDir, run } = fixture({ seedState: false });
     const target = resolve(home, ".config/opencode/plugins/sandbox-tools.ts");
     writeFileSync(target, "outdated plugin\n");
     const existing = `${target}.bak-20200101000000`;
@@ -392,18 +394,19 @@ describe("install-user-files --verify", () => {
     const result = run("--dry-run");
     expect(result.status).toBe(0);
     expect(snapshotTree(home)).toEqual(before);
+    expect(() => lstatSync(stateDir)).toThrow();
     expect(result.stdout).toContain("dry-run — nothing was installed");
   });
 
-  test("refuses dry-run combined with apply without mutating files", () => {
-    const { home, stateDir, run } = fixture();
+  test("refuses dry-run combined with apply without creating unseeded state", () => {
+    const { home, stateDir, run } = fixture({ seedState: false });
     const runner = applyInstaller(home);
     const before = snapshotTree(home);
     const result = run(["--dry-run", "--apply"], {}, runner);
     expect(result.status, result.stderr).toBe(2);
     expect(result.stderr).toContain("[install] --dry-run cannot be combined with --apply");
     expect(snapshotTree(home)).toEqual(before);
-    expect(lstatSync(stateDir).isDirectory()).toBe(true);
+    expect(() => lstatSync(stateDir)).toThrow();
   });
 
   test("dry-run backup pruning reports deletions without deleting backups", () => {

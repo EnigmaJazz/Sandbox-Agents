@@ -189,6 +189,23 @@ installer records the source version and path in `pin.json` and writes
 loads that file using `EnvironmentFile`, and `broker/src/config.ts` reads those
 environment keys into `reviewHelperPath` and `reviewHelperSha256`.
 
+The installer resolves its JSON parser with `command -v`, preferring `bun` and
+falling back to `node`; if neither is on `PATH`, verification fails with the
+named `REVIEW_HELPER_JSON_RUNTIME_MISSING` refusal. It parses `pin.json` as JSON
+with the resolved runtime's `-e` mode; JSON whitespace and key order are not
+part of the record's identity. The two managed environment
+assignments use one canonical form, `KEY=value`, with exactly one occurrence of
+each key. The path is absolute and limited to `[A-Za-z0-9._/@:+-]`; the digest
+is exactly 64 lowercase hexadecimal characters. Spaces, quotes, backslashes,
+malformed values, and duplicate assignments are refused before deployment
+writes rather than resolved by a last-match rule.
+
+The recorded hash authenticates stability after the owner's deliberate
+`--apply`; it is not independent provenance for bytes selected from the
+agent-writable package cache. The owner's review of the installer apply is the
+trust moment. The pin protects against later unobserved changes to the deployed
+helper, not against a compromised source cache at installation time.
+
 This state path is deliberately outside the confined agent's writable set:
 the profile grants `$HOME/.local/state/opencode`, not the distinct
 `$HOME/.local/state/opencode-sandbox`. The same confinement probe above remains
