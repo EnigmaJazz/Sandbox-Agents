@@ -13,12 +13,16 @@ import {
   accessSync,
   constants,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,9 +41,27 @@ import {
   assertReviewRunId,
   generateRunId,
   publishArtifactAtomic,
+  DEFAULT_REVIEW_RUN_MAX_RUNS,
+  DEFAULT_REVIEW_RUN_TTL_MS,
+  ReviewHelperDigestMismatchError,
+  ReviewHelperMissingError,
+  ReviewHelperNotRegularError,
+  ReviewHelperUnconfiguredError,
+  ReviewRunArtifactCapError,
+  ReviewRunArtifactEscapeError,
+  ReviewRunArtifactNotFoundError,
+  ReviewRunArtifactNotRegularError,
+  ReviewRunArtifactSymlinkError,
+  ReviewRunOwnershipError,
+  assertPinnedReviewHelper,
+  assertRunOwnership,
+  pruneReviewRuns,
+  readRunArtifact,
+  recoverInterruptedRuns,
   type ReviewRunCaps,
   type ReviewRunStoreOptions,
 } from "../src/review-run.ts";
+import { ConfigError, defaultConfig } from "../src/config.ts";
 
 const cleanup: string[] = [];
 
@@ -109,6 +131,20 @@ function catchError(fn: () => unknown): Error {
 
 function modeOf(path: string): number {
   return statSync(path).mode & 0o777;
+}
+
+function sha256Hex(buf: Buffer | string): string {
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+/** True when the path itself exists (does not follow a final symlink). */
+function lstatExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 describe("run identity grammar", () => {
@@ -379,5 +415,380 @@ describe("store ownership modes", () => {
     } finally {
       process.umask(previous);
     }
+  });
+});
+
+describe("review-run config knobs", () => {
+  test("defaults: no helper pin, a 7-day TTL and a 64-run global bound", () => {
+    const cfg = defaultConfig();
+    expect(cfg.reviewHelperPath).toBeNull();
+    expect(cfg.reviewHelperSha256).toBeNull();
+    expect(cfg.reviewRunTtlMs).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(DEFAULT_REVIEW_RUN_TTL_MS).toBe(cfg.reviewRunTtlMs);
+    expect(cfg.reviewRunMaxRuns).toBe(64);
+    expect(DEFAULT_REVIEW_RUN_MAX_RUNS).toBe(cfg.reviewRunMaxRuns);
+  });
+
+  test("a malformed sha256 override is refused with a named config error", () => {
+    for (const bad of ["not-a-digest", "ABCDEF", "a".repeat(63), "a".repeat(65), "g".repeat(64)]) {
+      const err = catchError(() => defaultConfig({ reviewHelperSha256: bad }));
+      expect(err).toBeInstanceOf(ConfigError);
+    }
+  });
+
+  test("a malformed sha256 env value is refused at parse", () => {
+    const previous = process.env.BROKER_REVIEW_HELPER_SHA256;
+    process.env.BROKER_REVIEW_HELPER_SHA256 = "NOT-HEX";
+    try {
+      const err = catchError(() => defaultConfig());
+      expect(err).toBeInstanceOf(ConfigError);
+    } finally {
+      if (previous === undefined) delete process.env.BROKER_REVIEW_HELPER_SHA256;
+      else process.env.BROKER_REVIEW_HELPER_SHA256 = previous;
+    }
+  });
+
+  test("a well-formed sha256 override and path are accepted", () => {
+    const digest = "e".repeat(64);
+    const cfg = defaultConfig({ reviewHelperPath: "/x/helper", reviewHelperSha256: digest });
+    expect(cfg.reviewHelperSha256).toBe(digest);
+    expect(cfg.reviewHelperPath).toBe("/x/helper");
+  });
+});
+
+describe("pinned helper identity", () => {
+  function writeHelper(dir: string, name: string, content: string): { path: string; sha: string } {
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, name);
+    writeFileSync(path, content);
+    return { path, sha: sha256Hex(content) };
+  }
+
+  test("a configured regular file with a matching digest is accepted and returned", () => {
+    const base = tempBase("helper-ok");
+    const { path, sha } = writeHelper(join(base, "bin"), "helper.js", "console.log(1)\n");
+    const verified = assertPinnedReviewHelper({ reviewHelperPath: path, reviewHelperSha256: sha });
+    expect(verified.path).toBe(realpathSync(path));
+    expect(verified.sha256).toBe(sha);
+    expect(verified.bytes).toBe(Buffer.byteLength("console.log(1)\n"));
+  });
+
+  test("an unconfigured helper (null path or null digest) is refused", () => {
+    const cases: { reviewHelperPath: string | null; reviewHelperSha256: string | null }[] = [
+      { reviewHelperPath: null, reviewHelperSha256: "a".repeat(64) },
+      { reviewHelperPath: "/nonexistent/helper", reviewHelperSha256: null },
+      { reviewHelperPath: null, reviewHelperSha256: null },
+    ];
+    for (const cfg of cases) {
+      const err = catchError(() => assertPinnedReviewHelper(cfg));
+      expect(err).toBeInstanceOf(ReviewHelperUnconfiguredError);
+    }
+  });
+
+  test("a missing helper file is refused", () => {
+    const err = catchError(() =>
+      assertPinnedReviewHelper({
+        reviewHelperPath: join(tempBase("helper-missing"), "absent.js"),
+        reviewHelperSha256: "b".repeat(64),
+      }),
+    );
+    expect(err).toBeInstanceOf(ReviewHelperMissingError);
+  });
+
+  test("a directory in place of the helper is refused as not a regular file", () => {
+    const dir = tempBase("helper-dir");
+    const err = catchError(() =>
+      assertPinnedReviewHelper({ reviewHelperPath: dir, reviewHelperSha256: "c".repeat(64) }),
+    );
+    expect(err).toBeInstanceOf(ReviewHelperNotRegularError);
+  });
+
+  test("a symlink to a regular helper is refused (symlinks never followed)", () => {
+    const base = tempBase("helper-link");
+    const target = writeHelper(join(base, "real"), "helper.js", "x");
+    const link = join(base, "helper-link.js");
+    symlinkSync(target.path, link);
+    const err = catchError(() =>
+      assertPinnedReviewHelper({ reviewHelperPath: link, reviewHelperSha256: target.sha }),
+    );
+    expect(err).toBeInstanceOf(ReviewHelperNotRegularError);
+  });
+
+  test("a stale digest is refused naming the expected and the observed digest", () => {
+    const base = tempBase("helper-stale");
+    const { path } = writeHelper(join(base, "bin"), "helper.js", "real bytes\n");
+    const expected = "d".repeat(64);
+    const err = catchError(() =>
+      assertPinnedReviewHelper({ reviewHelperPath: path, reviewHelperSha256: expected }),
+    );
+    expect(err).toBeInstanceOf(ReviewHelperDigestMismatchError);
+    expect(err.message).toContain(expected);
+    expect(err.message).toContain(sha256Hex("real bytes\n"));
+  });
+
+  test("a valid helper in a package-cache-like directory is NOT used when the config points elsewhere", () => {
+    const base = tempBase("helper-cache");
+    // A genuine, digest-correct helper sitting exactly where the confined agent
+    // can write it (the Systematic package-cache shape).
+    const cache = writeHelper(
+      join(base, "cache", "opencode", "packages", "@fro.bot", "systematic@1.0.0", "bin"),
+      "helper.js",
+      "cache helper\n",
+    );
+    const configured = writeHelper(join(base, "private"), "helper.js", "pinned helper\n");
+    const verified = assertPinnedReviewHelper({
+      reviewHelperPath: configured.path,
+      reviewHelperSha256: configured.sha,
+    });
+    expect(verified.path).toBe(configured.path);
+    expect(verified.path).not.toBe(cache.path);
+    expect(verified.sha256).toBe(configured.sha);
+    expect(verified.sha256).not.toBe(cache.sha);
+  });
+
+  test("an unconfigured pin never falls back to a package-cache helper", () => {
+    const base = tempBase("helper-cache-unconfigured");
+    writeHelper(
+      join(base, "cache", "opencode", "packages", "@fro.bot", "systematic@1.0.0", "bin"),
+      "helper.js",
+      "cache helper\n",
+    );
+    const err = catchError(() =>
+      assertPinnedReviewHelper({ reviewHelperPath: null, reviewHelperSha256: null }),
+    );
+    expect(err).toBeInstanceOf(ReviewHelperUnconfiguredError);
+  });
+});
+
+describe("owner-session access", () => {
+  test("the owning session is accepted", () => {
+    const store = makeStore();
+    const writer = store.createRun("sess-owner");
+    expect(() => assertRunOwnership(writer.record, "sess-owner")).not.toThrow();
+  });
+
+  test("a foreign session is refused without echoing its id", () => {
+    const store = makeStore();
+    const writer = store.createRun("sess-owner");
+    const foreign = "sess-intruder-9000";
+    const err = catchError(() => assertRunOwnership(writer.record, foreign));
+    expect(err).toBeInstanceOf(ReviewRunOwnershipError);
+    expect(err.message).not.toContain(foreign);
+    expect(err.message).toContain(writer.record.runId);
+  });
+});
+
+describe("retention, expiry and recovery", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  function ageRun(runDir: string, ageMs: number, now: number): void {
+    const when = new Date(now - ageMs);
+    utimesSync(runDir, when, when);
+  }
+
+  function makePublishedRun(session: string): {
+    store: ReviewRunStore;
+    writer: ReturnType<ReviewRunStore["createRun"]>;
+  } {
+    const store = makeStore();
+    const writer = store.createRun(session);
+    writer.addArtifact("payload.txt", Buffer.from("x"));
+    writer.publish();
+    return { store, writer };
+  }
+
+  test("an expired published run is pruned and named in the summary", () => {
+    const { store, writer } = makePublishedRun("sess-expired");
+    const now = Date.now();
+    ageRun(writer.runDir, 8 * DAY, now);
+    const summary = pruneReviewRuns({ root: store.root, ttlMs: 7 * DAY, maxRuns: 64, now });
+    expect(lstatExists(writer.runDir)).toBe(false);
+    expect(summary.pruned.map((p) => p.runId)).toContain(writer.record.runId);
+    expect(summary.pruned[0]!.reason).toBe("expired");
+  });
+
+  test("a run inside the TTL is untouched", () => {
+    const { store, writer } = makePublishedRun("sess-fresh");
+    const now = Date.now();
+    ageRun(writer.runDir, DAY, now);
+    const summary = pruneReviewRuns({ root: store.root, ttlMs: 7 * DAY, maxRuns: 64, now });
+    expect(lstatExists(writer.runDir)).toBe(true);
+    expect(summary.pruned).toEqual([]);
+  });
+
+  test("an expired publishing run is never pruned and never deleted", () => {
+    const store = makeStore();
+    const writer = store.createRun("sess-open");
+    const now = Date.now();
+    ageRun(writer.runDir, 8 * DAY, now);
+    const summary = pruneReviewRuns({ root: store.root, ttlMs: 7 * DAY, maxRuns: 64, now });
+    expect(lstatExists(writer.runDir)).toBe(true);
+    expect(summary.pruned).toEqual([]);
+    expect(summary.keptOpen.map((k) => k.runId)).toContain(writer.record.runId);
+  });
+
+  test("recovery marks an expired publishing run failed and records the interruption", () => {
+    const store = makeStore();
+    const writer = store.createRun("sess-interrupted");
+    writer.addArtifact("partial.txt", Buffer.from("half"));
+    const now = Date.now();
+    ageRun(writer.runDir, 8 * DAY, now);
+    const summary = recoverInterruptedRuns({ root: store.root, ttlMs: 7 * DAY, now });
+    expect(summary.recovered.map((r) => r.runId)).toContain(writer.record.runId);
+    expect(lstatExists(writer.runDir)).toBe(true);
+    const meta = JSON.parse(readFileSync(join(writer.runDir, "metadata.json"), "utf8")) as {
+      state: string;
+      failureReason?: string;
+    };
+    expect(meta.state).toBe("failed");
+    expect(meta.failureReason).toBe("interrupted");
+  });
+
+  test("recovery leaves a publishing run inside the TTL alone", () => {
+    const store = makeStore();
+    const writer = store.createRun("sess-interrupted-fresh");
+    const now = Date.now();
+    ageRun(writer.runDir, DAY, now);
+    const summary = recoverInterruptedRuns({ root: store.root, ttlMs: 7 * DAY, now });
+    expect(summary.recovered).toEqual([]);
+    const meta = JSON.parse(readFileSync(join(writer.runDir, "metadata.json"), "utf8")) as {
+      state: string;
+    };
+    expect(meta.state).toBe("publishing");
+  });
+
+  test("the global bound prunes oldest-first and never a publishing run", () => {
+    const store = makeStore();
+    const now = Date.now();
+    const publishing = store.createRun("sess-bound-open");
+    ageRun(publishing.runDir, 3 * DAY, now);
+    const publishedOld = store.createRun("sess-bound-a");
+    publishedOld.publish();
+    ageRun(publishedOld.runDir, 2 * DAY, now);
+    const publishedNew = store.createRun("sess-bound-b");
+    publishedNew.publish();
+    ageRun(publishedNew.runDir, DAY, now);
+
+    const summary = pruneReviewRuns({ root: store.root, ttlMs: 30 * DAY, maxRuns: 2, now });
+    // The oldest (publishing) is protected; the next-oldest published is pruned.
+    expect(lstatExists(publishing.runDir)).toBe(true);
+    expect(lstatExists(publishedOld.runDir)).toBe(false);
+    expect(lstatExists(publishedNew.runDir)).toBe(true);
+    expect(summary.pruned.map((p) => p.runId)).toEqual([publishedOld.record.runId]);
+    expect(summary.pruned.every((p) => p.reason === "over-bound")).toBe(true);
+  });
+
+  test("the per-session quota behaviour is unchanged after a prune", () => {
+    const store = makeStore({ caps: { maxPerSession: 1 } });
+    const writer = store.createRun("sess-quota-retained");
+    writer.publish();
+    const now = Date.now();
+    const summary = pruneReviewRuns({ root: store.root, ttlMs: 30 * DAY, maxRuns: 64, now });
+    expect(summary.pruned).toEqual([]);
+    const err = catchError(() => store.createRun("sess-quota-retained"));
+    expect(err).toBeInstanceOf(ReviewRunQuotaError);
+  });
+});
+
+describe("race-resistant read helper", () => {
+  function writeArtifact(runDir: string, name: string, data: Buffer | string): void {
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, name), data);
+  }
+
+  test("a normal artifact reads byte-identical, including non-ASCII", () => {
+    const runDir = tempBase("read-ok");
+    const content = "héllo wörld — €5\n日本語\n";
+    const input = Buffer.from(content, "utf8");
+    writeArtifact(runDir, "note.txt", input);
+    const read = readRunArtifact({ runDir, name: "note.txt", maxFileBytes: 1024 });
+    expect(read.data.equals(input)).toBe(true);
+    expect(read.bytes).toBe(input.byteLength);
+    expect(read.sha256).toBe(sha256Hex(input));
+    // More UTF-8 bytes than UTF-16 units: a String.length cap would drift.
+    expect(read.bytes).toBeGreaterThan(content.length);
+  });
+
+  test("a path traversal attempt is refused", () => {
+    const base = tempBase("read-traversal");
+    const runDir = join(base, "run");
+    writeArtifact(runDir, "inside.txt", "inside");
+    writeFileSync(join(base, "secret.txt"), "secret");
+    for (const name of ["../secret.txt", "../../etc/passwd", "sub/../../secret.txt"]) {
+      const err = catchError(() => readRunArtifact({ runDir, name, maxFileBytes: 1024 }));
+      expect(err).toBeInstanceOf(ReviewRunError);
+    }
+  });
+
+  test("a symlink whose target lies outside the run dir is refused as an escape", () => {
+    const base = tempBase("read-escape");
+    const runDir = join(base, "run");
+    const outside = join(base, "outside");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "secret.txt"), "secret");
+    writeArtifact(runDir, "real.txt", "real");
+    symlinkSync(join(outside, "secret.txt"), join(runDir, "escape.txt"));
+    const err = catchError(() => readRunArtifact({ runDir, name: "escape.txt", maxFileBytes: 1024 }));
+    expect(err).toBeInstanceOf(ReviewRunArtifactEscapeError);
+  });
+
+  test("a symlink whose target lies inside the run dir is still refused (never followed)", () => {
+    const runDir = tempBase("read-link-inside");
+    writeArtifact(runDir, "real.txt", "real");
+    symlinkSync(join(runDir, "real.txt"), join(runDir, "alias.txt"));
+    const err = catchError(() => readRunArtifact({ runDir, name: "alias.txt", maxFileBytes: 1024 }));
+    expect(err).toBeInstanceOf(ReviewRunArtifactSymlinkError);
+  });
+
+  test("a directory in place of a file is refused as not a regular file", () => {
+    const runDir = tempBase("read-dir");
+    mkdirSync(join(runDir, "adir"), { recursive: true });
+    const err = catchError(() => readRunArtifact({ runDir, name: "adir", maxFileBytes: 1024 }));
+    expect(err).toBeInstanceOf(ReviewRunArtifactNotRegularError);
+  });
+
+  test("an over-cap file is refused naming the cap and the observed size", () => {
+    const runDir = tempBase("read-cap");
+    writeArtifact(runDir, "big.bin", Buffer.alloc(10, 0x61));
+    const err = catchError(() => readRunArtifact({ runDir, name: "big.bin", maxFileBytes: 4 }));
+    expect(err).toBeInstanceOf(ReviewRunArtifactCapError);
+    expect(err.message).toContain("10");
+    expect(err.message).toContain("4");
+  });
+
+  test("a file exactly at the cap is accepted", () => {
+    const runDir = tempBase("read-exact");
+    writeArtifact(runDir, "exact.bin", Buffer.alloc(4, 0x61));
+    const read = readRunArtifact({ runDir, name: "exact.bin", maxFileBytes: 4 });
+    expect(read.bytes).toBe(4);
+  });
+
+  test("the run record is not readable through the artifact path without explicit opt-in", () => {
+    const runDir = tempBase("read-record");
+    writeArtifact(runDir, "metadata.json", "{\"state\":\"published\"}");
+    const err = catchError(() =>
+      readRunArtifact({ runDir, name: "metadata.json", maxFileBytes: 1024 }),
+    );
+    expect(err).toBeInstanceOf(ReviewRunError);
+    expect((err as ReviewRunError).code).toBe("review_run_artifact_name_reserved");
+  });
+
+  test("the run record is readable only with allowRecord", () => {
+    const runDir = tempBase("read-record-ok");
+    const body = "{\"state\":\"published\"}\n";
+    writeArtifact(runDir, "metadata.json", body);
+    const read = readRunArtifact({
+      runDir,
+      name: "metadata.json",
+      maxFileBytes: 1024,
+      allowRecord: true,
+    });
+    expect(read.data.toString("utf8")).toBe(body);
+  });
+
+  test("a missing artifact is refused", () => {
+    const runDir = tempBase("read-missing");
+    const err = catchError(() => readRunArtifact({ runDir, name: "nope.bin", maxFileBytes: 1024 }));
+    expect(err).toBeInstanceOf(ReviewRunArtifactNotFoundError);
   });
 });

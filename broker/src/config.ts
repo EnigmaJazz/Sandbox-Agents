@@ -10,7 +10,24 @@
  */
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { DEFAULT_REVIEW_RUN_CAPS } from "./review-run.ts";
+import {
+  DEFAULT_REVIEW_RUN_CAPS,
+  DEFAULT_REVIEW_RUN_MAX_RUNS,
+  DEFAULT_REVIEW_RUN_TTL_MS,
+  REVIEW_HELPER_SHA256_RE,
+} from "./review-run.ts";
+
+/**
+ * Named configuration-parse refusal: a present-but-invalid value aborts startup
+ * instead of silently falling back to a different behaviour than the operator
+ * asked for.
+ */
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigError";
+  }
+}
 
 export const BROKER_VERSION = 1;
 
@@ -133,6 +150,23 @@ export interface BrokerConfig {
   reviewRunMaxFileBytes: number;
   /** Maximum review runs per owning session. */
   reviewRunMaxPerSession: number;
+  /**
+   * Global review-run bound across every session (distinct from the
+   * per-session quota); oldest pruned first, never an open (`publishing`) run.
+   */
+  reviewRunMaxRuns: number;
+  /** Review-run retention TTL in ms; a run older than this is expired. */
+  reviewRunTtlMs: number;
+  /**
+   * Pinned review-helper path (T7). Null means the helper is not pinned; the
+   * broker then refuses every helper run rather than resolving any fallback.
+   */
+  reviewHelperPath: string | null;
+  /**
+   * Pinned review-helper sha256, lowercase hex (T7). Null means unpinned; a
+   * non-null value must match REVIEW_HELPER_SHA256_RE at parse.
+   */
+  reviewHelperSha256: string | null;
   /** Optional JSONL log file; defaults to stdout (§26). */
   logPath?: string;
   msbBinary: string;
@@ -326,6 +360,15 @@ function positiveIntEnv(name: string, fallback: number): number {
   return parsed;
 }
 
+/**
+ * Read an optional string env knob: unset or empty yields null (the fail-closed
+ * "not configured" state), never an empty-string value.
+ */
+function optionalStringEnv(name: string): string | null {
+  const raw = process.env[name];
+  return raw === undefined || raw === "" ? null : raw;
+}
+
 export function defaultConfig(
   overrides: BrokerConfigOverrides = {},
 ): BrokerConfig {
@@ -356,6 +399,16 @@ export function defaultConfig(
       "BROKER_REVIEW_RUN_MAX_PER_SESSION",
       DEFAULT_REVIEW_RUN_CAPS.maxPerSession,
     ),
+    reviewRunMaxRuns: positiveIntEnv(
+      "BROKER_REVIEW_RUN_MAX_RUNS",
+      DEFAULT_REVIEW_RUN_MAX_RUNS,
+    ),
+    reviewRunTtlMs: positiveIntEnv(
+      "BROKER_REVIEW_RUN_TTL_MS",
+      DEFAULT_REVIEW_RUN_TTL_MS,
+    ),
+    reviewHelperPath: optionalStringEnv("BROKER_REVIEW_HELPER_PATH"),
+    reviewHelperSha256: optionalStringEnv("BROKER_REVIEW_HELPER_SHA256"),
     logPath: process.env.BROKER_LOG_FILE,
     msbBinary: process.env.MSB_BINARY ?? "/home/james/.local/bin/msb",
     workerImage: process.env.MSB_WORKER_IMAGE ?? "debian",
@@ -451,6 +504,17 @@ export function defaultConfig(
       merged.roleModels.fresh_eyes = hyphen;
     }
     delete (merged.roleModels as Record<string, unknown>)["fresh-eyes"];
+  }
+  // Fail closed on a malformed pinned-helper digest, whatever its source
+  // (env or override), before any caller can trust it.
+  if (
+    merged.reviewHelperSha256 !== null &&
+    (typeof merged.reviewHelperSha256 !== "string" ||
+      !REVIEW_HELPER_SHA256_RE.test(merged.reviewHelperSha256))
+  ) {
+    throw new ConfigError(
+      `invalid reviewHelperSha256: expected 64 lowercase hex characters (got ${JSON.stringify(merged.reviewHelperSha256)})`,
+    );
   }
   return merged;
 }

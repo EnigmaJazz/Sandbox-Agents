@@ -26,12 +26,17 @@ import {
   constants,
   existsSync,
   fchmodSync,
+  fstatSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readdirSync,
   realpathSync,
   renameSync,
+  rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -47,6 +52,13 @@ const REVIEW_RUN_OBJECT_ID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const REVIEW_RUN_ARTIFACT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 /** Persisted run record name inside a run directory. */
 export const REVIEW_RUN_METADATA_NAME = "metadata.json";
+
+/** Default retention TTL: a run untouched for 7 days is expired. */
+export const DEFAULT_REVIEW_RUN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** Default global run bound across every session. */
+export const DEFAULT_REVIEW_RUN_MAX_RUNS = 64;
+/** Config grammar for the pinned review-helper digest. */
+export const REVIEW_HELPER_SHA256_RE = /^[0-9a-f]{64}$/;
 
 /**
  * File names reserved inside a run directory; an artifact may never take one.
@@ -96,6 +108,12 @@ export interface ReviewRunRecord {
   baseObjectId: string | null;
   headObjectId: string | null;
   artifacts: ReviewRunArtifact[];
+  /**
+   * Set by recovery (T9) when a run interrupted mid-write is marked `failed`, so
+   * a later reader can see the run was interrupted rather than deliberately
+   * failed. Absent on every other run.
+   */
+  failureReason?: string;
 }
 
 export interface ReviewRunEvidence {
@@ -218,13 +236,22 @@ export function assertReviewRunId(runId: unknown): asserts runId is string {
   }
 }
 
-export function assertReviewRunArtifactName(name: unknown): asserts name is string {
+/**
+ * Grammar-only artifact-name guard: one bounded, separator-free segment. Split
+ * out from the reserved-name check so the read path can validate grammar while
+ * still offering an explicit opt-in for the run record.
+ */
+function assertReviewRunArtifactNameGrammar(name: unknown): asserts name is string {
   if (typeof name !== "string" || !REVIEW_RUN_ARTIFACT_NAME_RE.test(name)) {
     throw new ReviewRunError(
       "review_run_artifact_name",
       `review run artifact name must be one bounded [A-Za-z0-9._-] segment (got ${show(name)})`,
     );
   }
+}
+
+export function assertReviewRunArtifactName(name: unknown): asserts name is string {
+  assertReviewRunArtifactNameGrammar(name);
   if (isReservedReviewRunName(name)) {
     throw new ReviewRunError(
       "review_run_artifact_name_reserved",
@@ -510,4 +537,422 @@ function normalizeObjectId(value: string | undefined, field: string): string | n
     );
   }
   return value;
+}
+
+// ---------------------------------------------------------------------------
+// T7 — Pinned helper identity (design property 1)
+// ---------------------------------------------------------------------------
+
+/** Minimal config slice `assertPinnedReviewHelper` consumes (never the whole config). */
+export interface ReviewHelperPinConfig {
+  reviewHelperPath: string | null;
+  reviewHelperSha256: string | null;
+}
+
+export interface PinnedReviewHelper {
+  /** Lexically-resolved absolute path of the verified helper. */
+  path: string;
+  sha256: string;
+  bytes: number;
+}
+
+export class ReviewHelperUnconfiguredError extends ReviewRunError {
+  constructor(message: string) {
+    super("review_helper_unconfigured", message);
+  }
+}
+export class ReviewHelperMissingError extends ReviewRunError {
+  constructor(message: string) {
+    super("review_helper_missing", message);
+  }
+}
+export class ReviewHelperNotRegularError extends ReviewRunError {
+  constructor(message: string) {
+    super("review_helper_not_regular", message);
+  }
+}
+export class ReviewHelperDigestMismatchError extends ReviewRunError {
+  constructor(message: string) {
+    super("review_helper_digest_mismatch", message);
+  }
+}
+
+function describeFileType(stat: {
+  isSymbolicLink(): boolean;
+  isDirectory(): boolean;
+}): string {
+  if (stat.isSymbolicLink()) return "symlink";
+  if (stat.isDirectory()) return "directory";
+  return "non-regular file";
+}
+
+/**
+ * Verify the configured helper is a regular file whose sha256 equals the
+ * configured digest, reading ONLY the configured path — never searching, never
+ * falling back to any package-cache location.
+ *
+ * `resolve` (lexical) is used deliberately instead of `realpath`: realpath
+ * would follow the very symlink this guard must reject. `lstat` (not `stat`)
+ * reports the link itself, so a symlink is refused as a non-regular type.
+ */
+export function assertPinnedReviewHelper(cfg: ReviewHelperPinConfig): PinnedReviewHelper {
+  const configuredPath = cfg.reviewHelperPath;
+  const configuredSha = cfg.reviewHelperSha256;
+  if (configuredPath === null || configuredSha === null) {
+    throw new ReviewHelperUnconfiguredError(
+      "review helper is not configured: both reviewHelperPath and reviewHelperSha256 must be set",
+    );
+  }
+  const resolved = resolve(configuredPath);
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(resolved);
+  } catch {
+    throw new ReviewHelperMissingError(`review helper does not exist: ${resolved}`);
+  }
+  if (!stat.isFile()) {
+    throw new ReviewHelperNotRegularError(
+      `review helper is not a regular file: ${resolved} (${describeFileType(stat)})`,
+    );
+  }
+  const bytes = readFileSync(resolved);
+  const observed = sha256Hex(bytes);
+  if (observed !== configuredSha) {
+    throw new ReviewHelperDigestMismatchError(
+      `review helper digest mismatch for ${resolved}: expected ${configuredSha}, observed ${observed}`,
+    );
+  }
+  return { path: resolved, sha256: observed, bytes: bytes.byteLength };
+}
+
+// ---------------------------------------------------------------------------
+// T8 — Owner-session access (design property 3)
+// ---------------------------------------------------------------------------
+
+export class ReviewRunOwnershipError extends ReviewRunError {
+  constructor(message: string) {
+    super("review_run_ownership", message);
+  }
+}
+
+/**
+ * Serve a run only to the session that owns it. The refusal names the run but
+ * NEVER the requesting session id, so a probing session cannot learn another
+ * session's identifier through the error.
+ */
+export function assertRunOwnership(record: ReviewRunRecord, sessionID: string): void {
+  if (record.sessionID !== sessionID) {
+    throw new ReviewRunOwnershipError(
+      `review run ${record.runId} is not owned by the requesting session`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T9 — Retention, expiry and recovery (design property 8)
+// ---------------------------------------------------------------------------
+
+interface DiscoveredRun {
+  sessionID: string;
+  runId: string;
+  runDir: string;
+  mtimeMs: number;
+  record: ReviewRunRecord | null;
+}
+
+interface RunRef {
+  sessionID: string;
+  runId: string;
+}
+
+function readRunRecord(runDir: string): ReviewRunRecord | null {
+  try {
+    const raw = readFileSync(join(runDir, REVIEW_RUN_METADATA_NAME), "utf8");
+    const parsed = JSON.parse(raw) as ReviewRunRecord;
+    if (parsed && typeof parsed === "object" && typeof parsed.state === "string") {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Every run directory under a root, with its mtime and (best-effort) record. */
+function discoverRuns(root: string): DiscoveredRun[] {
+  const out: DiscoveredRun[] = [];
+  if (!existsSync(root)) return out;
+  for (const session of readdirSync(root, { withFileTypes: true })) {
+    if (!session.isDirectory()) continue;
+    const sessionDir = join(root, session.name);
+    for (const run of readdirSync(sessionDir, { withFileTypes: true })) {
+      if (!run.isDirectory() || !REVIEW_RUN_ID_RE.test(run.name)) continue;
+      const runDir = join(sessionDir, run.name);
+      let mtimeMs: number;
+      try {
+        mtimeMs = statSync(runDir).mtimeMs;
+      } catch {
+        continue;
+      }
+      out.push({
+        sessionID: session.name,
+        runId: run.name,
+        runDir,
+        mtimeMs,
+        record: readRunRecord(runDir),
+      });
+    }
+  }
+  return out;
+}
+
+/** An open run for this slice: its record state is `publishing`. */
+function isOpenRun(run: DiscoveredRun): boolean {
+  return run.record?.state === "publishing";
+}
+
+export interface PrunedReviewRun extends RunRef {
+  reason: "expired" | "over-bound";
+  state: ReviewRunState | null;
+}
+
+export interface PruneReviewRunsSummary {
+  pruned: PrunedReviewRun[];
+  /** Runs protected because they are `publishing` (open) — never pruned. */
+  keptOpen: RunRef[];
+  totalBefore: number;
+}
+
+export interface PruneReviewRunsOptions {
+  /** Store root to sweep (the same root `ReviewRunStore` owns). */
+  root: string;
+  /** Retain runs whose directory mtime is within this window. */
+  ttlMs: number;
+  /** Global bound across every session; oldest pruned first when exceeded. */
+  maxRuns: number;
+  /** Inject "now" for deterministic tests; defaults to Date.now(). */
+  now?: number;
+}
+
+/**
+ * Remove expired runs and, when over the global bound, the oldest runs first.
+ * A run whose record reads `publishing` is "open" and is NEVER removed by
+ * either pass: it is reported in `keptOpen` instead. The summary names every
+ * run removed and the reason it was removed.
+ */
+export function pruneReviewRuns(opts: PruneReviewRunsOptions): PruneReviewRunsSummary {
+  const now = opts.now ?? Date.now();
+  const runs = discoverRuns(opts.root);
+  const pruned: PrunedReviewRun[] = [];
+  const keptOpen: RunRef[] = [];
+  const keptOpenDirs = new Set<string>();
+  const removed = new Set<string>();
+
+  const noteOpen = (run: DiscoveredRun): void => {
+    if (keptOpenDirs.has(run.runDir)) return;
+    keptOpenDirs.add(run.runDir);
+    keptOpen.push({ sessionID: run.sessionID, runId: run.runId });
+  };
+
+  // Pass 1 — expiry by directory mtime.
+  for (const run of runs) {
+    if (now - run.mtimeMs <= opts.ttlMs) continue;
+    if (isOpenRun(run)) {
+      noteOpen(run);
+      continue;
+    }
+    rmSync(run.runDir, { recursive: true, force: true });
+    removed.add(run.runDir);
+    pruned.push({
+      sessionID: run.sessionID,
+      runId: run.runId,
+      reason: "expired",
+      state: run.record?.state ?? null,
+    });
+  }
+
+  // Pass 2 — global bound, oldest first, still never an open run.
+  const remaining = runs
+    .filter((run) => !removed.has(run.runDir))
+    .sort((a, b) => a.mtimeMs - b.mtimeMs);
+  let excess = remaining.length - opts.maxRuns;
+  for (const run of remaining) {
+    if (excess <= 0) break;
+    if (isOpenRun(run)) {
+      noteOpen(run);
+      continue;
+    }
+    rmSync(run.runDir, { recursive: true, force: true });
+    removed.add(run.runDir);
+    pruned.push({
+      sessionID: run.sessionID,
+      runId: run.runId,
+      reason: "over-bound",
+      state: run.record?.state ?? null,
+    });
+    excess -= 1;
+  }
+
+  return { pruned, keptOpen, totalBefore: runs.length };
+}
+
+export interface RecoveredReviewRun extends RunRef {}
+
+export interface RecoverInterruptedRunsSummary {
+  recovered: RecoveredReviewRun[];
+}
+
+export interface RecoverInterruptedRunsOptions {
+  root: string;
+  ttlMs: number;
+  now?: number;
+}
+
+/**
+ * A run interrupted mid-write has a record still reading `publishing`. Once it
+ * is older than the TTL, mark it `failed` through the existing writer path and
+ * record `failureReason: "interrupted"` in the record — do NOT delete it, so a
+ * later reader can see the outcome.
+ */
+export function recoverInterruptedRuns(
+  opts: RecoverInterruptedRunsOptions,
+): RecoverInterruptedRunsSummary {
+  const now = opts.now ?? Date.now();
+  const recovered: RecoveredReviewRun[] = [];
+  for (const run of discoverRuns(opts.root)) {
+    if (run.record?.state !== "publishing") continue;
+    if (now - run.mtimeMs <= opts.ttlMs) continue;
+    const record = run.record;
+    record.failureReason = "interrupted";
+    const writer = new ReviewRunWriter(run.runDir, record, DEFAULT_REVIEW_RUN_CAPS);
+    writer.fail();
+    recovered.push({ sessionID: run.sessionID, runId: run.runId });
+  }
+  return { recovered };
+}
+
+// ---------------------------------------------------------------------------
+// T10 — Race-resistant read helper (design property 4)
+// ---------------------------------------------------------------------------
+
+export class ReviewRunArtifactEscapeError extends ReviewRunError {
+  constructor(message: string) {
+    super("review_run_artifact_escape", message);
+  }
+}
+export class ReviewRunArtifactSymlinkError extends ReviewRunError {
+  constructor(message: string) {
+    super("review_run_artifact_symlink", message);
+  }
+}
+export class ReviewRunArtifactNotRegularError extends ReviewRunError {
+  constructor(message: string) {
+    super("review_run_artifact_not_regular", message);
+  }
+}
+export class ReviewRunArtifactNotFoundError extends ReviewRunError {
+  constructor(message: string) {
+    super("review_run_artifact_not_found", message);
+  }
+}
+export class ReviewRunArtifactCapError extends ReviewRunError {
+  constructor(message: string) {
+    super("review_run_artifact_cap", message);
+  }
+}
+
+export interface ReadRunArtifactOptions {
+  /** The specific run directory the artifact must stay inside. */
+  runDir: string;
+  /** One bounded artifact name (the same grammar as `addArtifact`). */
+  name: string;
+  /** Read byte cap; exactly-at-cap is accepted, one over is refused. */
+  maxFileBytes: number;
+  /**
+   * Explicit opt-in to read the reserved run record (`metadata.json`). Default
+   * false, so an ordinary artifact read can never fetch the record.
+   */
+  allowRecord?: boolean;
+}
+
+export interface ReadReviewRunArtifact {
+  readonly name: string;
+  readonly bytes: number;
+  readonly sha256: string;
+  readonly data: Buffer;
+}
+
+/**
+ * Read one artifact from a run directory with the race-resistant shape:
+ *  1. name grammar + reserved-name validation (same as `addArtifact`);
+ *  2. canonical containment against the specific run directory (reusing the
+ *     module's boundary-aware `contains`/`canonicalForContainment`);
+ *  3. a SINGLE `openSync` (with `O_NOFOLLOW`) followed by `fstatSync` on that
+ *     SAME fd — never `stat` then `open`, which is the TOCTOU shape;
+ *  4. a regular-file requirement from that fstat (a symlink is refused by
+ *     `O_NOFOLLOW` before fstat, a directory by the isFile check);
+ *  5. a byte cap enforced by the observed fstat size AND the returned length.
+ */
+export function readRunArtifact(opts: ReadRunArtifactOptions): ReadReviewRunArtifact {
+  const { runDir, name } = opts;
+  assertReviewRunArtifactNameGrammar(name);
+  if (isReservedReviewRunName(name)) {
+    if (opts.allowRecord !== true || name !== REVIEW_RUN_METADATA_NAME) {
+      throw new ReviewRunError(
+        "review_run_artifact_name_reserved",
+        `review run artifact name ${show(name)} is reserved for the run record; pass allowRecord to read the record explicitly`,
+      );
+    }
+  }
+  const runDirCanonical = canonicalForContainment(runDir);
+  const target = join(runDir, name);
+  const targetCanonical = canonicalForContainment(target);
+  if (!contains(runDirCanonical, targetCanonical)) {
+    throw new ReviewRunArtifactEscapeError(
+      `review run artifact ${show(name)} resolves outside its run directory`,
+    );
+  }
+  const noFollow = constants.O_NOFOLLOW ?? 0;
+  let fd: number;
+  try {
+    fd = openSync(target, constants.O_RDONLY | noFollow);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ELOOP") {
+      throw new ReviewRunArtifactSymlinkError(
+        `review run artifact ${show(name)} is a symlink; refusing to follow it`,
+      );
+    }
+    if (code === "ENOENT") {
+      throw new ReviewRunArtifactNotFoundError(
+        `review run artifact ${show(name)} does not exist in the run directory`,
+      );
+    }
+    throw new ReviewRunError(
+      "review_run_artifact_read",
+      `review run artifact ${show(name)} could not be opened`,
+    );
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) {
+      throw new ReviewRunArtifactNotRegularError(
+        `review run artifact ${show(name)} is not a regular file`,
+      );
+    }
+    if (stat.size > opts.maxFileBytes) {
+      throw new ReviewRunArtifactCapError(
+        `review run artifact ${show(name)} is ${stat.size} bytes, over the read cap of ${opts.maxFileBytes}`,
+      );
+    }
+    const data = readFileSync(fd);
+    if (data.byteLength > opts.maxFileBytes) {
+      throw new ReviewRunArtifactCapError(
+        `review run artifact ${show(name)} returned ${data.byteLength} bytes, over the read cap of ${opts.maxFileBytes}`,
+      );
+    }
+    return { name, bytes: data.byteLength, sha256: sha256Hex(data), data };
+  } finally {
+    closeSync(fd);
+  }
 }

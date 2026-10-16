@@ -1,6 +1,6 @@
 # Review-run store — root choice, confinement probe and refusal knobs
 
-Status: slice U1b-1 of the `review-run-foundation` ODD task (2026-10-16).
+Status: slices U1b-1 and U1b-2 of the `review-run-foundation` ODD task (2026-10-16).
 This document records **why** the review-run store root is where it is, and the
 **observed probe** that establishes the confined OpenCode process cannot write
 it. The code lives in `broker/src/review-run.ts`; the config knobs in
@@ -15,6 +15,10 @@ it. The code lives in `broker/src/review-run.ts`; the config knobs in
 | `reviewRunMaxBytes` | 8 MiB — whole run (`BROKER_REVIEW_RUN_MAX_BYTES`) |
 | `reviewRunMaxFileBytes` | 4 MiB — one artifact (`BROKER_REVIEW_RUN_MAX_FILE_BYTES`) |
 | `reviewRunMaxPerSession` | 8 runs (`BROKER_REVIEW_RUN_MAX_PER_SESSION`) |
+| `reviewRunMaxRuns` | 64 runs, global across sessions (`BROKER_REVIEW_RUN_MAX_RUNS`) |
+| `reviewRunTtlMs` | 7 days — retention TTL (`BROKER_REVIEW_RUN_TTL_MS`) |
+| `reviewHelperPath` | `null` — unpinned (`BROKER_REVIEW_HELPER_PATH`) |
+| `reviewHelperSha256` | `null` — unpinned, or 64 lowercase hex (`BROKER_REVIEW_HELPER_SHA256`) |
 
 Why `<stateDir>/review-runs`:
 
@@ -112,8 +116,66 @@ mirror staying current.
   (`review_run_artifact_name_reserved`), so an artifact can never overwrite the
   run record; only the record itself publishes that name.
 
+## Added by slice U1b-2
+
+### Pinned helper identity (property 1)
+
+`assertPinnedReviewHelper(cfg)` reads ONLY the configured `reviewHelperPath`.
+It `lstat`s the path (not `stat`, so a symlink is refused rather than followed),
+requires a regular file, reads its bytes once, and requires the sha256 to equal
+`reviewHelperSha256` exactly. It never searches and never falls back to any
+package-cache location; a digest-correct helper sitting inside the agent-writable
+`$HOME/.cache/opencode` tree is simply never consulted. Named refusals:
+
+| Failure | Error class | Error code |
+|---|---|---|
+| path or digest null | `ReviewHelperUnconfiguredError` | `review_helper_unconfigured` |
+| file absent | `ReviewHelperMissingError` | `review_helper_missing` |
+| not a regular file (incl. symlink) | `ReviewHelperNotRegularError` | `review_helper_not_regular` |
+| digest mismatch (names expected + observed) | `ReviewHelperDigestMismatchError` | `review_helper_digest_mismatch` |
+
+The digest grammar (`^[0-9a-f]{64}$`) is validated at config parse; a malformed
+value is refused with `ConfigError`. The actual pinning (copying the bytes into
+a broker-private directory and writing the config) is slice U1b-3.
+
+### Owner-session access (property 3)
+
+`assertRunOwnership(record, sessionID)` refuses a request whose session id is
+not the run record's `sessionID` (`ReviewRunOwnershipError`,
+`review_run_ownership`). The refusal names the run id but never the requesting
+session id, so a probing session cannot learn another session's identifier.
+
+### Retention, expiry and recovery (property 8)
+
+`pruneReviewRuns({root, ttlMs, maxRuns, now?})` removes a run whose directory
+mtime is older than the TTL, then, when the global `maxRuns` bound is exceeded,
+the oldest runs first. A run whose record reads `publishing` is "open" and is
+**never** removed by either pass; it is reported in `keptOpen`. Returned summary:
+`{ pruned: [{sessionID, runId, reason: "expired"|"over-bound", state}], keptOpen, totalBefore }`.
+
+`recoverInterruptedRuns({root, ttlMs, now?})` handles a run interrupted
+mid-write: a record still reading `publishing` older than the TTL is marked
+`failed` through the existing `ReviewRunWriter.fail()` path with
+`failureReason: "interrupted"` recorded in the record, and reported — never
+deleted. The per-session quota from U1b-1 is a separate bound and is unchanged.
+
+### Race-resistant read helper (property 4)
+
+`readRunArtifact({runDir, name, maxFileBytes, allowRecord?})` reads one artifact
+from a specific run directory with: the same name grammar + reserved-name
+validation as `addArtifact`; canonical containment against that run directory
+(reusing the module's boundary-aware `contains`/`canonicalForContainment`); a
+single `openSync` with `O_NOFOLLOW` followed by `fstatSync` on the SAME fd (never
+`stat`-then-`open`); a regular-file requirement from that fstat; and a byte cap
+enforced by the fstat size and the returned length. `metadata.json` is refused
+unless the caller passes `allowRecord: true`. Named refusals:
+`review_run_artifact_escape`, `review_run_artifact_symlink`,
+`review_run_artifact_not_regular`, `review_run_artifact_not_found`,
+`review_run_artifact_cap`, and the existing `review_run_artifact_name_reserved`.
+
 ## Not in this slice
 
-Owner-session access control (T8), retention/expiry (T9), the race-resistant
-read helper (T10) and the pinned helper identity (T7/T12) are later slices.
-No model-facing host tool routes to this store yet.
+The pinning act (U1b-3: extending `scripts/install-user-files`) is not
+implemented here; U1b-2 supplies the verifier (`assertPinnedReviewHelper`) it
+will drive. No model-facing host tool routes to this store yet.
+
