@@ -21,6 +21,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -40,6 +41,8 @@ import {
   assertReviewRunId,
   generateRunId,
   publishArtifactAtomic,
+  DEFAULT_REVIEW_RUN_MAX_RUNS,
+  DEFAULT_REVIEW_RUN_TTL_MS,
   ReviewHelperDigestMismatchError,
   ReviewHelperMissingError,
   ReviewHelperNotRegularError,
@@ -52,7 +55,9 @@ import {
   ReviewRunOwnershipError,
   assertPinnedReviewHelper,
   assertRunOwnership,
+  pruneReviewRuns,
   readRunArtifact,
+  recoverInterruptedRuns,
   type ReviewRunCaps,
   type ReviewRunStoreOptions,
 } from "../src/review-run.ts";
@@ -413,11 +418,15 @@ describe("store ownership modes", () => {
   });
 });
 
-describe("pinned-helper config", () => {
-  test("defaults to no helper pin", () => {
+describe("review-run config knobs", () => {
+  test("defaults: no helper pin, a 7-day TTL and a 64-run global bound", () => {
     const cfg = defaultConfig();
     expect(cfg.reviewHelperPath).toBeNull();
     expect(cfg.reviewHelperSha256).toBeNull();
+    expect(cfg.reviewRunTtlMs).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(DEFAULT_REVIEW_RUN_TTL_MS).toBe(cfg.reviewRunTtlMs);
+    expect(cfg.reviewRunMaxRuns).toBe(64);
+    expect(DEFAULT_REVIEW_RUN_MAX_RUNS).toBe(cfg.reviewRunMaxRuns);
   });
 
   test("a malformed sha256 override is refused with a named config error", () => {
@@ -566,6 +575,118 @@ describe("owner-session access", () => {
     expect(err).toBeInstanceOf(ReviewRunOwnershipError);
     expect(err.message).not.toContain(foreign);
     expect(err.message).toContain(writer.record.runId);
+  });
+});
+
+describe("retention, expiry and recovery", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  function ageRun(runDir: string, ageMs: number, now: number): void {
+    const when = new Date(now - ageMs);
+    utimesSync(runDir, when, when);
+  }
+
+  function makePublishedRun(session: string): {
+    store: ReviewRunStore;
+    writer: ReturnType<ReviewRunStore["createRun"]>;
+  } {
+    const store = makeStore();
+    const writer = store.createRun(session);
+    writer.addArtifact("payload.txt", Buffer.from("x"));
+    writer.publish();
+    return { store, writer };
+  }
+
+  test("an expired published run is pruned and named in the summary", () => {
+    const { store, writer } = makePublishedRun("sess-expired");
+    const now = Date.now();
+    ageRun(writer.runDir, 8 * DAY, now);
+    const summary = pruneReviewRuns({ root: store.root, ttlMs: 7 * DAY, maxRuns: 64, now });
+    expect(lstatExists(writer.runDir)).toBe(false);
+    expect(summary.pruned.map((p) => p.runId)).toContain(writer.record.runId);
+    expect(summary.pruned[0]!.reason).toBe("expired");
+  });
+
+  test("a run inside the TTL is untouched", () => {
+    const { store, writer } = makePublishedRun("sess-fresh");
+    const now = Date.now();
+    ageRun(writer.runDir, DAY, now);
+    const summary = pruneReviewRuns({ root: store.root, ttlMs: 7 * DAY, maxRuns: 64, now });
+    expect(lstatExists(writer.runDir)).toBe(true);
+    expect(summary.pruned).toEqual([]);
+  });
+
+  test("an expired publishing run is never pruned and never deleted", () => {
+    const store = makeStore();
+    const writer = store.createRun("sess-open");
+    const now = Date.now();
+    ageRun(writer.runDir, 8 * DAY, now);
+    const summary = pruneReviewRuns({ root: store.root, ttlMs: 7 * DAY, maxRuns: 64, now });
+    expect(lstatExists(writer.runDir)).toBe(true);
+    expect(summary.pruned).toEqual([]);
+    expect(summary.keptOpen.map((k) => k.runId)).toContain(writer.record.runId);
+  });
+
+  test("recovery marks an expired publishing run failed and records the interruption", () => {
+    const store = makeStore();
+    const writer = store.createRun("sess-interrupted");
+    writer.addArtifact("partial.txt", Buffer.from("half"));
+    const now = Date.now();
+    ageRun(writer.runDir, 8 * DAY, now);
+    const summary = recoverInterruptedRuns({ root: store.root, ttlMs: 7 * DAY, now });
+    expect(summary.recovered.map((r) => r.runId)).toContain(writer.record.runId);
+    expect(lstatExists(writer.runDir)).toBe(true);
+    const meta = JSON.parse(readFileSync(join(writer.runDir, "metadata.json"), "utf8")) as {
+      state: string;
+      failureReason?: string;
+    };
+    expect(meta.state).toBe("failed");
+    expect(meta.failureReason).toBe("interrupted");
+  });
+
+  test("recovery leaves a publishing run inside the TTL alone", () => {
+    const store = makeStore();
+    const writer = store.createRun("sess-interrupted-fresh");
+    const now = Date.now();
+    ageRun(writer.runDir, DAY, now);
+    const summary = recoverInterruptedRuns({ root: store.root, ttlMs: 7 * DAY, now });
+    expect(summary.recovered).toEqual([]);
+    const meta = JSON.parse(readFileSync(join(writer.runDir, "metadata.json"), "utf8")) as {
+      state: string;
+    };
+    expect(meta.state).toBe("publishing");
+  });
+
+  test("the global bound prunes oldest-first and never a publishing run", () => {
+    const store = makeStore();
+    const now = Date.now();
+    const publishing = store.createRun("sess-bound-open");
+    ageRun(publishing.runDir, 3 * DAY, now);
+    const publishedOld = store.createRun("sess-bound-a");
+    publishedOld.publish();
+    ageRun(publishedOld.runDir, 2 * DAY, now);
+    const publishedNew = store.createRun("sess-bound-b");
+    publishedNew.publish();
+    ageRun(publishedNew.runDir, DAY, now);
+
+    const summary = pruneReviewRuns({ root: store.root, ttlMs: 30 * DAY, maxRuns: 2, now });
+    // The oldest (publishing) is protected; the next-oldest published is pruned.
+    expect(lstatExists(publishing.runDir)).toBe(true);
+    expect(lstatExists(publishedOld.runDir)).toBe(false);
+    expect(lstatExists(publishedNew.runDir)).toBe(true);
+    expect(summary.pruned.map((p) => p.runId)).toEqual([publishedOld.record.runId]);
+    expect(summary.pruned.every((p) => p.reason === "over-bound")).toBe(true);
+  });
+
+  test("the per-session quota behaviour is unchanged after a prune", () => {
+    const store = makeStore({ caps: { maxPerSession: 1 } });
+    const writer = store.createRun("sess-quota-retained");
+    writer.publish();
+    const now = Date.now();
+    const summary = pruneReviewRuns({ root: store.root, ttlMs: 30 * DAY, maxRuns: 64, now });
+    expect(summary.pruned).toEqual([]);
+    const err = catchError(() => store.createRun("sess-quota-retained"));
+    expect(err).toBeInstanceOf(ReviewRunQuotaError);
   });
 });
 

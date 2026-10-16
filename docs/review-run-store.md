@@ -15,6 +15,8 @@ it. The code lives in `broker/src/review-run.ts`; the config knobs in
 | `reviewRunMaxBytes` | 8 MiB — whole run (`BROKER_REVIEW_RUN_MAX_BYTES`) |
 | `reviewRunMaxFileBytes` | 4 MiB — one artifact (`BROKER_REVIEW_RUN_MAX_FILE_BYTES`) |
 | `reviewRunMaxPerSession` | 8 runs (`BROKER_REVIEW_RUN_MAX_PER_SESSION`) |
+| `reviewRunMaxRuns` | 64 runs, global across sessions (`BROKER_REVIEW_RUN_MAX_RUNS`) |
+| `reviewRunTtlMs` | 7 days — retention TTL (`BROKER_REVIEW_RUN_TTL_MS`) |
 | `reviewHelperPath` | `null` — unpinned (`BROKER_REVIEW_HELPER_PATH`) |
 | `reviewHelperSha256` | `null` — unpinned, or 64 lowercase hex (`BROKER_REVIEW_HELPER_SHA256`) |
 
@@ -142,6 +144,20 @@ a broker-private directory and writing the config) is slice U1b-3.
 not the run record's `sessionID` (`ReviewRunOwnershipError`,
 `review_run_ownership`). The refusal names the run id but never the requesting
 session id, so a probing session cannot learn another session's identifier.
+
+### Retention, expiry and recovery (property 8)
+
+`pruneReviewRuns({root, ttlMs, maxRuns, now?})` removes a run whose directory
+mtime is older than the TTL, then, when the global `maxRuns` bound is exceeded,
+the oldest runs first. A run whose record reads `publishing` is "open" and is
+**never** removed by either pass; it is reported in `keptOpen`. Returned summary:
+`{ pruned: [{sessionID, runId, reason: "expired"|"over-bound", state}], keptOpen, totalBefore }`.
+
+`recoverInterruptedRuns({root, ttlMs, now?})` handles a run interrupted
+mid-write: a record still reading `publishing` older than the TTL is marked
+`failed` through the existing `ReviewRunWriter.fail()` path with
+`failureReason: "interrupted"` recorded in the record, and reported — never
+deleted. The per-session quota from U1b-1 is a separate bound and is unchanged.
 
 ### Race-resistant read helper (property 4)
 

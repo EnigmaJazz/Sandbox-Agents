@@ -36,6 +36,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -52,6 +53,10 @@ const REVIEW_RUN_ARTIFACT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 /** Persisted run record name inside a run directory. */
 export const REVIEW_RUN_METADATA_NAME = "metadata.json";
 
+/** Default retention TTL: a run untouched for 7 days is expired. */
+export const DEFAULT_REVIEW_RUN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** Default global run bound across every session. */
+export const DEFAULT_REVIEW_RUN_MAX_RUNS = 64;
 /** Config grammar for the pinned review-helper digest. */
 export const REVIEW_HELPER_SHA256_RE = /^[0-9a-f]{64}$/;
 
@@ -87,7 +92,7 @@ export const DEFAULT_REVIEW_RUN_CAPS: ReviewRunCaps = Object.freeze({
   maxPerSession: 8,
 });
 
-export type ReviewRunState = "publishing" | "published";
+export type ReviewRunState = "publishing" | "published" | "failed";
 
 export interface ReviewRunArtifact {
   readonly name: string;
@@ -103,6 +108,12 @@ export interface ReviewRunRecord {
   baseObjectId: string | null;
   headObjectId: string | null;
   artifacts: ReviewRunArtifact[];
+  /**
+   * Set by recovery (T9) when a run interrupted mid-write is marked `failed`, so
+   * a later reader can see the run was interrupted rather than deliberately
+   * failed. Absent on every other run.
+   */
+  failureReason?: string;
 }
 
 export interface ReviewRunEvidence {
@@ -396,6 +407,12 @@ export class ReviewRunWriter {
     return this.record;
   }
 
+  /** Persist the metadata record with state "failed" (interrupted run). */
+  fail(): ReviewRunRecord {
+    this.persist("failed");
+    return this.record;
+  }
+
   private persist(state: ReviewRunState): void {
     this.record.state = state;
     // The run record is the one legitimate writer of the reserved metadata
@@ -629,6 +646,189 @@ export function assertRunOwnership(record: ReviewRunRecord, sessionID: string): 
       `review run ${record.runId} is not owned by the requesting session`,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// T9 — Retention, expiry and recovery (design property 8)
+// ---------------------------------------------------------------------------
+
+interface DiscoveredRun {
+  sessionID: string;
+  runId: string;
+  runDir: string;
+  mtimeMs: number;
+  record: ReviewRunRecord | null;
+}
+
+interface RunRef {
+  sessionID: string;
+  runId: string;
+}
+
+function readRunRecord(runDir: string): ReviewRunRecord | null {
+  try {
+    const raw = readFileSync(join(runDir, REVIEW_RUN_METADATA_NAME), "utf8");
+    const parsed = JSON.parse(raw) as ReviewRunRecord;
+    if (parsed && typeof parsed === "object" && typeof parsed.state === "string") {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Every run directory under a root, with its mtime and (best-effort) record. */
+function discoverRuns(root: string): DiscoveredRun[] {
+  const out: DiscoveredRun[] = [];
+  if (!existsSync(root)) return out;
+  for (const session of readdirSync(root, { withFileTypes: true })) {
+    if (!session.isDirectory()) continue;
+    const sessionDir = join(root, session.name);
+    for (const run of readdirSync(sessionDir, { withFileTypes: true })) {
+      if (!run.isDirectory() || !REVIEW_RUN_ID_RE.test(run.name)) continue;
+      const runDir = join(sessionDir, run.name);
+      let mtimeMs: number;
+      try {
+        mtimeMs = statSync(runDir).mtimeMs;
+      } catch {
+        continue;
+      }
+      out.push({
+        sessionID: session.name,
+        runId: run.name,
+        runDir,
+        mtimeMs,
+        record: readRunRecord(runDir),
+      });
+    }
+  }
+  return out;
+}
+
+/** An open run for this slice: its record state is `publishing`. */
+function isOpenRun(run: DiscoveredRun): boolean {
+  return run.record?.state === "publishing";
+}
+
+export interface PrunedReviewRun extends RunRef {
+  reason: "expired" | "over-bound";
+  state: ReviewRunState | null;
+}
+
+export interface PruneReviewRunsSummary {
+  pruned: PrunedReviewRun[];
+  /** Runs protected because they are `publishing` (open) — never pruned. */
+  keptOpen: RunRef[];
+  totalBefore: number;
+}
+
+export interface PruneReviewRunsOptions {
+  /** Store root to sweep (the same root `ReviewRunStore` owns). */
+  root: string;
+  /** Retain runs whose directory mtime is within this window. */
+  ttlMs: number;
+  /** Global bound across every session; oldest pruned first when exceeded. */
+  maxRuns: number;
+  /** Inject "now" for deterministic tests; defaults to Date.now(). */
+  now?: number;
+}
+
+/**
+ * Remove expired runs and, when over the global bound, the oldest runs first.
+ * A run whose record reads `publishing` is "open" and is NEVER removed by
+ * either pass: it is reported in `keptOpen` instead. The summary names every
+ * run removed and the reason it was removed.
+ */
+export function pruneReviewRuns(opts: PruneReviewRunsOptions): PruneReviewRunsSummary {
+  const now = opts.now ?? Date.now();
+  const runs = discoverRuns(opts.root);
+  const pruned: PrunedReviewRun[] = [];
+  const keptOpen: RunRef[] = [];
+  const keptOpenDirs = new Set<string>();
+  const removed = new Set<string>();
+
+  const noteOpen = (run: DiscoveredRun): void => {
+    if (keptOpenDirs.has(run.runDir)) return;
+    keptOpenDirs.add(run.runDir);
+    keptOpen.push({ sessionID: run.sessionID, runId: run.runId });
+  };
+
+  // Pass 1 — expiry by directory mtime.
+  for (const run of runs) {
+    if (now - run.mtimeMs <= opts.ttlMs) continue;
+    if (isOpenRun(run)) {
+      noteOpen(run);
+      continue;
+    }
+    rmSync(run.runDir, { recursive: true, force: true });
+    removed.add(run.runDir);
+    pruned.push({
+      sessionID: run.sessionID,
+      runId: run.runId,
+      reason: "expired",
+      state: run.record?.state ?? null,
+    });
+  }
+
+  // Pass 2 — global bound, oldest first, still never an open run.
+  const remaining = runs
+    .filter((run) => !removed.has(run.runDir))
+    .sort((a, b) => a.mtimeMs - b.mtimeMs);
+  let excess = remaining.length - opts.maxRuns;
+  for (const run of remaining) {
+    if (excess <= 0) break;
+    if (isOpenRun(run)) {
+      noteOpen(run);
+      continue;
+    }
+    rmSync(run.runDir, { recursive: true, force: true });
+    removed.add(run.runDir);
+    pruned.push({
+      sessionID: run.sessionID,
+      runId: run.runId,
+      reason: "over-bound",
+      state: run.record?.state ?? null,
+    });
+    excess -= 1;
+  }
+
+  return { pruned, keptOpen, totalBefore: runs.length };
+}
+
+export interface RecoveredReviewRun extends RunRef {}
+
+export interface RecoverInterruptedRunsSummary {
+  recovered: RecoveredReviewRun[];
+}
+
+export interface RecoverInterruptedRunsOptions {
+  root: string;
+  ttlMs: number;
+  now?: number;
+}
+
+/**
+ * A run interrupted mid-write has a record still reading `publishing`. Once it
+ * is older than the TTL, mark it `failed` through the existing writer path and
+ * record `failureReason: "interrupted"` in the record — do NOT delete it, so a
+ * later reader can see the outcome.
+ */
+export function recoverInterruptedRuns(
+  opts: RecoverInterruptedRunsOptions,
+): RecoverInterruptedRunsSummary {
+  const now = opts.now ?? Date.now();
+  const recovered: RecoveredReviewRun[] = [];
+  for (const run of discoverRuns(opts.root)) {
+    if (run.record?.state !== "publishing") continue;
+    if (now - run.mtimeMs <= opts.ttlMs) continue;
+    const record = run.record;
+    record.failureReason = "interrupted";
+    const writer = new ReviewRunWriter(run.runDir, record, DEFAULT_REVIEW_RUN_CAPS);
+    writer.fail();
+    recovered.push({ sessionID: run.sessionID, runId: run.runId });
+  }
+  return { recovered };
 }
 
 // ---------------------------------------------------------------------------

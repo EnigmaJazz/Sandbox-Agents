@@ -12,6 +12,8 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   DEFAULT_REVIEW_RUN_CAPS,
+  DEFAULT_REVIEW_RUN_MAX_RUNS,
+  DEFAULT_REVIEW_RUN_TTL_MS,
   REVIEW_HELPER_SHA256_RE,
 } from "./review-run.ts";
 
@@ -148,6 +150,13 @@ export interface BrokerConfig {
   reviewRunMaxFileBytes: number;
   /** Maximum review runs per owning session. */
   reviewRunMaxPerSession: number;
+  /**
+   * Global review-run bound across every session (distinct from the
+   * per-session quota); oldest pruned first, never an open (`publishing`) run.
+   */
+  reviewRunMaxRuns: number;
+  /** Review-run retention TTL in ms; a run older than this is expired. */
+  reviewRunTtlMs: number;
   /**
    * Pinned review-helper path (T7). Null means the helper is not pinned; the
    * broker then refuses every helper run rather than resolving any fallback.
@@ -389,6 +398,14 @@ export function defaultConfig(
     reviewRunMaxPerSession: positiveIntEnv(
       "BROKER_REVIEW_RUN_MAX_PER_SESSION",
       DEFAULT_REVIEW_RUN_CAPS.maxPerSession,
+    ),
+    reviewRunMaxRuns: positiveIntEnv(
+      "BROKER_REVIEW_RUN_MAX_RUNS",
+      DEFAULT_REVIEW_RUN_MAX_RUNS,
+    ),
+    reviewRunTtlMs: positiveIntEnv(
+      "BROKER_REVIEW_RUN_TTL_MS",
+      DEFAULT_REVIEW_RUN_TTL_MS,
     ),
     reviewHelperPath: optionalStringEnv("BROKER_REVIEW_HELPER_PATH"),
     reviewHelperSha256: optionalStringEnv("BROKER_REVIEW_HELPER_SHA256"),
