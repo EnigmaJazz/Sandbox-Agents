@@ -109,3 +109,25 @@ Effective mode at route entry: on, deciding source global (read 2026-10-16). Not
 
 ## Next step
 Complete U2-2b verification and hand off the S17 files for owner review/installation. No commit or sandbox apply is authorized.
+
+### U2-2b review outcome (2026-10-16)
+
+Native RDD review `review-7a65c4bbdddbc842` — **approved, 0 findings**, acknowledged, authority burned.
+- Candidate: base tree `7d56b9083a7058cb8072fff8693ceaa7e964b76f` to `47fabae2507affa573f4d12684282b2ece6a2b55`, committed-only, workspace projection, target `sha256:55c47f3d326ddcb28b8eb401ee1cf703044c6b74c2b48a9f3017e4c06a8e6344`.
+- Risk: medium (`executable_change` at `broker/src/config.ts`); 11 paths, 125 changed lines; correction budget 63. Lens: `review-reliability`, order 0.
+- Consumed revision `sha256:34928e19f654c8622ab03956af192a298c983bef13713a5a54717f383b46698a`.
+- The lens independently verified the properties that matter for an authority grant: `reviewMaterialize` is classified as a mutation and is absent from `HOST_READ_OPERATIONS`, so it is not read-open to every agent; it is allowed for the orchestrator and every PM identity including the ASTRA variants; a general agent is denied; the ASTRA variants cannot `registerProject`; the plugin `READ_ONLY_AGENTS` list is in parity with the broker allowlist; the 60000 ms client timeout is asserted at its exact value; and the tool contract preserves a string broker error code.
+- `review assess` before the start: medium / `under_budget` / `review_due: false`; the slice was reviewed on the owner's explicit decision.
+
+## Status
+U2-2 complete (a: broker operation + registries; b: plugin tool + permission + PM authority). U2-1 and U2-2 are committed and reviewed. The model-facing materialize tool now exists end to end in source.
+
+## Operator acts still required before the tool is live
+1. `scripts/install-user-files --apply` installs the plugin files.
+2. The permission fragment is NOT merged automatically (`MERGE IS MANUAL`): merge the `"host_review_materialize": "allow"` entry into the installed `opencode.json` by hand.
+3. Restart the broker service, then restart secure OpenCode.
+4. Gate 4 probes (operator-run, not certified by this unit): confirm plugin-tool permission matching actually gates the entry, and confirm whether the installed orchestrator and PM agent definitions carry their own `tools:` allowlists that also need the name. Both are documented in `docs/review-pipeline-tools-gate4.md`; probes 2 and 3 in that document are marked UNVERIFIED.
+
+## Next step
+The pipeline phases (U3): `screen`/`prepare`/`merge`/`finalize` with bounded inline stdin and by-reference chaining, then the single approval-gated persist step that extracts `.artifact` from `finalize`.
+
