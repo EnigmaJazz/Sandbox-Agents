@@ -107,6 +107,17 @@ test("sandbox_edit and sandbox_write descriptions distinguish targeted and whole
   expect(sandboxTools).toContain("sandbox_edit for targeted text changes");
 });
 
+test("host_review_materialize exposes only a bounded index and preserves broker errors", () => {
+  expect(sandboxTools).toContain("host_review_materialize: tool({");
+  expect(sandboxTools).toContain('c.request("reviewMaterialize", ctx.sessionID, payload, ctx.agent)');
+  expect(sandboxTools).toContain("materializes a git range into the broker-owned run store");
+  expect(sandboxTools).toContain("returns only a bounded index");
+  expect(sandboxTools).toContain("reviewers are expected");
+  expect(sandboxTools).toContain("fetch slices separately");
+  expect(sandboxTools).toContain("host_review_materialize failed");
+  expect(sandboxTools).toContain("typeof code === \"string\"");
+});
+
 test("sandbox_apply_patch gives an actionable remedy for invalid unified diffs", () => {
   expect(service).toContain("include at least one unchanged context line");
   expect(service).toContain("end-of-file append-only hunk is valid");

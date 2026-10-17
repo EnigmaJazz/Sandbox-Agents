@@ -286,10 +286,14 @@ describe("host tool ask metadata", () => {
   });
 });
 
-describe("host review lens-context client timeout", () => {
+describe("host review client timeouts", () => {
   test("bounds the reviewLensContext client wait above the read default", () => {
     expect(OPERATION_TIMEOUT_MS.reviewLensContext).toBe(130_000);
     expect(OPERATION_TIMEOUT_MS.reviewLensContext).toBeGreaterThan(30_000);
+  });
+
+  test("gives reviewMaterialize a 60-second operation budget", () => {
+    expect(OPERATION_TIMEOUT_MS.reviewMaterialize).toBe(60_000);
   });
 });
 

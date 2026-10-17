@@ -38,7 +38,7 @@ import {
 
 const ORCHESTRATOR = "gentle-orchestrator";
 const ORCHESTRATOR_ALT = "gentle-orchestrator-alt";
-const PM_AGENTS = ["pm-odd", "pm-systematic", "pm-sdd"] as const;
+const PM_AGENTS = ["pm-odd", "pm-systematic", "pm-sdd", "pm-odd-astra", "pm-systematic-astra"] as const;
 const HOST_IDENTITIES = [ORCHESTRATOR, ...PM_AGENTS] as const;
 // Independent review fixture: never derive this list from production guard policy.
 const EXPECTED_SANDBOX_OPERATIONS = [

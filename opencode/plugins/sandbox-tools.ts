@@ -66,6 +66,8 @@ const READ_ONLY_AGENTS: readonly string[] = [
   "pm-odd",
   "pm-systematic",
   "pm-sdd",
+  "pm-odd-astra",
+  "pm-systematic-astra",
 ];
 
 function assertNotOrchestrator(agent: string | undefined, toolName: string): void {
@@ -727,6 +729,38 @@ export default function sandboxToolsPlugin() {
             lens: args.lens,
           }, ctx.agent);
           return JSON.stringify(result, null, 2);
+        },
+      }),
+
+      host_review_materialize: tool({
+        description:
+          "This tool materializes a git range into the broker-owned run store, writes nothing into the " +
+          "project, and returns only a bounded index (never diff text). reviewers are expected " +
+          "to fetch slices separately.",
+        args: {
+          baseRef: z.string().min(1).max(4096),
+          headRef: z.string().min(1).max(4096).optional(),
+          contextLines: z.number().int().min(0).max(100).optional(),
+          paths: z.array(z.string().min(1).max(4096)).max(256).optional(),
+        },
+        execute: async (args, ctx) => {
+          try {
+            const c = await client();
+            const payload = {
+              projectDir: currentProjectDirectory(ctx.directory),
+              ...args,
+            };
+            const result = await c.request("reviewMaterialize", ctx.sessionID, payload, ctx.agent);
+            return JSON.stringify(result, null, 2);
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            const code = typeof error === "object" && error !== null && "code" in error
+              ? (error as { code?: unknown }).code
+              : undefined;
+            throw new Error(
+              `host_review_materialize failed${typeof code === "string" ? ` [${code}]` : ""}: ${detail}`,
+            );
+          }
         },
       }),
 
