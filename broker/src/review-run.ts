@@ -108,6 +108,9 @@ export interface ReviewRunRecord {
   baseObjectId: string | null;
   headObjectId: string | null;
   artifacts: ReviewRunArtifact[];
+  /** Materialized range manifest and complete byte length, when present. */
+  changedPaths?: string[];
+  totalBytes?: number;
   /**
    * Set by recovery (T9) when a run interrupted mid-write is marked `failed`, so
    * a later reader can see the run was interrupted rather than deliberately

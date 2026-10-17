@@ -126,6 +126,8 @@
       "opencode.ai",
       "models.opencode.ai",
       "openrouter.ai",
+      "generativelanguage.googleapis.com",
+      "*.googleapis.com",
       "api.deepseek.com",
       "mcp.context7.com",
       "context7.com",
