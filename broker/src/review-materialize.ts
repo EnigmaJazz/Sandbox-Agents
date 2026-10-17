@@ -41,6 +41,7 @@ export interface ReviewMaterializeOptions {
   projectRoot: string;
   store: ReviewRunStore;
   gitBinary?: string;
+  /** Test seam; production defaults to replacement-env Git spawning with hardening. */
   spawn?: SpawnFn;
 }
 export interface ReviewSliceIndex { name: string; bytes: number; sha256: string; }
@@ -56,7 +57,7 @@ const spawnWithReplacementEnv: SpawnFn = (argv, opts) => spawnExec(argv, { ...op
 async function resolveCommit(ref: string, opts: ReviewMaterializeOptions): Promise<string> {
   let result: SpawnResult;
   try {
-    result = await invokeGit(opts.spawn ?? spawnExec, opts.gitBinary ?? "git", ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`], opts.projectRoot, { PATH: process.env.PATH ?? "" });
+    result = await invokeGit(opts.spawn ?? spawnWithReplacementEnv, opts.gitBinary ?? "git", ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`], opts.projectRoot, { PATH: process.env.PATH ?? "" });
   } catch {
     throw new ReviewRangeRefError(ref);
   }

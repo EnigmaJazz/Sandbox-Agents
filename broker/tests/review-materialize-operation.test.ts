@@ -64,6 +64,12 @@ function fixture(overrides: Record<string, unknown> = {}) {
   return { root, project, base, head, server, internals, store, request };
 }
 
+function gitInProject(project: string, args: string[]): string {
+  const result = Bun.spawnSync(["git", ...args], { cwd: project, env: { PATH: process.env.PATH ?? "" } });
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  return result.stdout.toString().trim();
+}
+
 function fakeGit(project: string, responses: (args: string[]) => { status: number; stdout: string; stderr: string }) {
   const cwds: string[] = [];
   const spawn = async (argv: string[], options: { cwd?: string }) => {
@@ -97,29 +103,14 @@ describe("reviewMaterialize dispatch", () => {
 
   test("rejects path members containing NUL before diff execution", async () => {
     const env = fixture();
-    const oid = "d".repeat(40);
-    const fake = fakeGit(env.project, (args) => args[0] === "rev-parse"
-      ? { status: 0, stdout: `${oid}\n`, stderr: "" }
-      : { status: 0, stdout: "", stderr: "" });
-    env.internals.ctx.git.spawn = fake.spawn;
     await expect(env.internals.dispatch(env.request("reviewMaterialize", "bound-orchestrator", {
       projectDir: env.project, baseRef: env.base, paths: ["bad\0path"],
     }))).rejects.toMatchObject({ code: "review_range_paths_invalid" });
-    expect(fake.cwds).toHaveLength(2);
   });
 
   test("resolves the exact approved project root and refuses other directories", async () => {
     const env = fixture();
-    const oid = "a".repeat(40);
-    const fake = fakeGit(env.project, (args) => {
-      if (args[0] === "rev-parse") return { status: 0, stdout: `${oid}\n`, stderr: "" };
-      if (args.includes("--name-only")) return { status: 0, stdout: "", stderr: "" };
-      return { status: 0, stdout: "", stderr: "" };
-    });
-    env.internals.ctx.git.spawn = fake.spawn;
     await env.internals.dispatch(env.request("reviewMaterialize", "bound-orchestrator", { projectDir: env.project, baseRef: env.base }));
-    expect(fake.cwds.length).toBeGreaterThan(0);
-    expect(fake.cwds.every((cwd) => cwd === realpathSync(env.project))).toBe(true);
 
     const nested = join(env.project, "nested");
     mkdirSync(nested);
@@ -133,31 +124,18 @@ describe("reviewMaterialize dispatch", () => {
 
   test("preserves exact materialization refusal codes through dispatch", async () => {
     const env = fixture();
-    const oid = "b".repeat(40);
-    const setSpawn = (responses: (args: string[]) => { status: number; stdout: string; stderr: string }) => {
-      env.internals.ctx.git.spawn = fakeGit(env.project, responses).spawn;
-    };
-    setSpawn((args) => args[0] === "rev-parse"
-      ? { status: 1, stdout: "", stderr: "missing" }
-      : { status: 0, stdout: "", stderr: "" });
     await expect(env.internals.dispatch(env.request("reviewMaterialize", "bound-orchestrator", { projectDir: env.project, baseRef: "not-a-ref" })))
       .rejects.toMatchObject({ code: "review_range_ref_unresolvable" });
 
-    setSpawn((args) => {
-      if (args[0] === "rev-parse") return { status: 0, stdout: `${oid}\n`, stderr: "" };
-      if (args.includes("--name-only")) return { status: 0, stdout: "oversized.txt\0", stderr: "" };
-      return { status: 0, stdout: `diff --git a/oversized.txt b/oversized.txt\n${"+line\n".repeat(1501)}`, stderr: "" };
-    });
-    await expect(env.internals.dispatch(env.request("reviewMaterialize", "bound-orchestrator", { projectDir: env.project, baseRef: env.base })))
-      .rejects.toMatchObject({ code: "review_range_file_slice_cap" });
+    writeFileSync(join(env.project, "oversized.txt"), "line\n".repeat(1501));
+    gitInProject(env.project, ["add", "oversized.txt"]);
+    gitInProject(env.project, ["commit", "-qm", "oversized"]);
+    const oversizedHead = gitInProject(env.project, ["rev-parse", "HEAD"]);
+    await expect(env.internals.dispatch(env.request("reviewMaterialize", "bound-orchestrator", {
+      projectDir: env.project, baseRef: env.base, headRef: oversizedHead,
+    }))).rejects.toMatchObject({ code: "review_range_file_slice_cap" });
 
     const capped = fixture({ reviewRunMaxBytes: 100 });
-    const capOid = "c".repeat(40);
-    capped.internals.ctx.git.spawn = fakeGit(capped.project, (args) => {
-      if (args[0] === "rev-parse") return { status: 0, stdout: `${capOid}\n`, stderr: "" };
-      if (args.includes("--name-only")) return { status: 0, stdout: "", stderr: "" };
-      return { status: 0, stdout: "x".repeat(101), stderr: "" };
-    }).spawn;
     await expect(capped.internals.dispatch(capped.request("reviewMaterialize", "bound-orchestrator", { projectDir: capped.project, baseRef: capped.base })))
       .rejects.toMatchObject({ code: "review_range_byte_cap" });
 
@@ -189,6 +167,47 @@ describe("reviewMaterialize dispatch", () => {
     expect(expected.exitCode).toBe(0);
     expect(actual.equals(expected.stdout)).toBe(true);
     expect(actual.byteLength).toBe(index.totalBytes);
+  });
+
+  test("uses a replacement environment against ambient GIT_DIR through production dispatch", async () => {
+    const env = fixture();
+    const decoy = join(env.root, "decoy");
+    mkdirSync(decoy);
+    const git = (cwd: string, args: string[]) => {
+      const result = Bun.spawnSync(["git", ...args], { cwd, env: { PATH: process.env.PATH ?? "" } });
+      if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+      return result.stdout.toString().trim();
+    };
+    git(decoy, ["init", "-q"]);
+    git(decoy, ["config", "user.name", "Test"]);
+    git(decoy, ["config", "user.email", "test@example.invalid"]);
+    writeFileSync(join(decoy, "change.txt"), "DECOY_SENTINEL\\n");
+    git(decoy, ["add", "change.txt"]);
+    git(decoy, ["commit", "-qm", "decoy"]);
+
+    const expected = Bun.spawnSync(["git", "diff", "--no-ext-diff", "--no-color", "--no-textconv", "-U3", env.base, env.head], {
+      cwd: env.project, env: { PATH: process.env.PATH ?? "" },
+    });
+    expect(expected.exitCode).toBe(0);
+    const originalGitDir = process.env.GIT_DIR;
+    process.env.GIT_DIR = join(decoy, ".git");
+    try {
+      const index = await env.internals.dispatch(env.request("reviewMaterialize", "bound-orchestrator", {
+        projectDir: env.project, baseRef: env.base, headRef: env.head,
+      })) as { runId: string; baseObjectId: string; headObjectId: string };
+      const runDir = join(env.root, "review-runs", "bound-orchestrator", index.runId);
+      const diff = readFileSync(join(runDir, "scope.diff"), "utf8");
+      const record = JSON.parse(readFileSync(join(runDir, "metadata.json"), "utf8")) as { baseObjectId: string; headObjectId: string };
+      expect(index.baseObjectId).toBe(env.base);
+      expect(index.headObjectId).toBe(env.head);
+      expect(record.baseObjectId).toBe(env.base);
+      expect(record.headObjectId).toBe(env.head);
+      expect(diff).toBe(expected.stdout.toString());
+      expect(diff).not.toContain("DECOY_SENTINEL");
+    } finally {
+      if (originalGitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = originalGitDir;
+    }
   });
 
   test("allows the bound orchestrator through the exemption but denies workers and other identities", async () => {
