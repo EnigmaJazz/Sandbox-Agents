@@ -36,7 +36,7 @@ export class ReviewSliceNotFoundError extends ReviewMaterializeError {
   constructor(name: string) { super("review_slice_not_found", `review slice '${name}' does not exist`); }
 }
 
-export interface MaterializeReviewPayload { baseRef: string; headRef?: string; mode?: "committed" | "workspace"; }
+export interface MaterializeReviewPayload { baseRef: string; headRef?: string; contextLines?: number; paths?: string[]; mode?: "committed" | "workspace"; }
 export interface ReviewMaterializeOptions {
   projectRoot: string;
   store: ReviewRunStore;
@@ -97,18 +97,24 @@ function packSlices(sections: ReturnType<typeof splitFileSections>): Buffer[] {
 
 export async function materializeReviewRange(payload: MaterializeReviewPayload, sessionID: string, options: ReviewMaterializeOptions): Promise<ReviewMaterializeIndex> {
   if (payload.mode === "workspace") throw new ReviewWorkspaceUnsupportedError();
+  options.store.assertRunAdmission(sessionID);
   const headRef = payload.headRef ?? "HEAD";
   const baseObjectId = await resolveCommit(payload.baseRef, options);
   const headObjectId = await resolveCommit(headRef, options);
   const spawn = options.spawn ?? spawnExec;
   const binary = options.gitBinary ?? "git";
   const env = { PATH: process.env.PATH ?? "" };
-  const diffResult = await invokeGit(spawn, binary, ["diff", "--no-ext-diff", "--no-color", "--no-textconv", "-U3", baseObjectId, headObjectId, "--"], options.projectRoot, env);
+  const contextLines = payload.contextLines ?? 3;
+  if (!Number.isInteger(contextLines) || contextLines < 0 || contextLines > 100) throw new ReviewMaterializeError("review_range_context_invalid", "contextLines must be an integer from 0 through 100");
+  const paths = payload.paths ?? [];
+  if (!Array.isArray(paths) || paths.some((path) => typeof path !== "string" || path.includes("\0"))) throw new ReviewMaterializeError("review_range_paths_invalid", "paths must be an array of strings without NUL bytes");
+  const pathArgs = ["--", ...paths];
+  const diffResult = await invokeGit(spawn, binary, ["diff", "--no-ext-diff", "--no-color", "--no-textconv", `-U${contextLines}`, baseObjectId, headObjectId, ...pathArgs], options.projectRoot, env);
   if (diffResult.status !== 0 || diffResult.timedOut || diffResult.outputTruncated) throw new ReviewMaterializeError("review_range_diff_failed", "git diff failed or exceeded its output bound");
   const diff = diffResult.stdoutBytes ?? Buffer.from(diffResult.stdout, "utf8");
   const cap = options.store.caps.maxBytes;
   if (diff.byteLength > cap) throw new ReviewRangeCapError(diff.byteLength, cap);
-  const namesResult = await invokeGit(spawn, binary, ["diff", "--no-ext-diff", "--no-color", "--no-textconv", "--name-only", "-z", baseObjectId, headObjectId, "--"], options.projectRoot, env);
+  const namesResult = await invokeGit(spawn, binary, ["diff", "--no-ext-diff", "--no-color", "--no-textconv", "--name-only", "-z", baseObjectId, headObjectId, ...pathArgs], options.projectRoot, env);
   if (namesResult.status !== 0 || namesResult.timedOut || namesResult.outputTruncated) throw new ReviewMaterializeError("review_range_manifest_failed", "git changed-path manifest failed");
   const changedPaths = namesResult.stdout.split("\0").filter(Boolean);
   const sections = splitFileSections(diff, changedPaths);
@@ -145,6 +151,7 @@ export async function readReviewSlice(runId: string, name: string, sessionID: st
   }
   if (!runDir || !record) throw new ReviewSliceNotFoundError(name);
   assertRunOwnership(record, sessionID);
+  if (record.state !== "published") throw new ReviewMaterializeError("review_run_not_published", "review run is not published");
   const artifact = record.artifacts.find((item) => item.name === name);
   if (!artifact) throw new ReviewSliceNotFoundError(name);
   return readRunArtifact({ runDir, name, maxFileBytes: REVIEW_SLICE_READ_MAX_BYTES }).data.toString("utf8");

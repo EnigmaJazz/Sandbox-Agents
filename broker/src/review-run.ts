@@ -504,6 +504,16 @@ export class ReviewRunStore {
     return count;
   }
 
+  /** Cheap admission gate used before expensive Git resolution and diffing. */
+  assertRunAdmission(sessionID: string): void {
+    const existing = this.countRunsForSession(sessionID);
+    if (existing >= this.caps.maxPerSession) {
+      throw new ReviewRunQuotaError(
+        `session ${sessionID} already has ${existing} review runs, at the per-session quota of ${this.caps.maxPerSession}`,
+      );
+    }
+  }
+
   /** Broker-generated runId bound to the session; quota-checked first. */
   createRun(sessionID: string, evidence: ReviewRunEvidence = {}): ReviewRunWriter {
     const existing = this.countRunsForSession(sessionID);

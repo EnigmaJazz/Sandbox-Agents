@@ -88,6 +88,8 @@ import {
 } from "./copy-review.ts";
 import { MsbError } from "./msb.ts";
 import { StateError } from "./state.ts";
+import { ReviewRunStore } from "./review-run.ts";
+import { materializeReviewRange } from "./review-materialize.ts";
 import {
   divergenceIndexPathFor,
   durableHostRefResolves,
@@ -3613,6 +3615,35 @@ async function appendPlanDocAtomically(
  * caller path, cwd, binary, or argv: `doc` is an enum mapped to a compile-time
  * constant beneath the canonical root.
  */
+export function buildReviewMaterializeOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as { projectDir?: unknown; baseRef?: unknown; headRef?: unknown; contextLines?: unknown; paths?: unknown };
+    authorizeHostDispatch(ctx, "reviewMaterialize", req.sessionID, req.agent);
+    if (typeof payload.baseRef !== "string" || payload.baseRef.length === 0) throw new ValidationError("baseRef must be a non-empty string");
+    if (payload.headRef !== undefined && typeof payload.headRef !== "string") throw new ValidationError("headRef must be a string");
+    if (payload.contextLines !== undefined && (!Number.isInteger(payload.contextLines) || (payload.contextLines as number) < 0 || (payload.contextLines as number) > 100)) throw new ValidationError("contextLines must be an integer from 0 through 100");
+    if (payload.paths !== undefined && (!Array.isArray(payload.paths) || payload.paths.some((path) => typeof path !== "string"))) throw new ValidationError("paths must be an array of strings");
+    const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    // This operation publishes only broker-owned run-store artifacts, never project content; unlike planDocAppend, it needs no approval gate.
+    const store = new ReviewRunStore({
+      root: ctx.config.reviewRunRoot,
+      projectRoot,
+      deniedPrefixes: ctx.config.reviewRunDeniedPrefixes,
+      caps: {
+        maxBytes: ctx.config.reviewRunMaxBytes,
+        maxFileBytes: ctx.config.reviewRunMaxFileBytes,
+        maxPerSession: ctx.config.reviewRunMaxPerSession,
+      },
+    });
+    return materializeReviewRange({
+      baseRef: payload.baseRef,
+      ...(payload.headRef === undefined ? {} : { headRef: payload.headRef as string }),
+      ...(payload.contextLines === undefined ? {} : { contextLines: payload.contextLines as number }),
+      ...(payload.paths === undefined ? {} : { paths: payload.paths as string[] }),
+    }, req.sessionID, { projectRoot, store, spawn: ctx.git.spawn as never });
+  };
+}
+
 export function buildPlanDocAppendOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const payload = payloadOf(req) as {

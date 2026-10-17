@@ -190,6 +190,28 @@ describe("review materialization", () => {
     }
   });
 
+  test("rejects exhausted session quota before invoking Git", async () => {
+    const env = fixture();
+    env.store.caps.maxPerSession = 1;
+    const prior = env.store.createRun("owner", { baseObjectId: env.base, headObjectId: env.head });
+    prior.publish();
+    let spawnCount = 0;
+    const spawn = async () => { spawnCount += 1; throw new Error("Git must not run"); };
+    const result = await materializeReviewRange({ baseRef: env.base }, "owner", { ...env.options, spawn: spawn as never })
+      .then(() => null, (error: unknown) => error);
+    expect(spawnCount).toBe(0);
+    expect(result).toMatchObject({ code: "review_run_quota" });
+  });
+
+  test("refuses to serve artifacts from a failed run", async () => {
+    const env = fixture();
+    const writer = env.store.createRun("failedowner", { baseObjectId: env.base, headObjectId: env.head });
+    writer.addArtifact("slice-0000.diff", "private diff");
+    writer.fail();
+    await expect(readReviewSlice(writer.record.runId, "slice-0000.diff", "failedowner", { store: env.store }))
+      .rejects.toMatchObject({ code: "review_run_not_published" });
+  });
+
   test("serves a slice only to the owning session and refuses missing or oversized slices", async () => {
     const env = fixture();
     const index = await materializeReviewRange({ baseRef: env.base, headRef: env.head }, "owner", env.options);

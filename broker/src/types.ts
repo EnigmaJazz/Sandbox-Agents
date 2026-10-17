@@ -78,6 +78,7 @@ export type Operation =
   | "reviewCaptureValidation"
   | "reviewValidate"
   | "reviewRecover"
+  | "reviewMaterialize"
   // Host git/GH mutations: fixed argv, orchestrator-only (§31).
   | "gitCommit"
   | "gitClearCommitIntent"
@@ -159,6 +160,7 @@ export const SANDBOX_GUARD_CLASS = {
   reviewCaptureValidation: "exempt-from-sandbox-guard",
   reviewValidate: "exempt-from-sandbox-guard",
   reviewRecover: "exempt-from-sandbox-guard",
+  reviewMaterialize: "exempt-from-sandbox-guard",
   gitCommit: "exempt-from-sandbox-guard",
   gitClearCommitIntent: "exempt-from-sandbox-guard",
   gitPush: "exempt-from-sandbox-guard",
@@ -232,7 +234,11 @@ export const OPERATIONS: readonly Operation[] = [
   "reviewCaptureValidation",
   "reviewValidate",
   "reviewRecover",
+  "reviewMaterialize",
+  "gitCommit",
   "gitClearCommitIntent",
+  "gitPush",
+  "ghIssueCreate",
   "hostSystemSummary",
   "hostMemory",
   "hostDiskUsage",
@@ -377,6 +383,14 @@ export type ReviewLens =
   | "review-resilience"
   | "review-readability"
   | "review-reliability";
+
+export interface ReviewMaterializePayload {
+  projectDir: string;
+  baseRef: string;
+  headRef?: string;
+  contextLines?: number;
+  paths?: string[];
+}
 
 export interface ReviewStartPayload {
   projectDir: string;
