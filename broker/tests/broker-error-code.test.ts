@@ -35,6 +35,20 @@ describe("broker error code mapping", () => {
     expect(toBrokerError(worker).code).toBe("worker");
   });
 
+  test("maps an inherited typed code to internal", () => {
+    // Keep the pollution local to this test; never mutate Error.prototype or Object.prototype.
+    const prototype = Object.assign(new Error("boom"), { code: "review_range_ref_unresolvable" });
+    const error = Object.create(prototype) as Error;
+    expect(Object.hasOwn(error, "code")).toBe(false);
+    expect(toBrokerError(error).code).toBe("internal");
+  });
+
+  test("propagates an own typed code", () => {
+    const error = Object.assign(new Error("typed error"), { code: "review_range_ref_unresolvable" });
+    expect(Object.hasOwn(error, "code")).toBe(true);
+    expect(toBrokerError(error).code).toBe("review_range_ref_unresolvable");
+  });
+
   test("maps an ordinary Error without a typed code to internal", () => {
     expect(toBrokerError(new Error("unexpected"))).toEqual({ code: "internal", message: "unexpected" });
   });
