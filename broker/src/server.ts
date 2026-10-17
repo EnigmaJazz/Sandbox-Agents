@@ -1017,7 +1017,7 @@ export class BrokerServer {
   }
 }
 
-function toBrokerError(err: unknown): BrokerError {
+export function toBrokerError(err: unknown): BrokerError {
   if (err instanceof ValidationError) {
     return { code: "validation", message: err.message };
   }
@@ -1033,6 +1033,14 @@ function toBrokerError(err: unknown): BrokerError {
   }
   if (err instanceof MsbError) {
     return { code: "worker", message: err.message };
+  }
+  if (err instanceof Error) {
+    const code = (err as Error & { readonly code?: unknown }).code;
+    // Only bounded lowercase identifier tokens are safe protocol codes; this excludes
+    // whitespace, paths, punctuation, and free-form text that could carry caller input.
+    if (typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code)) {
+      return { code: code as BrokerError["code"], message: err.message };
+    }
   }
   if (err instanceof Error) {
     return { code: "internal", message: err.message };
