@@ -2,6 +2,7 @@ import { spawnExec, type SpawnFn, type SpawnResult } from "./msb.ts";
 import {
   assertPinnedReviewHelper,
   assertReviewRunId,
+  resolveReviewHelperInterpreter,
   ReviewHelperMissingError,
   ReviewRunError,
 } from "./review-run.ts";
@@ -43,7 +44,7 @@ function diagnostic(result: SpawnResult): string {
 
 export async function runReviewPipeline(
   payload: ReviewPipelinePayload,
-  config: Pick<BrokerConfig, "reviewHelperPath" | "reviewHelperSha256">,
+  config: Pick<BrokerConfig, "reviewHelperPath" | "reviewHelperSha256" | "reviewHelperInterpreter">,
   spawn: SpawnFn = spawnWithReplacementEnv,
 ): Promise<ReviewPipelineResult> {
   if (typeof payload.phase !== "string" || !PHASES.includes(payload.phase as ReviewPipelinePhase)) {
@@ -81,12 +82,13 @@ export async function runReviewPipeline(
     throw cause;
   }
   // Heredoc delimiters exist to protect shell interpolation; argv spawning has no shell.
+  const interpreter = resolveReviewHelperInterpreter(config);
   const phaseArgs = phase === "screen"
     ? ["screen", "--reviewer", payload.reviewer as string, "--harness", "opencode"]
     : [phase];
   let result: SpawnResult;
   try {
-    result = await spawn([helper.path, ...phaseArgs], {
+    result = await spawn([interpreter, helper.path, ...phaseArgs], {
       stdin: input,
       timeoutMs: 30_000,
       maxOutputBytes: 256 * 1024,

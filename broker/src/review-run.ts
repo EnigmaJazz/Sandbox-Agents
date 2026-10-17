@@ -571,6 +571,50 @@ export interface PinnedReviewHelper {
   bytes: number;
 }
 
+export interface ReviewHelperInterpreterConfig {
+  reviewHelperInterpreter: string | null;
+  lstat?: typeof lstatSync;
+}
+
+export class ReviewHelperInterpreterUnconfiguredError extends ReviewRunError {
+  constructor(message: string) { super("review_helper_interpreter_unconfigured", message); }
+}
+export class ReviewHelperInterpreterMissingError extends ReviewRunError {
+  constructor(message: string) { super("review_helper_interpreter_missing", message); }
+}
+export class ReviewHelperInterpreterNotRegularError extends ReviewRunError {
+  constructor(message: string) { super("review_helper_interpreter_not_regular", message); }
+}
+export class ReviewHelperInterpreterNotExecutableError extends ReviewRunError {
+  constructor(message: string) { super("review_helper_interpreter_not_executable", message); }
+}
+
+export function resolveReviewHelperInterpreter(cfg: ReviewHelperInterpreterConfig): string {
+  const configured = cfg.reviewHelperInterpreter;
+  if (configured === null) {
+    throw new ReviewHelperInterpreterUnconfiguredError("review helper interpreter is not configured");
+  }
+  if (typeof configured !== "string" || configured.length === 0 || !isAbsolute(configured)) {
+    throw new ReviewHelperInterpreterUnconfiguredError("review helper interpreter must be a non-empty absolute path");
+  }
+  const path = resolve(configured);
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = (cfg.lstat ?? lstatSync)(path);
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "ENOENT") throw new ReviewHelperInterpreterMissingError(`review helper interpreter does not exist: ${path}`);
+    throw new ReviewRunError("review_helper_interpreter_unavailable", `review helper interpreter could not be inspected: ${path}`);
+  }
+  if (!stat.isFile()) {
+    throw new ReviewHelperInterpreterNotRegularError(`review helper interpreter is not a regular file: ${path} (${describeFileType(stat)})`);
+  }
+  if ((stat.mode & 0o111) === 0) {
+    throw new ReviewHelperInterpreterNotExecutableError(`review helper interpreter is not executable: ${path}`);
+  }
+  return path;
+}
+
 export class ReviewHelperUnconfiguredError extends ReviewRunError {
   constructor(message: string) {
     super("review_helper_unconfigured", message);

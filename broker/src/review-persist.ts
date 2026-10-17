@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnExec } from "./msb.ts";
-import { assertPinnedReviewHelper } from "./review-run.ts";
+import { assertPinnedReviewHelper, resolveReviewHelperInterpreter } from "./review-run.ts";
 import type { BrokerConfig } from "./config.ts";
 import type { ReviewPipelineResult } from "./review-pipeline.ts";
 
@@ -15,7 +15,7 @@ export interface ReviewPersistResult { outcome: "persisted" | "incomplete" | "re
 export class ReviewPersistError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = new.target.name; }
 }
-export interface PersistReviewArtifactOptions extends Pick<BrokerConfig, "reviewHelperPath" | "reviewHelperSha256"> {
+export interface PersistReviewArtifactOptions extends Pick<BrokerConfig, "reviewHelperPath" | "reviewHelperSha256" | "reviewHelperInterpreter"> {
   root: string;
   runId: string;
   runDir: string;
@@ -113,11 +113,16 @@ async function ensureReviewIgnored(root: string, context: string, runDir: string
 
 async function validateArtifact(options: PersistReviewArtifactOptions, target: string, root: string): Promise<ReviewArtifactValidation> {
   let helper: ReturnType<typeof assertPinnedReviewHelper>;
-  try { helper = assertPinnedReviewHelper(options); }
-  catch (cause) { return { status: "unavailable", code: "review_artifact_validator_unavailable", reason: cause instanceof Error ? cause.message : "pinned validator unavailable" }; }
+  let interpreter: string;
+  try {
+    helper = assertPinnedReviewHelper(options);
+    interpreter = resolveReviewHelperInterpreter(options);
+  } catch (cause) {
+    return { status: "unavailable", code: "review_artifact_validator_unavailable", reason: cause instanceof Error ? cause.message : "pinned validator unavailable" };
+  }
   let result;
   try {
-    result = await (options.spawn ?? spawnExec)([helper.path, "artifact", target], {
+    result = await (options.spawn ?? spawnExec)([interpreter, helper.path, "artifact", target], {
       cwd: root, timeoutMs: 30_000, maxOutputBytes: 64 * 1024,
       env: { PATH: process.env.PATH ?? "", ...(options.env ?? {}) }, envMode: "replace",
     });

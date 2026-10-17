@@ -19,6 +19,7 @@ it. The code lives in `broker/src/review-run.ts`; the config knobs in
 | `reviewRunTtlMs` | 7 days — retention TTL (`BROKER_REVIEW_RUN_TTL_MS`) |
 | `reviewHelperPath` | `null` — unpinned (`BROKER_REVIEW_HELPER_PATH`) |
 | `reviewHelperSha256` | `null` — unpinned, or 64 lowercase hex (`BROKER_REVIEW_HELPER_SHA256`) |
+| `reviewHelperInterpreter` | `null` — unconfigured (`BROKER_REVIEW_HELPER_INTERPRETER`); when set, an absolute executable path |
 
 Why `<stateDir>/review-runs`:
 
@@ -184,19 +185,20 @@ The destination is `$BROKER_STATE_DIR/review-helper/validate-review.mjs`,
 defaulting to `$HOME/.local/state/opencode-sandbox/review-helper/`; the
 containing directory is forced to mode `0700` and the file to `0600`. The
 installer records the source version and path in `pin.json` and writes
-`BROKER_REVIEW_HELPER_PATH` plus `BROKER_REVIEW_HELPER_SHA256` into
+`BROKER_REVIEW_HELPER_PATH`, `BROKER_REVIEW_HELPER_SHA256`, and
+`BROKER_REVIEW_HELPER_INTERPRETER` into
 `$HOME/.config/opencode-sandbox/broker.env`. `systemd-user/sandbox-broker.service`
 loads that file using `EnvironmentFile`, and `broker/src/config.ts` reads those
-environment keys into `reviewHelperPath` and `reviewHelperSha256`.
+environment keys into the matching config fields.
 
 The installer resolves its JSON parser with `command -v`, preferring `bun` and
 falling back to `node`; if neither is on `PATH`, verification fails with the
 named `REVIEW_HELPER_JSON_RUNTIME_MISSING` refusal. It parses `pin.json` as JSON
 with the resolved runtime's `-e` mode; JSON whitespace and key order are not
-part of the record's identity. The two managed environment
-assignments use one canonical form, `KEY=value`, with exactly one occurrence of
-each key. The path is absolute and limited to `[A-Za-z0-9._/@:+-]`; the digest
-is exactly 64 lowercase hexadecimal characters. Spaces, quotes, backslashes,
+part of the record's identity. The three managed environment assignments use
+one canonical form, `KEY=value`, with exactly one occurrence of each key. The
+paths are absolute and limited to `[A-Za-z0-9._/@:+-]`; the digest is exactly
+64 lowercase hexadecimal characters. Spaces, quotes, backslashes,
 malformed values, and duplicate assignments are refused before deployment
 writes rather than resolved by a last-match rule.
 
@@ -222,8 +224,14 @@ When the highest available cache version differs from `pin.json`, verification
 reports the version change and requires a deliberate `--apply`; it never
 repins automatically. The installer pins only the validator because
 `assertPinnedReviewHelper` (U1b-2) verifies the configured path and digest for
-each execution, while the broker owns the ignore check. No model-facing host
-tool routes to this store yet.
+each execution, while the broker owns the ignore check. The helper is stored
+with mode `0600`, so the broker invokes it as an argument to the separately
+configured `reviewHelperInterpreter` (the absolute executable path recorded by
+the installer), not as the executable. The broker does not search `PATH` or
+choose a default interpreter: a null interpreter configuration fails closed
+with `review_helper_interpreter_unconfigured`. The installer resolves `node`
+first and then `bun` when creating the pin. No model-facing host tool routes to
+this store yet.
 
 The installer rejects a statically symlinked destination directory, including a
 dangling link, and checks its path ancestors before creating the pin. This closes

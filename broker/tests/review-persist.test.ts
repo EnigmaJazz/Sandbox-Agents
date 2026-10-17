@@ -22,7 +22,7 @@ function fixture() {
   writeFileSync(helper, `#!${process.execPath}\nprocess.exit(process.env.FIXTURE_STATUS === 'ok' ? 0 : process.env.FIXTURE_STATUS === 'fail' ? 3 : 2);\n`);
   chmodSync(helper, 0o700);
   const helperSha256 = createHash("sha256").update(readFileSync(helper)).digest("hex");
-  return { root, context, runDir, runId, reviewHelperPath: helper, reviewHelperSha256: helperSha256 };
+  return { root, context, runDir, runId, reviewHelperPath: helper, reviewHelperSha256: helperSha256, reviewHelperInterpreter: process.execPath };
 }
 
 const writing = (artifact: unknown) => ({ outcome: "accepted" as const, output: { kind: "writing", artifact, report: { private: "report-only" } } });
@@ -32,7 +32,7 @@ test("persists only artifact and adds schema_version after making the directory 
   const calls: Array<{ argv: string[]; options: { cwd?: string } }> = [];
   const spawn = async (argv: string[], options: Parameters<typeof spawnExec>[1]) => { calls.push({ argv, options }); return spawnExec(argv, options); };
   const result = await persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "ok" }, spawn });
-  expect(calls.some((call) => call.argv[0] === f.reviewHelperPath && call.options.cwd === f.root && call.argv[1] === "artifact" && call.argv.length === 3)).toBe(true);
+  expect(calls.some((call) => call.argv[0] === process.execPath && call.argv[1] === f.reviewHelperPath && call.options.cwd === f.root && call.argv[2] === "artifact" && call.argv.length === 4)).toBe(true);
   if (result.validation.status !== "passed") throw new Error(JSON.stringify(result.validation));
   const target = join(f.runDir, "review-summary.json");
   const parsed = JSON.parse(readFileSync(target, "utf8"));
@@ -159,7 +159,7 @@ test("unstartable validator is unavailable with a reason distinct from absence",
   const result = await persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }) });
   expect(result.validation.status).toBe("unavailable");
   expect(result.validation.code).toBe("review_artifact_validator_unavailable");
-  expect(result.validation.reason).toContain("status null");
+  expect(result.validation.reason).toContain("status 2");
 });
 
 test("refuses structurally rejected and unavailable finalize outcomes", async () => {

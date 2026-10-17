@@ -77,7 +77,7 @@ function fixture(options: { seedState?: boolean } = {}) {
     const helperSha256 = createHash("sha256").update(helperBytes).digest("hex");
     writeFileSync(resolve(pinDir, "pin.json"), JSON.stringify({ version: sourceVersion, source: helperSource, sha256: helperSha256 }) + "\n", { mode: 0o600 });
     chmodSync(resolve(pinDir, "pin.json"), 0o600);
-    writeFileSync(resolve(home, ".config/opencode-sandbox/broker.env"), `BROKER_REVIEW_HELPER_PATH=${helperDest}\nBROKER_REVIEW_HELPER_SHA256=${helperSha256}\n`, { flag: "a" });
+    writeFileSync(resolve(home, ".config/opencode-sandbox/broker.env"), `BROKER_REVIEW_HELPER_PATH=${helperDest}\nBROKER_REVIEW_HELPER_SHA256=${helperSha256}\nBROKER_REVIEW_HELPER_INTERPRETER=${process.execPath}\n`, { flag: "a" });
   }
   for (const file of pluginFiles) {
     install(`opencode/plugins/${file}`, resolve(home, ".config/opencode/plugins", file));
@@ -145,6 +145,22 @@ describe("install-user-files --verify", () => {
     expect(result.stdout).toContain("review helper unconfigured");
     expect(result.stdout).toContain("not verified");
     expect(result.stdout).not.toContain("review helper pin verified");
+  });
+
+  test("verify refuses missing, non-absolute, and non-executable pinned interpreters", () => {
+    const { home, run } = fixture();
+    const envPath = resolve(home, ".config/opencode-sandbox/broker.env");
+    const valid = readFileSync(envPath, "utf8");
+    const missing = resolve(home, "missing-interpreter");
+    const nonExecutable = resolve(home, "not-executable");
+    writeFileSync(nonExecutable, "not executable");
+    chmodSync(nonExecutable, 0o600);
+    for (const interpreter of [missing, "relative/node", nonExecutable]) {
+      writeFileSync(envPath, valid.replace(/^BROKER_REVIEW_HELPER_INTERPRETER=.*$/m, `BROKER_REVIEW_HELPER_INTERPRETER=${interpreter}`));
+      const result = run();
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain("review helper interpreter is missing, non-absolute, or non-executable");
+    }
   });
 
   test("helper config without a pin activates installed-pin consistency checks", () => {

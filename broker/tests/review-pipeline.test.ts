@@ -1,10 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { runReviewPipeline, REVIEW_PIPELINE_MAX_STDIN_BYTES } from "../src/review-pipeline.ts";
-import type { SpawnFn } from "../src/msb.ts";
+import { spawnExec, type SpawnFn } from "../src/msb.ts";
 import { assertPayloadKeys, ValidationError } from "../src/validation.ts";
 
 const roots: string[] = [];
@@ -26,8 +26,54 @@ process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), input: input.
 `);
   chmodSync(helper, 0o700);
   const digest = createHash("sha256").update(readFileSync(helper)).digest("hex");
-  return { helper, digest, config: { reviewHelperPath: helper, reviewHelperSha256: digest } };
+  return { helper, digest, config: { reviewHelperPath: helper, reviewHelperSha256: digest, reviewHelperInterpreter: process.execPath } };
 }
+
+test("runs a mode-0600 pinned helper through its configured interpreter", async () => {
+  const pin = fixture();
+  chmodSync(pin.helper, 0o600);
+  const config = { ...pin.config, reviewHelperInterpreter: process.execPath };
+  let observedArgv: string[] = [];
+  const result = await runReviewPipeline(
+    { phase: "prepare", runId: "a".repeat(32), stdin: "{}" }, config,
+    (argv, options) => { observedArgv = argv; return spawnExec(argv, options); },
+  );
+  expect(observedArgv).toEqual([process.execPath, pin.helper, "prepare"]);
+  expect(result).toEqual({ outcome: "accepted", output: {
+    argv: ["prepare"], input: "{}", stdinSha256: createHash("sha256").update("{}").digest("hex"),
+  } });
+});
+
+test("refuses an unconfigured interpreter before spawning", async () => {
+  const pin = fixture();
+  let spawns = 0;
+  const spawn: SpawnFn = async () => { spawns++; throw new Error("must not spawn"); };
+  await expect(runReviewPipeline(
+    { phase: "prepare", runId: "a".repeat(32), stdin: "{}" },
+    { ...pin.config, reviewHelperInterpreter: null }, spawn,
+  )).rejects.toThrow("review helper interpreter is not configured");
+  expect(spawns).toBe(0);
+});
+
+test("refuses missing, symlinked, and non-executable interpreters by distinct code", async () => {
+  const pin = fixture();
+  const missing = join(pin.helper, "..", "missing-interpreter");
+  const symlink = join(pin.helper, "..", "symlink-interpreter");
+  symlinkSync(process.execPath, symlink);
+  const nonExecutable = join(pin.helper, "..", "non-executable-interpreter");
+  writeFileSync(nonExecutable, "not executable");
+  chmodSync(nonExecutable, 0o600);
+  for (const [interpreter, code] of [
+    [missing, "review_helper_interpreter_missing"],
+    [symlink, "review_helper_interpreter_not_regular"],
+    [nonExecutable, "review_helper_interpreter_not_executable"],
+  ] as const) {
+    await expect(runReviewPipeline(
+      { phase: "prepare", runId: "a".repeat(32), stdin: "{}" },
+      { ...pin.config, reviewHelperInterpreter: interpreter },
+    )).rejects.toMatchObject({ code });
+  }
+});
 
 test("runs fixed phase argv with byte-identical stdin and no caller-controlled harness", async () => {
   const pin = fixture();

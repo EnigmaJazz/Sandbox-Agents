@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -23,6 +24,9 @@ function fixture(options: { source?: boolean; versions?: string[]; aliases?: str
   const home = mkdtempSync(resolve(tmpdir(), "review-helper-pin-"));
   tempDirs.push(home);
   const stateDir = resolve(home, ".local/state/opencode-sandbox");
+  const interpreterBin = resolve(home, "interpreter-bin");
+  mkdirSync(interpreterBin);
+  symlinkSync(process.execPath, resolve(interpreterBin, "node"));
   const sourceVersion = "3.21.0";
   const versions = options.versions ?? [sourceVersion];
   const sources = new Map<string, string>();
@@ -56,11 +60,12 @@ function fixture(options: { source?: boolean; versions?: string[]; aliases?: str
       'source "$SCRIPT_DIR/secure-launcher.conf"\nNONO_BIN="/bin/true"',
     );
   writeFileSync(testInstaller, source, { mode: 0o755 });
-  const run = (...args: string[]) => spawnSync("bash", [testInstaller, ...args], {
+  const runEnv = (extraEnv: Record<string, string>, ...args: string[]) => spawnSync("bash", [testInstaller, ...args], {
     encoding: "utf8",
-    env: { ...process.env, HOME: home, BROKER_STATE_DIR: stateDir },
+    env: { ...process.env, HOME: home, BROKER_STATE_DIR: stateDir, PATH: `${interpreterBin}:${process.env.PATH ?? ""}`, ...extraEnv },
   });
-  return { home, stateDir, sources, sourceVersion, run };
+  const run = (...args: string[]) => runEnv({}, ...args);
+  return { home, stateDir, sources, sourceVersion, run, runEnv };
 }
 
 const destination = (stateDir: string) => resolve(stateDir, "review-helper/validate-review.mjs");
@@ -93,8 +98,32 @@ describe("review helper installer pin", () => {
     const env = readFileSync(config(home), "utf8");
     expect(env).toContain(`BROKER_REVIEW_HELPER_PATH=${dest}`);
     expect(env).toMatch(/BROKER_REVIEW_HELPER_SHA256=[0-9a-f]{64}/);
+    expect(env).toContain(`BROKER_REVIEW_HELPER_INTERPRETER=${process.execPath}`);
+    expect(readFileSync(resolve(stateDir, "install-journal.tsv"), "utf8")).toContain(`interpreter=${process.execPath}`);
     expect(result.stdout).toContain("3.19.0");
     expect(result.stdout).toContain("3.20.0");
+  });
+
+  test("repeat apply keeps exactly one interpreter assignment", () => {
+    const { home, run } = fixture();
+    expect(run("--apply").status).toBe(0);
+    expect(run("--apply").status).toBe(0);
+    const env = readFileSync(config(home), "utf8");
+    expect(env.match(/^BROKER_REVIEW_HELPER_INTERPRETER=/gm)).toHaveLength(1);
+  });
+
+  test("apply refuses when neither node nor bun resolves to an executable interpreter", () => {
+    const { home, stateDir, runEnv } = fixture();
+    const blockedBin = resolve(home, "blocked-bin");
+    mkdirSync(blockedBin);
+    for (const command of readdirSync("/usr/bin")) {
+      if (command === "node" || command === "bun") continue;
+      try { symlinkSync(resolve("/usr/bin", command), resolve(blockedBin, command)); } catch { /* duplicate alias */ }
+    }
+    const result = runEnv({ PATH: blockedBin }, "--apply");
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toContain("REVIEW_HELPER_INTERPRETER_MISSING");
+    expect(() => statSync(destination(stateDir))).toThrow();
   });
 
   test("refuses a symlinked state ancestor without changing the external target", () => {

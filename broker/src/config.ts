@@ -9,7 +9,7 @@
  * docs/manual-verification.md). No secrets live here.
  */
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   DEFAULT_REVIEW_RUN_CAPS,
   DEFAULT_REVIEW_RUN_MAX_RUNS,
@@ -167,6 +167,8 @@ export interface BrokerConfig {
    * non-null value must match REVIEW_HELPER_SHA256_RE at parse.
    */
   reviewHelperSha256: string | null;
+  /** Absolute interpreter path for the pinned, non-executable review helper. */
+  reviewHelperInterpreter: string | null;
   /** Optional JSONL log file; defaults to stdout (§26). */
   logPath?: string;
   msbBinary: string;
@@ -411,6 +413,7 @@ export function defaultConfig(
     ),
     reviewHelperPath: optionalStringEnv("BROKER_REVIEW_HELPER_PATH"),
     reviewHelperSha256: optionalStringEnv("BROKER_REVIEW_HELPER_SHA256"),
+    reviewHelperInterpreter: optionalStringEnv("BROKER_REVIEW_HELPER_INTERPRETER"),
     logPath: process.env.BROKER_LOG_FILE,
     msbBinary: process.env.MSB_BINARY ?? "/home/james/.local/bin/msb",
     workerImage: process.env.MSB_WORKER_IMAGE ?? "debian",
@@ -516,6 +519,16 @@ export function defaultConfig(
   ) {
     throw new ConfigError(
       `invalid reviewHelperSha256: expected 64 lowercase hex characters (got ${JSON.stringify(merged.reviewHelperSha256)})`,
+    );
+  }
+  if (
+    merged.reviewHelperInterpreter !== null &&
+    (typeof merged.reviewHelperInterpreter !== "string" ||
+      merged.reviewHelperInterpreter.length === 0 ||
+      !isAbsolute(merged.reviewHelperInterpreter))
+  ) {
+    throw new ConfigError(
+      `invalid reviewHelperInterpreter: expected a non-empty absolute path (got ${JSON.stringify(merged.reviewHelperInterpreter)})`,
     );
   }
   return merged;

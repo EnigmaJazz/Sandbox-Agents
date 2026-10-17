@@ -29,6 +29,8 @@ JOURNAL="$STATE_DIR/install-journal.tsv"
 BROKER_ENV_DEST="$HOME/.config/opencode-sandbox/broker.env"
 BROKER_REVIEW_HELPER_PATH_VALUE=""
 BROKER_REVIEW_HELPER_SHA256_VALUE=""
+BROKER_REVIEW_HELPER_INTERPRETER_VALUE=""
+REVIEW_HELPER_INTERPRETER=""
 PIN_JSON_RUNTIME=""
 
 reject_symlink_path() {
@@ -45,9 +47,10 @@ reject_symlink_path() {
 }
 
 validate_helper_config() {
-  local line path_count=0 hash_count=0 value
+  local line path_count=0 hash_count=0 interpreter_count=0 value
   BROKER_REVIEW_HELPER_PATH_VALUE=""
   BROKER_REVIEW_HELPER_SHA256_VALUE=""
+  BROKER_REVIEW_HELPER_INTERPRETER_VALUE=""
   [[ -e "$BROKER_ENV_DEST" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
     case "$line" in
@@ -77,6 +80,19 @@ validate_helper_config() {
         fi
         BROKER_REVIEW_HELPER_SHA256_VALUE="$value"
         ;;
+      BROKER_REVIEW_HELPER_INTERPRETER=*)
+        interpreter_count=$((interpreter_count + 1))
+        if (( interpreter_count > 1 )); then
+          printf '[install] error: duplicate BROKER_REVIEW_HELPER_INTERPRETER assignment in %s\n' "$BROKER_ENV_DEST" >&2
+          return 1
+        fi
+        value="${line#*=}"
+        if [[ ! "$value" =~ ^/[A-Za-z0-9._/@:+-]+$ ]]; then
+          printf '[install] error: malformed BROKER_REVIEW_HELPER_INTERPRETER assignment in %s\n' "$BROKER_ENV_DEST" >&2
+          return 1
+        fi
+        BROKER_REVIEW_HELPER_INTERPRETER_VALUE="$value"
+        ;;
     esac
   done <"$BROKER_ENV_DEST"
 }
@@ -86,6 +102,23 @@ resolve_pin_json_runtime() {
   if PIN_JSON_RUNTIME="$(command -v bun 2>/dev/null)" && [[ -n "$PIN_JSON_RUNTIME" ]]; then return 0; fi
   if PIN_JSON_RUNTIME="$(command -v node 2>/dev/null)" && [[ -n "$PIN_JSON_RUNTIME" ]]; then return 0; fi
   printf '[install] error: REVIEW_HELPER_JSON_RUNTIME_MISSING: neither bun nor node is available on PATH\n' >&2
+  return 1
+}
+
+resolve_review_helper_interpreter() {
+  local candidate runtime
+  REVIEW_HELPER_INTERPRETER=""
+  for runtime in node bun; do
+    candidate="$(command -v "$runtime" 2>/dev/null || true)"
+    if [[ "$candidate" == /* ]]; then
+      candidate="$(readlink -f -- "$candidate" 2>/dev/null || true)"
+    fi
+    if [[ "$candidate" == /* && -f "$candidate" && -x "$candidate" ]]; then
+      REVIEW_HELPER_INTERPRETER="$candidate"
+      return 0
+    fi
+  done
+  printf '[install] error: REVIEW_HELPER_INTERPRETER_MISSING: neither node nor bun resolves to an absolute executable file on PATH\n' >&2
   return 1
 }
 
@@ -425,7 +458,7 @@ REVIEW_HELPER_PIN_PRESENT=0
 if [[ -e "$REVIEW_HELPER_DIR" || -L "$REVIEW_HELPER_DIR" || -e "$REVIEW_HELPER_PIN" || -L "$REVIEW_HELPER_PIN" ]]; then
   REVIEW_HELPER_PIN_PRESENT=1
 fi
-if [[ -f "$BROKER_ENV_DEST" ]] && grep -Eq '^BROKER_REVIEW_HELPER_(PATH|SHA256)=' "$BROKER_ENV_DEST"; then
+if [[ -f "$BROKER_ENV_DEST" ]] && grep -Eq '^BROKER_REVIEW_HELPER_(PATH|SHA256|INTERPRETER)=' "$BROKER_ENV_DEST"; then
   REVIEW_HELPER_PIN_PRESENT=1
 fi
 if ! validate_helper_config; then DRIFT=1; fi
@@ -513,6 +546,11 @@ if [[ "$VERIFY" == "1" && "$REVIEW_HELPER_PIN_PRESENT" == "1" ]]; then
     log "DRIFT $REVIEW_HELPER_DIR: mode differs (expected directory 0700)"
     DRIFT=1
   fi
+  RECORDED_INTERPRETER="$BROKER_REVIEW_HELPER_INTERPRETER_VALUE"
+  if [[ ! "$RECORDED_INTERPRETER" =~ ^/ || ! -f "$RECORDED_INTERPRETER" || -L "$RECORDED_INTERPRETER" || ! -x "$RECORDED_INTERPRETER" ]]; then
+    log "DRIFT $BROKER_ENV_DEST: review helper interpreter is missing, non-absolute, or non-executable"
+    DRIFT=1
+  fi
   RECORDED_PATH="$BROKER_REVIEW_HELPER_PATH_VALUE"
   if [[ "$RECORDED_PATH" != "$REVIEW_HELPER_DEST" ]]; then
     log "DRIFT $BROKER_ENV_DEST: live config helper path differs from pinned destination"
@@ -539,15 +577,16 @@ if [[ "$VERIFY" == "1" && "$REVIEW_HELPER_PIN_PRESENT" == "1" ]]; then
 elif [[ "$VERIFY" != "1" ]]; then
   log "review helper selected $REVIEW_HELPER_VERSION $REVIEW_HELPER_SOURCE; sha256 $REVIEW_HELPER_SHA256"
   if [[ "$APPLY" == "1" ]]; then
+    if ! resolve_review_helper_interpreter; then exit 1; fi
     mkdir -p "$REVIEW_HELPER_DIR"
     chmod 700 "$REVIEW_HELPER_DIR"
     cp "$REVIEW_HELPER_SOURCE" "$REVIEW_HELPER_DEST"
     chmod 600 "$REVIEW_HELPER_DEST"
     printf '{"version":"%s","source":"%s","sha256":"%s"}\n' "$REVIEW_HELPER_VERSION" "$REVIEW_HELPER_SOURCE" "$REVIEW_HELPER_SHA256" >"$REVIEW_HELPER_PIN"
     chmod 600 "$REVIEW_HELPER_PIN"
-    sed -i '/^BROKER_REVIEW_HELPER_PATH=/d; /^BROKER_REVIEW_HELPER_SHA256=/d' "$BROKER_ENV_DEST"
-    printf 'BROKER_REVIEW_HELPER_PATH=%s\nBROKER_REVIEW_HELPER_SHA256=%s\n' "$REVIEW_HELPER_DEST" "$REVIEW_HELPER_SHA256" >>"$BROKER_ENV_DEST"
-    journal "review-helper-pin" "$REVIEW_HELPER_SOURCE" "$REVIEW_HELPER_DEST" "$REVIEW_HELPER_VERSION $REVIEW_HELPER_SHA256"
+    sed -i '/^BROKER_REVIEW_HELPER_PATH=/d; /^BROKER_REVIEW_HELPER_SHA256=/d; /^BROKER_REVIEW_HELPER_INTERPRETER=/d' "$BROKER_ENV_DEST"
+    printf 'BROKER_REVIEW_HELPER_PATH=%s\nBROKER_REVIEW_HELPER_SHA256=%s\nBROKER_REVIEW_HELPER_INTERPRETER=%s\n' "$REVIEW_HELPER_DEST" "$REVIEW_HELPER_SHA256" "$REVIEW_HELPER_INTERPRETER" >>"$BROKER_ENV_DEST"
+    journal "review-helper-pin" "$REVIEW_HELPER_SOURCE" "$REVIEW_HELPER_DEST" "$REVIEW_HELPER_VERSION $REVIEW_HELPER_SHA256 interpreter=$REVIEW_HELPER_INTERPRETER"
   fi
 else
   log "review helper unconfigured: no installed pin or helper config; not verified"
