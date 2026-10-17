@@ -105,3 +105,22 @@ Effective mode at route entry: **on**, deciding source **global** (read 2026-10-
 
 ## Next step
 Continue U3a before treating it complete: resolve the outstanding tests and registrations above, run each guard revert with before/after hashes, and record observed outcomes.
+
+### U3a review outcome (2026-10-16)
+
+Native RDD review `review-d63291bbd176cae7` — **approved**, acknowledged, authority burned.
+- Candidate: base tree `ba691c6232c49593a42c397b8990c862a7d998a8` to `234456b971de2d3d0960e93cc344eeff12f55c1d`, committed-only, workspace projection, target `sha256:de242a9389ccdbb8724ba74d1f75fa3aa0397b8d53c343b5ef8d484d49f22fc4`.
+- Risk: medium (`executable_change` at `broker/src/review-pipeline.ts`); 9 paths, 379 changed lines; correction budget 190. Lens: `review-reliability`, order 0.
+- Consumed revision `sha256:598b1f406e48737e2655988734ea89c6f76a7ee6ae2d2ba7a1b0d9c5c197081e`.
+- The lens independently confirmed the phase/reviewer validation, the 256 KiB cap, the exact Buffer stdin (string or byte array), the pinned-helper check before spawn, the fixed argv vectors, the 0/1/2 outcome mapping, and the registry parity plus orchestrator/PM-only authorization.
+- `review assess` before the start: medium / `under_budget` / `review_due: false`; reviewed on the owner's explicit decision.
+
+**Advisory findings (non-blocking, informational — none opened a correction; treat as separate later work, never a reason to re-run review on this candidate):**
+- **R3-001** (WARNING, `broker/src/review-pipeline.ts:98-100`) — the accepted outcome returns the entire phase stdout inline rather than publishing it to the run store and returning a bounded summary plus artifact reference; large `prepare`/`merge`/`finalize` outputs will not scale, so this must change when T5 (by-reference chaining) lands. Already acknowledged as pending in this tracker.
+- **R3-002** (SUGGESTION, `broker/src/service.ts:3616-3622`) — `buildReviewPipelineRunOp` casts the request payload and delegates without an observable assertion at the operation boundary that disallowed keys are rejected; `assertPayloadKeys` is unit-tested but a handler-level or end-to-end test would prove the framework wires it in for this operation.
+
+## Status
+U3a (T1-T4) complete, committed and reviewed. T5 (by-reference chaining) and the client-timeout registration remain pending, as do slices U3b and U3c.
+
+## Next step
+U3b: persist, ignore provisioning, artifact validation.
