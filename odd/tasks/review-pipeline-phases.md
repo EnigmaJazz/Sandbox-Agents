@@ -79,10 +79,32 @@ Pre-code advice carried from the U2 design pass and applied here:
 - Internal `advisor-integration-pre`: the spawn-boundary must-fixes, delivered.
 Owner decisions taken during this unit: (a) the persist step writes into the project because the upstream contract's containment makes any other location produce a permanently degraded run; (b) the ignore entry is provisioned by the tool itself and skipped when already effective, so it works in other projects without pre-configuration; (c) this repository adds `.context/` to its root `.gitignore` instead of accepting a new untracked stray, so the eligible-untracked inventory stays at its existing six paths.
 
+Post-code advisory evidence:
+- **Step `post-code`** — dispatched 2026-10-17 by the coordinator over the accumulated candidate at `139093b`, because the route cannot run `ce:review` in this sandbox (its helper pipeline is stdin-only and the sandbox is argv-only), so the interim post-code advisory review is owed for every unit here.
+- **`advisor-testing-post`** (completed; ran `bun --cwd broker test` on the nine new test files in its own workspace: 176 pass / 0 fail, 590 expect calls). Findings:
+  - must-fix: `broker/tests/review-pipeline-operation.test.ts:21-63` is vacuous — it asserts only `outcome: "persisted"` and `validation.status: "passed"`, so a stub returning those values would pass. It never asserts the validator was spawned, that the interpreter and helper path reached the spawn vector, or that `review-summary.json` was written.
+  - must-fix: `contextLines > 100` has no failing test (`broker/src/review-materialize.ts:110`, `broker/src/service.ts:3660`); only `-1` is covered.
+  - should-fix: the truncation and timeout guards are unexercised — `review-pipeline.ts:100`, `review-persist.ts:132`, `review-materialize.ts:64,115,120`, and `review-persist.ts:133` for status 3 plus timedOut.
+  - should-fix: the test named "unstartable validator" (`broker/tests/review-persist.test.ts:156-163`) actually exercises a normal exit-2 path; the real spawn-throw catch at `review-persist.ts:129-131` is never reached.
+  - should-fix: `ReviewRunWriter.addArtifact`'s state guard (`review-run.ts:382`) is uncovered.
+  - should-fix: the service-level payload guards for `reviewPersist` (`service.ts:3632-3633`) are unexercised.
+  - advisory: the parity tests are static and would pass with empty op builders; the installer has one parse-only regex assertion (`install-user-files-verify.test.ts:368-372`), though most installer tests DO execute it via `bash`; and the test fakes do not reproduce the real boundary (fixtures at `0o700` with a shebang versus the pinned `0o600` helper plus interpreter, and fakes that omit `timedOut`/`outputTruncated`).
+  - It confirmed all four artifact-validation statuses have an assertion that would fail if a mapping collapsed, and that the installer is mostly executed rather than parsed.
+- **`advisor-integration-post`** (completed after one provider failure was retried; the first attempt returned `invalid_request_error`). Findings:
+  - must-fix: no plugin tool exists for `reviewPipelineRun` or `reviewPersist` (`opencode/plugins/sandbox-tools.ts` exposes only `host_review_materialize`; the permission fragment grants only that), so neither is reachable from a model.
+  - must-fix: `reviewPersist` reads `payload.finalizeRef` from the run store (`service.ts:3642`) but the pipeline returns its output inline and only `scope.diff` and `slice-*.diff` are ever published (`review-materialize.ts:128-131`), so every persist call fails `review_run_artifact_missing`. Consequence: by-reference phase chaining (T5) is a HARD DEPENDENCY for the persist step, not a deferred optimisation.
+  - must-fix: `OPERATION_TIMEOUT_MS` in `opencode/plugins/lib/broker-client.ts:102` has no entry for either new operation, so both fall back to the 30s client default while the broker's own helper budget is exactly 30s (`review-pipeline.ts:93`, `review-persist.ts:126`); the client can abort while the broker still completes, so the side effect lands but the caller sees a timeout and may retry.
+  - should-fix: `pruneReviewRuns` (`review-run.ts:821`) and `recoverInterruptedRuns` (`:895`) are exported but have no call sites, so a run interrupted while `publishing` persists forever, counts against the per-session quota, and surfaces only as a capacity error that hides the stale cause.
+  - advisory: the run store default (`config.ts:390-392`, `~/.local/state/opencode-sandbox/review-runs`) versus the profile allowlisting `$HOME/.local/state/opencode` — if nono matches by string prefix rather than a path boundary, the confined agent can reach the store. Unresolved; the operator probe settles it.
+  - advisory: no test covers the full install-time path (`--apply`, fragment merge, broker restart, OpenCode restart, tool call).
+  - advisory: the permission fragment is merged by hand and will need the two new tool names.
+  - Its "already correct, do not change" list: the broker env key names match the systemd `EnvironmentFile`; session identity reaches authorization via the plugin's `chat.params` and `bindSessionAgent`; the payload allowlists agree with server dispatch; both helper spawn sites prepend the resolved interpreter; the run store refuses project and tmp roots with 0700/0600 modes; and the `.gitignore` provisioning works both when `.context` is already ignored and when it is not.
+
 ## RDD mode
 Effective mode at route entry: **on**, deciding source **global** (read 2026-10-16). Not toggled by this unit.
 
 ## Progress
+- 2026-10-17 — This post-code advisory pass was the coordinator's remediation for omitting the mandatory pre-commit advisory review on the preceding units in this change. The route cannot run `ce:review` in this sandbox, so interim post-code review is owed for every unit; the two advisors' must-fixes now gate the next slice.
 - 2026-10-16 — tracker created. U3a not started.
 - 2026-10-17 — U3a T1–T4 implementation and requested coverage completed in the sandbox. Added `reviewPipelineRun` protocol/guard/operation, host mutation and payload registries, dispatch and service builder; `review-pipeline.ts` implements phase/reviewer validation, 256 KiB cap, exact Buffer stdin (string UTF-8 or byte-array payload), pinned-helper verification and exit taxonomy. Reviewer allowlist: `review-risk`, `review-resilience`, `review-readability`, `review-reliability`.
 - RED observed: operation parity initially failed because `OPERATIONS` lacked `reviewPipelineRun` (1 pass / 1 fail). Later revert checks also produced the specific test failures listed below.
@@ -186,5 +208,34 @@ U3a (T1-T4) is recorded as committed and reviewed. U3b T7–T10 implementation a
 - Full: `bun --cwd broker test --reporter=dot` from repository root — 1101 pass / 0 fail across 70 files. Build: `bun build --target=bun src/main.ts` from `broker` succeeded.
 - This is a sandbox-only result. No commit or host apply was performed; `broker/src/service.ts` is S17-protected and remains subject to owner-controlled review/install.
 
+## Progress addendum — T5 by-reference phase chaining (2026-10-18)
+
+- Route: substantial authorized ODD implementation in the parent-assigned worker session; trigger evidence is the requested mutation, execution and preparation. Boundary 2 is recorded as complete by the parent (tracker readback byte-exact; Magic Context mirror id 1184); this writer did not block on a second mirror readback.
+- Implemented phase output publication using `publishArtifactAtomic`: deterministic names are `phase-screen.json`, `phase-prepare.json`, `phase-merge.json`, and `phase-finalize.json`. The helper's raw `stdoutBytes` are stored unchanged; results return only artifact `{name, bytes, sha256}` and a summary containing the phase and up to 32 bounded top-level key names.
+- Added `inputRef`; the service reads a prior phase artifact in the same session/run via `readRunArtifact` (race-resistant read), then passes those exact bytes as child stdin. `stdin` and `inputRef` are mutually exclusive. Added `projectDir` to `reviewPipelineRun` so the broker can bind the store to the approved canonical project root; added both fields to `ALLOWED_PAYLOAD_KEYS` and parity coverage.
+- Output retention is limited to the per-file cap plus one byte. A successful helper output exceeding the cap is refused before JSON publication with `review_pipeline_output_too_large`, naming the configured cap and observed retained size; no partial artifact is written.
+- Real-dispatch chain test: `reviewPipeline dispatch chains all phase outputs by exact artifact reference` exercised screen → prepare(inputRef) → merge(inputRef) → finalize(inputRef), checking the exact artifact bytes, hashes, refs, and absence of inline payloads. Persist test ran finalize through dispatch twice for distinct runs, then persisted the second `phase-finalize.json` through dispatch; it confirmed `review-summary.json`, schema version, non-unavailable validation, and a real spawn audit vector containing the configured `process.execPath` and pinned helper path. Added the dispatch boundary test for `contextLines: 101`.
+- RED observed before publication implementation: `bun test tests/review-pipeline.test.ts --reporter=dot` failed the new reference test with `ENOENT` for `phase-prepare.json`; the expected artifact did not exist. This demonstrated the missing-publication defect.
+- Refusal codes/messages added: `review_pipeline_stdin_source_missing` — “exactly one of stdin or inputRef must be supplied; neither was provided”; `review_pipeline_stdin_source_conflict` — “exactly one of stdin or inputRef must be supplied; both were provided”; `review_pipeline_input_ref_invalid` — “inputRef must name an artifact from a prior phase in this run”; `review_pipeline_output_too_large` — “review pipeline output exceeds per-file cap <cap> bytes (observed <size> bytes)”; `review_pipeline_store_unavailable` — “review run store is required to publish phase output”.
+- Guard revert table. Each source was restored byte-identically; the before and after SHA-256 values are equal as shown:
+
+  | Guard removed | Named test and observed failure | Before SHA-256 | After SHA-256 |
+  |---|---|---|---|
+  | Missing stdin/inputRef check | `publishes phase output by reference and refuses missing or conflicting stdin sources` — expected `review_pipeline_stdin_source_missing`, received `stdin must be a string or an array of bytes`. | `866ebfc7212b893621a5136dd8005805b2e0765a247285f45e27f79337a9b98a` (`review-pipeline.ts`) | same |
+  | Both-sources conflict check | Same named test — expected rejection, but the promise resolved. | same | same |
+  | Prior-phase-only inputRef check | Same named test — expected `review_pipeline_input_ref_invalid`, received `review_run_artifact_not_found`. | same | same |
+  | Output per-file-cap check | `refuses over-cap helper output before publishing an artifact` — expected rejection, but the promise resolved. | same | same |
+  | Output capture limit at cap + 1 | Same cap test, with a 300 KiB store cap — expected `review_pipeline_output_too_large`, received `helper returned invalid JSON` after truncation at the old 256 KiB limit. | same | same |
+  | Require a run store before accepting output | `requires a run store before accepting phase output` — expected `review_pipeline_store_unavailable`, received a `TypeError` for `storeContext.store`. | same | same |
+  | Service-to-store dispatch wiring | `finalize dispatch publishes resolvable refs and persist dispatch spawns the pinned validator` and `reviewPipeline dispatch chains all phase outputs by exact artifact reference` — both received `review_pipeline_store_unavailable`. | `c14f085ff3836ed0a1f76ac9c54da4d74bed2db619dded2d3ac90e5aeadf1d73` (`service.ts`) | same |
+  | Pipeline inputRef payload registry | `reviewPipelineRun is registered as a host mutation with a payload allowlist` — expected `inputRef`, but it was absent. | `c22f0b9d684eff50000bce907a8fd1ced959f30cbb5f39eacfcc4b7f3cec9d1a` (`validation.ts`) | same |
+
+- Strengthened findings from `advisor-testing-post`: the persist dispatch test now proves the validator spawned with the configured interpreter and helper path, plus confirms the persisted file; the missing `contextLines > 100` dispatch boundary test now asserts refusal. No revert-tested guard remained green without its guard.
+- Verification: `bun test tests/review-pipeline.test.ts --reporter=dot` — 15 pass / 0 fail; `bun test tests/review-pipeline-operation.test.ts --reporter=dot` — 3 pass / 0 fail; `bun test tests/operations-parity.test.ts --reporter=dot` — 3 pass / 0 fail. Full `bun --cwd broker test --reporter=dot` — 1106 pass / 0 fail across 70 files. `bun build --target=bun src/main.ts` from `broker` completed with no build error.
+- Scope closed: the T5 must-fix preventing `reviewPersist` from resolving `finalizeRef`, and the inline large-phase-output issue. Remaining: U3c plugin/approval/timeout surfacing, native review, and owner-controlled installation/commit. This slice did not change `opencode/**` or `scripts/**`; no commit or apply was performed.
+
+## Status
+U3a T5 by-reference publication/chaining is implemented and empirically verified in the sandbox. The persist `finalizeRef` dependency is closed for broker dispatch; U3c plugin and approval surfacing, client timeout registration, native RDD review, owner installation, and owner commit remain pending.
+
 ## Next step
-Complete U3a T5/client-timeout integration, then U3c surfacing and its owner-controlled review/install steps.
+Complete U3c surfacing (including client timeouts and approval-gated persist) and the owner-controlled review/install steps.

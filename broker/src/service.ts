@@ -3619,9 +3619,11 @@ async function appendPlanDocAtomically(
  */
 export function buildReviewPipelineRunOp(ctx: OpContext): OpHandler {
   return async (req) => {
-    const payload = payloadOf(req) as { phase?: unknown; reviewer?: unknown; stdin?: unknown; runId?: unknown };
+    const payload = payloadOf(req) as { projectDir?: unknown; phase?: unknown; reviewer?: unknown; stdin?: unknown; inputRef?: unknown; runId?: unknown };
     authorizeHostDispatch(ctx, "reviewPipelineRun", req.sessionID, req.agent);
-    return runReviewPipeline(payload as { phase: unknown; reviewer?: unknown; stdin: unknown; runId: unknown }, ctx.config);
+    const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const store = new ReviewRunStore({ root: ctx.config.reviewRunRoot, projectRoot, deniedPrefixes: ctx.config.reviewRunDeniedPrefixes, caps: { maxBytes: ctx.config.reviewRunMaxBytes, maxFileBytes: ctx.config.reviewRunMaxFileBytes, maxPerSession: ctx.config.reviewRunMaxPerSession } });
+    return runReviewPipeline(payload as { phase: unknown; reviewer?: unknown; stdin?: unknown; inputRef?: unknown; runId: unknown }, ctx.config, undefined, { store, sessionID: req.sessionID });
   };
 }
 

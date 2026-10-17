@@ -2,6 +2,9 @@ import { spawnExec, type SpawnFn, type SpawnResult } from "./msb.ts";
 import {
   assertPinnedReviewHelper,
   assertReviewRunId,
+  publishArtifactAtomic,
+  readRunArtifact,
+  ReviewRunStore,
   resolveReviewHelperInterpreter,
   ReviewHelperMissingError,
   ReviewRunError,
@@ -17,7 +20,7 @@ export const REVIEW_PIPELINE_REVIEWERS = [
 ] as const;
 export type ReviewPipelinePhase = "screen" | "prepare" | "merge" | "finalize";
 export type ReviewPipelineResult =
-  | { outcome: "accepted"; output: unknown }
+  | { outcome: "accepted"; artifact: { name: string; bytes: number; sha256: string }; summary: { phase: ReviewPipelinePhase; topLevelKeys: string[] } }
   | { outcome: "structurally_rejected"; code: "review_pipeline_structurally_rejected"; diagnostic: string }
   | { outcome: "validation_unavailable"; code: "review_pipeline_validation_unavailable"; diagnostic: string };
 
@@ -28,8 +31,14 @@ export class ReviewPipelineError extends ReviewRunError {
 export interface ReviewPipelinePayload {
   phase: unknown;
   reviewer?: unknown;
-  stdin: unknown;
+  stdin?: unknown;
+  inputRef?: unknown;
   runId: unknown;
+}
+
+export interface ReviewPipelineStoreContext {
+  store: ReviewRunStore;
+  sessionID: string;
 }
 
 const PHASES: readonly ReviewPipelinePhase[] = ["screen", "prepare", "merge", "finalize"];
@@ -46,6 +55,7 @@ export async function runReviewPipeline(
   payload: ReviewPipelinePayload,
   config: Pick<BrokerConfig, "reviewHelperPath" | "reviewHelperSha256" | "reviewHelperInterpreter">,
   spawn: SpawnFn = spawnWithReplacementEnv,
+  storeContext?: ReviewPipelineStoreContext,
 ): Promise<ReviewPipelineResult> {
   if (typeof payload.phase !== "string" || !PHASES.includes(payload.phase as ReviewPipelinePhase)) {
     throw new ReviewPipelineError("review_pipeline_phase_invalid", "phase must be screen, prepare, merge, or finalize");
@@ -59,13 +69,32 @@ export async function runReviewPipeline(
     throw new ReviewPipelineError("review_pipeline_reviewer_forbidden", "reviewer is only valid for screen");
   }
   assertReviewRunId(payload.runId);
-  if (typeof payload.stdin !== "string" &&
-    (!Array.isArray(payload.stdin) || payload.stdin.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255))) {
-    throw new ReviewPipelineError("review_pipeline_stdin_invalid", "stdin must be a string or an array of bytes");
+  const hasStdin = payload.stdin !== undefined;
+  const hasInputRef = payload.inputRef !== undefined;
+  if (!hasStdin && !hasInputRef) {
+    throw new ReviewPipelineError("review_pipeline_stdin_source_missing", "exactly one of stdin or inputRef must be supplied; neither was provided");
   }
-  const input = typeof payload.stdin === "string"
-    ? Buffer.from(payload.stdin, "utf8")
-    : Buffer.from(payload.stdin as number[]);
+  if (hasStdin && hasInputRef) {
+    throw new ReviewPipelineError("review_pipeline_stdin_source_conflict", "exactly one of stdin or inputRef must be supplied; both were provided");
+  }
+  let input: Buffer;
+  if (hasInputRef) {
+    if (typeof payload.inputRef !== "string" || !storeContext) {
+      throw new ReviewPipelineError("review_pipeline_input_ref_invalid", "inputRef must name a published artifact in this review run");
+    }
+    const prior = PHASES.indexOf(phase) - 1;
+    const sourcePhase = PHASES.findIndex((candidate) => `phase-${candidate}.json` === payload.inputRef);
+    if (sourcePhase < 0 || sourcePhase > prior) {
+      throw new ReviewPipelineError("review_pipeline_input_ref_invalid", "inputRef must name an artifact from a prior phase in this run");
+    }
+    input = readRunArtifact({ runDir: storeContext.store.runDir(storeContext.sessionID, payload.runId as string), name: payload.inputRef, maxFileBytes: storeContext.store.caps.maxFileBytes }).data;
+  } else {
+    if (typeof payload.stdin !== "string" &&
+      (!Array.isArray(payload.stdin) || payload.stdin.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255))) {
+      throw new ReviewPipelineError("review_pipeline_stdin_invalid", "stdin must be a string or an array of bytes");
+    }
+    input = typeof payload.stdin === "string" ? Buffer.from(payload.stdin, "utf8") : Buffer.from(payload.stdin as number[]);
+  }
   if (input.byteLength > REVIEW_PIPELINE_MAX_STDIN_BYTES) {
     throw new ReviewPipelineError(
       "review_pipeline_stdin_too_large",
@@ -87,22 +116,38 @@ export async function runReviewPipeline(
     ? ["screen", "--reviewer", payload.reviewer as string, "--harness", "opencode"]
     : [phase];
   let result: SpawnResult;
+  const maxOutputBytes = storeContext
+    ? storeContext.store.caps.maxFileBytes + 1
+    : 256 * 1024;
   try {
     result = await spawn([interpreter, helper.path, ...phaseArgs], {
       stdin: input,
       timeoutMs: 30_000,
-      maxOutputBytes: 256 * 1024,
+      maxOutputBytes,
       env: { PATH: process.env.PATH ?? "" },
     });
   } catch (cause) {
     return { outcome: "validation_unavailable", code: "review_pipeline_validation_unavailable", diagnostic: cause instanceof Error ? cause.message.slice(0, STDERR_MAX_BYTES) : "helper could not start" };
   }
-  if (result.status === 0 && !result.timedOut && !result.outputTruncated) {
+  if (result.status === 0 && !result.timedOut) {
+    if (!storeContext) throw new ReviewPipelineError("review_pipeline_store_unavailable", "review run store is required to publish phase output");
+    const outputBytes = result.stdoutBytes ?? Buffer.from(result.stdout, "utf8");
+    const cap = storeContext.store.caps.maxFileBytes;
+    if (outputBytes.byteLength > cap) {
+      throw new ReviewPipelineError("review_pipeline_output_too_large", `review pipeline output exceeds per-file cap ${cap} bytes (observed ${outputBytes.byteLength} bytes)`);
+    }
+    let output: unknown;
     try {
-      return { outcome: "accepted", output: JSON.parse(result.stdout) as unknown };
+      output = JSON.parse(outputBytes.toString("utf8")) as unknown;
     } catch {
       throw new ReviewPipelineError("review_pipeline_output_invalid", "helper returned invalid JSON");
     }
+    const name = `phase-${phase}.json`;
+    const artifact = publishArtifactAtomic(storeContext.store.runDir(storeContext.sessionID, payload.runId as string), name, outputBytes);
+    const topLevelKeys = output !== null && typeof output === "object" && !Array.isArray(output)
+      ? Object.keys(output).slice(0, 32).map((key) => key.slice(0, 128))
+      : [];
+    return { outcome: "accepted", artifact: { name: artifact.name, bytes: artifact.bytes, sha256: artifact.sha256 }, summary: { phase, topLevelKeys } };
   }
   if (result.status === 1) return { outcome: "structurally_rejected", code: "review_pipeline_structurally_rejected", diagnostic: diagnostic(result) };
   return { outcome: "validation_unavailable", code: "review_pipeline_validation_unavailable", diagnostic: diagnostic(result) };

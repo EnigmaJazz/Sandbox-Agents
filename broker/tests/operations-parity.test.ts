@@ -16,7 +16,7 @@ describe("operation registry parity", () => {
     expect(OPERATIONS).toContain("reviewPipelineRun");
     expect(SANDBOX_GUARD_CLASS).toHaveProperty("reviewPipelineRun", "exempt-from-sandbox-guard");
     expect(HOST_MUTATION_OPERATIONS).toContain("reviewPipelineRun");
-    expect(ALLOWED_PAYLOAD_KEYS).toHaveProperty("reviewPipelineRun", ["phase", "reviewer", "stdin", "runId"]);
+    expect(ALLOWED_PAYLOAD_KEYS).toHaveProperty("reviewPipelineRun", ["projectDir", "phase", "reviewer", "stdin", "inputRef", "runId"]);
   });
 
   test("reviewPersist is registered as a host mutation without artifact content", () => {

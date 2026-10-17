@@ -1,11 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { runReviewPipeline, REVIEW_PIPELINE_MAX_STDIN_BYTES } from "../src/review-pipeline.ts";
 import { spawnExec, type SpawnFn } from "../src/msb.ts";
 import { assertPayloadKeys, ValidationError } from "../src/validation.ts";
+import { ReviewRunStore } from "../src/review-run.ts";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -22,26 +23,70 @@ const input = Buffer.concat(chunks);
 const mode = process.env.FIXTURE_MODE || 'accept';
 if (mode === 'reject') { process.stderr.write('invalid envelope'); process.exit(1); }
 if (mode === 'unavailable') process.exit(2);
-process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), input: input.toString('utf8'), stdinSha256: createHash('sha256').update(input).digest('hex') }));
+if (mode === 'oversize') { const prefix = '{"oversized":"'; const total = Number(process.env.OVERSIZE_BYTES); process.stdout.write(prefix + 'x'.repeat(total - prefix.length - 2) + '"}', () => {}); }
+else process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), input: input.toString('utf8'), stdinSha256: createHash('sha256').update(input).digest('hex') }));
 `);
   chmodSync(helper, 0o700);
   const digest = createHash("sha256").update(readFileSync(helper)).digest("hex");
-  return { helper, digest, config: { reviewHelperPath: helper, reviewHelperSha256: digest, reviewHelperInterpreter: process.execPath } };
+  const project = join(root, "project");
+  mkdirSync(project);
+  const storeRoot = mkdtempSync(join("/var/tmp", "review-pipeline-fixture-store-"));
+  roots.push(storeRoot);
+  const store = new ReviewRunStore({ root: storeRoot, projectRoot: project });
+  return { helper, digest, store, project, sessionID: "phase-owner", config: { reviewHelperPath: helper, reviewHelperSha256: digest, reviewHelperInterpreter: process.execPath } };
 }
+
+test("publishes phase output by reference and refuses missing or conflicting stdin sources", async () => {
+  const pin = fixture();
+  const { mkdtempSync, mkdirSync, readdirSync } = await import("node:fs");
+  const root = mkdtempSync(join(tmpdir(), "review-pipeline-store-"));
+  roots.push(root);
+  const sessionID = "phase-owner";
+  const project = join(root, "project");
+  mkdirSync(project);
+  const storeRoot = mkdtempSync(join("/var/tmp", "review-pipeline-store-root-"));
+  roots.push(storeRoot);
+  const store = new (await import("../src/review-run.ts")).ReviewRunStore({ root: storeRoot, projectRoot: project });
+  const writer = store.createRun(sessionID);
+  const result = await runReviewPipeline(
+    { runId: writer.record.runId, phase: "prepare", stdin: "{}" } as never,
+    pin.config,
+    undefined,
+    { store, sessionID } as never,
+  ) as { outcome: string; artifact: { name: string; bytes: number; sha256: string }; summary: unknown; output?: unknown };
+  const artifactBytes = readFileSync(join(store.runDir(sessionID, writer.record.runId), "phase-prepare.json"));
+  expect(result.outcome).toBe("accepted");
+  expect(result.artifact).toEqual({ name: "phase-prepare.json", bytes: artifactBytes.byteLength, sha256: createHash("sha256").update(artifactBytes).digest("hex") });
+  expect(result).not.toHaveProperty("output");
+  await expect(runReviewPipeline(
+    { runId: writer.record.runId, phase: "merge" } as never, pin.config, undefined, { store, sessionID } as never,
+  )).rejects.toMatchObject({ code: "review_pipeline_stdin_source_missing" });
+  await expect(runReviewPipeline(
+    { runId: writer.record.runId, phase: "merge", stdin: "{}", inputRef: "phase-prepare.json" } as never,
+    pin.config, undefined, { store, sessionID } as never,
+  )).rejects.toMatchObject({ code: "review_pipeline_stdin_source_conflict" });
+  await expect(runReviewPipeline(
+    { runId: writer.record.runId, phase: "merge", inputRef: "phase-finalize.json" } as never,
+    pin.config, undefined, { store, sessionID } as never,
+  )).rejects.toMatchObject({ code: "review_pipeline_input_ref_invalid" });
+  expect(readdirSync(store.runDir(sessionID, writer.record.runId)).sort()).toContain("phase-prepare.json");
+});
 
 test("runs a mode-0600 pinned helper through its configured interpreter", async () => {
   const pin = fixture();
   chmodSync(pin.helper, 0o600);
   const config = { ...pin.config, reviewHelperInterpreter: process.execPath };
+  mkdirSync(pin.store.runDir(pin.sessionID, "a".repeat(32)), { recursive: true });
   let observedArgv: string[] = [];
   const result = await runReviewPipeline(
     { phase: "prepare", runId: "a".repeat(32), stdin: "{}" }, config,
     (argv, options) => { observedArgv = argv; return spawnExec(argv, options); },
+    { store: pin.store, sessionID: pin.sessionID },
   );
   expect(observedArgv).toEqual([process.execPath, pin.helper, "prepare"]);
-  expect(result).toEqual({ outcome: "accepted", output: {
-    argv: ["prepare"], input: "{}", stdinSha256: createHash("sha256").update("{}").digest("hex"),
-  } });
+  expect(result).toMatchObject({ outcome: "accepted", artifact: { name: "phase-prepare.json" }, summary: { phase: "prepare" } });
+  expect(JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, "a".repeat(32)), "phase-prepare.json"), "utf8")))
+    .toEqual({ argv: ["prepare"], input: "{}", stdinSha256: createHash("sha256").update("{}").digest("hex") });
 });
 
 test("refuses an unconfigured interpreter before spawning", async () => {
@@ -78,8 +123,10 @@ test("refuses missing, symlinked, and non-executable interpreters by distinct co
 test("runs fixed phase argv with byte-identical stdin and no caller-controlled harness", async () => {
   const pin = fixture();
   const payload = "{\"value\":\"snowman ☃\"}";
-  const result = await runReviewPipeline({ phase: "screen", reviewer: "review-risk", runId: "a".repeat(32), stdin: payload }, pin.config);
-  expect(result).toEqual({ outcome: "accepted", output: { argv: ["screen", "--reviewer", "review-risk", "--harness", "opencode"], input: payload, stdinSha256: createHash("sha256").update(payload).digest("hex") } });
+  mkdirSync(pin.store.runDir(pin.sessionID, "a".repeat(32)), { recursive: true });
+  const result = await runReviewPipeline({ phase: "screen", reviewer: "review-risk", runId: "a".repeat(32), stdin: payload }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+  expect(result).toMatchObject({ outcome: "accepted", artifact: { name: "phase-screen.json" } });
+  expect(JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, "a".repeat(32)), "phase-screen.json"), "utf8"))).toEqual({ argv: ["screen", "--reviewer", "review-risk", "--harness", "opencode"], input: payload, stdinSha256: createHash("sha256").update(payload).digest("hex") });
 });
 
 test("refuses an over-cap stdin payload and names its observed byte size without spawning", async () => {
@@ -90,6 +137,30 @@ test("refuses an over-cap stdin payload and names its observed byte size without
   await expect(runReviewPipeline({ phase: "prepare", runId: "b".repeat(32), stdin: input }, pin.config, spawn))
     .rejects.toThrow(`${REVIEW_PIPELINE_MAX_STDIN_BYTES} bytes (observed ${REVIEW_PIPELINE_MAX_STDIN_BYTES + 1} bytes)`);
   expect(spawns).toBe(0);
+});
+
+test("requires a run store before accepting phase output", async () => {
+  const pin = fixture();
+  await expect(runReviewPipeline({ phase: "prepare", runId: "8".repeat(32), stdin: "{}" }, pin.config))
+    .rejects.toMatchObject({ code: "review_pipeline_store_unavailable" });
+});
+
+test("refuses over-cap helper output before publishing an artifact", async () => {
+  const pin = fixture();
+  const store = new ReviewRunStore({ root: pin.store.root, projectRoot: pin.project, caps: { ...pin.store.caps, maxFileBytes: 300 * 1024 } });
+  const cap = store.caps.maxFileBytes;
+  const runId = "9".repeat(32);
+  const runDir = store.runDir(pin.sessionID, runId);
+  mkdirSync(runDir, { recursive: true });
+  const before = readdirSync(runDir).sort();
+  const { spawnExec } = await import("../src/msb.ts");
+  const prefix = '{"oversized":"';
+  const output = prefix + "x".repeat(cap + 1 - Buffer.byteLength(prefix) - 2) + '"}';
+  await expect(runReviewPipeline({ phase: "prepare", runId, stdin: "{}" }, pin.config,
+    (argv, opts) => spawnExec(argv, { ...opts, env: { PATH: process.env.PATH ?? "", FIXTURE_MODE: "oversize", OVERSIZE_BYTES: String(cap + 1) }, envMode: "replace" }),
+    { store, sessionID: pin.sessionID },
+  )).rejects.toMatchObject({ code: "review_pipeline_output_too_large", message: `review pipeline output exceeds per-file cap ${cap} bytes (observed ${Buffer.byteLength(output)} bytes)` });
+  expect(readdirSync(runDir).sort()).toEqual(before);
 });
 
 test("returns a distinct structural rejection without a phase output on exit one", async () => {
@@ -126,6 +197,7 @@ test("rejects caller-supplied harness and argv fields at payload validation", ()
 
 test("observes exact fixed argv for all phases and rejects caller argv fields", async () => {
   const pin = fixture();
+  mkdirSync(pin.store.runDir(pin.sessionID, "f".repeat(32)), { recursive: true });
   const cases = [
     ["screen", "review-risk", ["screen", "--reviewer", "review-risk", "--harness", "opencode"]],
     ["prepare", undefined, ["prepare"]],
@@ -133,17 +205,22 @@ test("observes exact fixed argv for all phases and rejects caller argv fields", 
     ["finalize", undefined, ["finalize"]],
   ] as const;
   for (const [phase, reviewer, argv] of cases) {
-    const result = await runReviewPipeline({ phase, reviewer, runId: "f".repeat(32), stdin: "{}", harness: "malicious", args: ["--evil"] } as never, pin.config);
-    expect((result as { outcome: string; output: { argv: string[] } }).output.argv).toEqual(argv);
+    const result = await runReviewPipeline({ phase, reviewer, runId: "f".repeat(32), stdin: "{}", harness: "malicious", args: ["--evil"] } as never, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+    expect(result.outcome).toBe("accepted");
+    const saved = JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, "f".repeat(32)), `phase-${phase}.json`), "utf8")) as { argv: string[] };
+    expect(saved.argv).toEqual(argv);
   }
 });
 
 test("preserves arbitrary stdin bytes and the fixture reveals their digest", async () => {
   const pin = fixture();
   const bytes = [0x7b, 0xff, 0x00, 0x80, 0x7d];
-  const result = await runReviewPipeline({ phase: "prepare", runId: "1".repeat(32), stdin: bytes }, pin.config);
+  mkdirSync(pin.store.runDir(pin.sessionID, "1".repeat(32)), { recursive: true });
+  const result = await runReviewPipeline({ phase: "prepare", runId: "1".repeat(32), stdin: bytes }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
   const expected = createHash("sha256").update(Buffer.from(bytes)).digest("hex");
-  expect((result as { output: { stdinSha256: string } }).output.stdinSha256).toBe(expected);
+  expect(result.outcome).toBe("accepted");
+  const saved = JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, "1".repeat(32)), "phase-prepare.json"), "utf8")) as { stdinSha256: string };
+  expect(saved.stdinSha256).toBe(expected);
 });
 
 test("maps missing helper and unstartable helper to validation_unavailable", async () => {
