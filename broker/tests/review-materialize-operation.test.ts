@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
@@ -164,6 +164,31 @@ describe("reviewMaterialize dispatch", () => {
     const runStore = new ReviewRunStore({ root: join(env.root, "reader-store"), projectRoot: env.project });
     await expect(readReviewSlice("a".repeat(32), "slice-0000.diff", "bound-orchestrator", { store: runStore }))
       .rejects.toMatchObject({ code: "review_slice_not_found" });
+  });
+
+  test("uses production Git spawn through dispatch and publishes the exact range", async () => {
+    const env = fixture();
+    const runRoot = join(env.root, "review-runs");
+    const index = await env.internals.dispatch(env.request("reviewMaterialize", "bound-orchestrator", {
+      projectDir: env.project, baseRef: env.base, headRef: env.head,
+    })) as { runId: string; changedPaths: string[]; sliceCount: number; totalBytes: number };
+
+    expect(index.runId).toMatch(/^[0-9a-f]{32}$/);
+    expect(index.changedPaths).toEqual(["change.txt"]);
+    expect(index.sliceCount).toBeLessThanOrEqual(1);
+    expect(JSON.stringify(index).length).toBeLessThan(8192);
+
+    const runDir = join(runRoot, "bound-orchestrator", index.runId);
+    expect(existsSync(join(runDir, "metadata.json"))).toBe(true);
+    expect(existsSync(join(runDir, "scope.diff"))).toBe(true);
+    expect(existsSync(join(runDir, "slice-0000.diff"))).toBe(true);
+    const actual = readFileSync(join(runDir, "scope.diff"));
+    const expected = Bun.spawnSync(["git", "diff", "--no-ext-diff", "--no-color", "--no-textconv", "-U3", env.base, env.head], {
+      cwd: env.project, env: { PATH: process.env.PATH ?? "" },
+    });
+    expect(expected.exitCode).toBe(0);
+    expect(actual.equals(expected.stdout)).toBe(true);
+    expect(actual.byteLength).toBe(index.totalBytes);
   });
 
   test("allows the bound orchestrator through the exemption but denies workers and other identities", async () => {

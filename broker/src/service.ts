@@ -3640,7 +3640,7 @@ export function buildReviewMaterializeOp(ctx: OpContext): OpHandler {
       ...(payload.headRef === undefined ? {} : { headRef: payload.headRef as string }),
       ...(payload.contextLines === undefined ? {} : { contextLines: payload.contextLines as number }),
       ...(payload.paths === undefined ? {} : { paths: payload.paths as string[] }),
-    }, req.sessionID, { projectRoot, store, spawn: ctx.git.spawn as never });
+    }, req.sessionID, { projectRoot, store, spawn: (argv, opts) => ctx.git.spawn(argv, opts) });
   };
 }
 

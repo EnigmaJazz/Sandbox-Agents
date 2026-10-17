@@ -1,5 +1,5 @@
 import { readdirSync } from "node:fs";
-import { spawnExec, type SpawnResult } from "./msb.ts";
+import { spawnExec, type SpawnFn, type SpawnResult } from "./msb.ts";
 import {
   assertReviewRunId,
   assertRunOwnership,
@@ -41,7 +41,7 @@ export interface ReviewMaterializeOptions {
   projectRoot: string;
   store: ReviewRunStore;
   gitBinary?: string;
-  spawn?: typeof spawnExec;
+  spawn?: SpawnFn;
 }
 export interface ReviewSliceIndex { name: string; bytes: number; sha256: string; }
 export interface ReviewMaterializeIndex {
@@ -49,9 +49,10 @@ export interface ReviewMaterializeIndex {
   sliceCount: number; slices: ReviewSliceIndex[]; totalBytes: number;
 }
 
-function invokeGit(spawn: typeof spawnExec, binary: string, args: string[], cwd: string, env: Record<string, string>): Promise<SpawnResult> {
-  return spawn([binary, ...args], { cwd, env, envMode: "replace", timeoutMs: 30_000, maxOutputBytes: 9 * 1024 * 1024 });
+function invokeGit(spawn: SpawnFn, binary: string, args: string[], cwd: string, env: Record<string, string>): Promise<SpawnResult> {
+  return spawn([binary, ...args], { cwd, env, timeoutMs: 30_000, maxOutputBytes: 9 * 1024 * 1024 });
 }
+const spawnWithReplacementEnv: SpawnFn = (argv, opts) => spawnExec(argv, { ...opts, envMode: "replace" });
 async function resolveCommit(ref: string, opts: ReviewMaterializeOptions): Promise<string> {
   let result: SpawnResult;
   try {
@@ -101,7 +102,7 @@ export async function materializeReviewRange(payload: MaterializeReviewPayload, 
   const headRef = payload.headRef ?? "HEAD";
   const baseObjectId = await resolveCommit(payload.baseRef, options);
   const headObjectId = await resolveCommit(headRef, options);
-  const spawn = options.spawn ?? spawnExec;
+  const spawn = options.spawn ?? spawnWithReplacementEnv;
   const binary = options.gitBinary ?? "git";
   const env = { PATH: process.env.PATH ?? "" };
   const contextLines = payload.contextLines ?? 3;
