@@ -3646,6 +3646,7 @@ export function buildReviewPersistOp(ctx: OpContext): OpHandler {
       finalize: { outcome: "accepted", output },
       reviewHelperPath: ctx.config.reviewHelperPath,
       reviewHelperSha256: ctx.config.reviewHelperSha256,
+      reviewHelperInterpreter: ctx.config.reviewHelperInterpreter,
     });
   };
 }

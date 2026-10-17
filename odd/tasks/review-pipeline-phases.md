@@ -175,5 +175,16 @@ U3a (T1-T4) is recorded as committed and reviewed. U3b T7–T10 implementation a
 - No revert experiment stayed green. Fixture additions and exact diagnostic assertions made all requested experiments fail observably; only the unconfigured-message assertion needed strengthening.
 - Reviewability receipt for this sandbox delta is recorded in the delivery response after measuring `git diff --output=<path>` and `wc -c <path>`. No commit was created; S17 files remain in the sandbox result for owner-controlled installation/review.
 
+## Progress addendum — native review correction `review-c17bdf67c03c3cb7` (2026-10-17)
+
+- Finding R3-001 — **CRITICAL**, deterministic: `buildReviewPersistOp` omitted `reviewHelperInterpreter` from the `PersistReviewArtifactOptions` it passes to `persistReviewArtifact`. Added `reviewHelperInterpreter: ctx.config.reviewHelperInterpreter` beside the helper path and digest; handler-level dispatch now reaches artifact validation with the configured interpreter.
+- Builder cross-check: `buildReviewPipelineRunOp` was already correct: it passes the complete `ctx.config` to `runReviewPipeline`, including the interpreter-bearing field. `buildReviewMaterializeOp` does not invoke helper validation or construct helper options; its `materializeReviewRange` options are unrelated, so no interpreter field applies there. Only the persist builder was missing the field.
+- Added handler-level regression `reviewPersist dispatch passes the configured interpreter to artifact validation` in `broker/tests/review-pipeline-operation.test.ts`; it constructs `BrokerServer`, dispatches `reviewPersist`, and invokes an actual configured executable interpreter and pinned helper.
+- RED observed before source fix: `bun test tests/review-pipeline-operation.test.ts --reporter=dot` — 0 pass / 1 fail; named test expected validation `passed` and observed `unavailable` through broker dispatch. With the fix, the same assertion passes.
+- Revert verification: temporarily removed only the new source field; the same focused invocation failed the named test with expected `passed`, received `unavailable`. Restored the field; `broker/src/service.ts` SHA-256 before and after was `82973a4f146d988239370843e68bca30d4d5d8ae2620391109d458231440cc1f` (byte-identical).
+- Focused final: `bun test tests/review-pipeline-operation.test.ts tests/review-persist.test.ts --reporter=dot` from `broker` — 17 pass / 0 fail across 2 files.
+- Full: `bun --cwd broker test --reporter=dot` from repository root — 1101 pass / 0 fail across 70 files. Build: `bun build --target=bun src/main.ts` from `broker` succeeded.
+- This is a sandbox-only result. No commit or host apply was performed; `broker/src/service.ts` is S17-protected and remains subject to owner-controlled review/install.
+
 ## Next step
 Complete U3a T5/client-timeout integration, then U3c surfacing and its owner-controlled review/install steps.
