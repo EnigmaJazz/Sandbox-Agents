@@ -388,6 +388,27 @@ describe("host tool authorization policy (P0 SDD/review)", () => {
     expect(HOST_MUTATION_OPERATIONS).toContain("reviewMaterialize");
   });
 
+  test("reviewPipelineRun is a mutation and not available through the read-open path", () => {
+    expect(hostToolAccess("reviewPipelineRun")).toBe("mutation");
+    expect(HOST_READ_OPERATIONS).not.toContain("reviewPipelineRun");
+    expect(HOST_MUTATION_OPERATIONS).toContain("reviewPipelineRun");
+  });
+
+  test("reviewPipelineRun access is limited to configured orchestrator and PM identities", () => {
+    const identities = ["gentle-orchestrator", "pm-odd", "pm-systematic", "pm-sdd", "pm-odd-astra", "pm-systematic-astra"];
+    const configuredIdentities = defaultConfig().readOnlyAgents;
+    const policy = new HostToolPolicy(configuredIdentities);
+    for (const identity of identities) {
+      expect(configuredIdentities).toContain(identity);
+      expect(policy.decide("reviewPipelineRun", identity)).toEqual({
+        allowed: true, access: "mutation", reasonCode: "HOST_MUTATION_ORCHESTRATOR",
+      });
+    }
+    expect(policy.decide("reviewPipelineRun", "general")).toEqual({
+      allowed: false, access: "mutation", reasonCode: "HOST_MUTATION_NOT_ORCHESTRATOR",
+    });
+  });
+
   test("reviewMaterialize access is limited to configured orchestrator and PM identities", () => {
     const identities = [
       "gentle-orchestrator",

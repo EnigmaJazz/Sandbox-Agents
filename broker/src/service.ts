@@ -90,6 +90,7 @@ import { MsbError } from "./msb.ts";
 import { StateError } from "./state.ts";
 import { ReviewRunStore } from "./review-run.ts";
 import { materializeReviewRange } from "./review-materialize.ts";
+import { runReviewPipeline } from "./review-pipeline.ts";
 import {
   divergenceIndexPathFor,
   durableHostRefResolves,
@@ -3615,6 +3616,14 @@ async function appendPlanDocAtomically(
  * caller path, cwd, binary, or argv: `doc` is an enum mapped to a compile-time
  * constant beneath the canonical root.
  */
+export function buildReviewPipelineRunOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as { phase?: unknown; reviewer?: unknown; stdin?: unknown; runId?: unknown };
+    authorizeHostDispatch(ctx, "reviewPipelineRun", req.sessionID, req.agent);
+    return runReviewPipeline(payload as { phase: unknown; reviewer?: unknown; stdin: unknown; runId: unknown }, ctx.config);
+  };
+}
+
 export function buildReviewMaterializeOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const payload = payloadOf(req) as { projectDir?: unknown; baseRef?: unknown; headRef?: unknown; contextLines?: unknown; paths?: unknown };

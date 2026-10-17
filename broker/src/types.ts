@@ -79,6 +79,7 @@ export type Operation =
   | "reviewValidate"
   | "reviewRecover"
   | "reviewMaterialize"
+  | "reviewPipelineRun"
   // Host git/GH mutations: fixed argv, orchestrator-only (§31).
   | "gitCommit"
   | "gitClearCommitIntent"
@@ -161,6 +162,7 @@ export const SANDBOX_GUARD_CLASS = {
   reviewValidate: "exempt-from-sandbox-guard",
   reviewRecover: "exempt-from-sandbox-guard",
   reviewMaterialize: "exempt-from-sandbox-guard",
+  reviewPipelineRun: "exempt-from-sandbox-guard",
   gitCommit: "exempt-from-sandbox-guard",
   gitClearCommitIntent: "exempt-from-sandbox-guard",
   gitPush: "exempt-from-sandbox-guard",
@@ -235,6 +237,7 @@ export const OPERATIONS: readonly Operation[] = [
   "reviewValidate",
   "reviewRecover",
   "reviewMaterialize",
+  "reviewPipelineRun",
   "gitCommit",
   "gitClearCommitIntent",
   "gitPush",
