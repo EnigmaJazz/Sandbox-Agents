@@ -66,10 +66,10 @@ async function resolveCommit(ref: string, opts: ReviewMaterializeOptions): Promi
 }
 function splitFileSections(diff: Buffer, paths: string[]): { path: string; data: Buffer; lines: number }[] {
   if (diff.length === 0) return [];
-  const text = diff.toString("utf8");
+  const text = diff.toString("latin1");
   const starts: number[] = [];
   const marker = /^diff --git /gm;
-  for (let match = marker.exec(text); match; match = marker.exec(text)) starts.push(Buffer.byteLength(text.slice(0, match.index)));
+  for (let match = marker.exec(text); match; match = marker.exec(text)) starts.push(match.index);
   if (starts.length !== paths.length || starts[0] !== 0) throw new ReviewMaterializeError("review_range_diff_parse", "git diff file sections did not match the changed-path manifest");
   return starts.map((start, i) => {
     const end = starts[i + 1] ?? diff.length;
@@ -105,7 +105,7 @@ export async function materializeReviewRange(payload: MaterializeReviewPayload, 
   const env = { PATH: process.env.PATH ?? "" };
   const diffResult = await invokeGit(spawn, binary, ["diff", "--no-ext-diff", "--no-color", "--no-textconv", "-U3", baseObjectId, headObjectId, "--"], options.projectRoot, env);
   if (diffResult.status !== 0 || diffResult.timedOut || diffResult.outputTruncated) throw new ReviewMaterializeError("review_range_diff_failed", "git diff failed or exceeded its output bound");
-  const diff = Buffer.from(diffResult.stdout, "utf8");
+  const diff = diffResult.stdoutBytes ?? Buffer.from(diffResult.stdout, "utf8");
   const cap = options.store.caps.maxBytes;
   if (diff.byteLength > cap) throw new ReviewRangeCapError(diff.byteLength, cap);
   const namesResult = await invokeGit(spawn, binary, ["diff", "--no-ext-diff", "--no-color", "--no-textconv", "--name-only", "-z", baseObjectId, headObjectId, "--"], options.projectRoot, env);

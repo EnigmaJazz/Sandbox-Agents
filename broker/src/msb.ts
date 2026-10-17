@@ -24,6 +24,10 @@ export interface SpawnResult {
   status: number | null;
   stdout: string;
   stderr: string;
+  /** Retained stdout bytes before UTF-8 decoding; absent on synthetic spawn results. */
+  stdoutBytes?: Buffer;
+  /** Retained stderr bytes before UTF-8 decoding; absent on synthetic spawn results. */
+  stderrBytes?: Buffer;
   timedOut: boolean;
   /**
    * True when stdout exceeded `maxOutputBytes`: the retained text is a
@@ -150,8 +154,11 @@ function spawnCore(
           bytes = cap;
           truncated = true;
         },
+        bytes(): Buffer {
+          return Buffer.concat(chunks);
+        },
         text(): string {
-          return Buffer.concat(chunks).toString("utf8");
+          return this.bytes().toString("utf8");
         },
         truncated(): boolean {
           return truncated;
@@ -182,6 +189,8 @@ function spawnCore(
         status,
         stdout: stdout.text(),
         stderr: spawnErrorText ?? stderr.text(),
+        stdoutBytes: stdout.bytes(),
+        stderrBytes: stderr.bytes(),
         timedOut,
         outputTruncated: stdout.truncated(),
         stderrTruncated: stderr.truncated(),

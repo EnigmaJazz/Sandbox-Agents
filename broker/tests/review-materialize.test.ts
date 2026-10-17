@@ -41,6 +41,37 @@ describe("review materialization", () => {
     expect(JSON.stringify(index)).not.toContain("diff --git");
   });
 
+  test("preserves non-UTF-8 diff bytes and slices at byte-exact file boundaries", async () => {
+    const env = fixture();
+    const base = env.head;
+    writeFileSync(join(env.project, "aaa-latin.txt"), Buffer.concat([Buffer.from([0x68]), Buffer.alloc(23_000, 0xe9), Buffer.from([0x0a])]));
+    writeFileSync(join(env.project, "zzz-ascii.txt"), `${"z".repeat(23_000)}\n`);
+    gitAt(env.project, ["add", "aaa-latin.txt", "zzz-ascii.txt"]);
+    gitAt(env.project, ["commit", "-qm", "non-UTF-8 file"]);
+    const head = gitAt(env.project, ["rev-parse", "HEAD"]);
+    const expected = gitBytesAt(env.project, base, head);
+    expect(expected.includes(Buffer.from([0xe9]))).toBe(true);
+
+    const index = await materializeReviewRange({ baseRef: base, headRef: head }, "owner", env.options);
+    const runDir = env.store.runDir("owner", index.runId);
+    const published = readFileSync(join(runDir, "scope.diff"));
+    expect(published.equals(expected)).toBe(true);
+
+    const starts = byteSectionStarts(expected);
+    expect(starts).toHaveLength(index.changedPaths.length);
+    expect(index.sliceCount).toBe(starts.length);
+    for (const [i, start] of starts.entries()) {
+      const end = starts[i + 1]?.offset ?? expected.length;
+      const section = expected.subarray(start.offset, end);
+      const artifact = readFileSync(join(runDir, `slice-${String(i).padStart(4, "0")}.diff`));
+      const indexed = index.slices[i]!;
+      expect(start.path).toBe(index.changedPaths[i]);
+      expect(artifact.equals(section)).toBe(true);
+      expect(indexed.bytes).toBe(artifact.byteLength);
+      expect(indexed.sha256).toBe(createHash("sha256").update(artifact).digest("hex"));
+    }
+  });
+
   test("rejects workspace mode rather than invoking an unsafe index/tree diff", async () => {
     const env = fixture();
     await expect(materializeReviewRange({ baseRef: env.base, mode: "workspace" }, "owner", env.options)).rejects.toThrow("not supported in this slice");
@@ -181,6 +212,20 @@ function diffAt(root: string, base: string, head: string): string {
   const result = Bun.spawnSync(["git", "diff", "--no-ext-diff", "--no-color", "--no-textconv", "-U3", base, head, "--"], { cwd: root, env: { PATH: process.env.PATH ?? "" } });
   if (result.exitCode !== 0) throw new Error(result.stderr.toString());
   return result.stdout.toString();
+}
+
+function gitBytesAt(root: string, base: string, head: string): Buffer {
+  const result = Bun.spawnSync(["git", "diff", "--no-ext-diff", "--no-color", "--no-textconv", "-U3", base, head, "--"], { cwd: root, env: { PATH: process.env.PATH ?? "" } });
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  return result.stdout;
+}
+
+function byteSectionStarts(diff: Buffer): { offset: number; path: string }[] {
+  const view = diff.toString("latin1");
+  const starts: { offset: number; path: string }[] = [];
+  const marker = /^diff --git a\/(.+?) b\/.+$/gm;
+  for (let match = marker.exec(view); match; match = marker.exec(view)) starts.push({ offset: match.index, path: match[1]! });
+  return starts;
 }
 
 function diffLineCount(diff: string): number {
