@@ -103,8 +103,8 @@ Effective mode at route entry: **on**, deciding source **global** (read 2026-10-
 - Every experiment was restored; the identical before/after SHA-256 confirms byte-identical restoration. No test had to be strengthened during revert runs; the raw-byte fixture and direct payload-allowlist assertions were added to make those guards observable.
 - Reviewability receipt measured with `git diff --output=.u3a-receipt.patch` then `wc -c`: patch 13,320 bytes; `git diff --numstat` showed 96 additions and 17 deletions. Client-timeout registration is pending the surfacing slice; it is outside this writer's allowed paths.
 
-## Next step
-Continue U3a before treating it complete: resolve the outstanding tests and registrations above, run each guard revert with before/after hashes, and record observed outcomes.
+## Historical next step (superseded after U3a review)
+The earlier U3a continuation note was superseded by the approved U3a review outcome below and the current status at the end of this tracker.
 
 ### U3a review outcome (2026-10-16)
 
@@ -120,7 +120,36 @@ Native RDD review `review-d63291bbd176cae7` — **approved**, acknowledged, auth
 - **R3-002** (SUGGESTION, `broker/src/service.ts:3616-3622`) — `buildReviewPipelineRunOp` casts the request payload and delegates without an observable assertion at the operation boundary that disallowed keys are rejected; `assertPayloadKeys` is unit-tested but a handler-level or end-to-end test would prove the framework wires it in for this operation.
 
 ## Status
-U3a (T1-T4) complete, committed and reviewed. T5 (by-reference chaining) and the client-timeout registration remain pending, as do slices U3b and U3c.
+U3a (T1-T4) is recorded as committed and reviewed. U3b T7–T10 implementation and tests are present in the current sandbox result; the exact requested full-suite invocation passed, though the persist operation still depends on U3a T5 publishing finalize output to the run store. T5 and client-timeout registration, U3c, native RDD review, owner installation, and owner commit remain pending.
+
+## U3b progress — T7–T10
+- Implemented `reviewPersist` broker-side registration (operation union, ordered registry, sandbox guard partition, host mutation classification, payload allowlist, server dispatch and service builder). Payload accepts only `projectDir`, broker-issued `runId`, `finalizeRef`, and optional mode; no artifact content field. The plugin tool and approval prompt remain U3c.
+- Added `review-persist.ts`: fixed-argv `git check-ignore -q -- <artifact>` via `spawnExec` with `envMode: "replace"`; skip `.context/.gitignore` writes when already ignored; otherwise append idempotently with original bytes preserved, reject symlink/non-regular ignore files and unsafe directory components, write by owner-only temp plus same-directory rename, then verify effectiveness. A root `.context/` ignore is documented and results in no `.context/.gitignore` write.
+- Persist extracts only `.artifact` from a writing wrapper, adds `schema_version: 1`, atomically replaces `review-summary.json` from an exclusive owner-only same-directory temp, and cleans the temp after a pre-rename failure. Report-only returns distinct `not_attempted`; rejected/unavailable finalize outcomes and non-writing wrappers refuse.
+- Artifact validation runs the pinned helper as `artifact <path>` with cwd at the canonical project root and no outside-root flag. Statuses have distinct codes; failed validation leaves the artifact in place and returns `incomplete`, as does unavailable validation. Passing validation returns `persisted`.
+- RED observed: first targeted run failed because the new module did not yet exist; after adding the typed stub the test failed with `review_persist_not_implemented`. After implementation, a focused failure exposed a fixture path mismatch (validator was unavailable); correcting the fixture to use `reviewHelperPath`/`reviewHelperSha256` produced green tests. A later focused failure exposed an overly strict expected ignore-check call count; the test was corrected to assert the two git calls separately from the validator call.
+- Persist-only: `bun test tests/review-persist.test.ts --reporter=dot` from `broker` — 16 pass / 0 fail. Focused all changed tests: `bun test tests/review-persist.test.ts tests/operations-parity.test.ts tests/validation.test.ts --reporter=dot` — 97 pass / 0 fail.
+- Full: the exact requested `bun --cwd broker test --reporter=dot` from the repository root — 1092 pass / 0 fail. An earlier `bun test --reporter=dot` invocation with working directory `broker` returned 1088 pass / 4 fail in existing `review-pipeline.test.ts` fixtures (`/usr/bin/env: node: Permission denied`); invoking the prescribed command immediately afterward passed all 1092 tests. The invocation difference is observed, but its cause was not established. The failed standalone suite was also reproduced as 5 pass / 4 fail and left untouched because `broker/tests/review-pipeline.test.ts` is outside this slice's allowed edit surfaces.
+- Build: `bun build --target=bun src/main.ts` from `broker` returned successfully (bundled output; no build error).
+- Added 16 real-filesystem tests under temporary git repositories. Coverage includes effective ignore and no-write evidence, fixed argv/replacement env, append preservation and no duplicate, symlink and unsafe-ancestor refusals, post-write ignore verification, temp cleanup, artifact-only extraction, schema insertion, report-only, refused finalize outcomes, and all four validation outcomes (missing and unstartable validator reasons are distinct).
+- Revert table — each isolated source edit was restored; every before/after hash pair is identical. Hashes `45e93fbb1d9a2646f8fbf537f66b3eed8f4f9cd99485888e384282bc31b69728` cover the first three experiments; `91652ce6cf5ac244527a9846e8af2f1d12ad8bb7c278a1268a52bbd5d0353e82` covers the remaining experiments:
+  | Guard | Test that failed when removed; observed failure | Before SHA-256 | After SHA-256 |
+  |---|---|---|---|
+  | Initial ignore check | `ignore checks use fixed argv and replacement environment before and after provisioning` — only one git check occurred; already-ignored and duplicate-call tests also failed. | `45e93fbb1d9a2646f8fbf537f66b3eed8f4f9cd99485888e384282bc31b69728` | same |
+  | No-write when already ignored | `already ignored context performs no ignore-file write` — `.context/.gitignore` unexpectedly existed; context mtime invariant failed. | `45e93fbb1d9a2646f8fbf537f66b3eed8f4f9cd99485888e384282bc31b69728` | same |
+  | Idempotent/duplicate-entry refusal | `refuses to duplicate an existing ineffective or negated entry` — call resolved instead of refusing. | `45e93fbb1d9a2646f8fbf537f66b3eed8f4f9cd99485888e384282bc31b69728` | same |
+  | Symlink refusal | `refuses a symlinked context ignore file` — received `review_ignore_unsafe_target`, not the required `review_ignore_symlink`. | `91652ce6cf5ac244527a9846e8af2f1d12ad8bb7c278a1268a52bbd5d0353e82` | same |
+  | Effectiveness re-check | `fails closed when the post-write ignore verification is ineffective` — call resolved; fixed-argv test observed only one check. | `91652ce6cf5ac244527a9846e8af2f1d12ad8bb7c278a1268a52bbd5d0353e82` | same |
+  | Artifact-only extraction | `persists only artifact and adds schema_version after making the directory effectively ignored` — persisted wrapper included `kind` and `report`. | `91652ce6cf5ac244527a9846e8af2f1d12ad8bb7c278a1268a52bbd5d0353e82` | same |
+  | Schema insertion | Same named persist test — observed `schema_version` was undefined. | `91652ce6cf5ac244527a9846e8af2f1d12ad8bb7c278a1268a52bbd5d0353e82` | same |
+  | Atomic rename | Persist test raised `ENOENT` reading `review-summary.json`; failed-validation test observed no artifact on disk. | `91652ce6cf5ac244527a9846e8af2f1d12ad8bb7c278a1268a52bbd5d0353e82` | same |
+  | Temp cleanup | `removes the exclusively created temp file when rename preparation fails` — `.review-summary.<uuid>.tmp` remained. | `91652ce6cf5ac244527a9846e8af2f1d12ad8bb7c278a1268a52bbd5d0353e82` | same |
+  | Report-only branch | `report-only mode writes no artifact and does not invoke validation` — received `incomplete`/`unavailable` with a path instead of `report_only`/`not_attempted`. | `91652ce6cf5ac244527a9846e8af2f1d12ad8bb7c278a1268a52bbd5d0353e82` | same |
+  | Rejected finalize refusal | `refuses structurally rejected and unavailable finalize outcomes` — received `review_persist_kind` instead of `review_persist_rejected`. | `91652ce6cf5ac244527a9846e8af2f1d12ad8bb7c278a1268a52bbd5d0353e82` | same |
+  | Unavailable finalize refusal | Same named refusal test — received `review_persist_kind` instead of `review_persist_unavailable`. | `91652ce6cf5ac244527a9846e8af2f1d12ad8bb7c278a1268a52bbd5d0353e82` | same |
+  | Validation status mapping | Persist test returned `unavailable` with `validator exited with status 0` instead of `passed`. | `91652ce6cf5ac244527a9846e8af2f1d12ad8bb7c278a1268a52bbd5d0353e82` | same |
+- No test remained green when its listed guard was reverted; no additional test-strengthening was required during the revert runs.
+- Remaining: U3c plugin/approval surface; U3a T5 by-reference output storage and client timeout remain pending per the recorded U3a state. The exact requested full-suite command is green; the direct invocation from `broker` showed the separate four-failure discrepancy documented above. Native RDD review and owner installation/commit remain outside this sandbox task.
 
 ## Next step
-U3b: persist, ignore provisioning, artifact validation.
+Resolve the four pipeline fixture failures in an authorized scope, complete U3a T5/client-timeout integration, then complete U3c surfacing and its owner-controlled review/install steps.

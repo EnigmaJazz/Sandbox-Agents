@@ -840,6 +840,7 @@ export const HOST_MUTATION_OPERATIONS: readonly string[] = [
   "reviewRecover",
   "reviewMaterialize",
   "reviewPipelineRun",
+  "reviewPersist",
   "sandboxResultInstall",
   "advisorAsk",
 ];
@@ -1016,6 +1017,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   ],
   reviewMaterialize: ["projectDir", "baseRef", "headRef", "contextLines", "paths"],
   reviewPipelineRun: ["phase", "reviewer", "stdin", "runId"],
+  reviewPersist: ["projectDir", "runId", "finalizeRef", "mode"],
   gitCommit: ["projectDir", "message", "sandboxSessionID"],
   gitClearCommitIntent: ["projectDir", "sandboxSessionID"],
   gitPush: ["projectDir", "remote", "setUpstream", "allowProtectedBranch"],

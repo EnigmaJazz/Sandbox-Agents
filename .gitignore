@@ -19,6 +19,7 @@ broker/.sandbox-state/
 
 # Tool caches
 .atl/
+.context/
 
 # Backups and temp files
 *.bak

@@ -87,7 +87,7 @@ Adjacent: `git rev-parse` was unavailable, so branch/ref facts came from hand-re
 
 Typed params only, fixed argv, canonical project root only — no arbitrary shell, and no
 push/commit/checkout/fetch/`--ext-diff`/external diff drivers. Writable roots are exactly two,
-both verified gitignored and never assumed: the `ce:review` run dir and `.atl/review/**`.
+both verified gitignored and never assumed: the `ce:review` run dir and `.atl/review/**`. The broker may provision `.context/.gitignore` when needed; a project that already ignores `.context/` at its root passes the ignore check and receives no additional ignore-file write.
 Tool 1 is read-only wrt refs so it needs no approval; tools 2–3 are ask-gated to
 `gentle-orchestrator` only. Reviewers must not be given bash — they gain read access to the
 materialized diff and nothing else. Cap materialised bytes (e.g. 8 MiB) and fail closed with a

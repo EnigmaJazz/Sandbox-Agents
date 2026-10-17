@@ -88,9 +88,10 @@ import {
 } from "./copy-review.ts";
 import { MsbError } from "./msb.ts";
 import { StateError } from "./state.ts";
-import { ReviewRunStore } from "./review-run.ts";
+import { ReviewRunStore, readRunArtifact } from "./review-run.ts";
 import { materializeReviewRange } from "./review-materialize.ts";
 import { runReviewPipeline } from "./review-pipeline.ts";
+import { persistReviewArtifact } from "./review-persist.ts";
 import {
   divergenceIndexPathFor,
   durableHostRefResolves,
@@ -3621,6 +3622,31 @@ export function buildReviewPipelineRunOp(ctx: OpContext): OpHandler {
     const payload = payloadOf(req) as { phase?: unknown; reviewer?: unknown; stdin?: unknown; runId?: unknown };
     authorizeHostDispatch(ctx, "reviewPipelineRun", req.sessionID, req.agent);
     return runReviewPipeline(payload as { phase: unknown; reviewer?: unknown; stdin: unknown; runId: unknown }, ctx.config);
+  };
+}
+
+export function buildReviewPersistOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as { projectDir?: unknown; runId?: unknown; finalizeRef?: unknown; mode?: unknown };
+    authorizeHostDispatch(ctx, "reviewPersist", req.sessionID, req.agent);
+    if (typeof payload.runId !== "string" || typeof payload.finalizeRef !== "string") throw new ValidationError("runId and finalizeRef must be strings");
+    if (payload.mode !== undefined && payload.mode !== "write" && payload.mode !== "report_only") throw new ValidationError("mode must be write or report_only");
+    const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const store = new ReviewRunStore({ root: ctx.config.reviewRunRoot, projectRoot, deniedPrefixes: ctx.config.reviewRunDeniedPrefixes });
+    const runDir = store.runDir(req.sessionID, payload.runId);
+    const phaseBytes = readRunArtifact({ runDir, name: payload.finalizeRef, maxFileBytes: ctx.config.reviewRunMaxFileBytes }).data;
+    let output: unknown;
+    try { output = JSON.parse(phaseBytes.toString("utf8")) as unknown; }
+    catch { throw new ValidationError("finalize reference is not valid JSON"); }
+    return persistReviewArtifact({
+      root: projectRoot,
+      runId: payload.runId,
+      runDir: join(projectRoot, ".context", "systematic", "ce-review", payload.runId),
+      mode: (payload.mode as "write" | "report_only" | undefined) ?? "write",
+      finalize: { outcome: "accepted", output },
+      reviewHelperPath: ctx.config.reviewHelperPath,
+      reviewHelperSha256: ctx.config.reviewHelperSha256,
+    });
   };
 }
 

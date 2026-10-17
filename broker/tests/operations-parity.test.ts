@@ -18,4 +18,11 @@ describe("operation registry parity", () => {
     expect(HOST_MUTATION_OPERATIONS).toContain("reviewPipelineRun");
     expect(ALLOWED_PAYLOAD_KEYS).toHaveProperty("reviewPipelineRun", ["phase", "reviewer", "stdin", "runId"]);
   });
+
+  test("reviewPersist is registered as a host mutation without artifact content", () => {
+    expect(OPERATIONS).toContain("reviewPersist");
+    expect(SANDBOX_GUARD_CLASS).toHaveProperty("reviewPersist", "exempt-from-sandbox-guard");
+    expect(HOST_MUTATION_OPERATIONS).toContain("reviewPersist");
+    expect(ALLOWED_PAYLOAD_KEYS).toHaveProperty("reviewPersist", ["projectDir", "runId", "finalizeRef", "mode"]);
+  });
 });
