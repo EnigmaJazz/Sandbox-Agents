@@ -116,6 +116,15 @@ mirror staying current.
   The artifact-name validator refuses it and every case variant of it
   (`review_run_artifact_name_reserved`), so an artifact can never overwrite the
   run record; only the record itself publishes that name.
+- Finalize provenance assumes the confined agent cannot write the run store. An
+  agent with run-directory access could tamper with both the recorded digest and
+  the artifact, so the operator confinement probe matters. The broker does not
+  itself assert that the store is private from the agent.
+- Project binding compares canonical paths. A bind mount or case-insensitive
+  filesystem can therefore produce a spurious refusal; this is a false-refusal
+  edge, not a bypass.
+- The run-scoped ignore rule deliberately leaves sibling run directories
+  visible to git until each sibling's own persist operation completes.
 
 ## Added by slice U1b-2
 

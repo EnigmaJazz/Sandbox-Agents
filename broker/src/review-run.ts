@@ -109,6 +109,14 @@ export interface ReviewRunRecord {
   baseObjectId: string | null;
   headObjectId: string | null;
   artifacts: ReviewRunArtifact[];
+  /** Canonical project root that owned this run at creation. */
+  projectRoot: string;
+  /** Finalize phase evidence; artifact is absent when finalize was not accepted. */
+  finalizeProvenance?: {
+    phase: "finalize";
+    outcome: "accepted" | "structurally_rejected" | "validation_unavailable";
+    artifact?: ReviewRunArtifact;
+  };
   /** Materialized range manifest and complete byte length, when present. */
   changedPaths?: string[];
   totalBytes?: number;
@@ -485,11 +493,13 @@ export function resolveReviewRunRoot(opts: ReviewRunStoreOptions): string {
  */
 export class ReviewRunStore {
   readonly root: string;
+  readonly projectRoot: string;
   readonly caps: ReviewRunCaps;
   private readonly deniedPrefixes: readonly string[];
 
   constructor(opts: ReviewRunStoreOptions) {
     this.deniedPrefixes = opts.deniedPrefixes ?? [];
+    this.projectRoot = canonicalForContainment(opts.projectRoot);
     this.root = resolveReviewRunRoot({ ...opts, deniedPrefixes: this.deniedPrefixes });
     this.caps = { ...DEFAULT_REVIEW_RUN_CAPS, ...opts.caps };
     ensureOwnedDir(this.root, 0o700);
@@ -506,6 +516,27 @@ export class ReviewRunStore {
     const session = this.sessionDir(sessionID);
     assertReviewRunId(runId);
     return join(session, runId);
+  }
+
+  readRecord(sessionID: string, runId: string): ReviewRunRecord {
+    const raw = readRunArtifact({ runDir: this.runDir(sessionID, runId), name: REVIEW_RUN_METADATA_NAME, maxFileBytes: this.caps.maxFileBytes, allowRecord: true }).data;
+    let record: ReviewRunRecord;
+    try { record = JSON.parse(raw.toString("utf8")) as ReviewRunRecord; }
+    catch { throw new ReviewRunError("review_run_record_invalid", "review run record is not valid JSON"); }
+    if (!record || record.runId !== runId || record.sessionID !== sessionID || typeof record.projectRoot !== "string") {
+      throw new ReviewRunError("review_run_record_invalid", "review run record is missing its owner or canonical project identity");
+    }
+    return record;
+  }
+
+  recordFinalizeProvenance(
+    sessionID: string,
+    runId: string,
+    provenance: NonNullable<ReviewRunRecord["finalizeProvenance"]>,
+  ): void {
+    const record = this.readRecord(sessionID, runId);
+    record.finalizeProvenance = provenance;
+    publishValidatedArtifactAtomic(this.runDir(sessionID, runId), REVIEW_RUN_METADATA_NAME, `${JSON.stringify(record, null, 2)}\n`);
   }
 
   /** Runs that already exist for a session (quota accounting). */
@@ -552,6 +583,7 @@ export class ReviewRunStore {
       baseObjectId,
       headObjectId,
       artifacts: [],
+      projectRoot: this.projectRoot,
     };
     return new ReviewRunWriter(runDir, record, this.caps);
   }

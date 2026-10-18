@@ -197,7 +197,7 @@ test("rejects caller-supplied harness and argv fields at payload validation", ()
 
 test("observes exact fixed argv for all phases and rejects caller argv fields", async () => {
   const pin = fixture();
-  mkdirSync(pin.store.runDir(pin.sessionID, "f".repeat(32)), { recursive: true });
+  const writer = pin.store.createRun(pin.sessionID);
   const cases = [
     ["screen", "review-risk", ["screen", "--reviewer", "review-risk", "--harness", "opencode"]],
     ["prepare", undefined, ["prepare"]],
@@ -205,9 +205,9 @@ test("observes exact fixed argv for all phases and rejects caller argv fields", 
     ["finalize", undefined, ["finalize"]],
   ] as const;
   for (const [phase, reviewer, argv] of cases) {
-    const result = await runReviewPipeline({ phase, reviewer, runId: "f".repeat(32), stdin: "{}", harness: "malicious", args: ["--evil"] } as never, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+    const result = await runReviewPipeline({ phase, reviewer, runId: writer.record.runId, stdin: "{}", harness: "malicious", args: ["--evil"] } as never, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
     expect(result.outcome).toBe("accepted");
-    const saved = JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, "f".repeat(32)), `phase-${phase}.json`), "utf8")) as { argv: string[] };
+    const saved = JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, writer.record.runId), `phase-${phase}.json`), "utf8")) as { argv: string[] };
     expect(saved.argv).toEqual(argv);
   }
 });

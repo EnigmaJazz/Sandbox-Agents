@@ -39,8 +39,27 @@ test("persists only artifact and adds schema_version after making the directory 
   expect(parsed.schema_version).toBe(1);
   expect(parsed).toEqual({ findings: [], schema_version: 1 });
   expect(readFileSync(target, "utf8")).not.toContain("report");
-  expect(readFileSync(join(f.context, ".gitignore"), "utf8")).toContain("systematic/ce-review/");
+  expect(readFileSync(join(f.context, ".gitignore"), "utf8")).toContain(`systematic/ce-review/${f.runId}/`);
   expect(Bun.spawnSync(["git", "check-ignore", "-q", "--", target], { cwd: f.root }).exitCode).toBe(0);
+  const siblingRun = join(f.context, "systematic", "ce-review", "b".repeat(32), "review-summary.json");
+  expect(Bun.spawnSync(["git", "check-ignore", "-q", "--", siblingRun], { cwd: f.root }).exitCode).toBe(1);
+});
+
+test("refuses an existing ignore file over the bounded read cap with cap and observed size", async () => {
+  const f = fixture();
+  const oversized = Buffer.alloc(64 * 1024 + 1, 0x61);
+  writeFileSync(join(f.context, ".gitignore"), oversized);
+  await expect(persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }) }))
+    .rejects.toThrow(`65536-byte cap (observed 65537 bytes)`);
+});
+
+test("reports an ignore-file creation when artifact validation is incomplete", async () => {
+  const f = fixture();
+  const result = await persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "fail" } });
+  expect(result.outcome).toBe("incomplete");
+  expect(result.validation.status).toBe("failed");
+  expect(result.ignoreFile).toEqual({ status: "created" });
+  expect(readFileSync(join(f.context, ".gitignore"), "utf8")).toContain(`systematic/ce-review/${f.runId}/`);
 });
 
 test("ignore checks use fixed argv and replacement environment before and after provisioning", async () => {
@@ -101,7 +120,7 @@ test("append preserves the existing ignore bytes", async () => {
 
 test("refuses to duplicate an existing ineffective or negated entry", async () => {
   const f = fixture();
-  writeFileSync(join(f.context, ".gitignore"), "systematic/ce-review/\n!systematic/ce-review/\n");
+  writeFileSync(join(f.context, ".gitignore"), `systematic/ce-review/${f.runId}/\n!systematic/ce-review/${f.runId}/\n`);
   await expect(persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }) })).rejects.toMatchObject({ code: "review_ignore_ineffective" });
 });
 
@@ -191,7 +210,7 @@ test("keeps ignore provisioning on the verified context inode during an ancestor
   expect(readFileSync(marker)).toEqual(beforeBytes);
   expect(statSync(marker).mode & 0o777).toBe(beforeFileMode);
   expect(existsSync(join(externalContext, ".gitignore"))).toBe(false);
-  expect(readFileSync(join(movedContext, ".gitignore"), "utf8")).toContain("systematic/ce-review/");
+  expect(readFileSync(join(movedContext, ".gitignore"), "utf8")).toContain(`systematic/ce-review/${f.runId}/`);
 });
 
 test("refuses a symlinked context ignore file", async () => {
@@ -242,10 +261,39 @@ test("removes the exclusively created temp file when rename preparation fails", 
   expect(readdirSync(f.runDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
 });
 
+test("reports ignore-file mutation when artifact publication fails", async () => {
+  const f = fixture();
+  await expect(persistReviewArtifact({
+    ...f, mode: "write", finalize: writing({ findings: [] }),
+    beforeTempCreate: () => { throw new Error("simulated artifact publication failure"); },
+  })).rejects.toThrow(".context/.gitignore was created");
+  const ignorePath = join(f.context, ".gitignore");
+  expect(existsSync(ignorePath)).toBe(true);
+  expect(readFileSync(ignorePath, "utf8")).toContain(`systematic/ce-review/${f.runId}/`);
+  expect(existsSync(join(f.runDir, "review-summary.json"))).toBe(false);
+});
+
+test("preserves partial ignore mutation when post-write verification fails", async () => {
+  const f = fixture();
+  let checks = 0;
+  const spawn = async (argv: string[], options: Parameters<typeof spawnExec>[1]) => {
+    const result = await spawnExec(argv, options);
+    if (argv[0] === "git" && ++checks === 2) return { ...result, status: 1 };
+    return result;
+  };
+  const error = await persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), spawn })
+    .then(() => { throw new Error("persist unexpectedly resolved"); }, (cause: unknown) => cause);
+  expect(error).toMatchObject({ code: "review_ignore_ineffective" });
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).toContain(".context/.gitignore was created and remains modified");
+  expect(readFileSync(join(f.context, ".gitignore"), "utf8")).toContain(`systematic/ce-review/${f.runId}/`);
+  expect(existsSync(join(f.runDir, "review-summary.json"))).toBe(false);
+});
+
 test("report-only mode writes no artifact and does not invoke validation", async () => {
   const f = fixture();
   const result = await persistReviewArtifact({ ...f, mode: "report_only", finalize: writing({ findings: [] }) });
-  expect(result).toEqual({ outcome: "report_only", validation: { status: "not_attempted", code: "review_artifact_not_attempted" } });
+  expect(result).toEqual({ outcome: "report_only", validation: { status: "not_attempted", code: "review_artifact_not_attempted" }, ignoreFile: { status: "unchanged" } });
   expect(existsSync(join(f.runDir, "review-summary.json"))).toBe(false);
 });
 

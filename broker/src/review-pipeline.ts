@@ -144,10 +144,19 @@ export async function runReviewPipeline(
     }
     const name = `phase-${phase}.json`;
     const artifact = publishArtifactAtomic(storeContext.store.runDir(storeContext.sessionID, payload.runId as string), name, outputBytes);
+    if (phase === "finalize") {
+      storeContext.store.recordFinalizeProvenance(storeContext.sessionID, payload.runId as string, { phase, outcome: "accepted", artifact });
+    }
     const topLevelKeys = output !== null && typeof output === "object" && !Array.isArray(output)
       ? Object.keys(output).slice(0, 32).map((key) => key.slice(0, 128))
       : [];
     return { outcome: "accepted", artifact: { name: artifact.name, bytes: artifact.bytes, sha256: artifact.sha256 }, summary: { phase, topLevelKeys } };
+  }
+  if (phase === "finalize") {
+    storeContext?.store.recordFinalizeProvenance(storeContext.sessionID, payload.runId as string, {
+      phase,
+      outcome: result.status === 1 ? "structurally_rejected" : "validation_unavailable",
+    });
   }
   if (result.status === 1) return { outcome: "structurally_rejected", code: "review_pipeline_structurally_rejected", diagnostic: diagnostic(result) };
   return { outcome: "validation_unavailable", code: "review_pipeline_validation_unavailable", diagnostic: diagnostic(result) };

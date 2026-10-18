@@ -23,7 +23,7 @@ import {
   type Stats,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { BrokerConfig } from "./config.ts";
 import { RESULT_EXCLUDE_PATHS } from "./diff-spec.ts";
 import { gitSubcommand } from "./gitguard.ts";
@@ -91,7 +91,7 @@ import { StateError } from "./state.ts";
 import { ReviewRunStore, readRunArtifact, reviewRunStoreOptions } from "./review-run.ts";
 import { materializeReviewRange } from "./review-materialize.ts";
 import { runReviewPipeline } from "./review-pipeline.ts";
-import { persistReviewArtifact } from "./review-persist.ts";
+import { persistReviewArtifact, ReviewPersistError } from "./review-persist.ts";
 import {
   divergenceIndexPathFor,
   durableHostRefResolves,
@@ -3636,16 +3636,39 @@ export function buildReviewPersistOp(ctx: OpContext): OpHandler {
     const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
     const store = new ReviewRunStore({ ...reviewRunStoreOptions(ctx.config), projectRoot });
     const runDir = store.runDir(req.sessionID, payload.runId);
-    const phaseBytes = readRunArtifact({ runDir, name: payload.finalizeRef, maxFileBytes: ctx.config.reviewRunMaxFileBytes }).data;
+    const record = store.readRecord(req.sessionID, payload.runId);
+    if (record.projectRoot !== projectRoot) {
+      throw new ReviewPersistError("review_persist_project_mismatch", "review run is bound to a different canonical project root");
+    }
+    const provenance = record.finalizeProvenance;
+    if (!provenance) {
+      throw new ReviewPersistError("review_persist_finalize_provenance_missing", "review run has no finalize phase provenance");
+    }
+    if (provenance.phase !== "finalize") {
+      throw new ReviewPersistError("review_persist_finalize_phase_invalid", "recorded artifact was not published by the finalize phase");
+    }
+    if (provenance.outcome !== "accepted") {
+      throw new ReviewPersistError("review_persist_finalize_outcome_invalid", "recorded finalize phase did not have an accepted outcome");
+    }
+    if (!provenance.artifact) {
+      throw new ReviewPersistError("review_persist_finalize_provenance_missing", "accepted finalize phase has no published artifact");
+    }
+    if (payload.finalizeRef !== provenance.artifact.name) {
+      throw new ReviewPersistError("review_persist_finalize_ref_mismatch", "finalizeRef does not name the recorded finalize artifact");
+    }
+    const phaseArtifact = readRunArtifact({ runDir, name: payload.finalizeRef, maxFileBytes: ctx.config.reviewRunMaxFileBytes });
+    if (phaseArtifact.bytes !== provenance.artifact.bytes || phaseArtifact.sha256 !== provenance.artifact.sha256) {
+      throw new ReviewPersistError("review_persist_finalize_digest_mismatch", "finalize artifact bytes no longer match the recorded length and sha256");
+    }
     let output: unknown;
-    try { output = JSON.parse(phaseBytes.toString("utf8")) as unknown; }
+    try { output = JSON.parse(phaseArtifact.data.toString("utf8")) as unknown; }
     catch { throw new ValidationError("finalize reference is not valid JSON"); }
     return persistReviewArtifact({
       root: projectRoot,
       runId: payload.runId,
       runDir: join(projectRoot, ".context", "systematic", "ce-review", payload.runId),
       mode: (payload.mode as "write" | "report_only" | undefined) ?? "write",
-      finalize: { outcome: "accepted", output },
+      finalize: { outcome: provenance.outcome, output },
       reviewHelperPath: ctx.config.reviewHelperPath,
       reviewHelperSha256: ctx.config.reviewHelperSha256,
       reviewHelperInterpreter: ctx.config.reviewHelperInterpreter,

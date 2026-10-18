@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, constants as fsConstants, fchmodSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, fsyncSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { closeSync, constants as fsConstants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, renameSync, unlinkSync, writeFileSync, fsyncSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
 import { spawnExec } from "./msb.ts";
 import { assertPinnedReviewHelper, resolveReviewHelperInterpreter } from "./review-run.ts";
 import type { BrokerConfig } from "./config.ts";
@@ -11,10 +11,12 @@ export type ReviewArtifactValidation =
   | { status: "failed"; code: "review_artifact_validation_failed"; reason: string }
   | { status: "unavailable"; code: "review_artifact_validator_unavailable"; reason: string }
   | { status: "not_attempted"; code: "review_artifact_not_attempted" };
-export interface ReviewPersistResult { outcome: "persisted" | "incomplete" | "report_only"; path?: string; validation: ReviewArtifactValidation }
+export interface ReviewPersistResult { outcome: "persisted" | "incomplete" | "report_only"; path?: string; validation: ReviewArtifactValidation; ignoreFile: { status: "unchanged" | "created" | "changed" } }
 export class ReviewPersistError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = new.target.name; }
 }
+
+export const REVIEW_IGNORE_MAX_BYTES = 64 * 1024;
 export interface PersistReviewArtifactOptions extends Pick<BrokerConfig, "reviewHelperPath" | "reviewHelperSha256" | "reviewHelperInterpreter"> {
   root: string;
   runId: string;
@@ -89,7 +91,7 @@ export async function persistReviewArtifact(options: PersistReviewArtifactOption
   if (options.finalize.outcome === "validation_unavailable") throw new ReviewPersistError("review_persist_unavailable", "cannot persist unavailable finalize output");
   const wrapper = options.finalize.output as { kind?: unknown; artifact?: unknown };
   if (!wrapper || typeof wrapper !== "object" || wrapper.kind !== "writing") throw new ReviewPersistError("review_persist_kind", "finalize output is not a writing artifact");
-  if (options.mode === "report_only") return { outcome: "report_only", validation: { status: "not_attempted", code: "review_artifact_not_attempted" } };
+  if (options.mode === "report_only") return { outcome: "report_only", validation: { status: "not_attempted", code: "review_artifact_not_attempted" }, ignoreFile: { status: "unchanged" } };
   const root = resolve(options.root);
   const runId = options.runId;
   if (!/^[a-f0-9]{32}$/.test(runId)) throw new ReviewPersistError("review_persist_run_id", "invalid review run id");
@@ -102,56 +104,78 @@ export async function persistReviewArtifact(options: PersistReviewArtifactOption
   const runDir = expectedRunDir;
   assertProcFdAvailable(options);
   const { contextFd, runDirFd: anchorFd } = openContainedRunDirectories(root, runDir);
+  let ignoreFile: { status: "unchanged" | "created" | "changed" };
   try {
-    await ensureReviewIgnored(root, runDir, contextFd, options.spawn ?? spawnExec);
-    const target = join(runDir, "review-summary.json");
-    const tmpName = `.review-summary.${randomUUID()}.tmp`;
-    const tmp = procFdPath(anchorFd, tmpName);
-    const anchoredTarget = procFdPath(anchorFd, "review-summary.json");
-    let fd: number | undefined;
+    ignoreFile = await ensureReviewIgnored(root, runDir, contextFd, options.spawn ?? spawnExec);
     try {
-      options.beforeTempCreate?.();
-      fd = openSync(tmp, "wx", 0o600);
-      fchmodSync(fd, 0o600);
-      writeFileSync(fd, `${JSON.stringify(document, null, 2)}\n`);
-      fsyncSync(fd);
-      closeSync(fd); fd = undefined;
-      options.beforeRename?.();
-      renameSync(tmp, anchoredTarget);
-      fsyncSync(anchorFd);
+      const target = join(runDir, "review-summary.json");
+      const tmpName = `.review-summary.${randomUUID()}.tmp`;
+      const tmp = procFdPath(anchorFd, tmpName);
+      const anchoredTarget = procFdPath(anchorFd, "review-summary.json");
+      let fd: number | undefined;
+      try {
+        options.beforeTempCreate?.();
+        fd = openSync(tmp, "wx", 0o600);
+        fchmodSync(fd, 0o600);
+        writeFileSync(fd, `${JSON.stringify(document, null, 2)}\n`);
+        fsyncSync(fd);
+        closeSync(fd); fd = undefined;
+        options.beforeRename?.();
+        renameSync(tmp, anchoredTarget);
+        fsyncSync(anchorFd);
+      } catch (cause) {
+        if (fd !== undefined) closeSync(fd);
+        try { unlinkSync(tmp); } catch { /* absent after rename or failed creation */ }
+        throw cause;
+      }
+      const validation = await validateArtifact(options, target, root);
+      return { outcome: validation.status === "passed" ? "persisted" : "incomplete", path: target, validation, ignoreFile };
     } catch (cause) {
-      if (fd !== undefined) closeSync(fd);
-      try { unlinkSync(tmp); } catch { /* absent after rename or failed creation */ }
+      if (ignoreFile.status !== "unchanged") {
+        const message = cause instanceof Error ? cause.message : "artifact persistence failed";
+        const code = cause instanceof ReviewPersistError ? cause.code : "review_persist_partial_project_change";
+        throw new ReviewPersistError(code, `${message}; .context/.gitignore was ${ignoreFile.status} and remains modified`);
+      }
       throw cause;
     }
-    const validation = await validateArtifact(options, target, root);
-    return { outcome: validation.status === "passed" ? "persisted" : "incomplete", path: target, validation };
   } finally {
     try { closeSync(anchorFd); }
     finally { closeSync(contextFd); }
   }
 }
 
-async function ensureReviewIgnored(root: string, runDir: string, contextFd: number, spawn: typeof spawnExec): Promise<void> {
+async function ensureReviewIgnored(root: string, runDir: string, contextFd: number, spawn: typeof spawnExec): Promise<{ status: "unchanged" | "created" | "changed" }> {
   const check = async () => spawn(["git", "check-ignore", "-q", "--", join(runDir, "review-summary.json")], {
     cwd: root, timeoutMs: 10_000, maxOutputBytes: 4096,
     env: { PATH: process.env.PATH ?? "", HOME: root, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" },
     envMode: "replace",
   });
   const initial = await check();
-  if (initial.status === 0) return;
+  if (initial.status === 0) return { status: "unchanged" };
   if (initial.status !== 1) throw new ReviewPersistError("review_ignore_check_failed", `git check-ignore failed with status ${initial.status}`);
   const ignore = procFdPath(contextFd, ".gitignore");
   let existing = Buffer.alloc(0);
+  let existed = false;
   try {
     const stat = lstatSync(ignore);
+    existed = true;
     if (stat.isSymbolicLink()) throw new ReviewPersistError("review_ignore_symlink", ".context/.gitignore must not be a symlink");
     if (!stat.isFile()) throw new ReviewPersistError("review_ignore_unsafe_target", ".context/.gitignore must be a regular file");
-    existing = readFileSync(ignore);
+    if (stat.size > REVIEW_IGNORE_MAX_BYTES) throw new ReviewPersistError("review_ignore_file_too_large", `.context/.gitignore exceeds ${REVIEW_IGNORE_MAX_BYTES}-byte cap (observed ${stat.size} bytes)`);
+    const readFd = openSync(ignore, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      const opened = fstatSync(readFd);
+      if (!opened.isFile()) throw new ReviewPersistError("review_ignore_unsafe_target", ".context/.gitignore must be a regular file");
+      if (opened.size > REVIEW_IGNORE_MAX_BYTES) throw new ReviewPersistError("review_ignore_file_too_large", `.context/.gitignore exceeds ${REVIEW_IGNORE_MAX_BYTES}-byte cap (observed ${opened.size} bytes)`);
+      const bounded = Buffer.alloc(REVIEW_IGNORE_MAX_BYTES + 1);
+      const bytes = readSync(readFd, bounded, 0, bounded.byteLength, 0);
+      if (bytes > REVIEW_IGNORE_MAX_BYTES) throw new ReviewPersistError("review_ignore_file_too_large", `.context/.gitignore exceeds ${REVIEW_IGNORE_MAX_BYTES}-byte cap (observed at least ${bytes} bytes)`);
+      existing = bounded.subarray(0, bytes);
+    } finally { closeSync(readFd); }
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
   }
-  const entry = Buffer.from("systematic/ce-review/", "utf8");
+  const entry = Buffer.from(`systematic/ce-review/${basename(runDir)}/`, "utf8");
   const lines = existing.toString("utf8").split(/\r?\n/);
   if (lines.includes(entry.toString("utf8"))) throw new ReviewPersistError("review_ignore_ineffective", ".context/.gitignore already contains the review entry but git does not ignore the run artifact");
   const suffix = Buffer.from(`${existing.byteLength > 0 && existing[existing.byteLength - 1] !== 10 ? "\n" : ""}${entry.toString("utf8")}\n`, "utf8");
@@ -162,13 +186,15 @@ async function ensureReviewIgnored(root: string, runDir: string, contextFd: numb
     writeFileSync(fd, Buffer.concat([existing, suffix]));
     closeSync(fd); fd = undefined;
     renameSync(tmp, ignore);
+    fsyncSync(contextFd);
   } catch (cause) {
     if (fd !== undefined) closeSync(fd);
     try { unlinkSync(tmp); } catch { /* best effort cleanup */ }
     throw cause;
   }
   const verified = await check();
-  if (verified.status !== 0) throw new ReviewPersistError("review_ignore_ineffective", `git check-ignore did not ignore the review artifact (status ${verified.status})`);
+  if (verified.status !== 0) throw new ReviewPersistError("review_ignore_ineffective", `git check-ignore did not ignore the review artifact (status ${verified.status}); .context/.gitignore was ${existed ? "changed" : "created"} and remains modified`);
+  return { status: existed ? "changed" : "created" };
 }
 
 async function validateArtifact(options: PersistReviewArtifactOptions, target: string, root: string): Promise<ReviewArtifactValidation> {
