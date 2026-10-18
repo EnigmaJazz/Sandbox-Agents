@@ -83,5 +83,12 @@ Pre-code advice is recorded above. The corrected decision is caller-only diff ac
 - 2026-10-18 — follow-up fixes: both must-fixes are addressed (the diff reader uses the smaller operation/store cap and Gate 4 documents both tools); the service JSDoc and UTF-8/text response are updated. The tool-description change is not included because `opencode/plugins/sandbox-tools.ts` is outside this unit's allowed edit surfaces. Focused verification: `bun test --reporter=dot tests/review-materialize.test.ts` from `broker` — 22 pass, 0 fail, 84 expectations; full verification: `bun --cwd broker test --reporter=dot` — 1162 pass, 0 fail across 71 files, 4977 expectations; build: `bun build --target=bun src/main.ts` from `broker` — command completed without a reported error. Open advisories: multi-slice reads can exceed the 256 KiB whole-diff cap cumulatively because there is no cumulative bound; actor-level read authorization remains a separate follow-up.
 - 2026-10-18 — `host_review_diff_read` now directs callers to inline `text` when present and never forward the `data` array into prompts.
 
+## Records
+- Commit `fe1bd43` — 13 files, +363/−8.
+- Assessment: `68fdacb..HEAD`, risk medium, 25 changed paths, 902 changed lines, `review_due false` with reason `under_budget`, candidate not consumed.
+- This assessment covers the three previously unassessed commits `ac7cb7e`, `c48e01f` and `a4f824b`; no commit from that stretch remains unassessed.
+- The `ROUTER-LOG.md` row was added by this action.
+- This unit received no native review of its own. Its design was corrected by post-code advice before the commit.
+
 ## Next step
 Review final checks and the revert evidence; no commit or host apply is authorized in this unit.
