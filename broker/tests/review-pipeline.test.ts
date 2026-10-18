@@ -68,24 +68,65 @@ test("publishes phase output by reference and refuses missing or conflicting std
   await expect(runReviewPipeline(
     { runId: writer.record.runId, phase: "merge", inputRef: "phase-finalize.json" } as never,
     pin.config, undefined, { store, sessionID } as never,
-  )).rejects.toMatchObject({ code: "review_pipeline_input_ref_invalid" });
+  )).rejects.toMatchObject({ code: "review_pipeline_input_ref_not_prior" });
+  await expect(runReviewPipeline(
+    { runId: writer.record.runId, phase: "merge", inputRef: "unrecognized.json" } as never,
+    pin.config, undefined, { store, sessionID } as never,
+  )).rejects.toMatchObject({ code: "review_pipeline_input_ref_unknown" });
   expect(readdirSync(store.runDir(sessionID, writer.record.runId)).sort()).toContain("phase-prepare.json");
+});
+
+test("accepts a chained phase artifact larger than the inline stdin cap", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  const input = Buffer.from(JSON.stringify({ value: "x".repeat(REVIEW_PIPELINE_MAX_STDIN_BYTES) }));
+  writer.addArtifact("phase-prepare.json", input);
+  const result = await runReviewPipeline(
+    { phase: "merge", runId: writer.record.runId, inputRef: "phase-prepare.json" },
+    pin.config, undefined, { store: pin.store, sessionID: pin.sessionID },
+  );
+  expect(result.outcome).toBe("accepted");
+  expect(pin.store.readRecord(pin.sessionID, writer.record.runId).artifacts.map(({ name }) => name)).toContain("phase-merge.json");
+});
+
+test("publishes a distinct run-accounted artifact for every screen reviewer", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  for (const reviewer of ["review-risk", "review-resilience", "review-readability", "review-reliability"] as const) {
+    await runReviewPipeline({ phase: "screen", reviewer, runId: writer.record.runId, stdin: "{}" }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+  }
+  const record = pin.store.readRecord(pin.sessionID, writer.record.runId);
+  expect(record.artifacts.map(({ name }) => name).sort()).toEqual([
+    "phase-screen-review-readability.json", "phase-screen-review-reliability.json",
+    "phase-screen-review-resilience.json", "phase-screen-review-risk.json",
+  ]);
+  expect(record.artifacts.reduce((total, artifact) => total + artifact.bytes, 0)).toBeGreaterThan(0);
+});
+
+test("enforces the per-run cap before publishing a phase artifact", async () => {
+  const pin = fixture();
+  const store = new ReviewRunStore({ root: pin.store.root, projectRoot: pin.project, caps: { ...pin.store.caps, maxBytes: 1 } });
+  const writer = store.createRun(pin.sessionID);
+  await expect(runReviewPipeline(
+    { phase: "prepare", runId: writer.record.runId, stdin: "{}" }, pin.config, undefined, { store, sessionID: pin.sessionID },
+  )).rejects.toMatchObject({ code: "review_run_byte_cap" });
+  expect(readdirSync(store.runDir(pin.sessionID, writer.record.runId))).not.toContain("phase-prepare.json");
 });
 
 test("runs a mode-0600 pinned helper through its configured interpreter", async () => {
   const pin = fixture();
   chmodSync(pin.helper, 0o600);
   const config = { ...pin.config, reviewHelperInterpreter: process.execPath };
-  mkdirSync(pin.store.runDir(pin.sessionID, "a".repeat(32)), { recursive: true });
+  const writer = pin.store.createRun(pin.sessionID);
   let observedArgv: string[] = [];
   const result = await runReviewPipeline(
-    { phase: "prepare", runId: "a".repeat(32), stdin: "{}" }, config,
+    { phase: "prepare", runId: writer.record.runId, stdin: "{}" }, config,
     (argv, options) => { observedArgv = argv; return spawnExec(argv, options); },
     { store: pin.store, sessionID: pin.sessionID },
   );
   expect(observedArgv).toEqual([process.execPath, pin.helper, "prepare"]);
   expect(result).toMatchObject({ outcome: "accepted", artifact: { name: "phase-prepare.json" }, summary: { phase: "prepare" } });
-  expect(JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, "a".repeat(32)), "phase-prepare.json"), "utf8")))
+  expect(JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, writer.record.runId), "phase-prepare.json"), "utf8")))
     .toEqual({ argv: ["prepare"], input: "{}", stdinSha256: createHash("sha256").update("{}").digest("hex") });
 });
 
@@ -123,10 +164,10 @@ test("refuses missing, symlinked, and non-executable interpreters by distinct co
 test("runs fixed phase argv with byte-identical stdin and no caller-controlled harness", async () => {
   const pin = fixture();
   const payload = "{\"value\":\"snowman ☃\"}";
-  mkdirSync(pin.store.runDir(pin.sessionID, "a".repeat(32)), { recursive: true });
-  const result = await runReviewPipeline({ phase: "screen", reviewer: "review-risk", runId: "a".repeat(32), stdin: payload }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
-  expect(result).toMatchObject({ outcome: "accepted", artifact: { name: "phase-screen.json" } });
-  expect(JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, "a".repeat(32)), "phase-screen.json"), "utf8"))).toEqual({ argv: ["screen", "--reviewer", "review-risk", "--harness", "opencode"], input: payload, stdinSha256: createHash("sha256").update(payload).digest("hex") });
+  const writer = pin.store.createRun(pin.sessionID);
+  const result = await runReviewPipeline({ phase: "screen", reviewer: "review-risk", runId: writer.record.runId, stdin: payload }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+  expect(result).toMatchObject({ outcome: "accepted", artifact: { name: "phase-screen-review-risk.json" } });
+  expect(JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, writer.record.runId), "phase-screen-review-risk.json"), "utf8"))).toEqual({ argv: ["screen", "--reviewer", "review-risk", "--harness", "opencode"], input: payload, stdinSha256: createHash("sha256").update(payload).digest("hex") });
 });
 
 test("refuses an over-cap stdin payload and names its observed byte size without spawning", async () => {
@@ -207,7 +248,8 @@ test("observes exact fixed argv for all phases and rejects caller argv fields", 
   for (const [phase, reviewer, argv] of cases) {
     const result = await runReviewPipeline({ phase, reviewer, runId: writer.record.runId, stdin: "{}", harness: "malicious", args: ["--evil"] } as never, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
     expect(result.outcome).toBe("accepted");
-    const saved = JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, writer.record.runId), `phase-${phase}.json`), "utf8")) as { argv: string[] };
+    const name = phase === "screen" ? `phase-screen-${reviewer}.json` : `phase-${phase}.json`;
+    const saved = JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, writer.record.runId), name), "utf8")) as { argv: string[] };
     expect(saved.argv).toEqual(argv);
   }
 });
@@ -215,11 +257,11 @@ test("observes exact fixed argv for all phases and rejects caller argv fields", 
 test("preserves arbitrary stdin bytes and the fixture reveals their digest", async () => {
   const pin = fixture();
   const bytes = [0x7b, 0xff, 0x00, 0x80, 0x7d];
-  mkdirSync(pin.store.runDir(pin.sessionID, "1".repeat(32)), { recursive: true });
-  const result = await runReviewPipeline({ phase: "prepare", runId: "1".repeat(32), stdin: bytes }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+  const writer = pin.store.createRun(pin.sessionID);
+  const result = await runReviewPipeline({ phase: "prepare", runId: writer.record.runId, stdin: bytes }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
   const expected = createHash("sha256").update(Buffer.from(bytes)).digest("hex");
   expect(result.outcome).toBe("accepted");
-  const saved = JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, "1".repeat(32)), "phase-prepare.json"), "utf8")) as { stdinSha256: string };
+  const saved = JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, writer.record.runId), "phase-prepare.json"), "utf8")) as { stdinSha256: string };
   expect(saved.stdinSha256).toBe(expected);
 });
 

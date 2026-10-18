@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, constants as fsConstants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, renameSync, unlinkSync, writeFileSync, fsyncSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { closeSync, constants as fsConstants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, unlinkSync, writeFileSync, fsyncSync, chmodSync } from "node:fs";
+import { basename, join, resolve, relative, sep } from "node:path";
+import { homedir } from "node:os";
 import { spawnExec } from "./msb.ts";
 import { assertPinnedReviewHelper, resolveReviewHelperInterpreter } from "./review-run.ts";
 import type { BrokerConfig } from "./config.ts";
@@ -11,7 +12,7 @@ export type ReviewArtifactValidation =
   | { status: "failed"; code: "review_artifact_validation_failed"; reason: string }
   | { status: "unavailable"; code: "review_artifact_validator_unavailable"; reason: string }
   | { status: "not_attempted"; code: "review_artifact_not_attempted" };
-export interface ReviewPersistResult { outcome: "persisted" | "incomplete" | "report_only"; path?: string; validation: ReviewArtifactValidation; ignoreFile: { status: "unchanged" | "created" | "changed" } }
+export interface ReviewPersistResult { outcome: "persisted" | "incomplete" | "report_only"; path?: string; stagingPath?: string; validation: ReviewArtifactValidation; ignoreFile: { status: "unchanged" | "created" | "changed" } }
 export class ReviewPersistError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = new.target.name; }
 }
@@ -21,6 +22,7 @@ export interface PersistReviewArtifactOptions extends Pick<BrokerConfig, "review
   root: string;
   runId: string;
   runDir: string;
+  storeRunDir: string;
   mode: "write" | "report_only";
   finalize: ReviewPipelineResult;
   env?: Record<string, string>;
@@ -32,6 +34,18 @@ export interface PersistReviewArtifactOptions extends Pick<BrokerConfig, "review
 
 const DIRECTORY_FLAGS = fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW;
 const procFdPath = (fd: number, name?: string): string => `/proc/self/fd/${fd}${name ? `/${name}` : ""}`;
+
+function assertRunDirectoryAnchor(anchorFd: number, expectedRunDir: string): void {
+  let anchoredPath: string;
+  try {
+    anchoredPath = realpathSync(procFdPath(anchorFd));
+  } catch {
+    throw new ReviewPersistError("review_persist_anchor_changed", "repository review directory anchor cannot be resolved; refusing publication");
+  }
+  if (anchoredPath !== expectedRunDir) {
+    throw new ReviewPersistError("review_persist_anchor_changed", "repository review directory moved from its canonical location; refusing publication");
+  }
+}
 
 function assertProcFdAvailable(options: PersistReviewArtifactOptions): void {
   let probeFd: number | undefined;
@@ -67,7 +81,11 @@ function openContainedRunDirectories(root: string, runDir: string): { contextFd:
         try { mkdirSync(childPath, { mode: 0o700 }); } catch (mkdirCause) {
           if ((mkdirCause as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirCause;
         }
-        child = openSync(childPath, DIRECTORY_FLAGS);
+        try {
+          child = openSync(childPath, DIRECTORY_FLAGS);
+        } catch {
+          throw new ReviewPersistError("review_persist_unsafe_directory", `unsafe review directory component: ${component}`);
+        }
       }
       pendingFd = child;
       if (component === ".context") contextFd = child;
@@ -92,7 +110,7 @@ export async function persistReviewArtifact(options: PersistReviewArtifactOption
   const wrapper = options.finalize.output as { kind?: unknown; artifact?: unknown };
   if (!wrapper || typeof wrapper !== "object" || wrapper.kind !== "writing") throw new ReviewPersistError("review_persist_kind", "finalize output is not a writing artifact");
   if (options.mode === "report_only") return { outcome: "report_only", validation: { status: "not_attempted", code: "review_artifact_not_attempted" }, ignoreFile: { status: "unchanged" } };
-  const root = resolve(options.root);
+  const root = realpathSync(resolve(options.root));
   const runId = options.runId;
   if (!/^[a-f0-9]{32}$/.test(runId)) throw new ReviewPersistError("review_persist_run_id", "invalid review run id");
   const expectedRunDir = join(root, ".context", "systematic", "ce-review", runId);
@@ -102,25 +120,59 @@ export async function persistReviewArtifact(options: PersistReviewArtifactOption
   const document = { ...(artifact as Record<string, unknown>) };
   if (!Object.hasOwn(document, "schema_version")) document.schema_version = 1;
   const runDir = expectedRunDir;
+  let storeRunDir: string;
+  try { storeRunDir = realpathSync(resolve(options.storeRunDir)); }
+  catch { throw new ReviewPersistError("review_persist_staging_path", "broker review run directory cannot be resolved; refusing staging"); }
+  const storeRelative = relative(root, storeRunDir);
+  if (basename(storeRunDir) !== runId || storeRelative === "" || (storeRelative !== ".." && storeRelative.startsWith(`..${sep}`) === false)) {
+    throw new ReviewPersistError("review_persist_staging_path", "broker review staging directory must be a run-store directory outside the project; refusing staging");
+  }
+  const stagingRoot = join(storeRunDir, "staging");
+  const stagedRelativePath = `.context/systematic/ce-review/${runId}/review-summary.json`;
+  const stagedTarget = join(stagingRoot, stagedRelativePath);
+  const target = join(runDir, "review-summary.json");
+  const documentBytes = Buffer.from(`${JSON.stringify(document, null, 2)}\n`, "utf8");
   assertProcFdAvailable(options);
   const { contextFd, runDirFd: anchorFd } = openContainedRunDirectories(root, runDir);
   let ignoreFile: { status: "unchanged" | "created" | "changed" };
   try {
     ignoreFile = await ensureReviewIgnored(root, runDir, contextFd, options.spawn ?? spawnExec);
     try {
-      const target = join(runDir, "review-summary.json");
+      mkdirSync(join(stagingRoot, `.context`, `systematic`, `ce-review`, runId), { recursive: true, mode: 0o700 });
+      const stageDirectory = join(stagingRoot, `.context`, `systematic`, `ce-review`, runId);
+      chmodSync(stageDirectory, 0o700);
+      const stageTmp = `${stagedTarget}.${randomUUID()}.tmp`;
+      let stageFd: number | undefined;
+      try {
+        stageFd = openSync(stageTmp, "wx", 0o600);
+        fchmodSync(stageFd, 0o600);
+        writeFileSync(stageFd, documentBytes);
+        fsyncSync(stageFd);
+        closeSync(stageFd); stageFd = undefined;
+        renameSync(stageTmp, stagedTarget);
+      } catch (cause) {
+        if (stageFd !== undefined) closeSync(stageFd);
+        try { unlinkSync(stageTmp); } catch { /* absent after rename or failed creation */ }
+        throw cause;
+      }
+      const validation = await validateArtifact(options, stagedRelativePath, stagingRoot);
+      if (validation.status !== "passed") {
+        return { outcome: "incomplete", stagingPath: `staging/${stagedRelativePath}`, validation, ignoreFile };
+      }
       const tmpName = `.review-summary.${randomUUID()}.tmp`;
       const tmp = procFdPath(anchorFd, tmpName);
       const anchoredTarget = procFdPath(anchorFd, "review-summary.json");
       let fd: number | undefined;
       try {
         options.beforeTempCreate?.();
+        assertRunDirectoryAnchor(anchorFd, runDir);
         fd = openSync(tmp, "wx", 0o600);
         fchmodSync(fd, 0o600);
-        writeFileSync(fd, `${JSON.stringify(document, null, 2)}\n`);
+        writeFileSync(fd, documentBytes);
         fsyncSync(fd);
         closeSync(fd); fd = undefined;
         options.beforeRename?.();
+        assertRunDirectoryAnchor(anchorFd, runDir);
         renameSync(tmp, anchoredTarget);
         fsyncSync(anchorFd);
       } catch (cause) {
@@ -128,8 +180,7 @@ export async function persistReviewArtifact(options: PersistReviewArtifactOption
         try { unlinkSync(tmp); } catch { /* absent after rename or failed creation */ }
         throw cause;
       }
-      const validation = await validateArtifact(options, target, root);
-      return { outcome: validation.status === "passed" ? "persisted" : "incomplete", path: target, validation, ignoreFile };
+      return { outcome: "persisted", path: target, validation, ignoreFile };
     } catch (cause) {
       if (ignoreFile.status !== "unchanged") {
         const message = cause instanceof Error ? cause.message : "artifact persistence failed";
@@ -147,7 +198,8 @@ export async function persistReviewArtifact(options: PersistReviewArtifactOption
 async function ensureReviewIgnored(root: string, runDir: string, contextFd: number, spawn: typeof spawnExec): Promise<{ status: "unchanged" | "created" | "changed" }> {
   const check = async () => spawn(["git", "check-ignore", "-q", "--", join(runDir, "review-summary.json")], {
     cwd: root, timeoutMs: 10_000, maxOutputBytes: 4096,
-    env: { PATH: process.env.PATH ?? "", HOME: root, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" },
+    // Git's global config is trusted operator input; never redirect HOME into the project.
+    env: { PATH: process.env.PATH ?? "", HOME: homedir(), GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" },
     envMode: "replace",
   });
   const initial = await check();
@@ -197,7 +249,7 @@ async function ensureReviewIgnored(root: string, runDir: string, contextFd: numb
   return { status: existed ? "changed" : "created" };
 }
 
-async function validateArtifact(options: PersistReviewArtifactOptions, target: string, root: string): Promise<ReviewArtifactValidation> {
+async function validateArtifact(options: PersistReviewArtifactOptions, target: string, cwd: string): Promise<ReviewArtifactValidation> {
   let helper: ReturnType<typeof assertPinnedReviewHelper>;
   let interpreter: string;
   try {
@@ -209,7 +261,7 @@ async function validateArtifact(options: PersistReviewArtifactOptions, target: s
   let result;
   try {
     result = await (options.spawn ?? spawnExec)([interpreter, helper.path, "artifact", target], {
-      cwd: root, timeoutMs: 30_000, maxOutputBytes: 64 * 1024,
+      cwd, timeoutMs: 30_000, maxOutputBytes: 64 * 1024,
       env: { PATH: process.env.PATH ?? "", ...(options.env ?? {}) }, envMode: "replace",
     });
   } catch (cause) {

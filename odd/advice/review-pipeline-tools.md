@@ -54,3 +54,34 @@ The advisors also verified two properties as correct and not worth re-litigating
 ### Follow-up review finding — persist project binding
 
 - **`R3-unbound-project-persist` disposition: not fixed in this slice.** No cheap in-band pre-check exists in the current surfaces: the plugin has only the session's current `ctx.directory`, while the run's originating project binding is held by broker-owned run metadata. The plugin cannot read that metadata without adding a broker operation/tool, and passing a caller-supplied project would not establish a trusted binding. The broker's existing `review_persist_project_mismatch` refusal remains the control, but it occurs after approval. The approval's `projectDir` therefore reflects the session's current directory; the residual risk is an approval that names a project the broker will then refuse. Evidence: `host_review_persist` computes `projectDir` from `ctx.directory` and places it in both approval metadata and the request payload (`opencode/plugins/sandbox-tools.ts`); broker `reviewPersist` checks the recorded run's project against the requested project and throws `review_persist_project_mismatch` (`broker/src/service.ts`).
+
+## External advisory evidence — owner-supplied reviews
+
+The owner supplied two independent external reviews in-session. Selection rule: two independent engines, first pass, no cross-visibility; the owner supplied the reviews. Their verbatim responses are not reproduced here: a recorded response is never edited, and a partial transcription would itself be an edit. The index below records finding IDs and dispositions only.
+
+### Claude
+
+- F1 validator exit codes — **NEEDS PROBE**.
+- F2 publish-before-validate — **CONFIRMED; fixed here** by validating staged evidence before any project artifact publication.
+- F3 ignore temp not fsynced — **open**.
+- F4 concurrent persists lose updates — **open**.
+- F5 HOME set to project root — **CONFIRMED**.
+- F6 advisory cluster — **open**.
+- F7 helper source writable so the digest pins attacker bytes — **NEEDS PROBE; highest severity**.
+- F8 interpreter resolved after `broker.env` overwrite — **open**.
+- F9 interpreter path breaks on brew upgrade — **open**.
+- F10, F11, F12 advisories — **open**.
+- F13 approval proves acceptance, not a review — **open**.
+- F14 relocating the store is insufficient on LEAK — **open**.
+
+### Antigravity
+
+- F-01a chained input cap, F-01b screen collision, F-01c accounting bypass — **CONFIRMED and fixed in this work**.
+- F-02 publish-before-validate — **CONFIRMED; fixed here** by staging under the broker run store and publishing only after `passed`.
+- F-03 HOME=root — **CONFIRMED**.
+- F-04 anchor opened across awaits — **CONFIRMED; guard installed**.
+- F-05 helper discovery path and missing-key verify — premise **REFUTED** (`$HOME/.cache/opencode/packages` exists and has no `node_modules` entry); missing-key sub-claim **UNVERIFIED**.
+- F-06 helper errors thrown rather than mapped — **open**.
+- F-07 control directory in the allowlist — **CONFIRMED, out of scope** (pre-existing profile decision).
+- F-08 provenance bypass and post-approval artifact swap — **open**.
+- F-09 what is correct and must not change — recorded as advisory guidance, not a defect finding.

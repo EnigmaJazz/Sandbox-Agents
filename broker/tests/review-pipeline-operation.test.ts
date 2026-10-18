@@ -127,7 +127,8 @@ test("persist dispatch forwards configured helper path, digest, and interpreter 
   expect(existsSync(summaryPath)).toBe(true);
   expect(JSON.parse(readFileSync(summaryPath, "utf8"))).toMatchObject({ verdict: "approved", schema_version: 1 });
   const spawns = readFileSync(env.auditPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]);
-  expect(spawns).toContainEqual([process.execPath, env.helperPath, "artifact", summaryPath]);
+  expect(spawns).toContainEqual([process.execPath, env.helperPath, "artifact", `.context/systematic/ce-review/${selected.record.runId}/review-summary.json`]);
+  expect(existsSync(join(env.store.runDir(SESSION_ID, selected.record.runId), "staging", `.context/systematic/ce-review/${selected.record.runId}/review-summary.json`))).toBe(true);
   expect(env.config.reviewHelperPath).toBe(env.helperPath);
   expect(env.config.reviewHelperSha256).toBe(createHash("sha256").update(readFileSync(env.helperPath)).digest("hex"));
   expect(env.config.reviewHelperInterpreter).toBe(process.execPath);
@@ -235,14 +236,15 @@ test("reviewPipeline dispatch chains all phase outputs by exact artifact referen
     const result = await env.internals.dispatch({
       version: 1, id: `chain-${phase}`, operation: "reviewPipelineRun", sessionID: SESSION_ID,
       payload: { projectDir: env.project, phase, ...(phase === "screen" ? { reviewer: "review-risk" } : {}), runId: writer.record.runId,
-        ...(index === 0 ? { stdin: input } : { inputRef: `phase-${phases[index - 1]}.json` }) },
+        ...(index === 0 ? { stdin: input } : { inputRef: phases[index - 1] === "screen" ? "phase-screen-review-risk.json" : `phase-${phases[index - 1]}.json` }) },
     }) as { outcome: string; artifact: { name: string; bytes: number; sha256: string }; summary: unknown };
     const expected = phase === "finalize"
       ? JSON.stringify({ kind: "writing", artifact: { verdict: "approved" } })
       : JSON.stringify({ phase, input });
-    const bytes = readFileSync(join(env.store.runDir(SESSION_ID, writer.record.runId), `phase-${phase}.json`));
+    const artifactName = phase === "screen" ? "phase-screen-review-risk.json" : `phase-${phase}.json`;
+    const bytes = readFileSync(join(env.store.runDir(SESSION_ID, writer.record.runId), artifactName));
     expect(bytes.toString("utf8")).toBe(expected);
-    expect(result).toMatchObject({ outcome: "accepted", artifact: { name: `phase-${phase}.json`, bytes: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") } });
+    expect(result).toMatchObject({ outcome: "accepted", artifact: { name: artifactName, bytes: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") } });
     expect(JSON.stringify(result)).not.toContain(expected);
     input = bytes.toString("utf8");
   }

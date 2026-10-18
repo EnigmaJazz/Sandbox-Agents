@@ -3663,6 +3663,7 @@ export function buildReviewPersistOp(ctx: OpContext): OpHandler {
       root: projectRoot,
       runId: payload.runId,
       runDir: join(projectRoot, ".context", "systematic", "ce-review", payload.runId),
+      storeRunDir: runDir,
       mode: (payload.mode as "write" | "report_only" | undefined) ?? "write",
       finalize: { outcome: provenance.outcome, output },
       reviewHelperPath: ctx.config.reviewHelperPath,

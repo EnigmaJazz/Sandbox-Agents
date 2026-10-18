@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnExec } from "../src/msb.ts";
 import { persistReviewArtifact } from "../src/review-persist.ts";
@@ -18,11 +18,15 @@ function fixture() {
   const runId = "a".repeat(32);
   const runDir = join(reviewRoot, runId);
   mkdirSync(runDir, { recursive: true, mode: 0o700 });
+  const storeRoot = mkdtempSync(join(tmpdir(), "review-store-"));
+  roots.push(storeRoot);
+  const storeRunDir = join(storeRoot, runId);
+  mkdirSync(storeRunDir, { recursive: true, mode: 0o700 });
   const helper = join(root, "validate-review.mjs");
   writeFileSync(helper, `#!${process.execPath}\nprocess.exit(process.env.FIXTURE_STATUS === 'ok' ? 0 : process.env.FIXTURE_STATUS === 'fail' ? 3 : 2);\n`);
   chmodSync(helper, 0o700);
   const helperSha256 = createHash("sha256").update(readFileSync(helper)).digest("hex");
-  return { root, context, runDir, runId, reviewHelperPath: helper, reviewHelperSha256: helperSha256, reviewHelperInterpreter: process.execPath };
+  return { root, context, runDir, runId, storeRunDir, reviewHelperPath: helper, reviewHelperSha256: helperSha256, reviewHelperInterpreter: process.execPath };
 }
 
 const writing = (artifact: unknown) => ({ outcome: "accepted" as const, output: { kind: "writing", artifact, report: { private: "report-only" } } });
@@ -32,7 +36,9 @@ test("persists only artifact and adds schema_version after making the directory 
   const calls: Array<{ argv: string[]; options: { cwd?: string } }> = [];
   const spawn = async (argv: string[], options: Parameters<typeof spawnExec>[1]) => { calls.push({ argv, options }); return spawnExec(argv, options); };
   const result = await persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "ok" }, spawn });
-  expect(calls.some((call) => call.argv[0] === process.execPath && call.argv[1] === f.reviewHelperPath && call.options.cwd === f.root && call.argv[2] === "artifact" && call.argv.length === 4)).toBe(true);
+  const stageRoot = join(f.storeRunDir, "staging");
+  const stagedRelativePath = `.context/systematic/ce-review/${f.runId}/review-summary.json`;
+  expect(calls.some((call) => call.argv[0] === process.execPath && call.argv[1] === f.reviewHelperPath && call.options.cwd === stageRoot && call.argv[2] === "artifact" && call.argv[3] === stagedRelativePath && call.argv.length === 4)).toBe(true);
   if (result.validation.status !== "passed") throw new Error(JSON.stringify(result.validation));
   const target = join(f.runDir, "review-summary.json");
   const parsed = JSON.parse(readFileSync(target, "utf8"));
@@ -62,6 +68,16 @@ test("reports an ignore-file creation when artifact validation is incomplete", a
   expect(readFileSync(join(f.context, ".gitignore"), "utf8")).toContain(`systematic/ce-review/${f.runId}/`);
 });
 
+test("project .gitconfig does not become global config for ignore checks", async () => {
+  const f = fixture();
+  const excludes = join(f.root, "project-excludes");
+  writeFileSync(excludes, `/.context/systematic/ce-review/${f.runId}/\n`);
+  writeFileSync(join(f.root, ".gitconfig"), `[core]\n\texcludesFile = ${excludes}\n`);
+  const result = await persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "ok" } });
+  expect(result.ignoreFile.status).toBe("created");
+  expect(existsSync(join(f.context, ".gitignore"))).toBe(true);
+});
+
 test("ignore checks use fixed argv and replacement environment before and after provisioning", async () => {
   const f = fixture();
   const calls: Array<{ argv: string[]; options: { cwd?: string; envMode?: string; env?: Record<string, string> } }> = [];
@@ -77,7 +93,8 @@ test("ignore checks use fixed argv and replacement environment before and after 
   for (const call of ignoreCalls) {
     expect(call.options.cwd).toBe(f.root);
     expect(call.options.envMode).toBe("replace");
-    expect(call.options.env).toEqual({ PATH: process.env.PATH ?? "", HOME: f.root, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" });
+    expect(call.options.env).toEqual({ PATH: process.env.PATH ?? "", HOME: homedir(), GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" });
+    expect(call.options.env?.HOME).not.toBe(f.root);
   }
 });
 
@@ -213,6 +230,34 @@ test("keeps ignore provisioning on the verified context inode during an ancestor
   expect(readFileSync(join(movedContext, ".gitignore"), "utf8")).toContain(`systematic/ce-review/${f.runId}/`);
 });
 
+test("rechecks the anchored run directory after git awaits before writing", async () => {
+  const f = fixture();
+  const outside = join(tmpdir(), `review-persist-outside-${f.runId}`);
+  roots.push(outside);
+  const outsideContext = `${outside}-context`;
+  roots.push(outsideContext);
+  mkdirSync(outside, { mode: 0o711 });
+  const marker = join(outside, "marker.bin");
+  writeFileSync(marker, Buffer.from([3, 0, 255]));
+  chmodSync(marker, 0o640);
+  const before = { entries: readdirSync(outside).sort(), bytes: readFileSync(marker), dirMode: statSync(outside).mode & 0o777, fileMode: statSync(marker).mode & 0o777 };
+  writeFileSync(join(f.root, ".gitignore"), ".context/\n");
+  let moved = false;
+  const spawn = async (argv: string[], options: Parameters<typeof spawnExec>[1]) => {
+    const result = await spawnExec(argv, options);
+    if (argv[0] === "git" && !moved) { renameSync(f.context, outsideContext); moved = true; }
+    return result;
+  };
+  await expect(persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "ok" }, spawn }))
+    .rejects.toMatchObject({ code: "review_persist_anchor_changed" });
+  expect(moved).toBe(true);
+  expect(existsSync(join(outsideContext, "systematic", "ce-review", f.runId, "review-summary.json"))).toBe(false);
+  expect(readdirSync(outside).sort()).toEqual(before.entries);
+  expect(readFileSync(marker)).toEqual(before.bytes);
+  expect(statSync(outside).mode & 0o777).toBe(before.dirMode);
+  expect(statSync(marker).mode & 0o777).toBe(before.fileMode);
+});
+
 test("refuses a symlinked context ignore file", async () => {
   const f = fixture();
   const external = join(f.root, "external-ignore");
@@ -236,15 +281,14 @@ test("does not write into an external directory after a verified run directory i
     sentinelMode: statSync(sentinel).mode & 0o777,
   };
   let swapped = false;
-  const result = await persistReviewArtifact({
+  await expect(persistReviewArtifact({
     ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "ok" },
     beforeTempCreate: () => {
       renameSync(f.runDir, moved);
       symlinkSync(external, f.runDir);
       swapped = true;
     },
-  });
-  expect(result.outcome).toBe("persisted");
+  })).rejects.toMatchObject({ code: "review_persist_anchor_changed" });
   expect(swapped).toBe(true);
   expect(readdirSync(external).sort()).toEqual(before.entries);
   expect(statSync(external).mode & 0o777).toBe(before.directoryMode);
@@ -252,19 +296,19 @@ test("does not write into an external directory after a verified run directory i
   expect(statSync(sentinel).mode & 0o777).toBe(before.sentinelMode);
   expect(existsSync(join(external, "review-summary.json"))).toBe(false);
   expect(readdirSync(moved).some((name) => name.startsWith(".review-summary."))).toBe(false);
-  expect(JSON.parse(readFileSync(join(moved, "review-summary.json"), "utf8"))).toEqual({ findings: [], schema_version: 1 });
+  expect(existsSync(join(moved, "review-summary.json"))).toBe(false);
 });
 
 test("removes the exclusively created temp file when rename preparation fails", async () => {
   const f = fixture();
-  await expect(persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), beforeRename: () => { throw new Error("simulated rename failure"); } })).rejects.toThrow("simulated rename failure");
+  await expect(persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "ok" }, beforeRename: () => { throw new Error("simulated rename failure"); } })).rejects.toThrow("simulated rename failure");
   expect(readdirSync(f.runDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
 });
 
 test("reports ignore-file mutation when artifact publication fails", async () => {
   const f = fixture();
   await expect(persistReviewArtifact({
-    ...f, mode: "write", finalize: writing({ findings: [] }),
+    ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "ok" },
     beforeTempCreate: () => { throw new Error("simulated artifact publication failure"); },
   })).rejects.toThrow(".context/.gitignore was created");
   const ignorePath = join(f.context, ".gitignore");
@@ -297,12 +341,23 @@ test("report-only mode writes no artifact and does not invoke validation", async
   expect(existsSync(join(f.runDir, "review-summary.json"))).toBe(false);
 });
 
-test("failed artifact validation is distinct and retains the artifact", async () => {
+test("failed artifact validation publishes nothing to the project and retains staged evidence", async () => {
   const f = fixture();
   const result = await persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "fail" } });
   expect(result.outcome).toBe("incomplete");
   expect(result.validation).toMatchObject({ status: "failed", code: "review_artifact_validation_failed" });
-  expect(existsSync(join(f.runDir, "review-summary.json"))).toBe(true);
+  expect(existsSync(join(f.runDir, "review-summary.json"))).toBe(false);
+  expect(readdirSync(f.runDir).filter((name) => name.startsWith(".review-summary.") && name.endsWith(".tmp"))).toEqual([]);
+  expect(result.path).toBeUndefined();
+  expect(result.stagingPath).toBe(`staging/.context/systematic/ce-review/${f.runId}/review-summary.json`);
+  expect(existsSync(join(f.storeRunDir, result.stagingPath!))).toBe(true);
+});
+
+test("refuses a staging run directory inside the project", async () => {
+  const f = fixture();
+  await expect(persistReviewArtifact({ ...f, storeRunDir: f.runDir, mode: "write", finalize: writing({ findings: [] }) }))
+    .rejects.toMatchObject({ code: "review_persist_staging_path" });
+  expect(existsSync(join(f.runDir, "review-summary.json"))).toBe(false);
 });
 
 test("missing validator is unavailable with a distinct reason", async () => {
@@ -312,6 +367,9 @@ test("missing validator is unavailable with a distinct reason", async () => {
   expect(result.validation.status).toBe("unavailable");
   expect(result.validation.code).toBe("review_artifact_validator_unavailable");
   expect(result.validation.reason).toContain("does not exist");
+  expect(existsSync(join(f.runDir, "review-summary.json"))).toBe(false);
+  expect(result.stagingPath).toBe(`staging/.context/systematic/ce-review/${f.runId}/review-summary.json`);
+  expect(existsSync(join(f.storeRunDir, result.stagingPath!))).toBe(true);
 });
 
 test("unstartable validator is unavailable with a reason distinct from absence", async () => {

@@ -2,7 +2,6 @@ import { spawnExec, type SpawnFn, type SpawnResult } from "./msb.ts";
 import {
   assertPinnedReviewHelper,
   assertReviewRunId,
-  publishArtifactAtomic,
   readRunArtifact,
   ReviewRunStore,
   resolveReviewHelperInterpreter,
@@ -82,10 +81,14 @@ export async function runReviewPipeline(
     if (typeof payload.inputRef !== "string" || !storeContext) {
       throw new ReviewPipelineError("review_pipeline_input_ref_invalid", "inputRef must name a published artifact in this review run");
     }
-    const prior = PHASES.indexOf(phase) - 1;
-    const sourcePhase = PHASES.findIndex((candidate) => `phase-${candidate}.json` === payload.inputRef);
-    if (sourcePhase < 0 || sourcePhase > prior) {
-      throw new ReviewPipelineError("review_pipeline_input_ref_invalid", "inputRef must name an artifact from a prior phase in this run");
+    const phaseIndex = PHASES.indexOf(phase);
+    const phaseMatch = /^phase-(screen|prepare|merge|finalize)(?:-(review-risk|review-resilience|review-readability|review-reliability))?\.json$/.exec(payload.inputRef);
+    if (!phaseMatch) {
+      throw new ReviewPipelineError("review_pipeline_input_ref_unknown", "inputRef does not name a recognized phase artifact");
+    }
+    const sourcePhase = PHASES.indexOf(phaseMatch[1] as ReviewPipelinePhase);
+    if (sourcePhase >= phaseIndex) {
+      throw new ReviewPipelineError("review_pipeline_input_ref_not_prior", "inputRef must name an artifact from a strictly prior phase");
     }
     input = readRunArtifact({ runDir: storeContext.store.runDir(storeContext.sessionID, payload.runId as string), name: payload.inputRef, maxFileBytes: storeContext.store.caps.maxFileBytes }).data;
   } else {
@@ -95,10 +98,10 @@ export async function runReviewPipeline(
     }
     input = typeof payload.stdin === "string" ? Buffer.from(payload.stdin, "utf8") : Buffer.from(payload.stdin as number[]);
   }
-  if (input.byteLength > REVIEW_PIPELINE_MAX_STDIN_BYTES) {
+  if (hasStdin && input.byteLength > REVIEW_PIPELINE_MAX_STDIN_BYTES) {
     throw new ReviewPipelineError(
       "review_pipeline_stdin_too_large",
-      `review pipeline stdin exceeds ${REVIEW_PIPELINE_MAX_STDIN_BYTES} bytes (observed ${input.byteLength} bytes)`,
+      `review pipeline inline stdin exceeds ${REVIEW_PIPELINE_MAX_STDIN_BYTES} bytes (observed ${input.byteLength} bytes)`,
     );
   }
   let helper: ReturnType<typeof assertPinnedReviewHelper>;
@@ -142,8 +145,8 @@ export async function runReviewPipeline(
     } catch {
       throw new ReviewPipelineError("review_pipeline_output_invalid", "helper returned invalid JSON");
     }
-    const name = `phase-${phase}.json`;
-    const artifact = publishArtifactAtomic(storeContext.store.runDir(storeContext.sessionID, payload.runId as string), name, outputBytes);
+    const name = phase === "screen" ? `phase-screen-${payload.reviewer as string}.json` : `phase-${phase}.json`;
+    const artifact = storeContext.store.addArtifact(storeContext.sessionID, payload.runId as string, name, outputBytes);
     if (phase === "finalize") {
       storeContext.store.recordFinalizeProvenance(storeContext.sessionID, payload.runId as string, { phase, outcome: "accepted", artifact });
     }

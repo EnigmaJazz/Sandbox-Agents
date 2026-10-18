@@ -391,6 +391,7 @@ export class ReviewRunWriter {
     this.runDir = runDir;
     this.record = record;
     this.caps = caps;
+    this.totalBytes = record.artifacts.reduce((total, artifact) => total + artifact.bytes, 0);
     ensureOwnedDir(runDir, 0o700);
     this.persist("publishing");
   }
@@ -424,6 +425,7 @@ export class ReviewRunWriter {
     const artifact = publishArtifactAtomic(this.runDir, name, buf);
     this.record.artifacts.push(artifact);
     this.totalBytes = total;
+    this.persist("publishing");
     return artifact;
   }
 
@@ -516,6 +518,29 @@ export class ReviewRunStore {
     const session = this.sessionDir(sessionID);
     assertReviewRunId(runId);
     return join(session, runId);
+  }
+
+  addArtifact(sessionID: string, runId: string, name: string, data: Buffer | string): ReviewRunArtifact {
+    const record = this.readRecord(sessionID, runId);
+    if (record.state === "publishing") {
+      return new ReviewRunWriter(this.runDir(sessionID, runId), record, this.caps).addArtifact(name, data);
+    }
+    if (record.state !== "published") {
+      throw new ReviewRunError("review_run_state", `review run ${runId} is ${record.state}; refusing a new artifact`);
+    }
+    assertReviewRunArtifactName(name);
+    const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
+    if (bytes.byteLength > this.caps.maxFileBytes) {
+      throw new ReviewRunFileCapError(`review run artifact '${name}' is ${bytes.byteLength} bytes, over the per-file cap of ${this.caps.maxFileBytes}`);
+    }
+    const total = record.artifacts.reduce((sum, artifact) => sum + artifact.bytes, 0) + bytes.byteLength;
+    if (total > this.caps.maxBytes) {
+      throw new ReviewRunCapError(`review run total ${total} bytes (artifact '${name}' is ${bytes.byteLength}) is over the per-run cap of ${this.caps.maxBytes}`);
+    }
+    const artifact = publishArtifactAtomic(this.runDir(sessionID, runId), name, bytes);
+    record.artifacts.push(artifact);
+    publishValidatedArtifactAtomic(this.runDir(sessionID, runId), REVIEW_RUN_METADATA_NAME, `${JSON.stringify(record, null, 2)}\n`);
+    return artifact;
   }
 
   readRecord(sessionID: string, runId: string): ReviewRunRecord {
