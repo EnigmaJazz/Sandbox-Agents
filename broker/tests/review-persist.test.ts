@@ -23,7 +23,7 @@ function fixture() {
   const storeRunDir = join(storeRoot, runId);
   mkdirSync(storeRunDir, { recursive: true, mode: 0o700 });
   const helper = join(root, "validate-review.mjs");
-  writeFileSync(helper, `#!${process.execPath}\nprocess.exit(process.env.FIXTURE_STATUS === 'ok' ? 0 : process.env.FIXTURE_STATUS === 'fail' ? 3 : 2);\n`);
+  writeFileSync(helper, `#!${process.execPath}\nconst status = process.env.FIXTURE_STATUS;\nif (status === 'invalid') { process.stderr.write('issue: missing required field\\n'); process.exit(1); }\nprocess.exit(status === 'ok' ? 0 : status === 'legacy' ? 3 : 2);\n`);
   chmodSync(helper, 0o700);
   const helperSha256 = createHash("sha256").update(readFileSync(helper)).digest("hex");
   return { root, context, runDir, runId, storeRunDir, reviewHelperPath: helper, reviewHelperSha256: helperSha256, reviewHelperInterpreter: process.execPath };
@@ -61,7 +61,7 @@ test("refuses an existing ignore file over the bounded read cap with cap and obs
 
 test("reports an ignore-file creation when artifact validation is incomplete", async () => {
   const f = fixture();
-  const result = await persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "fail" } });
+  const result = await persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "invalid" } });
   expect(result.outcome).toBe("incomplete");
   expect(result.validation.status).toBe("failed");
   expect(result.ignoreFile).toEqual({ status: "created" });
@@ -343,9 +343,9 @@ test("report-only mode writes no artifact and does not invoke validation", async
 
 test("failed artifact validation publishes nothing to the project and retains staged evidence", async () => {
   const f = fixture();
-  const result = await persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "fail" } });
+  const result = await persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "invalid" } });
   expect(result.outcome).toBe("incomplete");
-  expect(result.validation).toMatchObject({ status: "failed", code: "review_artifact_validation_failed" });
+  expect(result.validation).toMatchObject({ status: "failed", code: "review_artifact_validation_failed", reason: expect.stringContaining("issue: missing required field") });
   expect(existsSync(join(f.runDir, "review-summary.json"))).toBe(false);
   expect(readdirSync(f.runDir).filter((name) => name.startsWith(".review-summary.") && name.endsWith(".tmp"))).toEqual([]);
   expect(result.path).toBeUndefined();
@@ -358,6 +358,13 @@ test("refuses a staging run directory inside the project", async () => {
   await expect(persistReviewArtifact({ ...f, storeRunDir: f.runDir, mode: "write", finalize: writing({ findings: [] }) }))
     .rejects.toMatchObject({ code: "review_persist_staging_path" });
   expect(existsSync(join(f.runDir, "review-summary.json"))).toBe(false);
+});
+
+test("legacy artifact exit is unavailable with a distinct legacy reason", async () => {
+  const f = fixture();
+  const result = await persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "legacy" } });
+  expect(result.validation).toMatchObject({ status: "unavailable", code: "review_artifact_validator_unavailable" });
+  expect(result.validation.status === "unavailable" ? result.validation.reason : "").toContain("legacy artifact");
 });
 
 test("missing validator is unavailable with a distinct reason", async () => {

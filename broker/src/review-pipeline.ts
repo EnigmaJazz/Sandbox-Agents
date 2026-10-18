@@ -155,12 +155,14 @@ export async function runReviewPipeline(
       : [];
     return { outcome: "accepted", artifact: { name: artifact.name, bytes: artifact.bytes, sha256: artifact.sha256 }, summary: { phase, topLevelKeys } };
   }
+  const stderrDiagnostic = diagnostic(result);
+  const internalFailure = result.status === 1 && stderrDiagnostic.startsWith("ce-review-validator: internal error in ");
   if (phase === "finalize") {
     storeContext?.store.recordFinalizeProvenance(storeContext.sessionID, payload.runId as string, {
       phase,
-      outcome: result.status === 1 ? "structurally_rejected" : "validation_unavailable",
+      outcome: result.status === 1 && !internalFailure ? "structurally_rejected" : "validation_unavailable",
     });
   }
-  if (result.status === 1) return { outcome: "structurally_rejected", code: "review_pipeline_structurally_rejected", diagnostic: diagnostic(result) };
-  return { outcome: "validation_unavailable", code: "review_pipeline_validation_unavailable", diagnostic: diagnostic(result) };
+  if (result.status === 1 && !internalFailure) return { outcome: "structurally_rejected", code: "review_pipeline_structurally_rejected", diagnostic: stderrDiagnostic };
+  return { outcome: "validation_unavailable", code: "review_pipeline_validation_unavailable", diagnostic: stderrDiagnostic };
 }

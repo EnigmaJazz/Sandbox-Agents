@@ -268,6 +268,7 @@ async function validateArtifact(options: PersistReviewArtifactOptions, target: s
     return { status: "unavailable", code: "review_artifact_validator_unavailable", reason: cause instanceof Error ? cause.message : "validator could not start" };
   }
   if (result.status === 0 && !result.timedOut && !result.outputTruncated) return { status: "passed", code: "review_artifact_validation_passed" };
-  if (result.status === 3 && !result.timedOut) return { status: "failed", code: "review_artifact_validation_failed", reason: result.stderr.slice(0, 4096) };
-  return { status: "unavailable", code: "review_artifact_validator_unavailable", reason: `validator exited with status ${result.status}` };
+  if (result.status === 1 && !result.timedOut && !result.outputTruncated) return { status: "failed", code: "review_artifact_validation_failed", reason: result.stderr.slice(0, 4096) };
+  if (result.status === 3 && !result.timedOut) return { status: "unavailable", code: "review_artifact_validator_unavailable", reason: "legacy artifact: validator returned exit status 3 despite schema_version insertion" };
+  return { status: "unavailable", code: "review_artifact_validator_unavailable", reason: result.stderr.slice(0, 4096) || `validator exited with status ${result.status}` };
 }

@@ -22,6 +22,7 @@ for await (const chunk of process.stdin) chunks.push(chunk);
 const input = Buffer.concat(chunks);
 const mode = process.env.FIXTURE_MODE || 'accept';
 if (mode === 'reject') { process.stderr.write('invalid envelope'); process.exit(1); }
+if (mode === 'internal-error') { process.stderr.write('ce-review-validator: internal error in finalize'); process.exit(1); }
 if (mode === 'unavailable') process.exit(2);
 if (mode === 'oversize') { const prefix = '{"oversized":"'; const total = Number(process.env.OVERSIZE_BYTES); process.stdout.write(prefix + 'x'.repeat(total - prefix.length - 2) + '"}', () => {}); }
 else process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), input: input.toString('utf8'), stdinSha256: createHash('sha256').update(input).digest('hex') }));
@@ -212,6 +213,26 @@ test("returns a distinct structural rejection without a phase output on exit one
       return spawnExec(argv, { ...opts, env: { PATH: process.env.PATH ?? "", FIXTURE_MODE: "reject" }, envMode: "replace" });
     });
   expect(result).toEqual({ outcome: "structurally_rejected", code: "review_pipeline_structurally_rejected", diagnostic: "invalid envelope" });
+});
+
+test("maps exit one with the internal-error prefix to validation_unavailable", async () => {
+  const pin = fixture();
+  const result = await runReviewPipeline({ phase: "prepare", runId: "f".repeat(32), stdin: "{}" }, pin.config,
+    async (argv, opts) => {
+      const { spawnExec } = await import("../src/msb.ts");
+      return spawnExec(argv, { ...opts, env: { PATH: process.env.PATH ?? "", FIXTURE_MODE: "internal-error" }, envMode: "replace" });
+    });
+  expect(result).toMatchObject({ outcome: "validation_unavailable", code: "review_pipeline_validation_unavailable", diagnostic: expect.stringContaining("ce-review-validator: internal error in finalize") });
+});
+
+test("maps other exit-one diagnostics to structurally_rejected", async () => {
+  const pin = fixture();
+  const result = await runReviewPipeline({ phase: "prepare", runId: "1".repeat(32), stdin: "{}" }, pin.config,
+    async (argv, opts) => {
+      const { spawnExec } = await import("../src/msb.ts");
+      return spawnExec(argv, { ...opts, env: { PATH: process.env.PATH ?? "", FIXTURE_MODE: "reject" }, envMode: "replace" });
+    });
+  expect(result).toMatchObject({ outcome: "structurally_rejected", code: "review_pipeline_structurally_rejected", diagnostic: "invalid envelope" });
 });
 
 test("digest mismatch refuses before spawn and unknown phases fail validation", async () => {
