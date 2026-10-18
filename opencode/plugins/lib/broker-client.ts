@@ -120,6 +120,7 @@ export const OPERATION_TIMEOUT_MS: Record<string, number> = {
   reviewValidate: 130_000,
   reviewRecover: 130_000,
   reviewMaterialize: 60_000,
+  reviewDiffRead: 10_000,
   reviewPipelineRun: 60_000,
   reviewPersist: 60_000,
 };

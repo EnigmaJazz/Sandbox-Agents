@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as materialize from "../src/review-materialize.ts";
 import { materializeReviewRange, readReviewSlice, REVIEW_SLICE_MAX_BYTES, ReviewRangeCapError, ReviewRangeRefError, ReviewSliceNotFoundError } from "../src/review-materialize.ts";
 import { ReviewRunStore } from "../src/review-run.ts";
 
@@ -266,6 +267,132 @@ function diffSections(diff: string): { path: string; text: string; bytes: number
 
 function diffPaths(diff: string): string[] {
   return [...diff.matchAll(/^diff --git a\/(.+?) b\/.+$/gm)].map((match) => match[1]!);
+}
+
+describe("review diff reads", () => {
+  test("returns non-UTF-8 bytes exactly and binds their recorded byte length and digest", async () => {
+    const read = requireDiffReader();
+    const env = fixture();
+    const bytes = Buffer.from([0x64, 0x69, 0x66, 0x66, 0xff, 0xfe, 0x00]);
+    const writer = env.store.createRun("owner", { baseObjectId: env.base, headObjectId: env.head });
+    const artifact = writer.addArtifact("scope.diff", bytes);
+    writer.publish();
+    const result = await read(writer.record.runId, undefined, "owner", { store: env.store });
+    expect(result.data).toEqual([...bytes]);
+    expect(result.bytes).toBe(artifact.bytes);
+    expect(result.bytes).toBe(bytes.byteLength);
+    expect(result.sha256).toBe(artifact.sha256);
+    expect(result).not.toHaveProperty("text");
+    expect(result.binary).toBe(true);
+  });
+
+  test("returns lossless UTF-8 diff text", async () => {
+    const read = requireDiffReader();
+    const env = fixture();
+    const text = "diff --git a/file.txt b/file.txt\n+naïve\n";
+    const writer = env.store.createRun("utf8-owner", { baseObjectId: env.base, headObjectId: env.head });
+    writer.addArtifact("scope.diff", Buffer.from(text, "utf8"));
+    writer.publish();
+    const result = await read(writer.record.runId, undefined, "utf8-owner", { store: env.store });
+    expect(result.text).toBe(text);
+    expect(result).not.toHaveProperty("binary");
+  });
+
+  test("refuses an operation-over-cap artifact under a larger store cap", async () => {
+    const read = requireDiffReader();
+    const env = fixture();
+    const store = new ReviewRunStore({
+      root: env.storeRoot,
+      projectRoot: env.project,
+      caps: { maxBytes: 8 * 1024 * 1024, maxFileBytes: 5 * 1024 * 1024 },
+    });
+    const writer = store.createRun("large-cap-owner", { baseObjectId: env.base, headObjectId: env.head });
+    writer.addArtifact("scope.diff", Buffer.alloc(400 * 1024, 0x61));
+    writer.publish();
+    const readerStore = new ReviewRunStore({
+      root: env.storeRoot,
+      projectRoot: env.project,
+      caps: { maxBytes: 8 * 1024 * 1024, maxFileBytes: 300 * 1024 },
+    });
+    const refusal = await read(writer.record.runId, undefined, "large-cap-owner", { store: readerStore })
+      .then(() => null, (error: unknown) => error as Error & { code: string; message: string });
+    expect(refusal?.code).toBe("review_diff_byte_cap");
+    expect(refusal?.message).toContain("262144-byte cap");
+    expect(refusal?.message).toContain("409600 bytes");
+  });
+
+  test("reads a named slice and returns its recorded bytes and digest", async () => {
+    const read = requireDiffReader();
+    const env = fixture();
+    const writer = env.store.createRun("owner", { baseObjectId: env.base, headObjectId: env.head });
+    writer.addArtifact("scope.diff", "whole diff");
+    const artifact = writer.addArtifact("slice-0000.diff", Buffer.from([0x73, 0xff, 0x6c]));
+    writer.publish();
+    const result = await read(writer.record.runId, artifact.name, "owner", { store: env.store });
+    expect(result.data).toEqual([0x73, 0xff, 0x6c]);
+    expect(result.bytes).toBe(artifact.bytes);
+    expect(result.sha256).toBe(artifact.sha256);
+  });
+
+  test("refuses an unknown run with its named refusal code", async () => {
+    const read = requireDiffReader();
+    const env = fixture();
+    await expect(read("00000000000000000000000000000000", undefined, "owner", { store: env.store }))
+      .rejects.toMatchObject({ code: "review_diff_run_not_found" });
+  });
+
+  test("refuses an unknown slice with its named refusal code", async () => {
+    const read = requireDiffReader();
+    const env = fixture();
+    const writer = env.store.createRun("owner", { baseObjectId: env.base, headObjectId: env.head });
+    writer.addArtifact("scope.diff", "diff");
+    writer.publish();
+    await expect(read(writer.record.runId, "slice-9999.diff", "owner", { store: env.store }))
+      .rejects.toMatchObject({ code: "review_diff_slice_not_found" });
+  });
+
+  test("refuses a foreign session without disclosing the owner's session id", async () => {
+    const read = requireDiffReader();
+    const env = fixture();
+    const writer = env.store.createRun("private-owner", { baseObjectId: env.base, headObjectId: env.head });
+    writer.addArtifact("scope.diff", "diff");
+    writer.publish();
+    const denied = await read(writer.record.runId, undefined, "intruder-session", { store: env.store })
+      .then(() => null, (error: unknown) => error as Error & { code: string; message: string });
+    expect(denied?.code).toBe("review_diff_foreign_session");
+    expect(denied?.message).not.toContain("private-owner");
+  });
+
+  test("refuses an over-cap artifact with the cap and observed byte size", async () => {
+    const read = requireDiffReader();
+    const env = fixture();
+    const over = env.store.createRun("large-owner", { baseObjectId: env.base, headObjectId: env.head });
+    over.addArtifact("scope.diff", Buffer.alloc(262145, 0x61));
+    over.publish();
+    const refusal = await read(over.record.runId, undefined, "large-owner", { store: env.store })
+      .then(() => null, (error: unknown) => error as Error & { code: string; message: string });
+    expect(refusal?.code).toBe("review_diff_byte_cap");
+    expect(refusal?.message).toContain("262144-byte cap");
+    expect(refusal?.message).toContain("262145 bytes");
+    expect(refusal?.message).toContain("read one slice instead");
+  });
+
+  test("refuses bytes that do not match the recorded digest", async () => {
+    const read = requireDiffReader();
+    const env = fixture();
+    const corrupt = env.store.createRun("corrupt-owner", { baseObjectId: env.base, headObjectId: env.head });
+    corrupt.addArtifact("scope.diff", "original");
+    corrupt.publish();
+    writeFileSync(join(env.store.runDir("corrupt-owner", corrupt.record.runId), "scope.diff"), "tampered");
+    await expect(read(corrupt.record.runId, undefined, "corrupt-owner", { store: env.store }))
+      .rejects.toMatchObject({ code: "review_diff_integrity_mismatch" });
+  });
+});
+
+function requireDiffReader(): (runId: string, slice: string | undefined, sessionID: string, options: { store: ReviewRunStore }) => Promise<{ data: number[]; bytes: number; sha256: string; text?: string; binary?: boolean }> {
+  const candidate = (materialize as unknown as { readReviewDiff?: (runId: string, slice: string | undefined, sessionID: string, options: { store: ReviewRunStore }) => Promise<{ data: number[]; bytes: number; sha256: string; text?: string; binary?: boolean }> }).readReviewDiff;
+  expect(typeof candidate).toBe("function");
+  return candidate!;
 }
 
 function projectSnapshot(root: string): unknown[] {

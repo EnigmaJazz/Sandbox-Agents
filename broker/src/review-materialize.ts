@@ -4,14 +4,17 @@ import {
   assertReviewRunId,
   assertRunOwnership,
   readRunArtifact,
+  ReviewRunArtifactCapError,
   ReviewRunError,
   ReviewRunStore,
   type ReviewRunRecord,
+  type ReviewRunStoreOptions,
 } from "./review-run.ts";
 
 export const REVIEW_SLICE_MAX_LINES = 1500;
 export const REVIEW_SLICE_MAX_BYTES = 45 * 1024;
 export const REVIEW_SLICE_READ_MAX_BYTES = 64 * 1024;
+export const REVIEW_DIFF_READ_MAX_BYTES = 256 * 1024;
 const OBJECT_ID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 export class ReviewMaterializeError extends ReviewRunError {
@@ -136,6 +139,61 @@ export async function materializeReviewRange(payload: MaterializeReviewPayload, 
     writer.fail();
     throw error;
   }
+}
+
+export function createReviewDiffStore(options: ReviewRunStoreOptions): ReviewRunStore {
+  return new ReviewRunStore(options);
+}
+
+export interface ReviewDiffReadResult { data: number[]; bytes: number; sha256: string; text?: string; binary?: true; }
+
+export async function readReviewDiff(runId: string, slice: string | undefined, sessionID: string, options: Pick<ReviewMaterializeOptions, "store">): Promise<ReviewDiffReadResult> {
+  assertReviewRunId(runId);
+  const name = slice ?? "scope.diff";
+  if (slice !== undefined && !/^slice-[0-9]{4}\.diff$/.test(slice)) {
+    throw new ReviewMaterializeError("review_diff_slice_not_found", "requested review diff slice does not exist");
+  }
+  let runDir: string | undefined;
+  let record: ReviewRunRecord | undefined;
+  for (const candidateSession of readdirSync(options.store.root)) {
+    let candidateDir: string;
+    try { candidateDir = options.store.runDir(candidateSession, runId); } catch { continue; }
+    try {
+      const candidate = options.store.readRecord(candidateSession, runId);
+      if (candidate.runId === runId) { runDir = candidateDir; record = candidate; break; }
+    } catch { /* unrelated session or run */ }
+  }
+
+  if (!runDir || !record) throw new ReviewMaterializeError("review_diff_run_not_found", "review diff run does not exist");
+  try { assertRunOwnership(record, sessionID); }
+  catch { throw new ReviewMaterializeError("review_diff_foreign_session", "review diff run is not owned by the requesting session"); }
+  if (record.state !== "published") throw new ReviewMaterializeError("review_diff_run_not_found", "review diff run is not published");
+  const expected = record.artifacts.find((artifact) => artifact.name === name);
+  if (!expected) throw new ReviewMaterializeError(slice === undefined ? "review_diff_run_not_found" : "review_diff_slice_not_found", "requested review diff artifact does not exist");
+  let actual: ReturnType<typeof readRunArtifact>;
+  try {
+    actual = readRunArtifact({ runDir, name, maxFileBytes: Math.min(options.store.caps.maxFileBytes, REVIEW_DIFF_READ_MAX_BYTES) });
+  } catch (error) {
+    if (error instanceof ReviewRunArtifactCapError) {
+      const observed = error.message.match(/(?:is|returned) (\d+) bytes, over the read cap/)?.[1];
+      const observedBytes = observed === undefined ? undefined : Number(observed);
+      if (observedBytes !== undefined && observedBytes > REVIEW_DIFF_READ_MAX_BYTES) {
+        throw new ReviewMaterializeError("review_diff_byte_cap", `review diff is ${observedBytes} bytes, over the ${REVIEW_DIFF_READ_MAX_BYTES}-byte cap; read one slice instead`);
+      }
+    }
+    throw error;
+  }
+  if (actual.bytes > REVIEW_DIFF_READ_MAX_BYTES) {
+    throw new ReviewMaterializeError("review_diff_byte_cap", `review diff is ${actual.bytes} bytes, over the ${REVIEW_DIFF_READ_MAX_BYTES}-byte cap; read one slice instead`);
+  }
+  if (expected.bytes !== actual.bytes || expected.sha256 !== actual.sha256) {
+    throw new ReviewMaterializeError("review_diff_integrity_mismatch", "review diff bytes do not match the recorded length and SHA-256");
+  }
+  const text = actual.data.toString("utf8");
+  const decoded = Buffer.from(text, "utf8");
+  return decoded.equals(actual.data)
+    ? { data: [...actual.data], bytes: actual.bytes, sha256: actual.sha256, text }
+    : { data: [...actual.data], bytes: actual.bytes, sha256: actual.sha256, binary: true };
 }
 
 export async function readReviewSlice(runId: string, name: string, sessionID: string, options: Pick<ReviewMaterializeOptions, "store">): Promise<string> {

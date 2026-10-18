@@ -798,6 +798,37 @@ export default function sandboxToolsPlugin() {
         },
       }),
 
+      host_review_diff_read: tool({
+        description:
+          "Read a bounded diff for a review run owned by the caller. Inline `text` into reviewer " +
+          "prompts when present; when absent, the bytes are binary—do not forward the `data` array " +
+          "into a prompt. `sha256` and `bytes` bind the inlined text.",
+        args: {
+          runId: z.string().regex(/^[a-f0-9]{32}$/),
+          slice: z.string().regex(/^slice-[0-9]{4}\.diff$/).optional(),
+        },
+        execute: async (args, ctx) => {
+          try {
+            const c = await client();
+            const result = await c.request("reviewDiffRead", ctx.sessionID, {
+              projectDir: currentProjectDirectory(ctx.directory),
+              runId: args.runId,
+              ...(args.slice !== undefined ? { slice: args.slice } : {}),
+            }, ctx.agent);
+            return JSON.stringify(result, null, 2);
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            const code = typeof error === "object" && error !== null && "code" in error
+              ? (error as { code?: unknown }).code
+              : undefined;
+            const errorCode = typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : undefined;
+            const wrapped = new Error(`host_review_diff_read failed${errorCode ? ` [${errorCode}]` : ""}: ${detail}`);
+            if (errorCode) Object.assign(wrapped, { code: errorCode });
+            throw wrapped;
+          }
+        },
+      }),
+
       host_review_materialize: tool({
         description:
           "This tool materializes a git range into the broker-owned run store, writes nothing into the " +

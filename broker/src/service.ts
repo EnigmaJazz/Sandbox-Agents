@@ -89,7 +89,7 @@ import {
 import { MsbError } from "./msb.ts";
 import { StateError } from "./state.ts";
 import { ReviewRunStore, readRunArtifact, reviewRunStoreOptions } from "./review-run.ts";
-import { materializeReviewRange } from "./review-materialize.ts";
+import { createReviewDiffStore, materializeReviewRange, readReviewDiff } from "./review-materialize.ts";
 import { runReviewPipeline } from "./review-pipeline.ts";
 import { persistReviewArtifact, ReviewPersistError } from "./review-persist.ts";
 import {
@@ -3612,7 +3612,21 @@ async function appendPlanDocAtomically(
   }
 }
 
-/** Run one pinned review-helper phase and publish its output to the broker-owned run store. */
+/** Read a bounded review diff from a run owned by the requesting caller. */
+export function buildReviewDiffReadOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as { projectDir?: unknown; runId?: unknown; slice?: unknown };
+    authorizeHostDispatch(ctx, "reviewDiffRead", req.sessionID, req.agent);
+    if (typeof payload.runId !== "string" || (payload.slice !== undefined && typeof payload.slice !== "string")) {
+      throw new ValidationError("reviewDiffRead requires a runId and optional slice string");
+    }
+    const config = ctx.config;
+    const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const store = createReviewDiffStore({ ...reviewRunStoreOptions(config), projectRoot });
+    return readReviewDiff(payload.runId, payload.slice as string | undefined, req.sessionID, { store });
+  };
+}
+
 export function buildReviewPipelineRunOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const payload = payloadOf(req) as { projectDir?: unknown; phase?: unknown; reviewer?: unknown; stdin?: unknown; inputRef?: unknown; runId?: unknown };

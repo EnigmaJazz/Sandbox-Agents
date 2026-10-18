@@ -93,6 +93,7 @@ import {
   buildPolicyOp,
   buildPlanDocAppendOp,
   buildReviewMaterializeOp,
+  buildReviewDiffReadOp,
   buildReviewPipelineRunOp,
   buildReviewPersistOp,
   buildPrepareResultOp,
@@ -953,6 +954,8 @@ export class BrokerServer {
         return buildReviewRecoverOp(this.ctx)(req);
       case "reviewMaterialize":
         return buildReviewMaterializeOp(this.ctx)(req);
+      case "reviewDiffRead":
+        return buildReviewDiffReadOp(this.ctx)(req);
       case "reviewPipelineRun":
         return buildReviewPipelineRunOp(this.ctx)(req);
       case "reviewPersist":
