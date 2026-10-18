@@ -15,7 +15,7 @@ Both probes are operator-run and unverified by this unit:
 
 - Confirm both manually merged permission entries gate their plugin tools. The permission fragment itself notes that plugin-tool permission matching is unverified and must be checked at Gate 4.
 - Inspect the INSTALLED PM and orchestrator agent definitions and confirm they do not contain explicit `tools:` allowlists that also need these tools. If they do, update those allowlists through the approved manual installation process.
-- Call `host_review_materialize` and then `host_review_diff_read` with the real returned `runId`; confirm the latter returns bounded diff bytes and `sha256`. Inline `text` when present; never forward the raw `data` array into a prompt.
+- Call `host_review_materialize` and then `host_review_diff_read` with the real returned `runId`; confirm a text diff returns `text`, `bytes`, and `sha256` with no `data`, while a binary diff returns `data`, `binary: true`, `bytes`, and `sha256` with no `text`. Inline only `text`; never forward the raw `data` array into a prompt.
 
 `host_review_materialize` returns a bounded index. `host_review_diff_read` returns one bounded whole diff or named slice.
 

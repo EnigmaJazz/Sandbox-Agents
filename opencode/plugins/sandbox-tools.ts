@@ -800,9 +800,9 @@ export default function sandboxToolsPlugin() {
 
       host_review_diff_read: tool({
         description:
-          "Read a bounded diff for a review run owned by the caller. Inline `text` into reviewer " +
-          "prompts when present; when absent, the bytes are binary—do not forward the `data` array " +
-          "into a prompt. `sha256` and `bytes` bind the inlined text.",
+          "Read a bounded diff for a review run owned by the caller. A text diff returns `text` " +
+          "with `sha256` and `bytes` and no `data`; a binary diff returns `data` with " +
+          "`binary: true` and no `text`. Never forward `data` into a prompt." ,
         args: {
           runId: z.string().regex(/^[a-f0-9]{32}$/),
           slice: z.string().regex(/^slice-[0-9]{4}\.diff$/).optional(),

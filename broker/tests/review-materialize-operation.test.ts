@@ -83,15 +83,17 @@ describe("reviewMaterialize dispatch", () => {
   test("dispatches reviewDiffRead through the real store path and preserves arbitrary bytes", async () => {
     const env = fixture();
     const runStore = new ReviewRunStore({ root: join(env.root, "review-runs"), projectRoot: env.project });
-    const bytes = Buffer.from([0x64, 0x69, 0x66, 0x66, 0xff, 0x00, 0xfe]);
+    const bytes = Buffer.from([0x64, 0x69, 0x66, 0x66, 0xe9, 0xff, 0x00, 0xfe]);
     const writer = runStore.createRun("bound-orchestrator", { baseObjectId: env.base, headObjectId: env.head });
     const artifact = writer.addArtifact("scope.diff", bytes);
     writer.publish();
 
     const result = await env.internals.dispatch(env.request("reviewDiffRead", "bound-orchestrator", {
       projectDir: env.project, runId: writer.record.runId,
-    })) as { data: number[]; bytes: number; sha256: string };
+    })) as { data: number[]; binary: true; bytes: number; sha256: string; text?: never };
     expect(result.data).toEqual([...bytes]);
+    expect(result.binary).toBe(true);
+    expect("text" in result).toBe(false);
     expect(result.bytes).toBe(artifact.bytes);
     expect(result.sha256).toBe(artifact.sha256);
   });

@@ -145,7 +145,9 @@ export function createReviewDiffStore(options: ReviewRunStoreOptions): ReviewRun
   return new ReviewRunStore(options);
 }
 
-export interface ReviewDiffReadResult { data: number[]; bytes: number; sha256: string; text?: string; binary?: true; }
+export type ReviewDiffReadResult =
+  | { bytes: number; sha256: string; text: string; data?: never; binary?: never }
+  | { bytes: number; sha256: string; data: number[]; binary: true; text?: never };
 
 export async function readReviewDiff(runId: string, slice: string | undefined, sessionID: string, options: Pick<ReviewMaterializeOptions, "store">): Promise<ReviewDiffReadResult> {
   assertReviewRunId(runId);
@@ -191,9 +193,10 @@ export async function readReviewDiff(runId: string, slice: string | undefined, s
   }
   const text = actual.data.toString("utf8");
   const decoded = Buffer.from(text, "utf8");
+  // Keep binding scalars first so transport truncation cuts only the payload field.
   return decoded.equals(actual.data)
-    ? { data: [...actual.data], bytes: actual.bytes, sha256: actual.sha256, text }
-    : { data: [...actual.data], bytes: actual.bytes, sha256: actual.sha256, binary: true };
+    ? { bytes: actual.bytes, sha256: actual.sha256, text }
+    : { bytes: actual.bytes, sha256: actual.sha256, binary: true, data: [...actual.data] };
 }
 
 export async function readReviewSlice(runId: string, name: string, sessionID: string, options: Pick<ReviewMaterializeOptions, "store">): Promise<string> {

@@ -273,12 +273,14 @@ describe("review diff reads", () => {
   test("returns non-UTF-8 bytes exactly and binds their recorded byte length and digest", async () => {
     const read = requireDiffReader();
     const env = fixture();
-    const bytes = Buffer.from([0x64, 0x69, 0x66, 0x66, 0xff, 0xfe, 0x00]);
+    const bytes = Buffer.from([0x64, 0x69, 0x66, 0x66, 0xe9, 0xff, 0xfe, 0x00]);
     const writer = env.store.createRun("owner", { baseObjectId: env.base, headObjectId: env.head });
     const artifact = writer.addArtifact("scope.diff", bytes);
     writer.publish();
     const result = await read(writer.record.runId, undefined, "owner", { store: env.store });
     expect(result.data).toEqual([...bytes]);
+    expect(result.binary).toBe(true);
+    expect(result).not.toHaveProperty("text");
     expect(result.bytes).toBe(artifact.bytes);
     expect(result.bytes).toBe(bytes.byteLength);
     expect(result.sha256).toBe(artifact.sha256);
@@ -290,11 +292,16 @@ describe("review diff reads", () => {
     const read = requireDiffReader();
     const env = fixture();
     const text = "diff --git a/file.txt b/file.txt\n+naïve\n";
+    const bytes = Buffer.from(text, "utf8");
     const writer = env.store.createRun("utf8-owner", { baseObjectId: env.base, headObjectId: env.head });
-    writer.addArtifact("scope.diff", Buffer.from(text, "utf8"));
+    const artifact = writer.addArtifact("scope.diff", bytes);
     writer.publish();
     const result = await read(writer.record.runId, undefined, "utf8-owner", { store: env.store });
     expect(result.text).toBe(text);
+    expect("data" in result).toBe(false);
+    expect(Buffer.from(result.text!, "utf8")).toEqual(bytes);
+    expect(result.bytes).toBe(artifact.bytes);
+    expect(result.sha256).toBe(artifact.sha256);
     expect(result).not.toHaveProperty("binary");
   });
 
