@@ -3612,11 +3612,7 @@ async function appendPlanDocAtomically(
   }
 }
 
-/**
- * Orchestrator-only append to the allowlisted plan document. There is no
- * caller path, cwd, binary, or argv: `doc` is an enum mapped to a compile-time
- * constant beneath the canonical root.
- */
+/** Run one pinned review-helper phase and publish its output to the broker-owned run store. */
 export function buildReviewPipelineRunOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const payload = payloadOf(req) as { projectDir?: unknown; phase?: unknown; reviewer?: unknown; stdin?: unknown; inputRef?: unknown; runId?: unknown };

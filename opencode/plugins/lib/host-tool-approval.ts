@@ -283,6 +283,7 @@ export interface ReviewPersistAskArgs {
   projectDir: string;
   runId: string;
   finalizeRef: string;
+  mode?: "write" | "report_only";
 }
 
 /** Approval metadata for publishing and validating a review artifact in a project. */
@@ -290,18 +291,24 @@ export function buildReviewPersistAsk(args: ReviewPersistAskArgs): HostToolAsk {
   assertNonEmpty(args.projectDir, "projectDir");
   assertNonEmpty(args.runId, "runId");
   assertNonEmpty(args.finalizeRef, "finalizeRef");
+  const mode = args.mode ?? "write";
+  const reportOnly = mode === "report_only";
+  const summary = reportOnly
+    ? `Report-only for ${args.finalizeRef} from review run ${args.runId} in ${args.projectDir}: NO project file will be written and validation is not attempted.`
+    : `Publish ${args.finalizeRef} from review run ${args.runId} into ${args.projectDir}/.context/systematic/ce-review/${args.runId}/review-summary.json; validation happens after publication, this may replace an existing summary, and .context/.gitignore may be created or changed.`;
   return buildHostToolAsk({
     permission: "host_review_persist",
     operation: "reviewPersist",
-    summary: `Publish ${args.finalizeRef} from review run ${args.runId} into ${args.projectDir}/.context/systematic/ce-review/${args.runId}/review-summary.json; validation happens after publication, this may replace an existing summary, and .context/.gitignore may be created or changed.`,
+    summary,
     details: {
       projectDir: args.projectDir,
       runId: args.runId,
       artifact: "review-summary.json",
       finalizeRef: args.finalizeRef,
-      validation: "after publication",
-      replacement: "may replace an existing summary",
-      ignoreFile: ".context/.gitignore may be created or changed",
+      mode,
+      validation: reportOnly ? "not attempted" : "after publication",
+      replacement: reportOnly ? "none" : "may replace an existing summary",
+      ignoreFile: reportOnly ? "not written" : ".context/.gitignore may be created or changed",
     },
   });
 }

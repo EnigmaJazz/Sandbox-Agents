@@ -9,43 +9,57 @@ mock.module("zod", () => ({
     get: () => () => schema,
   }),
 }));
-async function runIsolatedReviewToolProbe(): Promise<{ pipelineCalls: number; persistCalls: number; pipelineAsks: number }> {
+async function runIsolatedReviewToolProbe(): Promise<{ requests: unknown[]; outputs: string[]; pipelineAsks: number; persistMode: string; persistAskSummary: string }> {
   const source = `
     import { mock } from "bun:test";
     const schema = new Proxy({}, { get: () => () => schema });
     mock.module("@opencode-ai/plugin", () => ({ tool: (definition) => definition }));
     mock.module("zod", () => ({ z: new Proxy({}, { get: () => () => schema }) }));
-    let pipelineCalls = 0;
-    let persistCalls = 0;
+    const requests = [];
+    const failures = [];
+    let persistAskSummary = "";
+    let failure;
     mock.module("./opencode/plugins/lib/broker-client.ts", () => ({
       createBrokerClient: async () => ({
-        request: async (operation) => {
-          if (operation === "reviewPipelineRun") pipelineCalls += 1;
-          if (operation === "reviewPersist") persistCalls += 1;
-          return { outcome: "ok" };
+        request: async (operation, sessionID, payload, agent) => {
+          if (failure) throw failure;
+          requests.push({ operation, sessionID, payload, agent });
+          return { operation, accepted: true };
         },
         close: () => {},
       }),
       brokerSocketPath: () => "/tmp/unreachable-test.sock",
     }));
     const { default: plugin } = await import("./opencode/plugins/sandbox-tools.ts");
+    const tools = plugin().tool;
     let pipelineAsks = 0;
-    await plugin().tool.host_review_pipeline_run.execute({ phase: "prepare", stdin: "{}", runId: "0123456789abcdef0123456789abcdef" }, {
+    const pipelineOutput = await tools.host_review_pipeline_run.execute({ phase: "prepare", stdin: "{}", runId: "0123456789abcdef0123456789abcdef" }, {
       sessionID: "session-1", directory: "/work/project", agent: "gentle-orchestrator", ask: async () => { pipelineAsks += 1; },
     });
-    try {
-      await plugin().tool.host_review_persist.execute({ runId: "0123456789abcdef0123456789abcdef", finalizeRef: "phase-finalize.json" }, {
-        sessionID: "session-1", directory: "/work/project", agent: "gentle-orchestrator", ask: async () => { throw new Error("denied"); },
-      });
-    } catch (error) { if (error.message !== "denied") throw error; }
-    console.log(JSON.stringify({ pipelineCalls, persistCalls, pipelineAsks }));
+    const persistOutput = await tools.host_review_persist.execute({ runId: "0123456789abcdef0123456789abcdef", finalizeRef: "phase-finalize.json", mode: "report_only" }, {
+      sessionID: "session-1", directory: "/work/project", agent: "gentle-orchestrator", ask: async (ask) => { persistAskSummary = ask.metadata.summary; },
+    });
+    for (const [name, tool, args] of [
+      ["host_review_pipeline_run", tools.host_review_pipeline_run, { phase: "prepare", stdin: "{}", runId: "0123456789abcdef0123456789abcdef" }],
+      ["host_review_persist", tools.host_review_persist, { runId: "0123456789abcdef0123456789abcdef", finalizeRef: "phase-finalize.json" }],
+    ]) {
+      for (const coded of [true, false]) {
+        failure = new Error("broker detail");
+        if (coded) failure.code = "review_test_code";
+        try {
+          await tool.execute(args, { sessionID: "session-1", directory: "/work/project", agent: "gentle-orchestrator", ask: async () => {} });
+        } catch (error) { failures.push({ name, coded, message: error.message }); }
+        failure = undefined;
+      }
+    }
+    console.log(JSON.stringify({ requests, outputs: [pipelineOutput, persistOutput], failures, pipelineAsks, persistMode: requests[1].payload.mode, persistAskSummary }));
   `;
-  const child = Bun.spawn(["bun", "-e", source], { cwd: "..", stdout: "pipe", stderr: "pipe" });
+  const child = Bun.spawn(["bun", "-e", source], { cwd: `${import.meta.dir}/../..`, stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
   ]);
   if (exitCode !== 0) throw new Error(`isolated plugin probe failed: ${stderr}`);
-  return JSON.parse(stdout.trim().split("\\n").at(-1)!);
+  return JSON.parse(stdout.trim());
 }
 const { applyTargetedEdit } = await import("../../opencode/plugins/lib/sandbox-edit-core.ts");
 
@@ -177,6 +191,11 @@ test("review pipeline and persist tools expose only their allowed schema keys", 
   }
 });
 
+test("pipeline tool description requires an existing materialized run directory", () => {
+  expect(sandboxTools).toContain("runId from a prior host_review_materialize");
+  expect(sandboxTools).toContain("run directory must already exist");
+});
+
 test("review tools have matching permission and timeout entries", () => {
   expect(permissionFragment).toContain('"host_review_pipeline_run": "allow"');
   expect(permissionFragment).toContain('"host_review_persist": "ask"');
@@ -184,11 +203,36 @@ test("review tools have matching permission and timeout entries", () => {
   expect(brokerClientSource).toContain("reviewPersist: 60_000,");
 });
 
-test("pipeline is not ask-gated and denied persist dispatches zero requests", async () => {
+test("pipeline is not ask-gated and persist approval receives the caller mode before dispatch", async () => {
   const result = await runIsolatedReviewToolProbe();
   expect(result.pipelineAsks).toBe(0);
-  expect(result.pipelineCalls).toBe(1);
-  expect(result.persistCalls).toBe(0);
+  expect(result.requests).toEqual([
+    {
+      operation: "reviewPipelineRun",
+      sessionID: "session-1",
+      payload: { projectDir: "/work/project", phase: "prepare", stdin: "{}", runId: "0123456789abcdef0123456789abcdef" },
+      agent: "gentle-orchestrator",
+    },
+    {
+      operation: "reviewPersist",
+      sessionID: "session-1",
+      payload: { projectDir: "/work/project", runId: "0123456789abcdef0123456789abcdef", finalizeRef: "phase-finalize.json", mode: "report_only" },
+      agent: "gentle-orchestrator",
+    },
+  ]);
+  expect(result.outputs).toEqual([
+    JSON.stringify({ operation: "reviewPipelineRun", accepted: true }, null, 2),
+    JSON.stringify({ operation: "reviewPersist", accepted: true }, null, 2),
+  ]);
+  expect(result.failures).toEqual([
+    { name: "host_review_pipeline_run", coded: true, message: "host_review_pipeline_run failed [review_test_code]: broker detail" },
+    { name: "host_review_pipeline_run", coded: false, message: "host_review_pipeline_run failed: broker detail" },
+    { name: "host_review_persist", coded: true, message: "host_review_persist failed [review_test_code]: broker detail" },
+    { name: "host_review_persist", coded: false, message: "host_review_persist failed: broker detail" },
+  ]);
+  expect(result.persistMode).toBe("report_only");
+  expect(result.persistAskSummary).toContain("NO project file will be written");
+  expect(result.persistAskSummary).toContain("validation is not attempted");
 });
 
 test("sandbox_apply_patch gives an actionable remedy for invalid unified diffs", () => {

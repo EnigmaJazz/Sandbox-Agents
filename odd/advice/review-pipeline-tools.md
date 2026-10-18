@@ -40,3 +40,17 @@ The surfacing plan was mechanically correct but incomplete in three ways that ma
 
 ## Status
 Consequential findings are resolved before coding: the surfacing proceeds, and the persist exposure is held behind the containment and approval-scope work (see the tracker's Progress for the slicing decision).
+
+## Post-code correction findings
+
+Both post-code advisors agreed that `host_review_pipeline_run` should remain `allow`, not ask-gated. Its writes are broker-owned run-store artifacts and never project content; the broker-side orchestrator-identity gate is the primary control. The residual risk is that a misbehaving orchestrator can consume process spawns and the per-session run quota without a prompt: this is a resource risk, not a project-mutation risk. This is consistent with the `host_review_materialize` precedent.
+
+The advisors also verified two properties as correct and not worth re-litigating: the persist path asks before dispatching the broker request, and project location is derived from `ctx.directory` rather than accepted as caller-controlled input.
+
+- MUST-FIX (both advisors, converged): include `mode` in the persist approval request and make write/report-only summaries accurately describe project writes and validation. Disposition: implemented; tests cover both phrasings and preserve the exact `host_review_persist` permission.
+- SHOULD-FIX (both advisors): state the pipeline run's materialize/run-directory prerequisite in the tool description. Disposition: implemented and covered by a description assertion.
+- SHOULD-FIX (both advisors): replace the plan-append docstring on `buildReviewPipelineRunOp`. Disposition: corrected as a one-sentence description; no behavior changed.
+
+### Follow-up review finding — persist project binding
+
+- **`R3-unbound-project-persist` disposition: not fixed in this slice.** No cheap in-band pre-check exists in the current surfaces: the plugin has only the session's current `ctx.directory`, while the run's originating project binding is held by broker-owned run metadata. The plugin cannot read that metadata without adding a broker operation/tool, and passing a caller-supplied project would not establish a trusted binding. The broker's existing `review_persist_project_mismatch` refusal remains the control, but it occurs after approval. The approval's `projectDir` therefore reflects the session's current directory; the residual risk is an approval that names a project the broker will then refuse. Evidence: `host_review_persist` computes `projectDir` from `ctx.directory` and places it in both approval metadata and the request payload (`opencode/plugins/sandbox-tools.ts`); broker `reviewPersist` checks the recorded run's project against the requested project and throws `review_persist_project_mismatch` (`broker/src/service.ts`).

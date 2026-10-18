@@ -736,8 +736,10 @@ export default function sandboxToolsPlugin() {
       host_review_pipeline_run: tool({
         description:
           "Run one review pipeline phase using the pinned helper and publish its output only into the " +
-          "broker-owned run store. The helper and interpreter are trusted; this operation does not " +
-          "write project content and does not require approval. Returns JSON.",
+          "broker-owned run store. Requires a runId from a prior host_review_materialize (or from a " +
+          "prior pipeline phase for inputRef); the run directory must already exist. The helper and " +
+          "interpreter are trusted; this operation does not write project content and does not require " +
+          "approval. Returns JSON.",
         args: {
           phase: z.enum(["screen", "prepare", "merge", "finalize"]),
           reviewer: z.enum(["review-risk", "review-resilience", "review-readability", "review-reliability"]).optional(),
@@ -778,7 +780,7 @@ export default function sandboxToolsPlugin() {
         },
         execute: async (args, ctx) => {
           const projectDir = currentProjectDirectory(ctx.directory);
-          await ctx.ask(buildReviewPersistAsk({ projectDir, runId: args.runId, finalizeRef: args.finalizeRef }));
+          await ctx.ask(buildReviewPersistAsk({ projectDir, runId: args.runId, finalizeRef: args.finalizeRef, mode: args.mode }));
           try {
             const c = await client();
             const payload = { projectDir, ...args };

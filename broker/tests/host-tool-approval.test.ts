@@ -197,11 +197,12 @@ describe("host tool ask metadata", () => {
     expect(ask.always).toEqual([]);
   });
 
-  test("review persist ask names the project-write authority and exact permission", () => {
+  test("review persist write ask names publication, validation, and exact permission", () => {
     const ask = buildReviewPersistAsk({
       projectDir: "/work/project",
       runId: "0123456789abcdef0123456789abcdef",
       finalizeRef: "phase-finalize.json",
+      mode: "write",
     });
     expect(ask.permission).toBe("host_review_persist");
     expect(ask.metadata.hostOperation).toBe("reviewPersist");
@@ -210,6 +211,27 @@ describe("host tool ask metadata", () => {
       "validation happens after publication", "may replace an existing summary",
       ".context/.gitignore may be created or changed",
     ]) expect(ask.metadata.summary).toContain(detail);
+    expect(ask.metadata.summary).not.toContain("NO project file will be written");
+    const defaultWriteAsk = buildReviewPersistAsk({
+      projectDir: "/work/project",
+      runId: "0123456789abcdef0123456789abcdef",
+      finalizeRef: "phase-finalize.json",
+    });
+    expect(defaultWriteAsk.metadata.summary).toBe(ask.metadata.summary);
+  });
+
+  test("review persist report-only ask states that no project write or validation occurs", () => {
+    const ask = buildReviewPersistAsk({
+      projectDir: "/work/project",
+      runId: "0123456789abcdef0123456789abcdef",
+      finalizeRef: "phase-finalize.json",
+      mode: "report_only",
+    });
+    expect(ask.permission).toBe("host_review_persist");
+    expect(ask.metadata.hostOperation).toBe("reviewPersist");
+    expect(ask.metadata.summary).toContain("NO project file will be written");
+    expect(ask.metadata.summary).toContain("validation is not attempted");
+    expect(ask.metadata.summary).not.toContain("may replace an existing summary");
   });
 
   test("plan append ask omits the heading when absent and rejects bad input", () => {

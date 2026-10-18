@@ -259,6 +259,23 @@ U3a T5 by-reference publication/chaining is implemented and empirically verified
 - Observed checks: focused `bun --cwd broker test tests/review-persist.test.ts tests/review-pipeline-operation.test.ts --reporter=dot` — 38 pass / 0 fail / 157 expects. Full `bun --cwd broker test --reporter=dot` — 1125 pass / 0 fail / 4854 expects across 70 files (1124 baseline plus one new test). Build `bun build --target=bun src/main.ts` from `broker` completed successfully.
 - Findings disposition: C1 test strengthened; C2 behavior was already present and is now covered; C3 remains blocked by S17; C4 test strengthened; C5 documentation added. No code under `broker/src/**` was modified.
 
+## Post-code advisory corrections — U3c surfacing candidate
+
+- Findings and source: `advisor-testing-post` and `advisor-integration-post` converged on the approval prompt's missing `mode` as MUST-FIX; both also raised the missing pipeline prerequisite description and incorrect `buildReviewPipelineRunOp` docstring as SHOULD-FIX. Disposition: prompt mode and conditional summary corrected, pipeline description updated without behavior change, and service docstring corrected without any other `broker/src/service.ts` edits.
+- Additional advisor agreement: `host_review_pipeline_run` remains `allow` because its writes are broker-owned and never project content; the broker-side orchestrator-identity gate is primary. Residual risk is resource consumption (process spawns and per-session run quota) by a misbehaving orchestrator without a prompt, not project mutation. This matches the `host_review_materialize` precedent. Ask-before-dispatch and deriving project location from `ctx.directory` were verified correct and not re-litigated.
+- RED/stub observations: the new pipeline-description test failed before the description change with missing `runId from a prior host_review_materialize`. No production stub was added. The initial focused run demonstrated this expected failure; conditional approval assertions were also added test-first and will be recorded with their observed targeted result below.
+- RED/stub record: the first focused run failed the new description assertion because the source omitted `runId from a prior host_review_materialize`; no stub or production behavior change was needed. Isolated reverts below each failed the named assertion. No test stayed green with its guard removed.
+- Guard-revert table (source restored byte-identically in each experiment):
+
+  | Guard removed | Named test and observed failure | Source SHA-256 before | Source SHA-256 after |
+  |---|---|---|---|
+  | Report-only prompt conditional (`host-tool-approval.ts`) | `review persist report-only ask states that no project write or validation occurs` — expected `NO project file will be written`; got the unconditional publish prompt. | `58fc3f20fe0642a661d01a4b1173edadcc99796e27536267d15f392b1deb9627` | same |
+  | Default-to-write behavior (`host-tool-approval.ts`) | `review persist write ask names publication, validation, and exact permission` — default ask differed from the explicit write summary and instead said report-only. | `58fc3f20fe0642a661d01a4b1173edadcc99796e27536267d15f392b1deb9627` | same |
+  | Materialized-run prerequisite guidance (`sandbox-tools.ts`) | `pipeline tool description requires an existing materialized run directory` — expected `runId from a prior host_review_materialize`, which was absent. | `e6a7081fc20ee48477f395d61e83824844150e9b7fe787ccd5b0592388520617` | same |
+
+- Focused final: `bun --cwd broker test tests/host-tool-approval.test.ts tests/sandbox-tool-contract.test.ts --reporter=dot` — 37 pass / 0 fail, 180 expects across 2 files. Full: `bun --cwd broker test --reporter=dot` — 1131 pass / 0 fail, 4891 expects across 70 files. Build: from `broker`, `bun build --target=bun src/main.ts` completed successfully.
+- `buildReviewPipelineRunOp` docstring correction is comment-only; no other content in `broker/src/service.ts` was changed. The delivery remains uncommitted, with no git mutation or apply; owner-controlled S17 installation/commit remains required. Boundary 2 remains parent-owned and complete.
+
 ## Next step
 Owner-controlled S17 review/install for broker source changes, including the ignore directory fsync request, then run the full focused/full/build checks before commit.
 
