@@ -41,12 +41,17 @@ const APPLY_PREVIEW_TOOLS = new Set([
 ]);
 /** Tools the guard routes or blocks. */
 const READ_TOOLS = new Set(["read", "grep", "glob", "list"]);
+// Temporary containment only. The durable fix is broker-owned admission with default-deny,
+// per odd/tasks/routing-guard-admission.md.
 const MUTATION_TOOLS = new Set([
   "bash",
   "edit",
   "write",
   "apply_patch",
   "patch",
+  "ast_grep_replace",
+  "aft_import",
+  "aft_safety",
 ]);
 /** args fields that carry path/pattern targets, per tool. */
 const READ_PATH_ARGS: Record<string, string[]> = {
@@ -155,12 +160,8 @@ export default function routingGuardPlugin(): Plugin {
         return; // HOST_READ_ONLY: host reads are the intended mode (S3)
       }
       if (MUTATION_TOOLS.has(toolName)) {
-        // S1/S10: block ordinary host mutation. Return a proper tool error result
-        // that preserves MUTATION_BLOCK_MSG verbatim so the model sees
-        // "Ordinary host mutation... Use sandbox_write..." instead of generic
-        // "tool execution aborted". The plugin host surfaces the `error` field
-        // as a tool failure with the verbatim message.
-        return { error: MUTATION_BLOCK_MSG } as unknown as void;
+        // S1/S10: throw to cancel ordinary host mutation and preserve the block message.
+        throw new Error(MUTATION_BLOCK_MSG);
       }
     },
     "experimental.chat.system.transform": async (input, output) => {
