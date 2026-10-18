@@ -237,5 +237,15 @@ U3a (T1-T4) is recorded as committed and reviewed. U3b T7–T10 implementation a
 ## Status
 U3a T5 by-reference publication/chaining is implemented and empirically verified in the sandbox. The persist `finalizeRef` dependency is closed for broker dispatch; U3c plugin and approval surfacing, client timeout registration, native RDD review, owner installation, and owner commit remain pending.
 
+## Progress addendum — native review correction `review-c1892707fddea8ff` (R3-service-store-caps)
+
+- Finding `R3-service-store-caps` was the third instance of the builder-config-omission class: `buildReviewPersistOp` constructed `ReviewRunStore` without configured caps.
+- Added `reviewRunStoreOptions(config)` in `broker/src/review-run.ts`, returning root, denied prefixes, and all three configured caps. `buildReviewPipelineRunOp`, `buildReviewMaterializeOp`, and `buildReviewPersistOp` now all use that mapping and add only their canonical `projectRoot`.
+- Added a parity test asserting every mapped field and a source-level assertion that the three service builders all use the shared mapping. The persist builder exposes no independent store-cap operation; therefore its caps are observable only through the shared mapping and mapping-use assertion. Real dispatch tests prove the pipeline and materialize builders refuse over-cap artifacts naming the cap and observed bytes. Existing persist dispatch coverage asserts the configured helper path, digest-pinned validation and interpreter argv reach the real validator spawn.
+- RED: focused test initially failed because `reviewRunStoreOptions` was not exported (0 pass / 1 fail, import error). The initial materialize cap test also resolved because HEAD was compared with itself; corrected the fixture to compare two commits. The final cap assertion then passed on observed `scope.diff` size 253 over cap 64.
+- Revert checks (source `broker/src/service.ts`, before and after SHA-256 `f9a88995f44dbe108eef95a048bc8ce32632c379cc8f5bd88ce15ad7a0f6c0be`): pipeline store mapping — `pipeline dispatch enforces the configured review artifact cap` failed because dispatch resolved; materialize store mapping — `materialize dispatch enforces the configured review artifact cap` failed because dispatch resolved; persist store mapping — `all three service builders use the shared review-store mapping; persist caps are mapping-only observable` failed (expected 3 mapping invocations, received 2). Each isolated edit was restored and the source hash returned to the identical before hash.
+- Focused: `bun test tests/review-pipeline-operation.test.ts tests/review-persist.test.ts --reporter=dot` from `broker` — 23 pass / 0 fail across 2 files. Full: `bun --cwd broker test --reporter=dot` from repository root — 1109 pass / 0 fail across 70 files. Build: `bun build --target=bun src/main.ts` from `broker` completed successfully.
+- No commit or apply was performed; `broker/src/**` is S17-protected. Owner-controlled review/install remains required.
+
 ## Next step
 Complete U3c surfacing (including client timeouts and approval-gated persist) and the owner-controlled review/install steps.

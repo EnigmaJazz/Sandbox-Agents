@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
 import { BrokerServer } from "../src/server.ts";
-import { ReviewRunStore } from "../src/review-run.ts";
+import { ReviewRunStore, reviewRunStoreOptions } from "../src/review-run.ts";
 import type { BrokerRequestEnvelope } from "../src/types.ts";
 
 const SESSION_ID = "bound-orchestrator";
@@ -17,7 +17,7 @@ const rootBase = ["/var/tmp", process.env.HOME ?? ""].find((candidate) => {
 if (!rootBase) throw new Error("no writable test base outside $TMPDIR");
 afterAll(() => roots.forEach((root) => rmSync(root, { recursive: true, force: true })));
 
-function operationFixture() {
+function operationFixture(caps?: { maxBytes: number; maxFileBytes: number; maxPerSession: number }) {
   const root = mkdtempSync(join(rootBase!, "review-pipeline-operation-"));
   roots.push(root);
   const project = join(root, "project");
@@ -40,6 +40,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify(args[0] === "f
   const config = defaultConfig({
     stateDir: join(root, "state"), reviewRunRoot, reviewHelperPath: helperPath,
     reviewHelperSha256: helperSha256, reviewHelperInterpreter: process.execPath,
+    ...(caps ? { reviewRunMaxBytes: caps.maxBytes, reviewRunMaxFileBytes: caps.maxFileBytes, reviewRunMaxPerSession: caps.maxPerSession } : {}),
     projects: [{ id: "approved", path: project }], readOnlyAgents: ["gentle-orchestrator"],
   });
   const server = new BrokerServer(config);
@@ -51,7 +52,44 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify(args[0] === "f
   return { root, project, helperPath, auditPath, reviewRunRoot, config, internals, store: new ReviewRunStore({ root: reviewRunRoot, projectRoot: project }) };
 }
 
-test("finalize dispatch publishes resolvable refs and persist dispatch spawns the pinned validator", async () => {
+test("shared review store mapping includes root, denied prefixes, and every configured cap", () => {
+  const config = defaultConfig({ reviewRunRoot: "/var/tmp/review-runs", reviewRunDeniedPrefixes: ["/var/tmp/denied"], reviewRunMaxBytes: 4097, reviewRunMaxFileBytes: 513, reviewRunMaxPerSession: 7 });
+  expect(reviewRunStoreOptions(config)).toEqual({
+    root: "/var/tmp/review-runs",
+    deniedPrefixes: ["/var/tmp/denied"],
+    caps: { maxBytes: 4097, maxFileBytes: 513, maxPerSession: 7 },
+  });
+});
+
+test("all three service builders use the shared review-store mapping; persist caps are mapping-only observable", () => {
+  const serviceSource = readFileSync(new URL("../src/service.ts", import.meta.url), "utf8");
+  expect(serviceSource.match(/reviewRunStoreOptions\(ctx\.config\)/g)).toHaveLength(3);
+});
+
+test("pipeline dispatch enforces the configured review artifact cap", async () => {
+  const env = operationFixture({ maxBytes: 4097, maxFileBytes: 64, maxPerSession: 7 });
+  const writer = env.store.createRun(SESSION_ID);
+  await expect(env.internals.dispatch({
+    version: 1, id: "pipeline-cap", operation: "reviewPipelineRun", sessionID: SESSION_ID,
+    payload: { projectDir: env.project, phase: "prepare", runId: writer.record.runId, stdin: "x".repeat(128) },
+  })).rejects.toThrow(/per-file cap 64 bytes \(observed .* bytes\)/);
+});
+
+test("materialize dispatch enforces the configured review artifact cap", async () => {
+  const env = operationFixture({ maxBytes: 4097, maxFileBytes: 64, maxPerSession: 7 });
+  writeFileSync(join(env.project, "large.txt"), "materialized content that exceeds the configured artifact byte cap\n");
+  expect(Bun.spawnSync(["git", "add", "large.txt"], { cwd: env.project }).exitCode).toBe(0);
+  expect(Bun.spawnSync(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture"], { cwd: env.project }).exitCode).toBe(0);
+  writeFileSync(join(env.project, "large.txt"), "updated materialized content that exceeds the configured artifact byte cap\n");
+  expect(Bun.spawnSync(["git", "add", "large.txt"], { cwd: env.project }).exitCode).toBe(0);
+  expect(Bun.spawnSync(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "update"], { cwd: env.project }).exitCode).toBe(0);
+  await expect(env.internals.dispatch({
+    version: 1, id: "materialize-cap", operation: "reviewMaterialize", sessionID: SESSION_ID,
+    payload: { projectDir: env.project, baseRef: "HEAD^", headRef: "HEAD" },
+  })).rejects.toThrow(/is \d+ bytes, over the per-file cap of 64/);
+});
+
+test("persist dispatch forwards configured helper path, digest, and interpreter to validation", async () => {
   const env = operationFixture();
   const runs = [env.store.createRun(SESSION_ID), env.store.createRun(SESSION_ID)];
   let finalizeRef = "";
@@ -78,6 +116,8 @@ test("finalize dispatch publishes resolvable refs and persist dispatch spawns th
   expect(JSON.parse(readFileSync(summaryPath, "utf8"))).toMatchObject({ verdict: "approved", schema_version: 1 });
   const spawns = readFileSync(env.auditPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]);
   expect(spawns).toContainEqual([process.execPath, env.helperPath, "artifact", summaryPath]);
+  expect(env.config.reviewHelperPath).toBe(env.helperPath);
+  expect(env.config.reviewHelperSha256).toBe(createHash("sha256").update(readFileSync(env.helperPath)).digest("hex"));
   expect(env.config.reviewHelperInterpreter).toBe(process.execPath);
 });
 

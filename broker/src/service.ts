@@ -88,7 +88,7 @@ import {
 } from "./copy-review.ts";
 import { MsbError } from "./msb.ts";
 import { StateError } from "./state.ts";
-import { ReviewRunStore, readRunArtifact } from "./review-run.ts";
+import { ReviewRunStore, readRunArtifact, reviewRunStoreOptions } from "./review-run.ts";
 import { materializeReviewRange } from "./review-materialize.ts";
 import { runReviewPipeline } from "./review-pipeline.ts";
 import { persistReviewArtifact } from "./review-persist.ts";
@@ -3622,7 +3622,7 @@ export function buildReviewPipelineRunOp(ctx: OpContext): OpHandler {
     const payload = payloadOf(req) as { projectDir?: unknown; phase?: unknown; reviewer?: unknown; stdin?: unknown; inputRef?: unknown; runId?: unknown };
     authorizeHostDispatch(ctx, "reviewPipelineRun", req.sessionID, req.agent);
     const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
-    const store = new ReviewRunStore({ root: ctx.config.reviewRunRoot, projectRoot, deniedPrefixes: ctx.config.reviewRunDeniedPrefixes, caps: { maxBytes: ctx.config.reviewRunMaxBytes, maxFileBytes: ctx.config.reviewRunMaxFileBytes, maxPerSession: ctx.config.reviewRunMaxPerSession } });
+    const store = new ReviewRunStore({ ...reviewRunStoreOptions(ctx.config), projectRoot });
     return runReviewPipeline(payload as { phase: unknown; reviewer?: unknown; stdin?: unknown; inputRef?: unknown; runId: unknown }, ctx.config, undefined, { store, sessionID: req.sessionID });
   };
 }
@@ -3634,7 +3634,7 @@ export function buildReviewPersistOp(ctx: OpContext): OpHandler {
     if (typeof payload.runId !== "string" || typeof payload.finalizeRef !== "string") throw new ValidationError("runId and finalizeRef must be strings");
     if (payload.mode !== undefined && payload.mode !== "write" && payload.mode !== "report_only") throw new ValidationError("mode must be write or report_only");
     const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
-    const store = new ReviewRunStore({ root: ctx.config.reviewRunRoot, projectRoot, deniedPrefixes: ctx.config.reviewRunDeniedPrefixes });
+    const store = new ReviewRunStore({ ...reviewRunStoreOptions(ctx.config), projectRoot });
     const runDir = store.runDir(req.sessionID, payload.runId);
     const phaseBytes = readRunArtifact({ runDir, name: payload.finalizeRef, maxFileBytes: ctx.config.reviewRunMaxFileBytes }).data;
     let output: unknown;
@@ -3663,16 +3663,7 @@ export function buildReviewMaterializeOp(ctx: OpContext): OpHandler {
     if (payload.paths !== undefined && (!Array.isArray(payload.paths) || payload.paths.some((path) => typeof path !== "string"))) throw new ValidationError("paths must be an array of strings");
     const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
     // This operation publishes only broker-owned run-store artifacts, never project content; unlike planDocAppend, it needs no approval gate.
-    const store = new ReviewRunStore({
-      root: ctx.config.reviewRunRoot,
-      projectRoot,
-      deniedPrefixes: ctx.config.reviewRunDeniedPrefixes,
-      caps: {
-        maxBytes: ctx.config.reviewRunMaxBytes,
-        maxFileBytes: ctx.config.reviewRunMaxFileBytes,
-        maxPerSession: ctx.config.reviewRunMaxPerSession,
-      },
-    });
+    const store = new ReviewRunStore({ ...reviewRunStoreOptions(ctx.config), projectRoot });
     return materializeReviewRange({
       baseRef: payload.baseRef,
       ...(payload.headRef === undefined ? {} : { headRef: payload.headRef as string }),

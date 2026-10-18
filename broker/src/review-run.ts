@@ -43,6 +43,7 @@ import {
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { SESSION_ID_RE } from "./validation.ts";
+import type { BrokerConfig } from "./config.ts";
 
 /** The only accepted runId shape: 32 lowercase hex chars (128 random bits). */
 export const REVIEW_RUN_ID_RE = /^[0-9a-f]{32}$/;
@@ -132,6 +133,20 @@ export interface ReviewRunStoreOptions {
   /** Operator mirror of agent-writable prefixes; refused when containing root. */
   deniedPrefixes?: readonly string[];
   caps?: Partial<ReviewRunCaps>;
+}
+
+export function reviewRunStoreOptions(
+  config: Pick<BrokerConfig, "reviewRunRoot" | "reviewRunDeniedPrefixes" | "reviewRunMaxBytes" | "reviewRunMaxFileBytes" | "reviewRunMaxPerSession">,
+): Pick<ReviewRunStoreOptions, "root" | "deniedPrefixes" | "caps"> {
+  return {
+    root: config.reviewRunRoot,
+    deniedPrefixes: config.reviewRunDeniedPrefixes,
+    caps: {
+      maxBytes: config.reviewRunMaxBytes,
+      maxFileBytes: config.reviewRunMaxFileBytes,
+      maxPerSession: config.reviewRunMaxPerSession,
+    },
+  };
 }
 
 /** Base for every refusal this module raises; `name` is the concrete class. */
