@@ -23,6 +23,7 @@ export type HostMutationOperation =
   | "gitPush"
   | "ghIssueCreate"
   | "planDocAppend"
+  | "reviewPersist"
   | "reviewStart"
   | "reviewCaptureResult"
   | "reviewCaptureUnachievable"
@@ -275,6 +276,33 @@ export function buildPlanDocAppendAsk(args: PlanDocAppendAskArgs): HostToolAsk {
     operation: "planDocAppend",
     summary: `Append ${details.contentBytes} byte(s) to the ${args.doc} plan document${headingNote}`,
     details,
+  });
+}
+
+export interface ReviewPersistAskArgs {
+  projectDir: string;
+  runId: string;
+  finalizeRef: string;
+}
+
+/** Approval metadata for publishing and validating a review artifact in a project. */
+export function buildReviewPersistAsk(args: ReviewPersistAskArgs): HostToolAsk {
+  assertNonEmpty(args.projectDir, "projectDir");
+  assertNonEmpty(args.runId, "runId");
+  assertNonEmpty(args.finalizeRef, "finalizeRef");
+  return buildHostToolAsk({
+    permission: "host_review_persist",
+    operation: "reviewPersist",
+    summary: `Publish ${args.finalizeRef} from review run ${args.runId} into ${args.projectDir}/.context/systematic/ce-review/${args.runId}/review-summary.json; validation happens after publication, this may replace an existing summary, and .context/.gitignore may be created or changed.`,
+    details: {
+      projectDir: args.projectDir,
+      runId: args.runId,
+      artifact: "review-summary.json",
+      finalizeRef: args.finalizeRef,
+      validation: "after publication",
+      replacement: "may replace an existing summary",
+      ignoreFile: ".context/.gitignore may be created or changed",
+    },
   });
 }
 

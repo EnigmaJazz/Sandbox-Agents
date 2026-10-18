@@ -80,6 +80,8 @@
     "host_review_mode_status": "allow",
     "host_review_status": "allow",
     "host_review_materialize": "allow",
+    "host_review_pipeline_run": "allow",
+    "host_review_persist": "ask",
     "host_review_lens_context": "allow",
     "host_sandbox_result": "allow",
     "host_sandbox_result_install": "ask",

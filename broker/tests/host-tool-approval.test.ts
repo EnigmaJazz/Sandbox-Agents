@@ -17,6 +17,7 @@ import {
   HostToolAskError,
   buildHostToolAsk,
   buildPlanDocAppendAsk,
+  buildReviewPersistAsk,
   buildSddArchiveComposeAsk,
   buildSddAttemptGrantAsk,
 } from "../../opencode/plugins/lib/host-tool-approval.ts";
@@ -194,6 +195,21 @@ describe("host tool ask metadata", () => {
       heading: "Next",
     });
     expect(ask.always).toEqual([]);
+  });
+
+  test("review persist ask names the project-write authority and exact permission", () => {
+    const ask = buildReviewPersistAsk({
+      projectDir: "/work/project",
+      runId: "0123456789abcdef0123456789abcdef",
+      finalizeRef: "phase-finalize.json",
+    });
+    expect(ask.permission).toBe("host_review_persist");
+    expect(ask.metadata.hostOperation).toBe("reviewPersist");
+    for (const detail of [
+      "/work/project", "0123456789abcdef0123456789abcdef", "review-summary.json",
+      "validation happens after publication", "may replace an existing summary",
+      ".context/.gitignore may be created or changed",
+    ]) expect(ask.metadata.summary).toContain(detail);
   });
 
   test("plan append ask omits the heading when absent and rejects bad input", () => {

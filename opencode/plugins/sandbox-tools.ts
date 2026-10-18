@@ -52,6 +52,7 @@ import {
   buildReviewCaptureUnachievableAsk,
   buildReviewCaptureValidationAsk,
   buildReviewRecoverAsk,
+  buildReviewPersistAsk,
   buildReviewStartAsk,
   buildReviewValidateAsk,
   buildRegisterProjectAsk,
@@ -729,6 +730,69 @@ export default function sandboxToolsPlugin() {
             lens: args.lens,
           }, ctx.agent);
           return JSON.stringify(result, null, 2);
+        },
+      }),
+
+      host_review_pipeline_run: tool({
+        description:
+          "Run one review pipeline phase using the pinned helper and publish its output only into the " +
+          "broker-owned run store. The helper and interpreter are trusted; this operation does not " +
+          "write project content and does not require approval. Returns JSON.",
+        args: {
+          phase: z.enum(["screen", "prepare", "merge", "finalize"]),
+          reviewer: z.enum(["review-risk", "review-resilience", "review-readability", "review-reliability"]).optional(),
+          stdin: z.union([
+            z.string().max(256 * 1024),
+            z.array(z.number().int().min(0).max(255)).max(256 * 1024),
+          ]).optional(),
+          inputRef: z.string().min(1).max(255).optional(),
+          runId: z.string().regex(/^[a-f0-9]{32}$/),
+        },
+        execute: async (args, ctx) => {
+          try {
+            const c = await client();
+            const payload = { projectDir: currentProjectDirectory(ctx.directory), ...args };
+            const result = await c.request("reviewPipelineRun", ctx.sessionID, payload, ctx.agent);
+            return JSON.stringify(result, null, 2);
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            const code = typeof error === "object" && error !== null && "code" in error
+              ? (error as { code?: unknown }).code
+              : undefined;
+            throw new Error(
+              `host_review_pipeline_run failed${typeof code === "string" ? ` [${code}]` : ""}: ${detail}`,
+            );
+          }
+        },
+      }),
+
+      host_review_persist: tool({
+        description:
+          "Publish the recorded finalize artifact as review-summary.json in the canonical project run " +
+          "directory, then validate it. Requires explicit approval because publication may replace " +
+          "an existing summary and may create or change .context/.gitignore. Returns JSON.",
+        args: {
+          runId: z.string().regex(/^[a-f0-9]{32}$/),
+          finalizeRef: z.string().min(1).max(255),
+          mode: z.enum(["write", "report_only"]).optional(),
+        },
+        execute: async (args, ctx) => {
+          const projectDir = currentProjectDirectory(ctx.directory);
+          await ctx.ask(buildReviewPersistAsk({ projectDir, runId: args.runId, finalizeRef: args.finalizeRef }));
+          try {
+            const c = await client();
+            const payload = { projectDir, ...args };
+            const result = await c.request("reviewPersist", ctx.sessionID, payload, ctx.agent);
+            return JSON.stringify(result, null, 2);
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            const code = typeof error === "object" && error !== null && "code" in error
+              ? (error as { code?: unknown }).code
+              : undefined;
+            throw new Error(
+              `host_review_persist failed${typeof code === "string" ? ` [${code}]` : ""}: ${detail}`,
+            );
+          }
         },
       }),
 
