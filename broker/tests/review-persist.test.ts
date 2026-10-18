@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnExec } from "../src/msb.ts";
@@ -105,6 +105,52 @@ test("refuses to duplicate an existing ineffective or negated entry", async () =
   await expect(persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }) })).rejects.toMatchObject({ code: "review_ignore_ineffective" });
 });
 
+test("forces the artifact mode to 0600 despite a restrictive umask", async () => {
+  const f = fixture();
+  writeFileSync(join(f.root, ".gitignore"), ".context/\n");
+  const previousUmask = process.umask();
+  let restrictive = false;
+  try {
+    await persistReviewArtifact({
+      ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "ok" },
+      beforeTempCreate: () => { process.umask(0o777); restrictive = true; },
+      beforeRename: () => { process.umask(previousUmask); restrictive = false; },
+    });
+  } finally {
+    if (restrictive) process.umask(previousUmask);
+  }
+  expect(statSync(join(f.runDir, "review-summary.json")).mode & 0o777).toBe(0o600);
+});
+
+test("refuses when directory-handle paths are unavailable without writing", async () => {
+  const f = fixture();
+  const contextBefore = readdirSync(f.context).sort();
+  let spawned = false;
+  const spawn = async (argv: string[], options: Parameters<typeof spawnExec>[1]) => {
+    spawned = true;
+    return spawnExec(argv, options);
+  };
+  await expect(persistReviewArtifact({
+    ...f, mode: "write", finalize: writing({ findings: [] }), spawn,
+    procFdAvailable: () => false,
+  })).rejects.toMatchObject({ code: "review_persist_fd_path_unavailable" });
+  expect(spawned).toBe(false);
+  expect(readdirSync(f.context).sort()).toEqual(contextBefore);
+  expect(existsSync(join(f.runDir, "review-summary.json"))).toBe(false);
+  expect(readdirSync(f.runDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+});
+
+test("creates missing containment directories at mode 0700 and the artifact at mode 0600", async () => {
+  const f = fixture();
+  rmSync(f.context, { recursive: true });
+  const result = await persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "ok" } });
+  expect(result.outcome).toBe("persisted");
+  for (const directory of [f.context, join(f.context, "systematic"), join(f.context, "systematic", "ce-review"), f.runDir]) {
+    expect(statSync(directory).mode & 0o777).toBe(0o700);
+  }
+  expect(statSync(join(f.runDir, "review-summary.json")).mode & 0o777).toBe(0o600);
+});
+
 test("refuses a symlinked ancestor directory", async () => {
   const f = fixture();
   const systematic = join(f.context, "systematic");
@@ -115,12 +161,79 @@ test("refuses a symlinked ancestor directory", async () => {
   await expect(persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }) })).rejects.toMatchObject({ code: "review_persist_unsafe_directory" });
 });
 
+test("keeps ignore provisioning on the verified context inode during an ancestor swap", async () => {
+  const f = fixture();
+  const movedContext = `${f.context}-moved`;
+  const externalContext = join(f.root, "external-context");
+  mkdirSync(externalContext, { mode: 0o711 });
+  const marker = join(externalContext, "marker.bin");
+  writeFileSync(marker, Buffer.from([9, 0, 255]));
+  chmodSync(marker, 0o640);
+  const beforeEntries = readdirSync(externalContext).sort();
+  const beforeMode = statSync(externalContext).mode & 0o777;
+  const beforeBytes = readFileSync(marker);
+  const beforeFileMode = statSync(marker).mode & 0o777;
+  let swapped = false;
+  const spawn = async (argv: string[], options: Parameters<typeof spawnExec>[1]) => {
+    const result = await spawnExec(argv, options);
+    if (argv[0] === "git" && result.status === 1 && !swapped) {
+      renameSync(f.context, movedContext);
+      symlinkSync(externalContext, f.context);
+      swapped = true;
+    }
+    return result;
+  };
+
+  await expect(persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }), spawn })).rejects.toMatchObject({ code: "review_ignore_ineffective" });
+  expect(swapped).toBe(true);
+  expect(readdirSync(externalContext).sort()).toEqual(beforeEntries);
+  expect(statSync(externalContext).mode & 0o777).toBe(beforeMode);
+  expect(readFileSync(marker)).toEqual(beforeBytes);
+  expect(statSync(marker).mode & 0o777).toBe(beforeFileMode);
+  expect(existsSync(join(externalContext, ".gitignore"))).toBe(false);
+  expect(readFileSync(join(movedContext, ".gitignore"), "utf8")).toContain("systematic/ce-review/");
+});
+
 test("refuses a symlinked context ignore file", async () => {
   const f = fixture();
   const external = join(f.root, "external-ignore");
   writeFileSync(external, "");
   symlinkSync(external, join(f.context, ".gitignore"));
   await expect(persistReviewArtifact({ ...f, mode: "write", finalize: writing({ findings: [] }) })).rejects.toMatchObject({ code: "review_ignore_symlink" });
+});
+
+test("does not write into an external directory after a verified run directory is replaced by a symlink", async () => {
+  const f = fixture();
+  const external = join(f.root, "external-target");
+  const moved = `${f.runDir}-moved`;
+  mkdirSync(external, { mode: 0o711 });
+  const sentinel = join(external, "sentinel.bin");
+  writeFileSync(sentinel, Buffer.from([0, 255, 17]));
+  chmodSync(sentinel, 0o640);
+  const before = {
+    entries: readdirSync(external).sort(),
+    directoryMode: statSync(external).mode & 0o777,
+    sentinelBytes: readFileSync(sentinel),
+    sentinelMode: statSync(sentinel).mode & 0o777,
+  };
+  let swapped = false;
+  const result = await persistReviewArtifact({
+    ...f, mode: "write", finalize: writing({ findings: [] }), env: { FIXTURE_STATUS: "ok" },
+    beforeTempCreate: () => {
+      renameSync(f.runDir, moved);
+      symlinkSync(external, f.runDir);
+      swapped = true;
+    },
+  });
+  expect(result.outcome).toBe("persisted");
+  expect(swapped).toBe(true);
+  expect(readdirSync(external).sort()).toEqual(before.entries);
+  expect(statSync(external).mode & 0o777).toBe(before.directoryMode);
+  expect(readFileSync(sentinel)).toEqual(before.sentinelBytes);
+  expect(statSync(sentinel).mode & 0o777).toBe(before.sentinelMode);
+  expect(existsSync(join(external, "review-summary.json"))).toBe(false);
+  expect(readdirSync(moved).some((name) => name.startsWith(".review-summary."))).toBe(false);
+  expect(JSON.parse(readFileSync(join(moved, "review-summary.json"), "utf8"))).toEqual({ findings: [], schema_version: 1 });
 });
 
 test("removes the exclusively created temp file when rename preparation fails", async () => {

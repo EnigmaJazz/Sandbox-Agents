@@ -249,3 +249,24 @@ U3a T5 by-reference publication/chaining is implemented and empirically verified
 
 ## Next step
 Complete U3c surfacing (including client timeouts and approval-gated persist) and the owner-controlled review/install steps.
+
+## Progress addendum — persist-containment hardening
+
+- This slice closes the two security must-fixes in `odd/advice/review-pipeline-tools.md`: the persist write check-then-use window and the unapproved helper trust-boundary wording. Boundary 2 is complete per parent readback (tracker byte-exact; Magic Context mirror id 1184); this writer did not block on a second mirror readback.
+- Persist now probes `/proc/self/fd` before project operations and refuses when unavailable. Existing directory components are opened one-by-one with `O_RDONLY | O_DIRECTORY | O_NOFOLLOW`; missing components are created through the verified parent descriptor at mode `0700`. The `.context` and run-directory descriptors stay open across awaited git checks. Ignore provisioning uses the `.context` descriptor; artifact temp creation, rename, cleanup and directory fsync use the run-directory descriptor through `/proc/self/fd/<fd>/<name>`. The temp file is exclusive, forced to `0600`, written and fsynced before atomic rename; opened descriptors are closed through success and error paths.
+- RED observed before implementation: the new ancestor-swap test replaced the verified run directory with a symlink to an external fixture during the awaited `git check-ignore` call. The pathname-based implementation returned success and created `review-summary.json` in the external directory; the test failed because external contents changed. The test now swaps immediately before temp creation; it confirms the write lands in the original directory inode and the external fixture's entries, bytes, and modes are unchanged. A second race test covers ignore provisioning during a context-directory swap.
+- Helper trust boundary documented plainly: the unapproved pipeline boundary rests on trusted helper/interpreter behaviour; digest plus configured interpreter identify which executable runs, not its filesystem permissions; broker confinement of the helper is not asserted.
+- New named refusal: `review_persist_fd_path_unavailable` — `/proc/self/fd is unavailable; refusing pathname-based persistence`. Existing `review_persist_unsafe_directory` remains the refusal for symlinked or non-directory existing components. Ignore provisioning, symlink refusal, and U3b validation behavior remain covered by the unchanged tests.
+- Revert table (for each isolated experiment the `broker/src/review-persist.ts` SHA-256 before and after restoration was `266aad7659dab0e036f8b07ff94546b265a5a5d594e794db9e67147f659cb34b`):
+
+  | Guard removed | Named test and observed failure |
+  |---|---|
+  | `/proc/self/fd` availability gate | `refuses when directory-handle paths are unavailable without writing` — expected rejection; promise resolved. |
+  | `O_NOFOLLOW` directory open flag | `refuses a symlinked ancestor directory` — expected `review_persist_unsafe_directory`; received `review_ignore_check_failed` after following the link. |
+  | Descriptor-relative artifact temp and destination paths | `does not write into an external directory after a verified run directory is replaced by a symlink` — external entries gained `review-summary.json`. |
+  | Descriptor-relative ignore-file and temp paths | `keeps ignore provisioning on the verified context inode during an ancestor swap` — external entries gained `.gitignore`. |
+  | Explicit `mkdir` mode `0700` | `creates missing containment directories at mode 0700 and the artifact at mode 0600` — observed mode `0755` instead of `0700`. |
+  | `fchmodSync` on the open artifact temp fd | `forces the artifact mode to 0600 despite a restrictive umask` — observed mode `0000` instead of `0600`. |
+
+- Focused: `bun --cwd broker test tests/review-persist.test.ts --reporter=dot` — 21 pass / 0 fail, 1 file. Full: `bun --cwd broker test --reporter=dot` — 1115 pass / 0 fail across 70 files (baseline 1110). Build: `bun build --target=bun src/main.ts` from `broker` completed successfully.
+- The slice stays sandbox-only: no commit, git mutation, or `sandbox_apply`; owner review/install remains required. Boundary 2 mirror status remains parent-owned and complete.

@@ -233,6 +233,11 @@ with `review_helper_interpreter_unconfigured`. The installer resolves `node`
 first and then `bun` when creating the pin. No model-facing host tool routes to
 this store yet.
 
+The unapproved pipeline boundary rests on trusted helper and interpreter
+behaviour. The pinned digest and configured interpreter identify which helper
+and interpreter run; they do not confine their filesystem access. The broker
+asserts no filesystem confinement of the helper itself.
+
 The installer rejects a statically symlinked destination directory, including a
 dangling link, and checks its path ancestors before creating the pin. This closes
 the static symlink case only: a check-then-`mkdir -p`/`chmod`/`cp` sequence is
