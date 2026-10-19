@@ -16,7 +16,7 @@ describe("operation registry parity", () => {
     expect(OPERATIONS).toContain("reviewPipelineRun");
     expect(SANDBOX_GUARD_CLASS).toHaveProperty("reviewPipelineRun", "exempt-from-sandbox-guard");
     expect(HOST_MUTATION_OPERATIONS).toContain("reviewPipelineRun");
-    expect(ALLOWED_PAYLOAD_KEYS).toHaveProperty("reviewPipelineRun", ["projectDir", "phase", "reviewer", "stdin", "inputRef", "inputRefs", "runId"]);
+    expect(ALLOWED_PAYLOAD_KEYS).toHaveProperty("reviewPipelineRun", ["projectDir", "phase", "reviewer", "stdin", "inputRef", "inputRefs", "runId", "adjudication", "preparedRef", "mergeRef", "dispatch_records", "validator_lifecycle_results", "plan_assessment", "parent_run_metadata", "prepared", "merge", "screen_results"]);
   });
 
   test("reviewDiffRead is a host read with only runId and optional slice", () => {

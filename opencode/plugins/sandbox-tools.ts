@@ -749,6 +749,16 @@ export default function sandboxToolsPlugin() {
           ]).optional(),
           inputRef: z.string().min(1).max(255).optional(),
           inputRefs: z.array(z.string().min(1).max(255)).max(16).optional(),
+          adjudication: reviewPipelineEnvelopeArg,
+          preparedRef: z.string().min(1).max(255).optional(),
+          mergeRef: z.string().min(1).max(255).optional(),
+          dispatch_records: reviewPipelineEnvelopeArg,
+          validator_lifecycle_results: reviewPipelineEnvelopeArg,
+          plan_assessment: reviewPipelineEnvelopeArg,
+          parent_run_metadata: reviewPipelineEnvelopeArg,
+          prepared: z.unknown().optional(),
+          merge: z.unknown().optional(),
+          screen_results: z.unknown().optional(),
           runId: z.string().regex(/^[a-f0-9]{32}$/),
         },
         execute: async (args, ctx) => {
@@ -1315,6 +1325,10 @@ const reviewDispositionArg = z.enum(["scope_changed", "invalidated", "escalated"
 const reviewOrderArg = z.number().int().min(0).max(32);
 const reviewReasonArg = z.string().min(1).max(4096);
 const reviewDetailArg = z.string().min(1).max(16384);
+const reviewPipelineEnvelopeArg = z.unknown().refine((value) => {
+  try { const text = JSON.stringify(value); return text !== undefined && Buffer.byteLength(text, "utf8") <= 32 * 1024; }
+  catch { return false; }
+}).optional();
 const reviewActorArg = z.string().min(1).max(128);
 const reviewBaseRefArg = z.string().min(1).max(1024);
 const reviewCorrectionLinesArg = z.number().int().positive();

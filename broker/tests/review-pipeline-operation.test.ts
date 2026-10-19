@@ -39,7 +39,7 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", chunk => input += chunk);
 process.stdin.on("end", () => {
   if (args[0] === "finalize" && input.includes("reject-finalize")) process.exit(1);
-  const output = args[0] === "finalize" || input.includes("writing-wrapper")
+  const output = (args[0] === "finalize" && !input.includes("capture-finalize-input")) || input.includes("writing-wrapper")
     ? { kind: "writing", artifact: { verdict: "approved" } }
     : { phase: args[0], input };
   process.stdout.write(JSON.stringify(output));
@@ -60,6 +60,19 @@ process.stdin.on("end", () => {
   };
   internals.ctx.store.touch(SESSION_ID, { agent: "gentle-orchestrator", state: "HOST_READ_ONLY" });
   return { root, project, secondProject, helperPath, auditPath, reviewRunRoot, config, internals, store: new ReviewRunStore({ root: reviewRunRoot, projectRoot: project }) };
+}
+
+function finalizeInputs(env: ReturnType<typeof operationFixture>, runId: string, marker?: string) {
+  env.store.addArtifact(SESSION_ID, runId, "phase-screen-correctness.json", Buffer.from(JSON.stringify({ phase: "screen", input: "screen" })));
+  env.store.addArtifact(SESSION_ID, runId, "phase-prepare.json", Buffer.from(JSON.stringify({ phase: "prepare", groups: [] })));
+  env.store.addArtifact(SESSION_ID, runId, "phase-merge.json", Buffer.from(JSON.stringify({ phase: "merge", decisions: [] })));
+  return {
+    preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json",
+    dispatch_records: [{ reviewer: "correctness", status: "completed", ...(marker ? { marker } : {}) }],
+    validator_lifecycle_results: [{ validator: "unit", status: "passed" }],
+    plan_assessment: { verdict: "complete", residual_actionable_work: [], advisory_outputs: [] },
+    parent_run_metadata: { run_id: runId, branch: "master", head_sha: env.store.readRecord(SESSION_ID, runId).headObjectId, mode: "standard", harness: "opencode", timestamps: { completed_at: "2026-10-19T00:00:00.000Z" }, applied_fixes: [], selected_dispatches: [], validation: [] },
+  };
 }
 
 test("shared review store mapping includes root, denied prefixes, and every configured cap", () => {
@@ -108,7 +121,7 @@ test("persist dispatch forwards configured helper path, digest, and interpreter 
   for (const writer of runs) {
     const result = await env.internals.dispatch({
       version: 1, id: `finalize-${writer.record.runId}`, operation: "reviewPipelineRun", sessionID: SESSION_ID,
-      payload: { projectDir: env.project, phase: "finalize", runId: writer.record.runId, stdin: "{}" },
+      payload: { projectDir: env.project, phase: "finalize", runId: writer.record.runId, ...finalizeInputs(env, writer.record.runId) },
     }) as { outcome: string; artifact: { name: string } };
     expect(result.outcome).toBe("accepted");
     expect(result.artifact.name).toBe("phase-finalize.json");
@@ -145,7 +158,7 @@ test("persist refuses a run created in project A when requested for project B", 
   }) as { runId: string };
   const phase = await env.internals.dispatch({
     version: 1, id: "project-a-finalize", operation: "reviewPipelineRun", sessionID: SESSION_ID,
-    payload: { projectDir: env.project, phase: "finalize", runId: materialized.runId, stdin: "{}" },
+    payload: { projectDir: env.project, phase: "finalize", runId: materialized.runId, ...finalizeInputs(env, materialized.runId) },
   }) as { artifact: { name: string } };
   await expect(env.internals.dispatch({
     version: 1, id: "project-b-persist", operation: "reviewPersist", sessionID: SESSION_ID,
@@ -173,7 +186,7 @@ test("persist requires finalizeRef to equal the recorded finalize artifact", asy
   const writer = env.store.createRun(SESSION_ID);
   await env.internals.dispatch({
     version: 1, id: "finalize-for-ref", operation: "reviewPipelineRun", sessionID: SESSION_ID,
-    payload: { projectDir: env.project, phase: "finalize", runId: writer.record.runId, stdin: "{}" },
+    payload: { projectDir: env.project, phase: "finalize", runId: writer.record.runId, ...finalizeInputs(env, writer.record.runId) },
   });
   await expect(env.internals.dispatch({
     version: 1, id: "persist-wrong-ref", operation: "reviewPersist", sessionID: SESSION_ID,
@@ -187,7 +200,7 @@ test("persist refuses finalize bytes changed after publication", async () => {
   const writer = env.store.createRun(SESSION_ID);
   const phase = await env.internals.dispatch({
     version: 1, id: "finalize-for-tamper", operation: "reviewPipelineRun", sessionID: SESSION_ID,
-    payload: { projectDir: env.project, phase: "finalize", runId: writer.record.runId, stdin: "{}" },
+    payload: { projectDir: env.project, phase: "finalize", runId: writer.record.runId, ...finalizeInputs(env, writer.record.runId) },
   }) as { artifact: { name: string } };
   writeFileSync(join(env.store.runDir(SESSION_ID, writer.record.runId), phase.artifact.name), JSON.stringify({ kind: "writing", artifact: { verdict: "changed" } }), { mode: 0o600 });
   await expect(env.internals.dispatch({
@@ -201,7 +214,7 @@ test("persist refuses provenance whose recorded phase is not finalize", async ()
   const writer = env.store.createRun(SESSION_ID);
   const phase = await env.internals.dispatch({
     version: 1, id: "finalize-for-phase-check", operation: "reviewPipelineRun", sessionID: SESSION_ID,
-    payload: { projectDir: env.project, phase: "finalize", runId: writer.record.runId, stdin: "{}" },
+    payload: { projectDir: env.project, phase: "finalize", runId: writer.record.runId, ...finalizeInputs(env, writer.record.runId) },
   }) as { artifact: { name: string } };
   const metadataPath = join(env.store.runDir(SESSION_ID, writer.record.runId), "metadata.json");
   const metadata = JSON.parse(readFileSync(metadataPath, "utf8")) as { finalizeProvenance: { phase: string } };
@@ -218,7 +231,7 @@ test("persist refuses finalize phase outcomes that were not accepted", async () 
   const writer = env.store.createRun(SESSION_ID);
   await expect(env.internals.dispatch({
     version: 1, id: "rejected-finalize", operation: "reviewPipelineRun", sessionID: SESSION_ID,
-    payload: { projectDir: env.project, phase: "finalize", runId: writer.record.runId, stdin: "reject-finalize" },
+    payload: { projectDir: env.project, phase: "finalize", runId: writer.record.runId, ...finalizeInputs(env, writer.record.runId, "reject-finalize") },
   })).resolves.toMatchObject({ outcome: "structurally_rejected" });
   await expect(env.internals.dispatch({
     version: 1, id: "persist-rejected-finalize", operation: "reviewPersist", sessionID: SESSION_ID,
@@ -252,26 +265,36 @@ test("prepare dispatch assembles two screened returns from inputRefs in helper s
   expect(JSON.parse(readFileSync(env.auditPath, "utf8").trim().split("\n").at(-1)!)).toEqual([process.execPath, env.helperPath, "prepare"]);
 });
 
-test("reviewPipeline dispatch chains all phase outputs by exact artifact reference", async () => {
+test("dispatch composes merge and finalize stdin from same-run artifacts", async () => {
   const env = operationFixture();
-  const writer = env.store.createRun(SESSION_ID);
-  const phases = ["screen", "prepare", "merge", "finalize"] as const;
-  let input = "seed";
-  for (const [index, phase] of phases.entries()) {
-    const result = await env.internals.dispatch({
-      version: 1, id: `chain-${phase}`, operation: "reviewPipelineRun", sessionID: SESSION_ID,
-      payload: { projectDir: env.project, phase, ...(phase === "screen" ? { reviewer: "correctness" } : {}), runId: writer.record.runId,
-        ...(index === 0 ? { stdin: input } : { inputRef: phases[index - 1] === "screen" ? "phase-screen-correctness.json" : `phase-${phases[index - 1]}.json` }) },
-    }) as { outcome: string; artifact: { name: string; bytes: number; sha256: string }; summary: unknown };
-    const expected = phase === "finalize"
-      ? JSON.stringify({ kind: "writing", artifact: { verdict: "approved" } })
-      : JSON.stringify({ phase, input });
-    const artifactName = phase === "screen" ? "phase-screen-correctness.json" : `phase-${phase}.json`;
-    const bytes = readFileSync(join(env.store.runDir(SESSION_ID, writer.record.runId), artifactName));
-    expect(bytes.toString("utf8")).toBe(expected);
-    expect(result).toMatchObject({ outcome: "accepted", artifact: { name: artifactName, bytes: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") } });
-    expect(JSON.stringify(result)).not.toContain(expected);
-    input = bytes.toString("utf8");
+  const writer = env.store.createRun(SESSION_ID, { headObjectId: "a".repeat(40) });
+  const runDir = env.store.runDir(SESSION_ID, writer.record.runId);
+  const dispatch = (id: string, fields: Record<string, unknown>) => env.internals.dispatch({ version: 1, id, operation: "reviewPipelineRun", sessionID: SESSION_ID, payload: { projectDir: env.project, runId: writer.record.runId, ...fields } });
+  await dispatch("screen-c", { phase: "screen", reviewer: "correctness", stdin: '{"screened":"c"}' });
+  await dispatch("screen-t", { phase: "screen", reviewer: "testing", stdin: '{"screened":"t"}' });
+  await dispatch("prepare", { phase: "prepare", inputRefs: ["phase-screen-correctness.json", "phase-screen-testing.json"] });
+  const adjudication = { decisions: [{ finding_id: "f1", decision: "accept" }] };
+  await dispatch("merge", { phase: "merge", inputRef: "phase-prepare.json", adjudication });
+  const envelopes = {
+    dispatch_records: [{ reviewer: "correctness", status: "completed" }], validator_lifecycle_results: [{ validator: "unit", status: "passed" }],
+    plan_assessment: { verdict: "complete", residual_actionable_work: [], advisory_outputs: ["capture-finalize-input"] },
+    parent_run_metadata: { run_id: writer.record.runId, branch: "master", head_sha: "a".repeat(40), mode: "standard", harness: "opencode", timestamps: { completed_at: "now" }, applied_fixes: [], selected_dispatches: [], validation: [] },
+  };
+  await dispatch("finalize", { phase: "finalize", preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json", ...envelopes });
+  const screenResults = ["phase-screen-correctness.json", "phase-screen-testing.json"].map((ref) => JSON.parse(readFileSync(join(runDir, ref), "utf8")));
+  const prepared = JSON.parse(readFileSync(join(runDir, "phase-prepare.json"), "utf8"));
+  const merged = JSON.parse(readFileSync(join(runDir, "phase-merge.json"), "utf8"));
+  const received = readFileSync(env.auditPath, "utf8").trim().split("\n").map((row) => JSON.parse(row) as string[]).slice(-3).map((args) => {
+    const phase = args[2]!;
+    return JSON.parse((JSON.parse(readFileSync(join(runDir, `phase-${phase}.json`), "utf8")) as { input: string }).input);
+  });
+  expect(received).toEqual([
+    { screen_results: screenResults }, { prepared, adjudication },
+    { merge: merged, prepared, screen_results: screenResults, ...envelopes },
+  ]);
+  for (const field of ["prepared", "merge", "screen_results"] as const) {
+    await expect(dispatch(`override-${field}`, { phase: "merge", inputRef: "phase-prepare.json", adjudication: { decisions: [] }, [field]: {} }))
+      .rejects.toMatchObject({ code: `review_pipeline_${field}_override_forbidden` });
   }
 });
 

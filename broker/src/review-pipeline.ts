@@ -12,6 +12,8 @@ import type { BrokerConfig } from "./config.ts";
 
 export const REVIEW_PIPELINE_MAX_STDIN_BYTES = 256 * 1024;
 export const REVIEW_PIPELINE_MAX_INPUT_REFS = 16;
+export const REVIEW_PIPELINE_MAX_ENVELOPE_BYTES = 32 * 1024;
+export const REVIEW_PIPELINE_MAX_CALLER_BYTES = 64 * 1024;
 // These are the ce:review persona names from the Systematic persona catalog, deliberately NOT the native 4R lens names.
 export const REVIEW_PIPELINE_REVIEWERS = [
   "correctness",
@@ -44,6 +46,16 @@ export interface ReviewPipelinePayload {
   stdin?: unknown;
   inputRef?: unknown;
   inputRefs?: unknown;
+  adjudication?: unknown;
+  preparedRef?: unknown;
+  mergeRef?: unknown;
+  dispatch_records?: unknown;
+  validator_lifecycle_results?: unknown;
+  plan_assessment?: unknown;
+  parent_run_metadata?: unknown;
+  prepared?: unknown;
+  merge?: unknown;
+  screen_results?: unknown;
   runId: unknown;
 }
 
@@ -69,6 +81,86 @@ function diagnostic(result: SpawnResult): string {
   return bytes.subarray(0, STDERR_MAX_BYTES).toString("utf8");
 }
 
+function phaseObject(context: ReviewPipelineStoreContext, runId: string, ref: string): Record<string, unknown> {
+  const bytes = readRunArtifact({ runDir: context.store.runDir(context.sessionID, runId), name: ref, maxFileBytes: context.store.caps.maxFileBytes }).data;
+  let value: unknown;
+  try { value = JSON.parse(bytes.toString("utf8")) as unknown; }
+  catch { throw new ReviewPipelineError("review_pipeline_input_ref_unparseable", `phase artifact is not parseable JSON: ${ref}`); }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new ReviewPipelineError("review_pipeline_input_ref_not_object", `phase artifact must contain a JSON object: ${ref}`);
+  return value as Record<string, unknown>;
+}
+
+function callerBytes(entries: Array<[string, unknown]>): Buffer[] {
+  let total = 0;
+  return entries.map(([field, value]) => {
+    let text: string | undefined;
+    try { text = JSON.stringify(value); } catch { /* rejected below */ }
+    if (text === undefined || value === null || typeof value !== "object") throw new ReviewPipelineError(`review_pipeline_${field}_invalid`, `${field} must be a JSON object or array`);
+    const bytes = Buffer.from(text, "utf8");
+    if (bytes.byteLength > REVIEW_PIPELINE_MAX_ENVELOPE_BYTES) throw new ReviewPipelineError(`review_pipeline_${field}_too_large`, `${field} exceeds envelope cap ${REVIEW_PIPELINE_MAX_ENVELOPE_BYTES} bytes (observed ${bytes.byteLength} bytes)`);
+    total += bytes.byteLength;
+    if (total > REVIEW_PIPELINE_MAX_CALLER_BYTES) throw new ReviewPipelineError("review_pipeline_caller_envelopes_too_large", `caller-supplied envelopes exceed total cap ${REVIEW_PIPELINE_MAX_CALLER_BYTES} bytes (observed ${total} bytes)`);
+    return bytes;
+  });
+}
+
+function assertRecordedComposedSize(record: ReturnType<ReviewRunStore["readRecord"]>, refs: readonly string[]): void {
+  const names = new Set(refs);
+  const total = record.artifacts.reduce((sum, artifact) => names.has(artifact.name) ? sum + artifact.bytes : sum, 0);
+  if (total > REVIEW_PIPELINE_MAX_STDIN_BYTES) {
+    throw new ReviewPipelineError(
+      "review_pipeline_composed_input_too_large",
+      `review pipeline stdin exceeds cap ${REVIEW_PIPELINE_MAX_STDIN_BYTES} bytes (observed ${total} bytes)`,
+    );
+  }
+}
+
+function composeMerge(payload: ReviewPipelinePayload, context?: ReviewPipelineStoreContext): Buffer {
+  for (const field of ["dispatch_records", "validator_lifecycle_results", "plan_assessment", "parent_run_metadata"] as const) {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) throw new ReviewPipelineError(`review_pipeline_${field}_phase_forbidden`, `${field} is only valid for finalize`);
+  }
+  if (payload.stdin !== undefined || payload.inputRefs !== undefined || payload.preparedRef !== undefined || payload.mergeRef !== undefined) throw new ReviewPipelineError("review_pipeline_stdin_source_conflict", "merge accepts only inputRef naming its prepared artifact");
+  if (typeof payload.inputRef !== "string" || !context) throw new ReviewPipelineError("review_pipeline_input_ref_invalid", "merge requires inputRef naming a prepared artifact in this review run");
+  const match = matchPhaseArtifact(payload.inputRef);
+  if (!match) throw new ReviewPipelineError("review_pipeline_input_ref_unknown", "merge inputRef does not name a recognized phase artifact");
+  if (match[1] !== "prepare" || match[2]) throw new ReviewPipelineError("review_pipeline_merge_ref_phase_invalid", `merge inputRef must name phase-prepare.json (received ${payload.inputRef})`);
+  if (payload.adjudication === undefined) throw new ReviewPipelineError("review_pipeline_adjudication_missing", "merge requires adjudication");
+  const [decisionBytes] = callerBytes([["adjudication", payload.adjudication]]);
+  const record = context.store.readRecord(context.sessionID, payload.runId as string);
+  assertRecordedComposedSize(record, [payload.inputRef]);
+  return Buffer.from(JSON.stringify({ prepared: phaseObject(context, payload.runId as string, payload.inputRef), adjudication: JSON.parse(decisionBytes!.toString("utf8")) }), "utf8");
+}
+
+function composeFinalize(payload: ReviewPipelinePayload, context?: ReviewPipelineStoreContext): Buffer {
+  if (payload.stdin !== undefined || payload.inputRef !== undefined || payload.inputRefs !== undefined) throw new ReviewPipelineError("review_pipeline_stdin_source_conflict", "finalize accepts only preparedRef and mergeRef artifact references");
+  if (payload.adjudication !== undefined) throw new ReviewPipelineError("review_pipeline_adjudication_forbidden", "adjudication is only valid for merge");
+  if (!context || typeof payload.preparedRef !== "string" || typeof payload.mergeRef !== "string") throw new ReviewPipelineError("review_pipeline_finalize_refs_missing", "finalize requires preparedRef and mergeRef from this review run");
+  if (payload.preparedRef === payload.mergeRef) throw new ReviewPipelineError("review_pipeline_input_ref_duplicate", "finalize preparedRef and mergeRef must be distinct");
+  const preparedMatch = matchPhaseArtifact(payload.preparedRef);
+  if (!preparedMatch || preparedMatch[1] !== "prepare" || preparedMatch[2]) throw new ReviewPipelineError("review_pipeline_finalize_prepared_ref_phase_invalid", `preparedRef must name phase-prepare.json (received ${payload.preparedRef})`);
+  const mergeMatch = matchPhaseArtifact(payload.mergeRef);
+  if (!mergeMatch || mergeMatch[1] !== "merge" || mergeMatch[2]) throw new ReviewPipelineError("review_pipeline_finalize_merge_ref_phase_invalid", `mergeRef must name phase-merge.json (received ${payload.mergeRef})`);
+  const fields = ["dispatch_records", "validator_lifecycle_results", "plan_assessment", "parent_run_metadata"] as const;
+  const encoded = callerBytes(fields.map((field) => [field, payload[field]]));
+  const record = context.store.readRecord(context.sessionID, payload.runId as string);
+  const screens = [...new Set(record.artifacts.map(({ name }) => name).filter((name) => { const m = matchPhaseArtifact(name); return m?.[1] === "screen" && m[2] !== undefined; }))];
+  if (screens.length === 0) throw new ReviewPipelineError("review_pipeline_finalize_screen_results_missing", "finalize requires at least one screened artifact in this review run");
+  if (new Set([payload.preparedRef, payload.mergeRef, ...screens]).size !== screens.length + 2) throw new ReviewPipelineError("review_pipeline_input_ref_duplicate", "finalize phase references must be unique");
+  assertRecordedComposedSize(record, [payload.preparedRef, payload.mergeRef, ...screens]);
+  const parentRunMetadataIndex = fields.indexOf("parent_run_metadata");
+  const parentRunMetadata = JSON.parse(encoded[parentRunMetadataIndex]!.toString("utf8")) as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(parentRunMetadata, "head_sha") && parentRunMetadata.head_sha !== record.headObjectId) {
+    throw new ReviewPipelineError("review_pipeline_parent_head_sha_mismatch", "parent_run_metadata.head_sha does not match the resolved review run head object id");
+  }
+  const composed = {
+    merge: phaseObject(context, payload.runId as string, payload.mergeRef),
+    prepared: phaseObject(context, payload.runId as string, payload.preparedRef),
+    screen_results: screens.map((ref) => phaseObject(context, payload.runId as string, ref)),
+    ...Object.fromEntries(fields.map((field, index) => [field, field === "parent_run_metadata" ? { ...parentRunMetadata, head_sha: record.headObjectId } : JSON.parse(encoded[index]!.toString("utf8"))])),
+  };
+  return Buffer.from(JSON.stringify(composed), "utf8");
+}
+
 export async function runReviewPipeline(
   payload: ReviewPipelinePayload,
   config: Pick<BrokerConfig, "reviewHelperPath" | "reviewHelperSha256" | "reviewHelperInterpreter">,
@@ -87,9 +179,20 @@ export async function runReviewPipeline(
     throw new ReviewPipelineError("review_pipeline_reviewer_forbidden", "reviewer is only valid for screen");
   }
   assertReviewRunId(payload.runId);
+  for (const field of ["prepared", "merge", "screen_results"] as const) {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) throw new ReviewPipelineError(`review_pipeline_${field}_override_forbidden`, `caller may not supply helper-produced field ${field}`);
+  }
   const hasStdin = payload.stdin !== undefined;
   const hasInputRef = payload.inputRef !== undefined;
   const hasInputRefs = payload.inputRefs !== undefined;
+  let input: Buffer;
+  let composedInput = false;
+  if (phase === "merge") { input = composeMerge(payload, storeContext); composedInput = true; }
+  else if (phase === "finalize") { input = composeFinalize(payload, storeContext); composedInput = true; }
+  else {
+  for (const field of ["adjudication", "preparedRef", "mergeRef", "dispatch_records", "validator_lifecycle_results", "plan_assessment", "parent_run_metadata"] as const) {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) throw new ReviewPipelineError(`review_pipeline_${field}_phase_forbidden`, `${field} is not valid for ${phase}`);
+  }
   const sourceCount = Number(hasStdin) + Number(hasInputRef) + Number(hasInputRefs);
   if (sourceCount === 0) {
     throw new ReviewPipelineError("review_pipeline_stdin_source_missing", "exactly one of stdin, inputRef, or inputRefs must be supplied; none was provided");
@@ -97,7 +200,6 @@ export async function runReviewPipeline(
   if (sourceCount > 1) {
     throw new ReviewPipelineError("review_pipeline_stdin_source_conflict", "exactly one of stdin, inputRef, or inputRefs must be supplied; multiple sources were provided");
   }
-  let input: Buffer;
   if (hasInputRefs) {
     if (phase !== "prepare") {
       throw new ReviewPipelineError("review_pipeline_input_refs_phase_forbidden", `inputRefs is only valid for prepare (received ${phase})`);
@@ -159,9 +261,10 @@ export async function runReviewPipeline(
     }
     input = typeof payload.stdin === "string" ? Buffer.from(payload.stdin, "utf8") : Buffer.from(payload.stdin as number[]);
   }
-  if ((hasStdin || hasInputRefs) && input.byteLength > REVIEW_PIPELINE_MAX_STDIN_BYTES) {
+  }
+  if ((composedInput || hasStdin || hasInputRefs) && input.byteLength > REVIEW_PIPELINE_MAX_STDIN_BYTES) {
     throw new ReviewPipelineError(
-      hasInputRefs ? "review_pipeline_input_refs_too_large" : "review_pipeline_stdin_too_large",
+      composedInput ? "review_pipeline_composed_input_too_large" : hasInputRefs ? "review_pipeline_input_refs_too_large" : "review_pipeline_stdin_too_large",
       `review pipeline stdin exceeds cap ${REVIEW_PIPELINE_MAX_STDIN_BYTES} bytes (observed ${input.byteLength} bytes)`,
     );
   }

@@ -1,5 +1,50 @@
 # ODD task — review-pipeline-phases
 
+## Continuation addendum — parity and isolated reverts
+
+The exact `reviewPipelineRun` expected payload keys in `broker/tests/operations-parity.test.ts` were copied after reading `ALLOWED_PAYLOAD_KEYS.reviewPipelineRun` at `broker/src/validation.ts:1021`: `["projectDir", "phase", "reviewer", "stdin", "inputRef", "inputRefs", "runId", "adjudication", "preparedRef", "mergeRef", "dispatch_records", "validator_lifecycle_results", "plan_assessment", "parent_run_metadata", "prepared", "merge", "screen_results"]`. Only that exact-list assertion changed; the other assertions in the test file remain intact. The file contained no other exact-key assertions invalidated by these fields.
+
+- Focused: `bun --cwd broker test tests/operations-parity.test.ts --reporter=dot` — 4 pass / 0 fail / 17 expect calls.
+- Full: `bun --cwd broker test --reporter=dot` — 1171 pass / 0 fail / 5029 expect calls across 71 files.
+- Build: from `broker`, `bun build --target=bun src/main.ts` completed without a build error.
+
+Six isolated guard reverts were run one at a time. Each row records hashes sampled immediately before its removal and after restoration; all restores were byte-identical. Focused commands intentionally selected the test names containing those assertions.
+
+| Guard removed | Command and observed failure | Before SHA-256 | After SHA-256 |
+|---|---|---|---|
+| Caller override refusal | `bun test tests/review-pipeline.test.ts -t helper-owned --reporter=dot` — expected `review_pipeline_prepared_override_forbidden`, received `review_run_artifact_not_found`. | `8dccaa4fa8c611b822563d5053a290512014a023cb949799ba89d021a7bece0a` | `8dccaa4fa8c611b822563d5053a290512014a023cb949799ba89d021a7bece0a` |
+| Wrong-phase reference refusal | Same helper-owned focused command — expected `review_pipeline_merge_ref_phase_invalid`, but the valid screen artifact passed the phase check and the promise resolved. | `8dccaa4fa8c611b822563d5053a290512014a023cb949799ba89d021a7bece0a` | `8dccaa4fa8c611b822563d5053a290512014a023cb949799ba89d021a7bece0a` |
+| Duplicate-reference refusal | Same helper-owned focused command — expected `review_pipeline_input_ref_duplicate`, received `review_pipeline_finalize_merge_ref_phase_invalid`. | `8dccaa4fa8c611b822563d5053a290512014a023cb949799ba89d021a7bece0a` | `8dccaa4fa8c611b822563d5053a290512014a023cb949799ba89d021a7bece0a` |
+| 256 KiB composed-input cap | `bun test tests/review-pipeline.test.ts -t composed --reporter=dot` — expected cap refusal, but the oversized merge promise resolved. | `8dccaa4fa8c611b822563d5053a290512014a023cb949799ba89d021a7bece0a` | `8dccaa4fa8c611b822563d5053a290512014a023cb949799ba89d021a7bece0a` |
+| Per-envelope 32 KiB cap | Same helper-owned focused command — expected `review_pipeline_dispatch_records_too_large`, but the finalize promise resolved. | `8dccaa4fa8c611b822563d5053a290512014a023cb949799ba89d021a7bece0a` | `8dccaa4fa8c611b822563d5053a290512014a023cb949799ba89d021a7bece0a` |
+| 64 KiB total caller-envelope cap | Same helper-owned focused command — expected `review_pipeline_caller_envelopes_too_large`, but the finalize promise resolved. | `8dccaa4fa8c611b822563d5053a290512014a023cb949799ba89d021a7bece0a` | `8dccaa4fa8c611b822563d5053a290512014a023cb949799ba89d021a7bece0a` |
+
+
+
+## Addendum — bidirectional merge/finalize composition
+
+Established helper contracts (the helper is outside the worker boundary; the orchestrator read these exact ranges from `validate-review.mjs`): `prepare` receives `{screen_results:[...]}`; `merge` receives `{prepared:<prepare output>,adjudication:{decisions:[...]}}` (`runMergeSubcommand`, lines 10297–10313); `finalize` receives `{merge,prepared,screen_results,dispatch_records,validator_lifecycle_results,plan_assessment,parent_run_metadata}` (`finalizeReview`, lines 9934–9953). The latter two ranges and source attribution are supplied by the orchestrator; this worker did not access the external helper.
+
+Composition is bidirectional. For merge the caller supplies `adjudication` and references the same-run `phase-prepare.json` through `inputRef`; the broker reads it through `readRunArtifact` and assembles `{prepared,adjudication}`. For finalize the caller supplies only `dispatch_records`, `validator_lifecycle_results`, `plan_assessment`, and `parent_run_metadata`; `preparedRef` and `mergeRef` identify same-run artifacts and screen results are enumerated from that run's published screen artifacts. The broker composes the complete helper envelope and rejects `prepared`, `merge`, or `screen_results` from callers so phase state cannot be substituted.
+
+Every caller envelope is capped at 32 KiB and all caller envelopes together at 64 KiB. Composed stdin is capped at 256 KiB; each overage is refused with the cap and observed byte count (never truncated). Wrong-phase and duplicate refs are refused. Existing screen/prepare `stdin`, `inputRef`, and `inputRefs` source semantics remain unchanged.
+
+RED observed: the dispatch-chain test initially failed at broker payload validation with `unexpected field 'adjudication' in reviewPipelineRun payload`, proving the new merge envelope was not yet registered. During an earlier implementation attempt, before that sandbox expired, focused tests also failed for absent phase composition. Final focused check: `bun test tests/review-pipeline.test.ts tests/review-pipeline-operation.test.ts tests/sandbox-tool-contract.test.ts --reporter=dot` from `broker` — 57 pass / 0 fail / 229 expect calls. Build: `bun build --target=bun src/main.ts` from `broker` completed without a build error. Full required command `bun --cwd broker test --reporter=dot` — 1170 pass / 1 fail across 1171 tests; the sole failure is the pre-existing `operations-parity.test.ts` exact allowlist assertion, which still expects the old seven-key array. That test is outside this task's allowed edit surfaces, so parity-test repair and a green full-suite result remain pending explicit scope authorization.
+
+Isolated guard-removal experiments (each showed a named assertion failing; source was restored after each edit). Shared `broker/src/review-pipeline.ts` digest observed before the experiments and after the restoration sequence: `8dccaa4fa8c611b822563d5053a290512014a023cb949799ba89d021a7bece0a` in both observations. The exact before/after pair is recorded for each row as that shared source-state digest; the final focused suite passed after all restorations.
+
+| Guard removed | Test command and observed failure | Before SHA-256 | After SHA-256 |
+|---|---|---|---|
+| Caller override refusal | `bun test tests/review-pipeline.test.ts --reporter=dot` — expected `review_pipeline_prepared_override_forbidden`, instead the attempted read reached `review_run_artifact_not_found`. | `8dccaa4fa8c611b822563d5053a290512014a023cb949799ba89d021a7bece0a` | same |
+| Wrong-phase reference refusal | Same focused command — `review_pipeline_merge_ref_phase_invalid` expected, but a valid screen artifact passed the phase check and the promise resolved. | same | same |
+| Duplicate-reference refusal | Same focused command — expected `review_pipeline_input_ref_duplicate`, received `review_pipeline_finalize_merge_ref_phase_invalid`. | same | same |
+| 256 KiB composed-input cap | Same focused command — expected refusal, but the oversized merge promise resolved. | same | same |
+| Per-envelope 32 KiB cap | Same focused command — expected `review_pipeline_dispatch_records_too_large`, but the finalize promise resolved. | same | same |
+| 64 KiB total caller-envelope cap | Same focused command — expected `review_pipeline_caller_envelopes_too_large`, but the finalize promise resolved. | same | same |
+
+No tested guard remained green after removal. The final focused command is green; the full-suite exception above is solely the uneditable parity expectation.
+
+
 ## Objective
 Make `ce:review` run end to end from the secure orchestrator: expose the four pure-stdin validator phases with bounded inline stdin and by-reference chaining, and the single approval-gated persist step that extracts the artifact from `finalize`, writes it into the project run directory, and validates it.
 
@@ -435,6 +480,27 @@ First live exercise after install:
 - The native lane's `assertReviewLens` and `INSTALLED_REVIEW_AGENTS` were deliberately not touched; the existing `preserves all four native review lenses and relay agents independently of pipeline personas` regression test passed.
 - Revert experiment: starting source SHA-256 `d675d3ee887a6c90befc530f69b13e9e9e18083b1fac49b88827695662f44451`; reverted only the derived suffix validation to the hardcoded native 4R suffixes and ran `bun --cwd broker test tests/review-pipeline.test.ts tests/review-pipeline-operation.test.ts --reporter=dot`. Observed failures: `accepts a persona-named screen artifact as a later phase inputRef` and `reviewPipeline dispatch chains all phase outputs by exact artifact reference`. The unknown-persona refusal test continued to pass because both old and new grammars reject an unknown suffix. Restored validation; ending SHA-256 `d675d3ee887a6c90befc530f69b13e9e9e18083b1fac49b88827695662f44451` (byte-identical).
 - Final verification: `bun --cwd broker test tests/review-pipeline.test.ts tests/review-pipeline-operation.test.ts --reporter=dot` — 37 pass / 0 fail / 136 expect calls across 2 files; `bun --cwd broker test --reporter=dot` — 1167 pass / 0 fail / 4999 expect calls across 71 files; `bun build --target=bun src/main.ts` from `broker` — succeeded.
+
+## Progress addendum — composed-size preflight and finalize head binding (2026-10-19)
+
+- Both supplied findings are resolved in `broker/src/review-pipeline.ts`; regression coverage is in `broker/tests/review-pipeline.test.ts` and relevant operation fixtures are updated in `broker/tests/review-pipeline-operation.test.ts`.
+- `composeMerge` and `composeFinalize` now sum the run-recorded byte lengths of the artifacts in their composition before artifact reads. If the recorded total exceeds `REVIEW_PIPELINE_MAX_STDIN_BYTES`, both refuse with `review_pipeline_composed_input_too_large`, the cap, and observed total. The existing final composed-byte check remains unchanged and authoritative; inputs are never truncated.
+- Finalize compares an own `head_sha` property on caller `parent_run_metadata` against `record.headObjectId`, refusing mismatches with `review_pipeline_parent_head_sha_mismatch`; missing or matching values are emitted bound to the run record's object ID.
+- Authority split: broker-authoritative finalize fields are `merge`, `prepared`, `screen_results`, and `parent_run_metadata.head_sha`. Caller-authoritative fields are `dispatch_records`, `validator_lifecycle_results`, `plan_assessment.verdict`, `parent_run_metadata.branch`, `applied_fixes`, `mode`, `harness`, and `timestamps`. The broker cannot establish truth for the caller-authoritative fields; a manipulated caller can misreport the branch, verdict, or applied fixes.
+- Recorded advisories, not changed: the override check uses `Object.prototype.hasOwnProperty.call`, and serialized output uses `JSON.stringify`, which does not serialize prototype-polluted properties; protection relies on both facts. Cross-run artifact mixing was verified-correct because every referenced artifact is read from the same run directory; no change was made.
+- RED observed before guards: `merge preflight refuses recorded oversized artifacts before reading them` failed because artifact read counter was 1, `finalize preflight refuses recorded oversized artifacts before reading them` failed because artifact read counter was 3, and `finalize binds parent metadata head_sha to the resolved run head` observed missing `head_sha`; the mismatch assertion also expected a refusal that did not yet exist.
+- Isolated revert table; each restoration was byte-identical (`broker/src/review-pipeline.ts` SHA-256 before and after each experiment: `feb8835b9fdf4b3e80a4ca451496b6374cb06b486b7f4488525f6385ed2b328e`):
+
+  | Guard removed | Command and observed named failure | Before SHA-256 | After SHA-256 |
+  |---|---|---|---|
+  | Merge recorded-size preflight | `bun test tests/review-pipeline.test.ts -t "merge preflight refuses recorded oversized artifacts before reading them" --reporter=dot` — expected zero artifact reads, observed 1. | `feb8835b9fdf4b3e80a4ca451496b6374cb06b486b7f4488525f6385ed2b328e` | `feb8835b9fdf4b3e80a4ca451496b6374cb06b486b7f4488525f6385ed2b328e` |
+  | Finalize recorded-size preflight | `bun test tests/review-pipeline.test.ts -t "finalize preflight refuses recorded oversized artifacts before reading them" --reporter=dot` — expected zero artifact reads, observed 3. | `feb8835b9fdf4b3e80a4ca451496b6374cb06b486b7f4488525f6385ed2b328e` | `feb8835b9fdf4b3e80a4ca451496b6374cb06b486b7f4488525f6385ed2b328e` |
+  | Mismatched-head refusal | `bun test tests/review-pipeline.test.ts -t "finalize binds parent metadata head_sha to the resolved run head" --reporter=dot` — expected mismatch refusal, but the promise resolved. | `feb8835b9fdf4b3e80a4ca451496b6374cb06b486b7f4488525f6385ed2b328e` | `feb8835b9fdf4b3e80a4ca451496b6374cb06b486b7f4488525f6385ed2b328e` |
+- No new test remained green when its corresponding guard was removed.
+- Checks: `bun test tests/review-pipeline.test.ts tests/review-pipeline-operation.test.ts --reporter=dot` from `broker` — 44 pass / 0 fail / 173 expect calls; `bun --cwd broker test --reporter=dot` from the repository root — 1174 pass / 0 fail / 5038 expect calls across 71 files; `bun build --target=bun src/main.ts` from `broker` — completed without a build error.
+- Test-total delta is +3 tests from the stated 1171-test baseline, corresponding to the two preflight tests and one head-binding test. No test remained green when its matching guard was reverted; all three isolated reverts failed as recorded above and the source hash matched before/after every restoration.
+- Cross-run artifact mixing remains verified-correct because each composition uses the run-specific directory from the same record/session; no cross-run behavior was modified.
+- Final source hash and reviewability receipt are included in the sandbox delivery result.
 
 ## Progress addendum — inputRefs post-code advisory fixes (2026-10-19)
 

@@ -62,7 +62,7 @@ test("publishes phase output by reference and refuses missing or conflicting std
   expect(result).not.toHaveProperty("output");
   await expect(runReviewPipeline(
     { runId: writer.record.runId, phase: "merge" } as never, pin.config, undefined, { store, sessionID } as never,
-  )).rejects.toMatchObject({ code: "review_pipeline_stdin_source_missing" });
+  )).rejects.toMatchObject({ code: "review_pipeline_input_ref_invalid" });
   await expect(runReviewPipeline(
     { runId: writer.record.runId, phase: "merge", stdin: "{}", inputRef: "phase-prepare.json" } as never,
     pin.config, undefined, { store, sessionID } as never,
@@ -70,7 +70,7 @@ test("publishes phase output by reference and refuses missing or conflicting std
   await expect(runReviewPipeline(
     { runId: writer.record.runId, phase: "merge", inputRef: "phase-finalize.json" } as never,
     pin.config, undefined, { store, sessionID } as never,
-  )).rejects.toMatchObject({ code: "review_pipeline_input_ref_not_prior" });
+  )).rejects.toMatchObject({ code: "review_pipeline_merge_ref_phase_invalid" });
   await expect(runReviewPipeline(
     { runId: writer.record.runId, phase: "merge", inputRef: "unrecognized.json" } as never,
     pin.config, undefined, { store, sessionID } as never,
@@ -90,7 +90,7 @@ test("inputRefs validates phase, grammar, run membership, JSON, count, conflicts
   const invoke = (payload: Record<string, unknown>) => runReviewPipeline({ runId: writer.record.runId, phase: "prepare", ...payload }, pin.config, undefined, context);
 
   await expect(runReviewPipeline({ phase: "merge", runId: writer.record.runId, inputRefs: ["phase-screen-correctness.json"] }, pin.config, undefined, context))
-    .rejects.toMatchObject({ code: "review_pipeline_input_refs_phase_forbidden" });
+    .rejects.toMatchObject({ code: "review_pipeline_stdin_source_conflict" });
   await expect(invoke({ inputRefs: ["phase-prepare.json"] })).rejects.toMatchObject({ code: "review_pipeline_input_ref_not_screen" });
   await expect(invoke({ inputRefs: ["phase-screen-unknown.json"] })).rejects.toMatchObject({ code: "review_pipeline_input_ref_not_screen" });
   await expect(invoke({ inputRefs: ["phase-screen-adversarial.json"] })).rejects.toMatchObject({ code: "review_run_artifact_not_found" });
@@ -136,17 +136,70 @@ test("refuses a screen artifact with an unknown persona suffix", async () => {
   )).rejects.toMatchObject({ code: "review_pipeline_input_ref_unknown" });
 });
 
-test("accepts a chained phase artifact larger than the inline stdin cap", async () => {
+test("merge preflight refuses recorded oversized artifacts before reading them", async () => {
   const pin = fixture();
   const writer = pin.store.createRun(pin.sessionID);
-  const input = Buffer.from(JSON.stringify({ value: "x".repeat(REVIEW_PIPELINE_MAX_STDIN_BYTES) }));
-  writer.addArtifact("phase-prepare.json", input);
-  const result = await runReviewPipeline(
-    { phase: "merge", runId: writer.record.runId, inputRef: "phase-prepare.json" },
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-prepare.json", Buffer.from(JSON.stringify({ value: "x".repeat(REVIEW_PIPELINE_MAX_STDIN_BYTES) })));
+  const record = pin.store.readRecord(pin.sessionID, writer.record.runId);
+  const originalRunDir = pin.store.runDir.bind(pin.store);
+  let artifactReadCount = 0;
+  pin.store.readRecord = (() => record) as typeof pin.store.readRecord;
+  pin.store.runDir = ((sessionID: string, runId: string) => { artifactReadCount++; return originalRunDir(sessionID, runId); }) as typeof pin.store.runDir;
+
+  await expect(runReviewPipeline(
+    { phase: "merge", runId: writer.record.runId, inputRef: "phase-prepare.json", adjudication: { decisions: [] } },
     pin.config, undefined, { store: pin.store, sessionID: pin.sessionID },
-  );
-  expect(result.outcome).toBe("accepted");
-  expect(pin.store.readRecord(pin.sessionID, writer.record.runId).artifacts.map(({ name }) => name)).toContain("phase-merge.json");
+  )).rejects.toMatchObject({ code: "review_pipeline_composed_input_too_large" });
+  expect(artifactReadCount).toBe(0);
+});
+
+test("finalize preflight refuses recorded oversized artifacts before reading them", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-prepare.json", Buffer.from("{}"));
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-merge.json", Buffer.from("{}"));
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-correctness.json", Buffer.from(JSON.stringify({ value: "x".repeat(REVIEW_PIPELINE_MAX_STDIN_BYTES) })));
+  const record = pin.store.readRecord(pin.sessionID, writer.record.runId);
+  const originalRunDir = pin.store.runDir.bind(pin.store);
+  let artifactReadCount = 0;
+  pin.store.readRecord = (() => record) as typeof pin.store.readRecord;
+  pin.store.runDir = ((sessionID: string, runId: string) => { artifactReadCount++; return originalRunDir(sessionID, runId); }) as typeof pin.store.runDir;
+
+  await expect(runReviewPipeline(
+    { phase: "finalize", runId: writer.record.runId, preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json", dispatch_records: [], validator_lifecycle_results: [], plan_assessment: {}, parent_run_metadata: {} },
+    pin.config, undefined, { store: pin.store, sessionID: pin.sessionID },
+  )).rejects.toMatchObject({ code: "review_pipeline_composed_input_too_large" });
+  expect(artifactReadCount).toBe(0);
+});
+
+test("finalize binds parent metadata head_sha to the resolved run head", async () => {
+  const pin = fixture();
+  const expectedHead = "a".repeat(40);
+  const writer = pin.store.createRun(pin.sessionID, { headObjectId: expectedHead });
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-prepare.json", Buffer.from("{}"));
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-merge.json", Buffer.from("{}"));
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-correctness.json", Buffer.from("{}"));
+  const base = { phase: "finalize", runId: writer.record.runId, preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json", dispatch_records: [], validator_lifecycle_results: [], plan_assessment: {}, parent_run_metadata: { branch: "master", mode: "standard" } };
+  const finalize = (parent_run_metadata: Record<string, unknown>) => runReviewPipeline({ ...base, parent_run_metadata }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+
+  await expect(finalize({ branch: "master" })).resolves.toMatchObject({ outcome: "accepted" });
+  const missingHeadArtifact = pin.store.readRecord(pin.sessionID, writer.record.runId).finalizeProvenance?.artifact;
+  expect(missingHeadArtifact).toBeDefined();
+  const missingHead = JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, writer.record.runId), missingHeadArtifact!.name), "utf8")).input;
+  expect(JSON.parse(missingHead).parent_run_metadata.head_sha).toBe(expectedHead);
+
+  await expect(finalize({ branch: "master", head_sha: expectedHead })).resolves.toMatchObject({ outcome: "accepted" });
+  await expect(finalize({ branch: "master", head_sha: "b".repeat(40) })).rejects.toMatchObject({ code: "review_pipeline_parent_head_sha_mismatch" });
+});
+
+test("refuses a composed merge payload larger than the inline stdin cap", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  writer.addArtifact("phase-prepare.json", Buffer.from(JSON.stringify({ value: "x".repeat(REVIEW_PIPELINE_MAX_STDIN_BYTES) })));
+  await expect(runReviewPipeline(
+    { phase: "merge", runId: writer.record.runId, inputRef: "phase-prepare.json", adjudication: { decisions: [] } },
+    pin.config, undefined, { store: pin.store, sessionID: pin.sessionID },
+  )).rejects.toMatchObject({ code: "review_pipeline_composed_input_too_large", message: expect.stringContaining(`cap ${REVIEW_PIPELINE_MAX_STDIN_BYTES} bytes`) });
 });
 
 test("REVIEW_PIPELINE_REVIEWERS contains the exact ce:review persona catalog", () => {
@@ -329,17 +382,22 @@ test("rejects caller-supplied harness and argv fields at payload validation", ()
 
 test("observes exact fixed argv for all phases and rejects caller argv fields", async () => {
   const pin = fixture();
-  const writer = pin.store.createRun(pin.sessionID);
+  const writer = pin.store.createRun(pin.sessionID, { headObjectId: "a".repeat(40) });
+  writer.addArtifact("phase-screen-correctness.json", Buffer.from("{}"));
+  writer.addArtifact("phase-prepare.json", Buffer.from("{}"));
+  writer.addArtifact("phase-merge.json", Buffer.from("{}"));
+  const envelopes = { dispatch_records: [], validator_lifecycle_results: [], plan_assessment: { verdict: "complete", residual_actionable_work: [], advisory_outputs: [] }, parent_run_metadata: { run_id: writer.record.runId, branch: "master", head_sha: "a".repeat(40), mode: "standard", harness: "opencode", timestamps: { completed_at: "now" }, applied_fixes: [], selected_dispatches: [], validation: [] } };
   const cases = [
-    ["screen", "correctness", ["screen", "--reviewer", "correctness", "--harness", "opencode"]],
-    ["prepare", undefined, ["prepare"]],
-    ["merge", undefined, ["merge"]],
-    ["finalize", undefined, ["finalize"]],
+    [{ phase: "screen", reviewer: "correctness", stdin: "{}" }, ["screen", "--reviewer", "correctness", "--harness", "opencode"]],
+    [{ phase: "prepare", stdin: "{}" }, ["prepare"]],
+    [{ phase: "merge", inputRef: "phase-prepare.json", adjudication: { decisions: [] } }, ["merge"]],
+    [{ phase: "finalize", preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json", ...envelopes }, ["finalize"]],
   ] as const;
-  for (const [phase, reviewer, argv] of cases) {
-    const result = await runReviewPipeline({ phase, reviewer, runId: writer.record.runId, stdin: "{}", harness: "malicious", args: ["--evil"] } as never, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+  for (const [fields, argv] of cases) {
+    const phase = fields.phase;
+    const result = await runReviewPipeline({ ...fields, runId: writer.record.runId, harness: "malicious", args: ["--evil"] } as never, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
     expect(result.outcome).toBe("accepted");
-    const name = phase === "screen" ? `phase-screen-${reviewer}.json` : `phase-${phase}.json`;
+    const name = phase === "screen" ? "phase-screen-correctness.json" : `phase-${phase}.json`;
     const saved = JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, writer.record.runId), name), "utf8")) as { argv: string[] };
     expect(saved.argv).toEqual(argv);
   }
@@ -369,7 +427,53 @@ test("maps missing helper and unstartable helper to validation_unavailable", asy
 test("maps exit two to validation_unavailable", async () => {
   const pin = fixture();
   const { spawnExec } = await import("../src/msb.ts");
-  const result = await runReviewPipeline({ phase: "merge", runId: "d".repeat(32), stdin: "{}" }, pin.config,
+  const result = await runReviewPipeline({ phase: "prepare", runId: "d".repeat(32), stdin: "{}" }, pin.config,
     (argv, opts) => spawnExec(argv, { ...opts, env: { PATH: process.env.PATH ?? "", FIXTURE_MODE: "unavailable" }, envMode: "replace" }));
   expect(result).toMatchObject({ outcome: "validation_unavailable", code: "review_pipeline_validation_unavailable" });
+});
+
+test("refuses helper-owned overrides, wrong phase refs, duplicates, and oversized caller envelopes", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  const context = { store: pin.store, sessionID: pin.sessionID };
+  for (const field of ["prepared", "merge", "screen_results"] as const) {
+    await expect(runReviewPipeline({ phase: "merge", runId: writer.record.runId, [field]: {}, inputRef: "phase-prepare.json", adjudication: { decisions: [] } }, pin.config, undefined, context))
+      .rejects.toMatchObject({ code: `review_pipeline_${field}_override_forbidden` });
+  }
+  writer.addArtifact("phase-screen-correctness.json", Buffer.from('{"screen":true}'));
+  writer.addArtifact("phase-prepare.json", Buffer.from('{"prepared":true}'));
+  writer.addArtifact("phase-merge.json", Buffer.from('{"merged":true}'));
+  await expect(runReviewPipeline({ phase: "merge", runId: writer.record.runId, inputRef: "phase-screen-correctness.json", adjudication: { decisions: [] } }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_merge_ref_phase_invalid" });
+  await expect(runReviewPipeline({ phase: "finalize", runId: writer.record.runId, preparedRef: "phase-prepare.json", mergeRef: "phase-prepare.json" }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_input_ref_duplicate" });
+  await expect(runReviewPipeline({ phase: "finalize", runId: writer.record.runId, preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json", dispatch_records: [{ text: "x".repeat(33 * 1024) }], validator_lifecycle_results: [], plan_assessment: {}, parent_run_metadata: {} }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_dispatch_records_too_large", message: expect.stringContaining("observed") });
+  await expect(runReviewPipeline({ phase: "finalize", runId: writer.record.runId, preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json", dispatch_records: [{ x: "a".repeat(20 * 1024) }], validator_lifecycle_results: [{ x: "b".repeat(20 * 1024) }], plan_assessment: { x: "c".repeat(20 * 1024) }, parent_run_metadata: { x: "d".repeat(20 * 1024) } }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_caller_envelopes_too_large", message: expect.stringContaining("total cap") });
+  await expect(runReviewPipeline({ phase: "finalize", runId: writer.record.runId, preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json", dispatch_records: [{ x: "a".repeat(20 * 1024) }], validator_lifecycle_results: [{ x: "b".repeat(20 * 1024) }], plan_assessment: { x: "c".repeat(20 * 1024) }, parent_run_metadata: { x: "d".repeat(20 * 1024) } }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_caller_envelopes_too_large", message: expect.stringContaining("total cap") });
+});
+
+test("refuses helper-owned overrides, wrong phase refs, duplicates, and oversized caller envelopes", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  const context = { store: pin.store, sessionID: pin.sessionID };
+  for (const field of ["prepared", "merge", "screen_results"] as const) {
+    await expect(runReviewPipeline({ phase: "merge", runId: writer.record.runId, [field]: {}, inputRef: "phase-prepare.json", adjudication: { decisions: [] } }, pin.config, undefined, context))
+      .rejects.toMatchObject({ code: `review_pipeline_${field}_override_forbidden` });
+  }
+  writer.addArtifact("phase-screen-correctness.json", Buffer.from('{"screen":true}'));
+  writer.addArtifact("phase-prepare.json", Buffer.from('{"prepared":true}'));
+  writer.addArtifact("phase-merge.json", Buffer.from('{"merged":true}'));
+  await expect(runReviewPipeline({ phase: "merge", runId: writer.record.runId, inputRef: "phase-screen-correctness.json", adjudication: { decisions: [] } }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_merge_ref_phase_invalid" });
+  await expect(runReviewPipeline({ phase: "finalize", runId: writer.record.runId, preparedRef: "phase-prepare.json", mergeRef: "phase-prepare.json" }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_input_ref_duplicate" });
+  await expect(runReviewPipeline({ phase: "finalize", runId: writer.record.runId, preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json", dispatch_records: [{ text: "x".repeat(33 * 1024) }], validator_lifecycle_results: [], plan_assessment: {}, parent_run_metadata: {} }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_dispatch_records_too_large", message: expect.stringContaining("observed") });
+  await expect(runReviewPipeline({ phase: "finalize", runId: writer.record.runId, preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json", dispatch_records: [{ x: "a".repeat(20 * 1024) }], validator_lifecycle_results: [{ x: "b".repeat(20 * 1024) }], plan_assessment: { x: "c".repeat(20 * 1024) }, parent_run_metadata: { x: "d".repeat(20 * 1024) } }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_caller_envelopes_too_large", message: expect.stringContaining("total cap") });
+  await expect(runReviewPipeline({ phase: "finalize", runId: writer.record.runId, preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json", dispatch_records: [{ x: "a".repeat(20 * 1024) }], validator_lifecycle_results: [{ x: "b".repeat(20 * 1024) }], plan_assessment: { x: "c".repeat(20 * 1024) }, parent_run_metadata: { x: "d".repeat(20 * 1024) } }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_caller_envelopes_too_large", message: expect.stringContaining("total cap") });
 });
