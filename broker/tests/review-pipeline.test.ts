@@ -3,9 +3,10 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, s
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { runReviewPipeline, REVIEW_PIPELINE_MAX_STDIN_BYTES } from "../src/review-pipeline.ts";
+import { runReviewPipeline, REVIEW_PIPELINE_MAX_STDIN_BYTES, REVIEW_PIPELINE_REVIEWERS } from "../src/review-pipeline.ts";
+import { INSTALLED_REVIEW_AGENTS } from "../../opencode/plugins/lib/reviewer-relay-core.ts";
 import { spawnExec, type SpawnFn } from "../src/msb.ts";
-import { assertPayloadKeys, ValidationError } from "../src/validation.ts";
+import { assertPayloadKeys, assertReviewLens, ValidationError } from "../src/validation.ts";
 import { ReviewRunStore } from "../src/review-run.ts";
 
 const roots: string[] = [];
@@ -77,6 +78,25 @@ test("publishes phase output by reference and refuses missing or conflicting std
   expect(readdirSync(store.runDir(sessionID, writer.record.runId)).sort()).toContain("phase-prepare.json");
 });
 
+test("accepts a persona-named screen artifact as a later phase inputRef", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  writer.addArtifact("phase-screen-correctness.json", Buffer.from("{}"));
+  await expect(runReviewPipeline(
+    { phase: "prepare", runId: writer.record.runId, inputRef: "phase-screen-correctness.json" },
+    pin.config, undefined, { store: pin.store, sessionID: pin.sessionID },
+  )).resolves.toMatchObject({ outcome: "accepted", artifact: { name: "phase-prepare.json" } });
+});
+
+test("refuses a screen artifact with an unknown persona suffix", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  await expect(runReviewPipeline(
+    { phase: "prepare", runId: writer.record.runId, inputRef: "phase-screen-unknown-persona.json" },
+    pin.config, undefined, { store: pin.store, sessionID: pin.sessionID },
+  )).rejects.toMatchObject({ code: "review_pipeline_input_ref_unknown" });
+});
+
 test("accepts a chained phase artifact larger than the inline stdin cap", async () => {
   const pin = fixture();
   const writer = pin.store.createRun(pin.sessionID);
@@ -90,18 +110,29 @@ test("accepts a chained phase artifact larger than the inline stdin cap", async 
   expect(pin.store.readRecord(pin.sessionID, writer.record.runId).artifacts.map(({ name }) => name)).toContain("phase-merge.json");
 });
 
-test("publishes a distinct run-accounted artifact for every screen reviewer", async () => {
+test("REVIEW_PIPELINE_REVIEWERS contains the exact ce:review persona catalog", () => {
+  expect(REVIEW_PIPELINE_REVIEWERS).toEqual([
+    "correctness", "testing", "project-standards", "maintainability", "security", "performance",
+    "api-contract", "data-migrations", "reliability", "adversarial", "cli-readiness", "previous-comments",
+    "kieran-typescript",
+  ]);
+});
+
+test("accepts ce:review personas and refuses native 4R names on the pipeline surface", async () => {
   const pin = fixture();
   const writer = pin.store.createRun(pin.sessionID);
-  for (const reviewer of ["review-risk", "review-resilience", "review-readability", "review-reliability"] as const) {
-    await runReviewPipeline({ phase: "screen", reviewer, runId: writer.record.runId, stdin: "{}" }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
-  }
-  const record = pin.store.readRecord(pin.sessionID, writer.record.runId);
-  expect(record.artifacts.map(({ name }) => name).sort()).toEqual([
-    "phase-screen-review-readability.json", "phase-screen-review-reliability.json",
-    "phase-screen-review-resilience.json", "phase-screen-review-risk.json",
-  ]);
-  expect(record.artifacts.reduce((total, artifact) => total + artifact.bytes, 0)).toBeGreaterThan(0);
+  await runReviewPipeline({ phase: "screen", reviewer: "correctness", runId: writer.record.runId, stdin: "{}" }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+  expect(pin.store.readRecord(pin.sessionID, writer.record.runId).artifacts.map(({ name }) => name)).toContain("phase-screen-correctness.json");
+  await expect(runReviewPipeline({ phase: "screen", reviewer: "review-risk", runId: writer.record.runId, stdin: "{}" }, pin.config))
+    .rejects.toMatchObject({ code: "review_pipeline_reviewer_invalid" });
+});
+
+test("preserves all four native review lenses and relay agents independently of pipeline personas", () => {
+  const lenses = ["review-risk", "review-resilience", "review-readability", "review-reliability"] as const;
+  for (const lens of lenses) expect(() => assertReviewLens(lens)).not.toThrow();
+  expect(() => assertReviewLens("correctness")).toThrow(ValidationError);
+  expect(INSTALLED_REVIEW_AGENTS).toEqual(expect.arrayContaining(lenses));
+  expect(INSTALLED_REVIEW_AGENTS).toEqual(expect.arrayContaining(["review-risk", "review-resilience", "review-readability", "review-reliability"]));
 });
 
 test("enforces the per-run cap before publishing a phase artifact", async () => {
@@ -166,9 +197,9 @@ test("runs fixed phase argv with byte-identical stdin and no caller-controlled h
   const pin = fixture();
   const payload = "{\"value\":\"snowman ☃\"}";
   const writer = pin.store.createRun(pin.sessionID);
-  const result = await runReviewPipeline({ phase: "screen", reviewer: "review-risk", runId: writer.record.runId, stdin: payload }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
-  expect(result).toMatchObject({ outcome: "accepted", artifact: { name: "phase-screen-review-risk.json" } });
-  expect(JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, writer.record.runId), "phase-screen-review-risk.json"), "utf8"))).toEqual({ argv: ["screen", "--reviewer", "review-risk", "--harness", "opencode"], input: payload, stdinSha256: createHash("sha256").update(payload).digest("hex") });
+  const result = await runReviewPipeline({ phase: "screen", reviewer: "correctness", runId: writer.record.runId, stdin: payload }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+  expect(result).toMatchObject({ outcome: "accepted", artifact: { name: "phase-screen-correctness.json" } });
+  expect(JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, writer.record.runId), "phase-screen-correctness.json"), "utf8"))).toEqual({ argv: ["screen", "--reviewer", "correctness", "--harness", "opencode"], input: payload, stdinSha256: createHash("sha256").update(payload).digest("hex") });
 });
 
 test("refuses an over-cap stdin payload and names its observed byte size without spawning", async () => {
@@ -246,22 +277,22 @@ test("digest mismatch refuses before spawn and unknown phases fail validation", 
     .rejects.toMatchObject({ code: "review_pipeline_phase_invalid" });
   await expect(runReviewPipeline({ phase: "screen", runId: "e".repeat(32), stdin: "{}" }, pin.config, spawn))
     .rejects.toMatchObject({ code: "review_pipeline_reviewer_invalid" });
-  await expect(runReviewPipeline({ phase: "prepare", reviewer: "review-risk", runId: "e".repeat(32), stdin: "{}" }, pin.config, spawn))
+  await expect(runReviewPipeline({ phase: "prepare", reviewer: "correctness", runId: "e".repeat(32), stdin: "{}" }, pin.config, spawn))
     .rejects.toMatchObject({ code: "review_pipeline_reviewer_forbidden" });
   await expect(runReviewPipeline({ phase: "prepare", runId: "e".repeat(32), stdin: "x".repeat(REVIEW_PIPELINE_MAX_STDIN_BYTES + 1) }, pin.config, spawn))
     .rejects.toMatchObject({ code: "review_pipeline_stdin_too_large" });
 });
 
 test("rejects caller-supplied harness and argv fields at payload validation", () => {
-  expect(() => assertPayloadKeys("reviewPipelineRun", { phase: "screen", reviewer: "review-risk", stdin: "{}", runId: "a".repeat(32), harness: "pi" })).toThrow(ValidationError);
-  expect(() => assertPayloadKeys("reviewPipelineRun", { phase: "screen", reviewer: "review-risk", stdin: "{}", runId: "a".repeat(32), args: ["--evil"] })).toThrow(ValidationError);
+  expect(() => assertPayloadKeys("reviewPipelineRun", { phase: "screen", reviewer: "correctness", stdin: "{}", runId: "a".repeat(32), harness: "pi" })).toThrow(ValidationError);
+  expect(() => assertPayloadKeys("reviewPipelineRun", { phase: "screen", reviewer: "correctness", stdin: "{}", runId: "a".repeat(32), args: ["--evil"] })).toThrow(ValidationError);
 });
 
 test("observes exact fixed argv for all phases and rejects caller argv fields", async () => {
   const pin = fixture();
   const writer = pin.store.createRun(pin.sessionID);
   const cases = [
-    ["screen", "review-risk", ["screen", "--reviewer", "review-risk", "--harness", "opencode"]],
+    ["screen", "correctness", ["screen", "--reviewer", "correctness", "--harness", "opencode"]],
     ["prepare", undefined, ["prepare"]],
     ["merge", undefined, ["merge"]],
     ["finalize", undefined, ["finalize"]],

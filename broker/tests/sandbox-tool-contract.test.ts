@@ -172,6 +172,19 @@ test("host_review_materialize exposes only a bounded index and preserves broker 
   expect(sandboxTools).toContain("typeof code === \"string\"");
 });
 
+test("pipeline reviewer enum accepts ce:review personas and rejects native 4R lens names", () => {
+  const reviewerEnum = /reviewer:\s*z\.enum\((\[[^\]]+\])\)\.optional\(\)/.exec(sandboxTools)?.[1];
+  expect(reviewerEnum).toBeDefined();
+  const reviewers = JSON.parse(reviewerEnum!) as string[];
+  expect(reviewers).toEqual([
+    "correctness", "testing", "project-standards", "maintainability", "security", "performance",
+    "api-contract", "data-migrations", "reliability", "adversarial", "cli-readiness", "previous-comments",
+    "kieran-typescript",
+  ]);
+  expect(reviewers.includes("correctness")).toBe(true);
+  expect(reviewers.includes("review-risk")).toBe(false);
+});
+
 test("review pipeline and persist tools expose only their allowed schema keys", async () => {
   const { default: plugin } = await import("../../opencode/plugins/sandbox-tools.ts");
   const tools = plugin().tool as Record<string, { args: Record<string, unknown>; execute: (args: any, ctx: any) => Promise<string> }>;

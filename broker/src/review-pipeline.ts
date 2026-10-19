@@ -11,11 +11,21 @@ import {
 import type { BrokerConfig } from "./config.ts";
 
 export const REVIEW_PIPELINE_MAX_STDIN_BYTES = 256 * 1024;
+// These are the ce:review persona names from the Systematic persona catalog, deliberately NOT the native 4R lens names.
 export const REVIEW_PIPELINE_REVIEWERS = [
-  "review-risk",
-  "review-resilience",
-  "review-readability",
-  "review-reliability",
+  "correctness",
+  "testing",
+  "project-standards",
+  "maintainability",
+  "security",
+  "performance",
+  "api-contract",
+  "data-migrations",
+  "reliability",
+  "adversarial",
+  "cli-readiness",
+  "previous-comments",
+  "kieran-typescript",
 ] as const;
 export type ReviewPipelinePhase = "screen" | "prepare" | "merge" | "finalize";
 export type ReviewPipelineResult =
@@ -82,7 +92,10 @@ export async function runReviewPipeline(
       throw new ReviewPipelineError("review_pipeline_input_ref_invalid", "inputRef must name a published artifact in this review run");
     }
     const phaseIndex = PHASES.indexOf(phase);
-    const phaseMatch = /^phase-(screen|prepare|merge|finalize)(?:-(review-risk|review-resilience|review-readability|review-reliability))?\.json$/.exec(payload.inputRef);
+    const reviewerSuffixes = REVIEW_PIPELINE_REVIEWERS
+      .map((reviewer) => reviewer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join("|");
+    const phaseMatch = new RegExp(`^phase-(screen|prepare|merge|finalize)(?:-(${reviewerSuffixes}))?\\.json$`).exec(payload.inputRef);
     if (!phaseMatch) {
       throw new ReviewPipelineError("review_pipeline_input_ref_unknown", "inputRef does not name a recognized phase artifact");
     }

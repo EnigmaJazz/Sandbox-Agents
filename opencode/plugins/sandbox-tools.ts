@@ -742,7 +742,7 @@ export default function sandboxToolsPlugin() {
           "approval. Returns JSON.",
         args: {
           phase: z.enum(["screen", "prepare", "merge", "finalize"]),
-          reviewer: z.enum(["review-risk", "review-resilience", "review-readability", "review-reliability"]).optional(),
+          reviewer: z.enum(["correctness", "testing", "project-standards", "maintainability", "security", "performance", "api-contract", "data-migrations", "reliability", "adversarial", "cli-readiness", "previous-comments", "kieran-typescript"]).optional(),
           stdin: z.union([
             z.string().max(256 * 1024),
             z.array(z.number().int().min(0).max(255)).max(256 * 1024),
