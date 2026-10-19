@@ -468,6 +468,26 @@ First live exercise after install:
 - `scripts/install-user-files --apply`, then `--verify`, PASSED on the script's first-ever execution: 14 installed files verified; pin `3.22.4` verified at SHA-256 `edcd5c05d9f9457d79ea6b71bd55c7435b55fdc84d127ce5a8294a4f6ea45a28`; pin parser runtime `bun`; config-fragment excluded as manual merge. Operator merged the three permission entries into installed OpenCode config; broker and secure OpenCode restarted.
 - `materialize` succeeded: runId `9577fec39da1478684064c37f066e909`, baseObjectId `ef65a179…`, headObjectId `a4f824b1…`, 18 changed paths, 3 slices of 45,933 / 34,210 / 44,382 bytes (each below 46,080); per-slice SHA-256 recorded; totalBytes 124,525. Response contained only the bounded index, no diff text.
 - `materialize` without a path filter refused the same range with `review_range_file_slice_cap`, naming `odd/tasks/review-pipeline-phases.md` at 305 lines / 68,027 bytes against the 46,080-byte slice budget. It refused and named the observed size; it did not truncate. The tracker exceeds the budget and must be consolidated; this is repository working-document hygiene, not a tool defect.
+
+## Progress addendum — live prepare aggregate rejection
+
+- Observed live rejection: `prepare rejected the aggregate envelope: schema validation at screen_results.0.reviewer` while preparing from `inputRefs`.
+- Helper source details were supplied by the coordinator, who read the external installed helper: `prepareReviewCandidates` (`validate-review.mjs:7740-7780`) consumes both `screen_results` and `selected_dispatches`; `validatePrepareStructure` (`:7592-7656`) requires each screen entry to contain `reviewer` and `result.admitted_findings`, and requires selected dispatch personas and screen-result personas to match exactly. `computeCoverageUnion` (`:7695-7702`) optionally consumes `dispatch.selection_surface`. The worker did not access the helper.
+- Broker composition now maps each `phase-screen-<persona>.json` artifact to `{ reviewer: <persona from validated artifact filename>, result: <parsed artifact content unchanged> }`, and adds bounded caller-authored `selected_dispatches`. The persona is broker-derived from the artifact name so callers cannot spoof it. The selected array is byte-capped with other caller envelopes. Early mismatch codes: `review_pipeline_input_refs_persona_unselected` (artifact persona missing from selection) and `review_pipeline_selected_dispatches_screen_missing` (selected persona has no artifact); missing or empty selection uses `review_pipeline_selected_dispatches_missing`.
+- Registration: `selected_dispatches` is present in `ALLOWED_PAYLOAD_KEYS`, the `host_review_pipeline_run` plugin args, and exact operations-parity expectation. Existing run scoping, duplicate artifact checks, overrides, and input/composed caps remain in place.
+- RED: after reverting the wrapping guard, `bun test tests/review-pipeline.test.ts -t "prepare wraps screen artifacts"` failed because the observed screen result was top-level instead of nested under `result`, and no `reviewer` was present. Missing-selection guard revert failed the same focused test: expected `review_pipeline_selected_dispatches_missing`, got the generic selected_dispatches envelope validation error. Artifact-unselected guard revert failed expecting `review_pipeline_input_refs_persona_unselected`, instead the reverse mismatch code was returned. Reverse-mismatch guard revert failed because the test expected a rejection but the promise resolved.
+
+| Isolated guard removal | Before SHA-256 | After restoration SHA-256 |
+|---|---|---|
+| Artifact `{reviewer,result}` wrapping | `7d9e703d21055c320918b4f006636989afa97448c53f8a0611a4f7e70855a7c5` | `7d9e703d21055c320918b4f006636989afa97448c53f8a0611a4f7e70855a7c5` |
+| Missing/empty selected-dispatch refusal | `7d9e703d21055c320918b4f006636989afa97448c53f8a0611a4f7e70855a7c5` | `7d9e703d21055c320918b4f006636989afa97448c53f8a0611a4f7e70855a7c5` |
+| Unselected screen persona refusal | `7d9e703d21055c320918b4f006636989afa97448c53f8a0611a4f7e70855a7c5` | `7d9e703d21055c320918b4f006636989afa97448c53f8a0611a4f7e70855a7c5` |
+| Missing screen for selected persona refusal | `7d9e703d21055c320918b4f006636989afa97448c53f8a0611a4f7e70855a7c5` | `7d9e703d21055c320918b4f006636989afa97448c53f8a0611a4f7e70855a7c5` |
+
+- Focused verification: `bun test tests/review-pipeline.test.ts tests/review-pipeline-operation.test.ts tests/operations-parity.test.ts tests/sandbox-tool-contract.test.ts` — 65 pass / 0 fail / 260 expect calls.
+- Full verification: `bun --cwd broker test --reporter=dot` — 1175 pass / 0 fail / 5043 expect calls across 71 files (baseline noted by coordinator: 1174 pass / 0 fail).
+- Build: from `broker`, `bun build --target=bun src/main.ts` completed without a reported build error.
+
 - Phase `screen` with reviewer `review-risk` and synthetic payload returned `structurally_rejected`, code `review_pipeline_structurally_rejected`, diagnostic `screen rejected the reviewer return`. The pinned helper was spawned through the configured interpreter and exited 1; diagnostic lacked `ce-review-validator: internal error in`, so taxonomy mapped structural rejection, not `validation_unavailable`.
 - `host_review_persist` prompted for approval before broker dispatch. After operator approval, broker refused with `review_persist_finalize_provenance_missing`. The `ask` gate therefore gates the call, and finalize-provenance is enforced. In all three refusal observations above, the named error code crossed the full round trip rather than becoming `internal`.
 - Persist approval prompt was informationally empty (independent security review F-13, now observed): it showed only run id and finalize ref—no base/head object ids, verdict, finding counts, or whether finalize input was inline or a slice reference. The operator approved a call that could not succeed without a basis for judgment. The gate is mechanically sound but informationally insufficient.
@@ -502,6 +522,22 @@ First live exercise after install:
 - Cross-run artifact mixing remains verified-correct because each composition uses the run-specific directory from the same record/session; no cross-run behavior was modified.
 - Final source hash and reviewability receipt are included in the sandbox delivery result.
 
+## Progress addendum — finalize screen-result wrapping fix (2026-10-19)
+
+- Live rejection observed: `finalize rejected the aggregate envelope: invalid_type at screen_results.0.reviewer`. `prepare` already emitted `{ reviewer, result }`, while `finalize` supplied the parsed screen result without its reviewer.
+- Extracted `wrapScreenResult(context, runId, ref)` and use it in both `prepare`'s `inputRefs` composition and `finalize`'s same-run screen artifact collection. It derives `reviewer` only from `phase-screen-<persona>.json`, and preserves the parsed artifact content as `result`; caller-supplied reviewer fields are not used. Override protection, byte preflight/caps, same-run scoping, duplicate detection, `head_sha` binding, and merge/prepare references were left unchanged.
+- RED observed: `bun --cwd broker test tests/review-pipeline.test.ts -t 'finalize uses the shared screen-result wrapper' --reporter=dot` failed before implementation because actual `screen_results` contained a raw artifact object instead of `{reviewer,result}`. The initial combined focused run also showed the existing operation expectation needed updating to the required wrapper form.
+- Revert experiments (the source was restored byte-identically after each):
+
+  | Guard removed | Command and observed failure | Before SHA-256 | After SHA-256 |
+  |---|---|---|---|
+  | Finalize wrapper call | `bun --cwd broker test tests/review-pipeline.test.ts -t 'finalize uses the shared screen-result wrapper' --reporter=dot` — expected reviewer/result wrapper, received raw artifact content. | `f35b21e42599a2e015832b1a296dc4833c1d8226ce183459877595021b39c66b` | `f35b21e42599a2e015832b1a296dc4833c1d8226ce183459877595021b39c66b` |
+  | Prepare shared-helper call | `bun --cwd broker test tests/review-pipeline.test.ts -t 'prepare wraps screen artifacts' --reporter=dot` — expected reviewer/result wrapper, received raw artifact content. | `f35b21e42599a2e015832b1a296dc4833c1d8226ce183459877595021b39c66b` | `f35b21e42599a2e015832b1a296dc4833c1d8226ce183459877595021b39c66b` |
+
+  No tested path stayed green after its guard was removed.
+- Observed checks: `bun --cwd broker test tests/review-pipeline.test.ts --reporter=dot` — 32 pass / 0 fail / 109 expect calls; `bun --cwd broker test tests/review-pipeline-operation.test.ts --reporter=dot` — 14 pass / 0 fail / 71 expect calls; `bun --cwd broker test --reporter=dot` — 1176 pass / 0 fail / 5045 expect calls across 71 files; from `broker`, `bun build --target=bun src/main.ts` completed without a build error.
+- S17 source changes remain in the sandbox for owner-controlled installation and commit. No sandbox apply or Git mutation was performed.
+
 ## Progress addendum — inputRefs post-code advisory fixes (2026-10-19)
 
 - Resolved the four findings: duplicate screen refs now refuse with `review_pipeline_input_ref_duplicate`; an empty array refuses with `review_pipeline_input_refs_empty`; JSON scalars/arrays/null refuse with `review_pipeline_input_ref_not_object`; and both `inputRef` and `inputRefs` use `matchPhaseArtifact`, built from the shared phase/persona regex grammar. Each ref still goes through `readRunArtifact`, and accepted artifact bytes are spliced exactly as stored.
@@ -520,3 +556,43 @@ First live exercise after install:
   No test stayed green without any of the three behavior guards; grammar-helper behavior stayed green without the refactor because the restored implementation was semantically equivalent.
 - Checks: focused `bun test tests/review-pipeline.test.ts tests/review-pipeline-operation.test.ts --reporter=dot` — 39 pass / 0 fail / 157 expect calls; full `bun --cwd broker test --reporter=dot` — 1169 pass / 0 fail / 5022 expect calls across 71 files; `bun build --target=bun src/main.ts` from `broker` — completed and emitted the bundle without an error.
 - Reviewability receipt for this delta is recorded in the delivery report; no commit was created and the S17 source remains for owner-controlled installation/review.
+
+## Envelope reference — established live and from the helper source (2026-10-19)
+
+**Why this exists:** nine defects in the phase chain were found by running it against the real helper in one session, and none by 1176 passing tests, because every test fixture agreed with the authors' assumptions. This table is the durable record so the next session does not rediscover them.
+
+### Broker caller fields per phase
+
+| Phase | Caller fields |
+|---|---|
+| `prepare` | `inputRefs` (array of `phase-screen-<persona>.json`) |
+| `merge` | `inputRef` (the `phase-prepare.json` artifact) plus `adjudication` |
+| `finalize` | `preparedRef` AND `mergeRef` (the prepare and merge artifacts) |
+| `screen` | `stdin`, plus `reviewer` (required for screen, forbidden for other phases) |
+
+### Helper stdin shapes
+
+- `prepare`: `{ "screen_results": [ { "reviewer": "<persona>", "result": <screen artifact content> } ], "selected_dispatches": [ { "persona": "<persona>", "dispatch_outcome": "<outcome>" } ] }`
+  - Findings live NESTED under `result`, not at the entry's top level.
+  - The two sets must match EXACTLY: an unselected persona's result is refused, and a selected dispatch with no result is refused.
+  - `input_finding_count` is REJECTED inside `selected_dispatches` entries although the synthesis contract lists it; the schema is strict.
+  - The helper's `screen` output does NOT carry a `reviewer` field, so the broker derives it from the artifact name and it is never caller-supplied.
+- `merge`: `{ "prepared": <prepare artifact content>, "adjudication": { "decisions": [ ... ] } }`
+- `finalize`: `{ "merge": …, "prepared": …, "screen_results": [ { "reviewer": "<persona>", "result": <screen artifact content> } ], "dispatch_records": [ ... ], "validator_lifecycle_results": [ ... ], "plan_assessment": { "verdict": "<string>", "results": [ ... ] }, "parent_run_metadata": { "run_id": …, "branch": …, "head_sha": …, "mode": "interactive" | "autofix" | "headless", "harness": "opencode", "timestamps": { "started_at": …, "completed_at": … }, "applied_fixes": [ ... ], "selected_dispatches": [ ... ], "validation": { "status": "not_attempted", "reason": "<non-empty string>" } } }`
+  - `plan_assessment` accepts ONLY `verdict` and `results`; `residual_actionable_work` and `advisory_outputs` are REJECTED there (`additionalProperties: false`).
+  - `parent_run_metadata.timestamps` requires BOTH `started_at` and `completed_at`.
+  - `validation.status` must be `not_attempted` AT FINALIZE, with a non-empty `reason`, because validation happens at persist.
+  - `head_sha` is broker-authoritative: bound from the run record's resolved head object id; a differing caller value is refused, and an omitted one is filled.
+- `validatorLifecycleResult` entries: `{ "outcome": "true" | "false" | "failed" | "unavailable" }` with `reason` required for everything except `"true"` — `outcome` is a STRING, not a boolean.
+
+### Helper exit codes
+
+- `artifact`: `0` valid; `1` schema failure with issue lines on STDERR; `2` usage or unreadable path; `3` legacy artifact lacking `schema_version`.
+- Phases: `0` valid; `1` structural rejection OR an internal helper crash; `2` usage, TTY, read or empty-input failure.
+- The internal-crash case is distinguished ONLY by the fixed stderr prefix `ce-review-validator: internal error in `.
+
+### What was proven live in one run
+
+`materialize` produced three hashed slices and refused an over-cap single file; the diff read returned byte-exact `text` plus `sha256` and survived a broker restart; `screen` admitted a real persona return and published `phase-screen-<persona>.json`; `prepare`, `merge` and `finalize` each accepted through the pinned helper; and `persist` published `review-summary.json` with `validation.status: "passed"`, `ignoreFile.status: "unchanged"`, and a broker-bound `head_sha`, carrying the persona's real residual risk into `coverage.residual_risks`.
+
+**The lesson to carry forward:** a fixture that encodes the author's assumption about an external contract proves nothing about that contract. For any envelope crossing a helper boundary, observe the refusal diagnostic or read the helper's own code before trusting a test.
