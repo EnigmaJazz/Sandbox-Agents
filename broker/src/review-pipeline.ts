@@ -56,6 +56,7 @@ export interface ReviewPipelinePayload {
   prepared?: unknown;
   merge?: unknown;
   screen_results?: unknown;
+  selected_dispatches?: unknown;
   runId: unknown;
 }
 
@@ -88,6 +89,24 @@ function phaseObject(context: ReviewPipelineStoreContext, runId: string, ref: st
   catch { throw new ReviewPipelineError("review_pipeline_input_ref_unparseable", `phase artifact is not parseable JSON: ${ref}`); }
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new ReviewPipelineError("review_pipeline_input_ref_not_object", `phase artifact must contain a JSON object: ${ref}`);
   return value as Record<string, unknown>;
+}
+
+function wrapScreenResult(context: ReviewPipelineStoreContext, runId: string, ref: string): { reviewer: string; result: Record<string, unknown> } {
+  const match = matchPhaseArtifact(ref);
+  if (!match || match[1] !== "screen" || !match[2]) {
+    throw new ReviewPipelineError("review_pipeline_input_ref_not_screen", `inputRefs artifact is not a screen artifact: ${ref}`);
+  }
+  const bytes = readRunArtifact({ runDir: context.store.runDir(context.sessionID, runId), name: ref, maxFileBytes: context.store.caps.maxFileBytes }).data;
+  let result: unknown;
+  try {
+    result = JSON.parse(bytes.toString("utf8")) as unknown;
+  } catch {
+    throw new ReviewPipelineError("review_pipeline_input_ref_unparseable", `screen artifact is not parseable JSON: ${ref}`);
+  }
+  if (result === null || typeof result !== "object" || Array.isArray(result)) {
+    throw new ReviewPipelineError("review_pipeline_input_ref_not_object", `screen artifact must contain a JSON object: ${ref}`);
+  }
+  return { reviewer: match[2], result: result as Record<string, unknown> };
 }
 
 function callerBytes(entries: Array<[string, unknown]>): Buffer[] {
@@ -155,7 +174,7 @@ function composeFinalize(payload: ReviewPipelinePayload, context?: ReviewPipelin
   const composed = {
     merge: phaseObject(context, payload.runId as string, payload.mergeRef),
     prepared: phaseObject(context, payload.runId as string, payload.preparedRef),
-    screen_results: screens.map((ref) => phaseObject(context, payload.runId as string, ref)),
+    screen_results: screens.map((ref) => wrapScreenResult(context, payload.runId as string, ref)),
     ...Object.fromEntries(fields.map((field, index) => [field, field === "parent_run_metadata" ? { ...parentRunMetadata, head_sha: record.headObjectId } : JSON.parse(encoded[index]!.toString("utf8"))])),
   };
   return Buffer.from(JSON.stringify(composed), "utf8");
@@ -213,8 +232,20 @@ export async function runReviewPipeline(
     if (payload.inputRefs.length === 0) {
       throw new ReviewPipelineError("review_pipeline_input_refs_empty", "inputRefs must contain at least one screen artifact");
     }
+    if (!Array.isArray(payload.selected_dispatches) || payload.selected_dispatches.length === 0) {
+      throw new ReviewPipelineError("review_pipeline_selected_dispatches_missing", "prepare with inputRefs requires a non-empty selected_dispatches array");
+    }
+    const selectedDispatchBytes = callerBytes([["selected_dispatches", payload.selected_dispatches]]);
+    const selectedDispatches = JSON.parse(selectedDispatchBytes[0]!.toString("utf8")) as unknown[];
+    const selectedPersonas = new Set<string>();
+    for (const dispatch of selectedDispatches) {
+      if (dispatch === null || typeof dispatch !== "object" || Array.isArray(dispatch) || typeof (dispatch as Record<string, unknown>).persona !== "string") {
+        throw new ReviewPipelineError("review_pipeline_selected_dispatches_invalid", "each selected_dispatches entry must be an object with a persona string");
+      }
+      selectedPersonas.add((dispatch as Record<string, unknown>).persona as string);
+    }
     const seenRefs = new Set<string>();
-    const parts: Buffer[] = [];
+    const screenResults: { reviewer: string; result: Record<string, unknown> }[] = [];
     for (const ref of payload.inputRefs) {
       if (typeof ref !== "string" || ref.length > 255) {
         throw new ReviewPipelineError("review_pipeline_input_refs_invalid", "each inputRefs entry must be a bounded artifact name");
@@ -227,19 +258,21 @@ export async function runReviewPipeline(
         throw new ReviewPipelineError("review_pipeline_input_ref_duplicate", `inputRefs contains a duplicate screen artifact: ${ref}`);
       }
       seenRefs.add(ref);
-      const bytes = readRunArtifact({ runDir: storeContext.store.runDir(storeContext.sessionID, payload.runId as string), name: ref, maxFileBytes: storeContext.store.caps.maxFileBytes }).data;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(bytes.toString("utf8")) as unknown;
-      } catch {
-        throw new ReviewPipelineError("review_pipeline_input_ref_unparseable", `screen artifact is not parseable JSON: ${ref}`);
+      const persona = phaseMatch[2]!;
+      if (!selectedPersonas.has(persona)) {
+        throw new ReviewPipelineError("review_pipeline_input_refs_persona_unselected", `screen artifact persona is not selected: ${persona}`);
       }
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new ReviewPipelineError("review_pipeline_input_ref_not_object", `screen artifact must contain a JSON object: ${ref}`);
-      }
-      parts.push(bytes);
+      screenResults.push(wrapScreenResult(storeContext, payload.runId as string, ref));
     }
-    input = Buffer.concat([Buffer.from('{"screen_results":['), ...parts.flatMap((part, index) => index ? [Buffer.from(","), part] : [part]), Buffer.from("]}")]);
+    for (const persona of selectedPersonas) {
+      if (!seenRefs.has(`phase-screen-${persona}.json`)) {
+        throw new ReviewPipelineError("review_pipeline_selected_dispatches_screen_missing", `selected dispatch has no matching screen artifact: ${persona}`);
+      }
+    }
+    input = Buffer.from(JSON.stringify({
+      screen_results: screenResults,
+      selected_dispatches: JSON.parse(selectedDispatchBytes[0]!.toString("utf8")),
+    }), "utf8");
   } else if (hasInputRef) {
     if (typeof payload.inputRef !== "string" || !storeContext) {
       throw new ReviewPipelineError("review_pipeline_input_ref_invalid", "inputRef must name a published artifact in this review run");

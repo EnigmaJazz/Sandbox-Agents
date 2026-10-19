@@ -253,15 +253,18 @@ test("prepare dispatch assembles two screened returns from inputRefs in helper s
   }
   const prepared = await env.internals.dispatch({
     version: 1, id: "prepare-aggregate", operation: "reviewPipelineRun", sessionID: SESSION_ID,
-    payload: { projectDir: env.project, phase: "prepare", runId: writer.record.runId, inputRefs: refs },
+    payload: { projectDir: env.project, phase: "prepare", runId: writer.record.runId, inputRefs: refs, selected_dispatches: [{ persona: "correctness" }, { persona: "testing" }] },
   }) as { outcome: string; artifact: { name: string } };
   expect(prepared.outcome).not.toBe("structurally_rejected");
   expect(prepared.artifact.name).toBe("phase-prepare.json");
   const helperOutput = JSON.parse(readFileSync(join(env.store.runDir(SESSION_ID, writer.record.runId), prepared.artifact.name), "utf8")) as { input: string };
-  expect(JSON.parse(helperOutput.input)).toEqual({ screen_results: [
-    { phase: "screen", input: "return-correctness" },
-    { phase: "screen", input: "return-testing" },
-  ] });
+  expect(JSON.parse(helperOutput.input)).toEqual({
+    screen_results: [
+      { reviewer: "correctness", result: { phase: "screen", input: "return-correctness" } },
+      { reviewer: "testing", result: { phase: "screen", input: "return-testing" } },
+    ],
+    selected_dispatches: [{ persona: "correctness" }, { persona: "testing" }],
+  });
   expect(JSON.parse(readFileSync(env.auditPath, "utf8").trim().split("\n").at(-1)!)).toEqual([process.execPath, env.helperPath, "prepare"]);
 });
 
@@ -272,7 +275,7 @@ test("dispatch composes merge and finalize stdin from same-run artifacts", async
   const dispatch = (id: string, fields: Record<string, unknown>) => env.internals.dispatch({ version: 1, id, operation: "reviewPipelineRun", sessionID: SESSION_ID, payload: { projectDir: env.project, runId: writer.record.runId, ...fields } });
   await dispatch("screen-c", { phase: "screen", reviewer: "correctness", stdin: '{"screened":"c"}' });
   await dispatch("screen-t", { phase: "screen", reviewer: "testing", stdin: '{"screened":"t"}' });
-  await dispatch("prepare", { phase: "prepare", inputRefs: ["phase-screen-correctness.json", "phase-screen-testing.json"] });
+  await dispatch("prepare", { phase: "prepare", inputRefs: ["phase-screen-correctness.json", "phase-screen-testing.json"], selected_dispatches: [{ persona: "correctness" }, { persona: "testing" }] });
   const adjudication = { decisions: [{ finding_id: "f1", decision: "accept" }] };
   await dispatch("merge", { phase: "merge", inputRef: "phase-prepare.json", adjudication });
   const envelopes = {
@@ -281,7 +284,10 @@ test("dispatch composes merge and finalize stdin from same-run artifacts", async
     parent_run_metadata: { run_id: writer.record.runId, branch: "master", head_sha: "a".repeat(40), mode: "standard", harness: "opencode", timestamps: { completed_at: "now" }, applied_fixes: [], selected_dispatches: [], validation: [] },
   };
   await dispatch("finalize", { phase: "finalize", preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json", ...envelopes });
-  const screenResults = ["phase-screen-correctness.json", "phase-screen-testing.json"].map((ref) => JSON.parse(readFileSync(join(runDir, ref), "utf8")));
+  const screenResults = ["phase-screen-correctness.json", "phase-screen-testing.json"].map((ref, index) => ({
+    reviewer: ["correctness", "testing"][index]!,
+    result: JSON.parse(readFileSync(join(runDir, ref), "utf8")),
+  }));
   const prepared = JSON.parse(readFileSync(join(runDir, "phase-prepare.json"), "utf8"));
   const merged = JSON.parse(readFileSync(join(runDir, "phase-merge.json"), "utf8"));
   const received = readFileSync(env.auditPath, "utf8").trim().split("\n").map((row) => JSON.parse(row) as string[]).slice(-3).map((args) => {
@@ -289,7 +295,7 @@ test("dispatch composes merge and finalize stdin from same-run artifacts", async
     return JSON.parse((JSON.parse(readFileSync(join(runDir, `phase-${phase}.json`), "utf8")) as { input: string }).input);
   });
   expect(received).toEqual([
-    { screen_results: screenResults }, { prepared, adjudication },
+    { screen_results: screenResults, selected_dispatches: [{ persona: "correctness" }, { persona: "testing" }] }, { prepared, adjudication },
     { merge: merged, prepared, screen_results: screenResults, ...envelopes },
   ]);
   for (const field of ["prepared", "merge", "screen_results"] as const) {

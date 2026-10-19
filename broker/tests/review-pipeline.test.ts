@@ -87,7 +87,7 @@ test("inputRefs validates phase, grammar, run membership, JSON, count, conflicts
   store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-project-standards.json", Buffer.from('"bare string"'));
   store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-maintainability.json", Buffer.from("[]"));
   const context = { store, sessionID: pin.sessionID };
-  const invoke = (payload: Record<string, unknown>) => runReviewPipeline({ runId: writer.record.runId, phase: "prepare", ...payload }, pin.config, undefined, context);
+  const invoke = (payload: Record<string, unknown>) => runReviewPipeline({ runId: writer.record.runId, phase: "prepare", selected_dispatches: (Array.isArray(payload.inputRefs) ? payload.inputRefs : []).flatMap((ref) => typeof ref === "string" ? [{ persona: ref.match(/^phase-screen-(.+)\.json$/)?.[1] ?? "correctness" }] : []), ...payload }, pin.config, undefined, context);
 
   await expect(runReviewPipeline({ phase: "merge", runId: writer.record.runId, inputRefs: ["phase-screen-correctness.json"] }, pin.config, undefined, context))
     .rejects.toMatchObject({ code: "review_pipeline_stdin_source_conflict" });
@@ -115,6 +115,27 @@ test("inputRefs validates phase, grammar, run membership, JSON, count, conflicts
   store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-performance.json", large);
   await expect(invoke({ inputRefs: ["phase-screen-security.json", "phase-screen-performance.json"] }))
     .rejects.toMatchObject({ code: "review_pipeline_input_refs_too_large", message: expect.stringContaining(String(REVIEW_PIPELINE_MAX_STDIN_BYTES)) });
+});
+
+test("prepare wraps screen artifacts with broker-derived reviewers and matches selected dispatches", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  const screen = { admitted_findings: [{ input_id: "finding-1" }], residual_risks: [], testing_gaps: [], harness: "opencode" };
+  writer.addArtifact("phase-screen-correctness.json", Buffer.from(JSON.stringify(screen)));
+  const run = (selected_dispatches: unknown, inputRefs = ["phase-screen-correctness.json"]) => runReviewPipeline(
+    { phase: "prepare", runId: writer.record.runId, inputRefs, selected_dispatches },
+    pin.config, undefined, { store: pin.store, sessionID: pin.sessionID },
+  );
+  await expect(run(undefined)).rejects.toMatchObject({ code: "review_pipeline_selected_dispatches_missing" });
+  await expect(run([])).rejects.toMatchObject({ code: "review_pipeline_selected_dispatches_missing" });
+  await expect(run([{ persona: "testing" }])).rejects.toMatchObject({ code: "review_pipeline_input_refs_persona_unselected", message: expect.stringContaining("correctness") });
+  await expect(run([{ persona: "correctness" }, { persona: "testing" }])).rejects.toMatchObject({ code: "review_pipeline_selected_dispatches_screen_missing", message: expect.stringContaining("testing") });
+  await run([{ persona: "correctness", selection_surface: ["finding-1"] }]);
+  const saved = JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, writer.record.runId), "phase-prepare.json"), "utf8")) as { input: string };
+  expect(JSON.parse(saved.input)).toEqual({
+    screen_results: [{ reviewer: "correctness", result: screen }],
+    selected_dispatches: [{ persona: "correctness", selection_surface: ["finding-1"] }],
+  });
 });
 
 test("accepts a persona-named screen artifact as a later phase inputRef", async () => {
@@ -170,6 +191,28 @@ test("finalize preflight refuses recorded oversized artifacts before reading the
     pin.config, undefined, { store: pin.store, sessionID: pin.sessionID },
   )).rejects.toMatchObject({ code: "review_pipeline_composed_input_too_large" });
   expect(artifactReadCount).toBe(0);
+});
+
+test("finalize uses the shared screen-result wrapper with broker-derived reviewers", async () => {
+  const pin = fixture();
+  const expectedHead = "b".repeat(40);
+  const writer = pin.store.createRun(pin.sessionID, { headObjectId: expectedHead });
+  const screen = { admitted_findings: [{ input_id: "finalize-finding" }], residual_risks: ["tracked"], harness: "opencode" };
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-reliability.json", Buffer.from(JSON.stringify(screen)));
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-prepare.json", Buffer.from(JSON.stringify({ prepared: true })));
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-merge.json", Buffer.from(JSON.stringify({ merged: true })));
+
+  await runReviewPipeline({
+    phase: "finalize", runId: writer.record.runId,
+    preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json",
+    dispatch_records: [], validator_lifecycle_results: [], plan_assessment: {},
+    parent_run_metadata: { head_sha: expectedHead },
+  }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+
+  const artifact = pin.store.readRecord(pin.sessionID, writer.record.runId).finalizeProvenance?.artifact;
+  expect(artifact?.name).toBe("phase-finalize.json");
+  const helperInput = JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, writer.record.runId), artifact!.name), "utf8")).input;
+  expect(JSON.parse(helperInput).screen_results).toEqual([{ reviewer: "reliability", result: screen }]);
 });
 
 test("finalize binds parent metadata head_sha to the resolved run head", async () => {

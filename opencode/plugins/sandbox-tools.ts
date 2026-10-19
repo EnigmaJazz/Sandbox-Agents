@@ -759,6 +759,7 @@ export default function sandboxToolsPlugin() {
           prepared: z.unknown().optional(),
           merge: z.unknown().optional(),
           screen_results: z.unknown().optional(),
+          selected_dispatches: reviewPipelineEnvelopeArg.optional(),
           runId: z.string().regex(/^[a-f0-9]{32}$/),
         },
         execute: async (args, ctx) => {
