@@ -192,11 +192,13 @@ test("review pipeline and persist tools expose only their allowed schema keys", 
   const persist = tools.host_review_persist;
   expect(pipeline).toBeDefined();
   expect(persist).toBeDefined();
-  expect(Object.keys(pipeline.args).sort()).toEqual(["inputRef", "phase", "reviewer", "runId", "stdin"]);
+  expect(Object.keys(pipeline.args).sort()).toEqual(["inputRef", "inputRefs", "phase", "reviewer", "runId", "stdin"]);
+  expect(Object.keys(pipeline.args)).toContain("inputRefs");
+  expect(sandboxTools).toMatch(/inputRefs:\s*z\.array\(z\.string\(\)\.min\(1\)\.max\(255\)\)\.max\(16\)\.optional\(\)/);
   expect(Object.keys(persist.args).sort()).toEqual(["finalizeRef", "mode", "runId"]);
   const acceptsKeys = (shape: Record<string, unknown>, keys: string[]) =>
     keys.every((key) => Object.hasOwn(shape, key)) && Object.keys(shape).every((key) => keys.includes(key));
-  expect(acceptsKeys(pipeline.args, ["phase", "reviewer", "stdin", "inputRef", "runId"])).toBe(true);
+  expect(acceptsKeys(pipeline.args, ["phase", "reviewer", "stdin", "inputRef", "inputRefs", "runId"])).toBe(true);
   expect(acceptsKeys(persist.args, ["runId", "finalizeRef", "mode"])).toBe(true);
   for (const args of [pipeline.args, persist.args]) {
     expect(acceptsKeys(args, [...Object.keys(args), "unknown"])).toBe(false);

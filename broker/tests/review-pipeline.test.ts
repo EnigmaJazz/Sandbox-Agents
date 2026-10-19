@@ -78,6 +78,45 @@ test("publishes phase output by reference and refuses missing or conflicting std
   expect(readdirSync(store.runDir(sessionID, writer.record.runId)).sort()).toContain("phase-prepare.json");
 });
 
+test("inputRefs validates phase, grammar, run membership, JSON, count, conflicts, and assembled byte cap", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  const store = new ReviewRunStore({ root: pin.store.root, projectRoot: pin.project, caps: { ...pin.store.caps, maxFileBytes: 1024 * 1024 } });
+  store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-correctness.json", Buffer.from("{\"ok\":true}"));
+  store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-testing.json", Buffer.from("{bad"));
+  store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-project-standards.json", Buffer.from('"bare string"'));
+  store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-maintainability.json", Buffer.from("[]"));
+  const context = { store, sessionID: pin.sessionID };
+  const invoke = (payload: Record<string, unknown>) => runReviewPipeline({ runId: writer.record.runId, phase: "prepare", ...payload }, pin.config, undefined, context);
+
+  await expect(runReviewPipeline({ phase: "merge", runId: writer.record.runId, inputRefs: ["phase-screen-correctness.json"] }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_input_refs_phase_forbidden" });
+  await expect(invoke({ inputRefs: ["phase-prepare.json"] })).rejects.toMatchObject({ code: "review_pipeline_input_ref_not_screen" });
+  await expect(invoke({ inputRefs: ["phase-screen-unknown.json"] })).rejects.toMatchObject({ code: "review_pipeline_input_ref_not_screen" });
+  await expect(invoke({ inputRefs: ["phase-screen-adversarial.json"] })).rejects.toMatchObject({ code: "review_run_artifact_not_found" });
+  await expect(invoke({ inputRefs: ["phase-screen-testing.json"] })).rejects.toMatchObject({ code: "review_pipeline_input_ref_unparseable", message: expect.stringContaining("phase-screen-testing.json") });
+  await expect(invoke({ inputRefs: [] })).rejects.toMatchObject({ code: "review_pipeline_input_refs_empty" });
+  await expect(invoke({ inputRefs: ["phase-screen-correctness.json", "phase-screen-correctness.json"] }))
+    .rejects.toMatchObject({ code: "review_pipeline_input_ref_duplicate" });
+  await expect(invoke({ inputRefs: ["phase-screen-project-standards.json"] }))
+    .rejects.toMatchObject({ code: "review_pipeline_input_ref_not_object" });
+  await expect(invoke({ inputRefs: ["phase-screen-maintainability.json"] }))
+    .rejects.toMatchObject({ code: "review_pipeline_input_ref_not_object" });
+  await expect(invoke({ inputRefs: ["phase-screen.json"] })).rejects.toMatchObject({ code: "review_pipeline_input_ref_not_screen" });
+  await expect(invoke({ inputRefs: ["phase-prepare-correctness.json"] })).rejects.toMatchObject({ code: "review_pipeline_input_ref_not_screen" });
+  await expect(invoke({ inputRefs: Array(17).fill("phase-screen-correctness.json") }))
+    .rejects.toMatchObject({ code: "review_pipeline_input_refs_too_many", message: expect.stringContaining("16") });
+  await expect(runReviewPipeline({ phase: "prepare", runId: writer.record.runId, stdin: "{}", inputRefs: ["phase-screen-correctness.json"] }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_stdin_source_conflict" });
+  await expect(runReviewPipeline({ phase: "prepare", runId: writer.record.runId, inputRef: "phase-screen-correctness.json", inputRefs: ["phase-screen-correctness.json"] }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_stdin_source_conflict" });
+  const large = Buffer.from(JSON.stringify({ value: "x".repeat(140 * 1024) }));
+  store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-security.json", large);
+  store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-performance.json", large);
+  await expect(invoke({ inputRefs: ["phase-screen-security.json", "phase-screen-performance.json"] }))
+    .rejects.toMatchObject({ code: "review_pipeline_input_refs_too_large", message: expect.stringContaining(String(REVIEW_PIPELINE_MAX_STDIN_BYTES)) });
+});
+
 test("accepts a persona-named screen artifact as a later phase inputRef", async () => {
   const pin = fixture();
   const writer = pin.store.createRun(pin.sessionID);

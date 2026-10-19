@@ -1018,7 +1018,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   ],
   reviewMaterialize: ["projectDir", "baseRef", "headRef", "contextLines", "paths"],
   reviewDiffRead: ["projectDir", "runId", "slice"],
-  reviewPipelineRun: ["projectDir", "phase", "reviewer", "stdin", "inputRef", "runId"],
+  reviewPipelineRun: ["projectDir", "phase", "reviewer", "stdin", "inputRef", "inputRefs", "runId"],
   reviewPersist: ["projectDir", "runId", "finalizeRef", "mode"],
   gitCommit: ["projectDir", "message", "sandboxSessionID"],
   gitClearCommitIntent: ["projectDir", "sandboxSessionID"],

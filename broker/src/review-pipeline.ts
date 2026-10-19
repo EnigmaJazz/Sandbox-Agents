@@ -11,6 +11,7 @@ import {
 import type { BrokerConfig } from "./config.ts";
 
 export const REVIEW_PIPELINE_MAX_STDIN_BYTES = 256 * 1024;
+export const REVIEW_PIPELINE_MAX_INPUT_REFS = 16;
 // These are the ce:review persona names from the Systematic persona catalog, deliberately NOT the native 4R lens names.
 export const REVIEW_PIPELINE_REVIEWERS = [
   "correctness",
@@ -42,6 +43,7 @@ export interface ReviewPipelinePayload {
   reviewer?: unknown;
   stdin?: unknown;
   inputRef?: unknown;
+  inputRefs?: unknown;
   runId: unknown;
 }
 
@@ -52,6 +54,13 @@ export interface ReviewPipelineStoreContext {
 
 const PHASES: readonly ReviewPipelinePhase[] = ["screen", "prepare", "merge", "finalize"];
 const STDERR_MAX_BYTES = 4096;
+const REVIEWER_SUFFIXES = REVIEW_PIPELINE_REVIEWERS
+  .map((reviewer) => reviewer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+  .join("|");
+
+function matchPhaseArtifact(ref: string): RegExpExecArray | null {
+  return new RegExp(`^phase-(screen|prepare|merge|finalize)(?:-(${REVIEWER_SUFFIXES}))?\\.json$`).exec(ref);
+}
 const spawnWithReplacementEnv: SpawnFn = (argv, opts) =>
   spawnExec(argv, { ...opts, envMode: "replace" });
 
@@ -80,22 +89,61 @@ export async function runReviewPipeline(
   assertReviewRunId(payload.runId);
   const hasStdin = payload.stdin !== undefined;
   const hasInputRef = payload.inputRef !== undefined;
-  if (!hasStdin && !hasInputRef) {
-    throw new ReviewPipelineError("review_pipeline_stdin_source_missing", "exactly one of stdin or inputRef must be supplied; neither was provided");
+  const hasInputRefs = payload.inputRefs !== undefined;
+  const sourceCount = Number(hasStdin) + Number(hasInputRef) + Number(hasInputRefs);
+  if (sourceCount === 0) {
+    throw new ReviewPipelineError("review_pipeline_stdin_source_missing", "exactly one of stdin, inputRef, or inputRefs must be supplied; none was provided");
   }
-  if (hasStdin && hasInputRef) {
-    throw new ReviewPipelineError("review_pipeline_stdin_source_conflict", "exactly one of stdin or inputRef must be supplied; both were provided");
+  if (sourceCount > 1) {
+    throw new ReviewPipelineError("review_pipeline_stdin_source_conflict", "exactly one of stdin, inputRef, or inputRefs must be supplied; multiple sources were provided");
   }
   let input: Buffer;
-  if (hasInputRef) {
+  if (hasInputRefs) {
+    if (phase !== "prepare") {
+      throw new ReviewPipelineError("review_pipeline_input_refs_phase_forbidden", `inputRefs is only valid for prepare (received ${phase})`);
+    }
+    if (!Array.isArray(payload.inputRefs) || !storeContext) {
+      throw new ReviewPipelineError("review_pipeline_input_refs_invalid", "inputRefs must be an array of published screen artifacts in this review run");
+    }
+    if (payload.inputRefs.length > REVIEW_PIPELINE_MAX_INPUT_REFS) {
+      throw new ReviewPipelineError("review_pipeline_input_refs_too_many", `inputRefs exceeds limit ${REVIEW_PIPELINE_MAX_INPUT_REFS} (observed ${payload.inputRefs.length})`);
+    }
+    if (payload.inputRefs.length === 0) {
+      throw new ReviewPipelineError("review_pipeline_input_refs_empty", "inputRefs must contain at least one screen artifact");
+    }
+    const seenRefs = new Set<string>();
+    const parts: Buffer[] = [];
+    for (const ref of payload.inputRefs) {
+      if (typeof ref !== "string" || ref.length > 255) {
+        throw new ReviewPipelineError("review_pipeline_input_refs_invalid", "each inputRefs entry must be a bounded artifact name");
+      }
+      const phaseMatch = matchPhaseArtifact(ref);
+      if (!phaseMatch || phaseMatch[1] !== "screen" || !phaseMatch[2]) {
+        throw new ReviewPipelineError("review_pipeline_input_ref_not_screen", `inputRefs artifact is not a screen artifact: ${ref}`);
+      }
+      if (seenRefs.has(ref)) {
+        throw new ReviewPipelineError("review_pipeline_input_ref_duplicate", `inputRefs contains a duplicate screen artifact: ${ref}`);
+      }
+      seenRefs.add(ref);
+      const bytes = readRunArtifact({ runDir: storeContext.store.runDir(storeContext.sessionID, payload.runId as string), name: ref, maxFileBytes: storeContext.store.caps.maxFileBytes }).data;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(bytes.toString("utf8")) as unknown;
+      } catch {
+        throw new ReviewPipelineError("review_pipeline_input_ref_unparseable", `screen artifact is not parseable JSON: ${ref}`);
+      }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new ReviewPipelineError("review_pipeline_input_ref_not_object", `screen artifact must contain a JSON object: ${ref}`);
+      }
+      parts.push(bytes);
+    }
+    input = Buffer.concat([Buffer.from('{"screen_results":['), ...parts.flatMap((part, index) => index ? [Buffer.from(","), part] : [part]), Buffer.from("]}")]);
+  } else if (hasInputRef) {
     if (typeof payload.inputRef !== "string" || !storeContext) {
       throw new ReviewPipelineError("review_pipeline_input_ref_invalid", "inputRef must name a published artifact in this review run");
     }
     const phaseIndex = PHASES.indexOf(phase);
-    const reviewerSuffixes = REVIEW_PIPELINE_REVIEWERS
-      .map((reviewer) => reviewer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-      .join("|");
-    const phaseMatch = new RegExp(`^phase-(screen|prepare|merge|finalize)(?:-(${reviewerSuffixes}))?\\.json$`).exec(payload.inputRef);
+    const phaseMatch = matchPhaseArtifact(payload.inputRef);
     if (!phaseMatch) {
       throw new ReviewPipelineError("review_pipeline_input_ref_unknown", "inputRef does not name a recognized phase artifact");
     }
@@ -111,10 +159,10 @@ export async function runReviewPipeline(
     }
     input = typeof payload.stdin === "string" ? Buffer.from(payload.stdin, "utf8") : Buffer.from(payload.stdin as number[]);
   }
-  if (hasStdin && input.byteLength > REVIEW_PIPELINE_MAX_STDIN_BYTES) {
+  if ((hasStdin || hasInputRefs) && input.byteLength > REVIEW_PIPELINE_MAX_STDIN_BYTES) {
     throw new ReviewPipelineError(
-      "review_pipeline_stdin_too_large",
-      `review pipeline inline stdin exceeds ${REVIEW_PIPELINE_MAX_STDIN_BYTES} bytes (observed ${input.byteLength} bytes)`,
+      hasInputRefs ? "review_pipeline_input_refs_too_large" : "review_pipeline_stdin_too_large",
+      `review pipeline stdin exceeds cap ${REVIEW_PIPELINE_MAX_STDIN_BYTES} bytes (observed ${input.byteLength} bytes)`,
     );
   }
   let helper: ReturnType<typeof assertPinnedReviewHelper>;

@@ -281,8 +281,31 @@ U3a T5 by-reference publication/chaining is implemented and empirically verified
 - Focused final: `bun --cwd broker test tests/host-tool-approval.test.ts tests/sandbox-tool-contract.test.ts --reporter=dot` — 37 pass / 0 fail, 180 expects across 2 files. Full: `bun --cwd broker test --reporter=dot` — 1131 pass / 0 fail, 4891 expects across 70 files. Build: from `broker`, `bun build --target=bun src/main.ts` completed successfully.
 - `buildReviewPipelineRunOp` docstring correction is comment-only; no other content in `broker/src/service.ts` was changed. The delivery remains uncommitted, with no git mutation or apply; owner-controlled S17 installation/commit remains required. Boundary 2 remains parent-owned and complete.
 
+## Progress addendum — helper-owned prepare screen aggregation
+
+- Observed live defect: `prepare` rejected a single screen artifact with `schema validation at screen_results`; the parent receives only bounded summaries and cannot author or reconstruct helper-shaped screened returns.
+- The broker now accepts exactly one source among `stdin`, `inputRef`, and `inputRefs`; `inputRefs` is prepare-only. It validates each reference against the enumerated `phase-screen-<persona>.json` names, reads through `readRunArtifact`, verifies JSON parseability, and splices the original artifact bytes into `{"screen_results":[...]}` on the helper's stdin. No phase output is synthesized.
+- Bounds: at most 16 screen references, each name is bounded to 255 characters, and the assembled input is refused above the existing 256 KiB stdin cap; errors identify the source conflict, phase, artifact, limit, or cap and observed byte count as applicable.
+- Tests add real pipeline dispatch for two screen personas followed by prepare, and verify the helper's published output contains the observed two-entry `screen_results` array. Other tests cover phase, non-screen name, missing run artifact, unparseable JSON, ref count, aggregate size, and source conflicts. `inputRefs` is registered in the broker allowlist and bounded plugin schema.
+- RED observed: before implementation, focused dispatch failed with `unexpected field 'inputRefs' in reviewPipelineRun payload` (13 pass / 1 fail), proving registration/dispatch did not accept the feature. The two-screen helper chain subsequently passed.
+- Revert table: completed isolated remove/test/restore experiments; every row begins and ends at SHA-256 `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` for `broker/src/review-pipeline.ts`.
+
+  | Guard removed | Named test and observed failure | SHA-256 before | SHA-256 after restore |
+  |---|---|---|---|
+  | Exactly-one source: missing case (`sourceCount === 0`) | `publishes phase output by reference and refuses missing or conflicting stdin sources` — expected `review_pipeline_stdin_source_missing`; got `stdin must be a string or an array of bytes`. | `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` | `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` |
+  | Exactly-one source: conflict case (`sourceCount > 1`) | `publishes phase output by reference and refuses missing or conflicting stdin sources` — expected `review_pipeline_stdin_source_conflict`; promise resolved. | `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` | `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` |
+  | `inputRefs` only for `prepare` | `inputRefs validates phase, grammar, run membership, JSON, count, conflicts, and assembled byte cap` — expected `review_pipeline_input_refs_phase_forbidden`; promise resolved. | `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` | `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` |
+  | Per-ref screen-artifact grammar | Same `inputRefs validates phase, grammar, run membership, JSON, count, conflicts, and assembled byte cap` test — expected `review_pipeline_input_ref_not_screen`; got `review_run_artifact_not_found` for `phase-prepare.json`. | `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` | `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` |
+  | JSON-parse requirement per artifact | Same named `inputRefs` test — expected `review_pipeline_input_ref_unparseable`; promise resolved for `phase-screen-testing.json`. | `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` | `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` |
+  | 16-entry maximum | Same named `inputRefs` test — expected `review_pipeline_input_refs_too_many`; promise resolved for 17 valid refs. | `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` | `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` |
+  | Assembled-byte cap | Same named `inputRefs` test — expected `review_pipeline_input_refs_too_large`; promise resolved for the oversized assembled input. | `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` | `7a19d470f4769a42c242eef4e534c8577254c4c40b75129fb7fd77ca5adec7b4` |
+
+- Each isolated experiment ran `bun test tests/review-pipeline.test.ts --test-name-pattern "<named test>"` from `broker`; all seven guard removals produced the specific expected test failure. No guard was left removed and the restored SHA matched byte-for-byte after every experiment.
+- Observed verification: `bun --cwd broker test tests/sandbox-tool-contract.test.ts --reporter=dot` — 16 pass / 0 fail / 65 expects. Full `bun --cwd broker test --reporter=dot` — 1169 pass / 0 fail / 5016 expects across 71 files. `bun build --target=bun src/main.ts` from `broker` completed successfully.
+- Explicitly not covered: `merge` and `finalize` still require their own composition (helper-prepared state spliced with model adjudication); this change only assembles screen returns for `prepare`.
+
 ## Next step
-Owner-controlled S17 review/install for broker source changes, including the ignore directory fsync request, then run the full focused/full/build checks before commit.
+Owner-controlled S17 review/install for broker source changes, including the ignore directory fsync request, then update the plugin-contract expectation in its authorized follow-up and run the complete focused/full/build checks before commit.
 
 ## Progress addendum — persist-containment hardening
 
@@ -412,3 +435,22 @@ First live exercise after install:
 - The native lane's `assertReviewLens` and `INSTALLED_REVIEW_AGENTS` were deliberately not touched; the existing `preserves all four native review lenses and relay agents independently of pipeline personas` regression test passed.
 - Revert experiment: starting source SHA-256 `d675d3ee887a6c90befc530f69b13e9e9e18083b1fac49b88827695662f44451`; reverted only the derived suffix validation to the hardcoded native 4R suffixes and ran `bun --cwd broker test tests/review-pipeline.test.ts tests/review-pipeline-operation.test.ts --reporter=dot`. Observed failures: `accepts a persona-named screen artifact as a later phase inputRef` and `reviewPipeline dispatch chains all phase outputs by exact artifact reference`. The unknown-persona refusal test continued to pass because both old and new grammars reject an unknown suffix. Restored validation; ending SHA-256 `d675d3ee887a6c90befc530f69b13e9e9e18083b1fac49b88827695662f44451` (byte-identical).
 - Final verification: `bun --cwd broker test tests/review-pipeline.test.ts tests/review-pipeline-operation.test.ts --reporter=dot` — 37 pass / 0 fail / 136 expect calls across 2 files; `bun --cwd broker test --reporter=dot` — 1167 pass / 0 fail / 4999 expect calls across 71 files; `bun build --target=bun src/main.ts` from `broker` — succeeded.
+
+## Progress addendum — inputRefs post-code advisory fixes (2026-10-19)
+
+- Resolved the four findings: duplicate screen refs now refuse with `review_pipeline_input_ref_duplicate`; an empty array refuses with `review_pipeline_input_refs_empty`; JSON scalars/arrays/null refuse with `review_pipeline_input_ref_not_object`; and both `inputRef` and `inputRefs` use `matchPhaseArtifact`, built from the shared phase/persona regex grammar. Each ref still goes through `readRunArtifact`, and accepted artifact bytes are spliced exactly as stored.
+- Corrected the prior duplicate-as-size test: duplicate pair expects the duplicate refusal. The assembled-byte-cap test now uses two distinct screen refs so it still specifically exercises the cap.
+- Grammar cases covered: accepts `phase-screen-correctness.json`; refuses `phase-screen.json`, `phase-prepare-correctness.json`, and unknown personas.
+- Recorded, not fixed, advisories: up to 16 artifacts (default 4 MiB each) are read before assembled-byte cap enforcement; suggested remedy is pre-flight size summation from run-record byte lengths before reading. The single `inputRef` path also does not enforce the 256 KiB stdin cap; this pre-existing behavior is unrelated and remains unchanged.
+- RED evidence: before the empty-array guard, the focused test expected `review_pipeline_input_refs_empty` but the promise resolved. Guard reverts:
+
+  | Guard reverted | Named test / observed failure | Source SHA-256 before | Source SHA-256 after restore |
+  |---|---|---|---|
+  | Empty-array refusal | `inputRefs validates phase, grammar, run membership, JSON, count, conflicts, and assembled byte cap` — expected rejection; promise resolved at empty-array assertion. | `af09497c30a58df861058d4ccbaeadddfc87efd9c4a2002bd38342ac566ef856` | `af09497c30a58df861058d4ccbaeadddfc87efd9c4a2002bd38342ac566ef856` |
+  | Duplicate-ref refusal | Same test — expected rejection with `review_pipeline_input_ref_duplicate`; promise resolved. | `af09497c30a58df861058d4ccbaeadddfc87efd9c4a2002bd38342ac566ef856` | `af09497c30a58df861058d4ccbaeadddfc87efd9c4a2002bd38342ac566ef856` |
+  | JSON-object shape refusal | Same test — expected rejection with `review_pipeline_input_ref_not_object`; promise resolved for the bare string. | `af09497c30a58df861058d4ccbaeadddfc87efd9c4a2002bd38342ac566ef856` | `af09497c30a58df861058d4ccbaeadddfc87efd9c4a2002bd38342ac566ef856` |
+  | Shared grammar helper | Equivalent prior two-regex implementation retained the identical grammar; accept/refusal cases stayed green, as expected for a behavior-preserving refactor. | `af09497c30a58df861058d4ccbaeadddfc87efd9c4a2002bd38342ac566ef856` | `af09497c30a58df861058d4ccbaeadddfc87efd9c4a2002bd38342ac566ef856` |
+
+  No test stayed green without any of the three behavior guards; grammar-helper behavior stayed green without the refactor because the restored implementation was semantically equivalent.
+- Checks: focused `bun test tests/review-pipeline.test.ts tests/review-pipeline-operation.test.ts --reporter=dot` — 39 pass / 0 fail / 157 expect calls; full `bun --cwd broker test --reporter=dot` — 1169 pass / 0 fail / 5022 expect calls across 71 files; `bun build --target=bun src/main.ts` from `broker` — completed and emitted the bundle without an error.
+- Reviewability receipt for this delta is recorded in the delivery report; no commit was created and the S17 source remains for owner-controlled installation/review.

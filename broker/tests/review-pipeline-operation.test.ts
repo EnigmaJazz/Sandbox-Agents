@@ -227,6 +227,31 @@ test("persist refuses finalize phase outcomes that were not accepted", async () 
   expect(existsSync(join(env.project, ".context"))).toBe(false);
 });
 
+test("prepare dispatch assembles two screened returns from inputRefs in helper stdin", async () => {
+  const env = operationFixture();
+  const writer = env.store.createRun(SESSION_ID);
+  const refs = [];
+  for (const reviewer of ["correctness", "testing"] as const) {
+    const screened = await env.internals.dispatch({
+      version: 1, id: `screen-${reviewer}`, operation: "reviewPipelineRun", sessionID: SESSION_ID,
+      payload: { projectDir: env.project, phase: "screen", reviewer, runId: writer.record.runId, stdin: `return-${reviewer}` },
+    }) as { artifact: { name: string } };
+    refs.push(screened.artifact.name);
+  }
+  const prepared = await env.internals.dispatch({
+    version: 1, id: "prepare-aggregate", operation: "reviewPipelineRun", sessionID: SESSION_ID,
+    payload: { projectDir: env.project, phase: "prepare", runId: writer.record.runId, inputRefs: refs },
+  }) as { outcome: string; artifact: { name: string } };
+  expect(prepared.outcome).not.toBe("structurally_rejected");
+  expect(prepared.artifact.name).toBe("phase-prepare.json");
+  const helperOutput = JSON.parse(readFileSync(join(env.store.runDir(SESSION_ID, writer.record.runId), prepared.artifact.name), "utf8")) as { input: string };
+  expect(JSON.parse(helperOutput.input)).toEqual({ screen_results: [
+    { phase: "screen", input: "return-correctness" },
+    { phase: "screen", input: "return-testing" },
+  ] });
+  expect(JSON.parse(readFileSync(env.auditPath, "utf8").trim().split("\n").at(-1)!)).toEqual([process.execPath, env.helperPath, "prepare"]);
+});
+
 test("reviewPipeline dispatch chains all phase outputs by exact artifact reference", async () => {
   const env = operationFixture();
   const writer = env.store.createRun(SESSION_ID);

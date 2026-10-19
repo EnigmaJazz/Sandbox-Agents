@@ -748,6 +748,7 @@ export default function sandboxToolsPlugin() {
             z.array(z.number().int().min(0).max(255)).max(256 * 1024),
           ]).optional(),
           inputRef: z.string().min(1).max(255).optional(),
+          inputRefs: z.array(z.string().min(1).max(255)).max(16).optional(),
           runId: z.string().regex(/^[a-f0-9]{32}$/),
         },
         execute: async (args, ctx) => {
