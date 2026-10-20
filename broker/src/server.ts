@@ -96,6 +96,7 @@ import {
   buildReviewDiffReadOp,
   buildReviewPipelineRunOp,
   buildReviewPersistOp,
+  buildReviewPersistPreflightOp,
   buildPrepareResultOp,
   buildReadFileOp,
   buildResultDiffOp,
@@ -690,7 +691,7 @@ export class BrokerServer {
           this.dispatch(envelope!, sendProgress),
         );
         // resultDiff is a strict read and must not create/touch session state.
-        if (envelope.operation !== "resultDiff") {
+        if (envelope.operation !== "resultDiff" && envelope.operation !== "reviewPersistPreflight") {
           try { this.ctx.store.touch(envelope.sessionID, { lastOperation: envelope.operation }, envelope.operation); } catch {}
         }
 
@@ -960,6 +961,8 @@ export class BrokerServer {
         return buildReviewPipelineRunOp(this.ctx)(req);
       case "reviewPersist":
         return buildReviewPersistOp(this.ctx)(req);
+      case "reviewPersistPreflight":
+        return buildReviewPersistPreflightOp(this.ctx)(req);
       case "copyOutInfo":
         return buildCopyOutInfoOp(this.ctx)(req);
       case "copyOut":

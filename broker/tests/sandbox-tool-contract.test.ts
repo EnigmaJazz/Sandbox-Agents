@@ -24,6 +24,13 @@ async function runIsolatedReviewToolProbe(): Promise<{ requests: unknown[]; outp
         request: async (operation, sessionID, payload, agent) => {
           if (failure) throw failure;
           requests.push({ operation, sessionID, payload, agent });
+          if (operation === "reviewPersistPreflight") return {
+            runId: payload.runId, projectDir: payload.projectDir, baseObjectId: "base", headObjectId: "head",
+            changedPaths: 2, totalBytes: 100,
+            finalize: { name: payload.finalizeRef, bytes: 100, sha256: "digest-123" },
+            finalizeInput: "stdin", kind: "writing", verdict: "pass", verdictSource: "verdict",
+            counts: { finding_count: 1 }, blockers: [],
+          };
           return { operation, accepted: true };
         },
         close: () => {},
@@ -52,7 +59,7 @@ async function runIsolatedReviewToolProbe(): Promise<{ requests: unknown[]; outp
         failure = undefined;
       }
     }
-    console.log(JSON.stringify({ requests, outputs: [pipelineOutput, persistOutput], failures, pipelineAsks, persistMode: requests[1].payload.mode, persistAskSummary }));
+    console.log(JSON.stringify({ requests, outputs: [pipelineOutput, persistOutput], failures, pipelineAsks, persistMode: requests[2].payload.mode, persistAskSummary }));
   `;
   const child = Bun.spawn(["bun", "-e", source], { cwd: `${import.meta.dir}/../..`, stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([
@@ -229,6 +236,12 @@ test("pipeline is not ask-gated and persist approval receives the caller mode be
       agent: "gentle-orchestrator",
     },
     {
+      operation: "reviewPersistPreflight",
+      sessionID: "session-1",
+      payload: { projectDir: "/work/project", runId: "0123456789abcdef0123456789abcdef", finalizeRef: "phase-finalize.json", mode: "report_only" },
+      agent: "gentle-orchestrator",
+    },
+    {
       operation: "reviewPersist",
       sessionID: "session-1",
       payload: { projectDir: "/work/project", runId: "0123456789abcdef0123456789abcdef", finalizeRef: "phase-finalize.json", mode: "report_only" },
@@ -246,6 +259,9 @@ test("pipeline is not ask-gated and persist approval receives the caller mode be
     { name: "host_review_persist", coded: false, message: "host_review_persist failed: broker detail" },
   ]);
   expect(result.persistMode).toBe("report_only");
+  expect(result.persistAskSummary).toContain("sha256 digest-123");
+  expect(result.persistAskSummary).toContain("verdict pass");
+  expect(result.persistAskSummary).toContain("finalize input inline stdin");
   expect(result.persistAskSummary).toContain("NO project file will be written");
   expect(result.persistAskSummary).toContain("validation is not attempted");
 });

@@ -52,6 +52,7 @@ import {
   buildReviewCaptureUnachievableAsk,
   buildReviewCaptureValidationAsk,
   buildReviewRecoverAsk,
+  assertReviewPersistPreflightClear,
   buildReviewPersistAsk,
   buildReviewStartAsk,
   buildReviewValidateAsk,
@@ -792,10 +793,18 @@ export default function sandboxToolsPlugin() {
         },
         execute: async (args, ctx) => {
           const projectDir = currentProjectDirectory(ctx.directory);
-          await ctx.ask(buildReviewPersistAsk({ projectDir, runId: args.runId, finalizeRef: args.finalizeRef, mode: args.mode }));
           try {
             const c = await client();
             const payload = { projectDir, ...args };
+            const preflight = await c.request("reviewPersistPreflight", ctx.sessionID, payload, ctx.agent) as {
+              finalize: { name: string | null; bytes: number | null; sha256: string | null };
+              baseObjectId: string | null; headObjectId: string | null; changedPaths: number;
+              verdict: string | null; verdictSource: string | null; counts: Record<string, number>;
+              finalizeInput: "stdin" | "inputRef" | "inputRefs" | "unknown";
+              blockers: Array<{ code: string; message: string }>;
+            };
+            assertReviewPersistPreflightClear(preflight.blockers);
+            await ctx.ask(buildReviewPersistAsk({ projectDir, runId: args.runId, finalizeRef: args.finalizeRef, mode: args.mode, preflight }));
             const result = await c.request("reviewPersist", ctx.sessionID, payload, ctx.agent);
             return JSON.stringify(result, null, 2);
           } catch (error) {

@@ -3,7 +3,7 @@ import { closeSync, constants as fsConstants, fchmodSync, fstatSync, lstatSync, 
 import { basename, join, resolve, relative, sep } from "node:path";
 import { homedir } from "node:os";
 import { spawnExec } from "./msb.ts";
-import { assertPinnedReviewHelper, resolveReviewHelperInterpreter } from "./review-run.ts";
+import { assertPinnedReviewHelper, readRunArtifact, ReviewRunStore, resolveReviewHelperInterpreter } from "./review-run.ts";
 import type { BrokerConfig } from "./config.ts";
 import type { ReviewPipelineResult } from "./review-pipeline.ts";
 
@@ -15,6 +15,94 @@ export type ReviewArtifactValidation =
 export interface ReviewPersistResult { outcome: "persisted" | "incomplete" | "report_only"; path?: string; stagingPath?: string; validation: ReviewArtifactValidation; ignoreFile: { status: "unchanged" | "created" | "changed" } }
 export class ReviewPersistError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = new.target.name; }
+}
+
+export interface ReviewPersistPreflight {
+  runId: string;
+  projectDir: string;
+  baseObjectId: string | null;
+  headObjectId: string | null;
+  changedPaths: number;
+  totalBytes: number;
+  finalize: { name: string | null; bytes: number | null; sha256: string | null };
+  finalizeInput: "stdin" | "inputRef" | "inputRefs" | "unknown";
+  kind: string | null;
+  verdict: string | null;
+  verdictSource: string | null;
+  counts: Record<string, number>;
+  blockers: Array<{ code: string; message: string }>;
+}
+
+export function preflightReviewPersist(options: {
+  projectDir: string;
+  runId: string;
+  finalizeRef: string;
+  store: ReviewRunStore;
+  sessionID: string;
+  maxFileBytes: number;
+}): ReviewPersistPreflight {
+  const projectDir = realpathSync(resolve(options.projectDir));
+  const record = options.store.readRecord(options.sessionID, options.runId);
+  const blockers: ReviewPersistPreflight["blockers"] = [];
+  const add = (code: string, message: string) => blockers.push({ code, message: message.slice(0, 128) });
+  if (record.projectRoot !== projectDir) add("review_persist_project_mismatch", "review run is bound to a different canonical project root");
+  const provenance = record.finalizeProvenance;
+  if (!provenance) add("review_persist_finalize_provenance_missing", "review run has no finalize phase provenance");
+  else {
+    if (provenance.phase !== "finalize") add("review_persist_finalize_phase_invalid", "recorded artifact was not published by the finalize phase");
+    if (provenance.outcome !== "accepted") add("review_persist_finalize_outcome_invalid", "recorded finalize phase did not have an accepted outcome");
+    if (!provenance.artifact) add("review_persist_finalize_provenance_missing", "accepted finalize phase has no published artifact");
+  }
+  const recorded = provenance?.artifact;
+  if (recorded && options.finalizeRef !== recorded.name) add("review_persist_finalize_ref_mismatch", "finalizeRef does not name the recorded finalize artifact");
+  let artifact: ReturnType<typeof readRunArtifact> | undefined;
+  if (recorded) {
+    try {
+      artifact = readRunArtifact({ runDir: options.store.runDir(options.sessionID, options.runId), name: recorded.name, maxFileBytes: options.maxFileBytes });
+      if (artifact.bytes !== recorded.bytes || artifact.sha256 !== recorded.sha256) add("review_persist_finalize_digest_mismatch", "finalize artifact bytes no longer match the recorded length and sha256");
+    } catch {
+      add("review_persist_preflight_artifact_unreadable", "finalize artifact cannot be read safely");
+    }
+  }
+  let document: Record<string, unknown> | undefined;
+  if (artifact) {
+    try {
+      const parsed: unknown = JSON.parse(artifact.data.toString("utf8"));
+      document = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : {};
+    } catch {
+      add("review_persist_preflight_json_invalid", "finalize artifact is not a JSON object");
+    }
+  }
+  const wrapper = document as { kind?: unknown; artifact?: unknown } | undefined;
+  const kind = typeof wrapper?.kind === "string" ? wrapper.kind.slice(0, 128) : null;
+  if (document && kind !== "writing") add("review_persist_kind", "finalize output is not a writing artifact");
+  const body = wrapper?.artifact;
+  const payloadDocument = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : undefined;
+  if (document && kind === "writing" && !payloadDocument) add("review_persist_artifact", "finalize writing wrapper must contain a JSON artifact object");
+  const verdict = typeof payloadDocument?.verdict === "string" ? payloadDocument.verdict :
+    payloadDocument?.plan_assessment !== null && typeof payloadDocument?.plan_assessment === "object" && typeof (payloadDocument.plan_assessment as Record<string, unknown>).verdict === "string"
+      ? (payloadDocument.plan_assessment as Record<string, string>).verdict : null;
+  const verdictSource = verdict === null ? null : typeof payloadDocument?.verdict === "string" ? "verdict" : "plan_assessment.verdict";
+  const counts: Record<string, number> = {};
+  if (payloadDocument) {
+    for (const [key, value] of Object.entries(payloadDocument)) {
+      if (Object.keys(counts).length >= 16) break;
+      if ((key.endsWith("_count") && Number.isInteger(value)) || Array.isArray(value)) counts[key.slice(0, 128)] = Array.isArray(value) ? value.length : value as number;
+    }
+  }
+  const inputSource = provenance?.inputSource;
+  return {
+    runId: options.runId.slice(0, 128), projectDir: projectDir.slice(0, 128),
+    baseObjectId: typeof record.baseObjectId === "string" ? record.baseObjectId.slice(0, 128) : null,
+    headObjectId: typeof record.headObjectId === "string" ? record.headObjectId.slice(0, 128) : null,
+    changedPaths: Array.isArray(record.changedPaths) ? record.changedPaths.length : 0,
+    totalBytes: Number.isInteger(record.totalBytes) ? record.totalBytes! : 0,
+    finalize: { name: recorded?.name.slice(0, 128) ?? null, bytes: recorded?.bytes ?? null, sha256: recorded?.sha256.slice(0, 128) ?? null },
+    finalizeInput: inputSource === "stdin" || inputSource === "inputRef" || inputSource === "inputRefs" ? inputSource : "unknown", kind, verdict: verdict?.slice(0, 128) ?? null,
+    verdictSource, counts, blockers: blockers.slice(0, 16),
+  };
 }
 
 export const REVIEW_IGNORE_MAX_BYTES = 64 * 1024;

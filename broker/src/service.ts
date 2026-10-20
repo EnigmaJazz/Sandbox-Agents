@@ -91,7 +91,7 @@ import { StateError } from "./state.ts";
 import { ReviewRunStore, readRunArtifact, reviewRunStoreOptions } from "./review-run.ts";
 import { createReviewDiffStore, materializeReviewRange, readReviewDiff } from "./review-materialize.ts";
 import { runReviewPipeline } from "./review-pipeline.ts";
-import { persistReviewArtifact, ReviewPersistError } from "./review-persist.ts";
+import { persistReviewArtifact, preflightReviewPersist, ReviewPersistError } from "./review-persist.ts";
 import {
   divergenceIndexPathFor,
   durableHostRefResolves,
@@ -132,6 +132,8 @@ import type {
   SandboxResultPatchMetrics,
   SessionState,
 } from "./types.ts";
+
+const reviewStoreOptionsForRead = reviewRunStoreOptions;
 
 export interface OpContext {
   config: BrokerConfig;
@@ -3634,6 +3636,18 @@ export function buildReviewPipelineRunOp(ctx: OpContext): OpHandler {
     const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
     const store = new ReviewRunStore({ ...reviewRunStoreOptions(ctx.config), projectRoot });
     return runReviewPipeline(payload as { phase: unknown; reviewer?: unknown; stdin?: unknown; inputRef?: unknown; runId: unknown }, ctx.config, undefined, { store, sessionID: req.sessionID });
+  };
+}
+
+export function buildReviewPersistPreflightOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as { projectDir?: unknown; runId?: unknown; finalizeRef?: unknown; mode?: unknown };
+    authorizeHostDispatch(ctx, "reviewPersistPreflight", req.sessionID, req.agent);
+    if (typeof payload.runId !== "string" || typeof payload.finalizeRef !== "string") throw new ValidationError("runId and finalizeRef must be strings");
+    if (payload.mode !== undefined && payload.mode !== "write" && payload.mode !== "report_only") throw new ValidationError("mode must be write or report_only");
+    const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const store = ReviewRunStore.readOnly({ ...reviewStoreOptionsForRead(ctx.config), projectRoot });
+    return preflightReviewPersist({ projectDir: projectRoot, runId: payload.runId, finalizeRef: payload.finalizeRef, store, sessionID: req.sessionID, maxFileBytes: ctx.config.reviewRunMaxFileBytes });
   };
 }
 

@@ -82,6 +82,7 @@ export type Operation =
   | "reviewDiffRead"
   | "reviewPipelineRun"
   | "reviewPersist"
+  | "reviewPersistPreflight"
   // Host git/GH mutations: fixed argv, orchestrator-only (§31).
   | "gitCommit"
   | "gitClearCommitIntent"
@@ -167,6 +168,7 @@ export const SANDBOX_GUARD_CLASS = {
   reviewDiffRead: "exempt-from-sandbox-guard",
   reviewPipelineRun: "exempt-from-sandbox-guard",
   reviewPersist: "exempt-from-sandbox-guard",
+  reviewPersistPreflight: "exempt-from-sandbox-guard",
   gitCommit: "exempt-from-sandbox-guard",
   gitClearCommitIntent: "exempt-from-sandbox-guard",
   gitPush: "exempt-from-sandbox-guard",
@@ -244,6 +246,7 @@ export const OPERATIONS: readonly Operation[] = [
   "reviewDiffRead",
   "reviewPipelineRun",
   "reviewPersist",
+  "reviewPersistPreflight",
   "gitCommit",
   "gitClearCommitIntent",
   "gitPush",
@@ -407,6 +410,8 @@ export interface ReviewPersistPayload {
   finalizeRef: string;
   mode?: "write" | "report_only";
 }
+
+export interface ReviewPersistPreflightPayload extends ReviewPersistPayload {}
 
 export interface ReviewStartPayload {
   projectDir: string;

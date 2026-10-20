@@ -279,11 +279,43 @@ export function buildPlanDocAppendAsk(args: PlanDocAppendAskArgs): HostToolAsk {
   });
 }
 
+function renderReviewPersistCounts(counts: Record<string, number>): string {
+  const entries = Object.entries(counts).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+  if (entries.length === 0) return "none";
+  let output = "";
+  for (const [key, value] of entries) {
+    const entry = `${key}=${value}`;
+    const next = output.length === 0 ? entry : `${output}; ${entry}`;
+    if (next.length > 512) return output.length === 0 ? entry.slice(0, 512) : output;
+    output = next;
+  }
+  return output;
+}
+
+export function assertReviewPersistPreflightClear(blockers: readonly { code: string; message: string }[]): void {
+  if (blockers.length === 0) return;
+  const refusal = new Error(`host_review_persist preflight refused: ${blockers.map(({ code, message }) => `${code}: ${message}`).join("; ")}`);
+  Object.assign(refusal, { code: "review_persist_preflight_blocked" });
+  throw refusal;
+}
+
+export interface ReviewPersistPreflightFacts {
+  finalize: { name: string | null; bytes: number | null; sha256: string | null };
+  baseObjectId: string | null;
+  headObjectId: string | null;
+  changedPaths: number;
+  verdict: string | null;
+  verdictSource: string | null;
+  counts: Record<string, number>;
+  finalizeInput: "stdin" | "inputRef" | "inputRefs" | "unknown";
+}
+
 export interface ReviewPersistAskArgs {
   projectDir: string;
   runId: string;
   finalizeRef: string;
   mode?: "write" | "report_only";
+  preflight: ReviewPersistPreflightFacts;
 }
 
 /** Approval metadata for publishing and validating a review artifact in a project. */
@@ -293,9 +325,14 @@ export function buildReviewPersistAsk(args: ReviewPersistAskArgs): HostToolAsk {
   assertNonEmpty(args.finalizeRef, "finalizeRef");
   const mode = args.mode ?? "write";
   const reportOnly = mode === "report_only";
+  const artifactName = args.preflight.finalize.name ?? "unknown";
+  const inputForm = args.preflight.finalizeInput === "stdin" ? "inline stdin" :
+    args.preflight.finalizeInput === "unknown" ? "unknown input source" : `artifact reference ${artifactName}`;
+  const verdict = args.preflight.verdict === null ? "no verdict" : `${args.preflight.verdict} (${args.preflight.verdictSource ?? "unknown source"})`;
+  const counts = renderReviewPersistCounts(args.preflight.counts);
   const summary = reportOnly
-    ? `Report-only for ${args.finalizeRef} from review run ${args.runId} in ${args.projectDir}: NO project file will be written and validation is not attempted.`
-    : `Publish ${args.finalizeRef} from review run ${args.runId} into ${args.projectDir}/.context/systematic/ce-review/${args.runId}/review-summary.json; validation happens after publication, this may replace an existing summary, and .context/.gitignore may be created or changed.`;
+    ? `Report-only for ${args.finalizeRef} from review run ${args.runId} in ${args.projectDir}; artifact ${artifactName} sha256 ${args.preflight.finalize.sha256 ?? "unknown"}; verdict ${verdict}; counts ${counts}; finalize input ${inputForm}; NO project file will be written and validation is not attempted.`
+    : `Publish ${args.finalizeRef} from review run ${args.runId} into ${args.projectDir}/.context/systematic/ce-review/${args.runId}/review-summary.json; artifact ${artifactName} sha256 ${args.preflight.finalize.sha256 ?? "unknown"}; verdict ${verdict}; counts ${counts}; finalize input ${inputForm}; validation happens after publication, this may replace an existing summary, and .context/.gitignore may be created or changed.`;
   return buildHostToolAsk({
     permission: "host_review_persist",
     operation: "reviewPersist",
@@ -306,6 +343,16 @@ export function buildReviewPersistAsk(args: ReviewPersistAskArgs): HostToolAsk {
       artifact: "review-summary.json",
       finalizeRef: args.finalizeRef,
       mode,
+      artifactName,
+      artifactBytes: args.preflight.finalize.bytes ?? 0,
+      artifactSha256: args.preflight.finalize.sha256 ?? "unknown",
+      baseObjectId: args.preflight.baseObjectId ?? "unknown",
+      headObjectId: args.preflight.headObjectId ?? "unknown",
+      changedPaths: args.preflight.changedPaths,
+      verdict: args.preflight.verdict ?? "none",
+      verdictSource: args.preflight.verdictSource ?? "none",
+      counts,
+      finalizeInput: inputForm,
       validation: reportOnly ? "not attempted" : "after publication",
       replacement: reportOnly ? "none" : "may replace an existing summary",
       ignoreFile: reportOnly ? "not written" : ".context/.gitignore may be created or changed",

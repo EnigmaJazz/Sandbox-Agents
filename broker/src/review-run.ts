@@ -115,6 +115,7 @@ export interface ReviewRunRecord {
   finalizeProvenance?: {
     phase: "finalize";
     outcome: "accepted" | "structurally_rejected" | "validation_unavailable";
+    inputSource?: "stdin" | "inputRef" | "inputRefs";
     artifact?: ReviewRunArtifact;
   };
   /** Materialized range manifest and complete byte length, when present. */
@@ -141,6 +142,7 @@ export interface ReviewRunStoreOptions {
   /** Operator mirror of agent-writable prefixes; refused when containing root. */
   deniedPrefixes?: readonly string[];
   caps?: Partial<ReviewRunCaps>;
+  readOnly?: boolean;
 }
 
 export function reviewRunStoreOptions(
@@ -494,6 +496,10 @@ export function resolveReviewRunRoot(opts: ReviewRunStoreOptions): string {
  * run (owner-session check) is a later slice and is NOT implemented here.
  */
 export class ReviewRunStore {
+  static readOnly(opts: ReviewRunStoreOptions): ReviewRunStore {
+    return new ReviewRunStore({ ...opts, readOnly: true });
+  }
+
   readonly root: string;
   readonly projectRoot: string;
   readonly caps: ReviewRunCaps;
@@ -504,7 +510,7 @@ export class ReviewRunStore {
     this.projectRoot = canonicalForContainment(opts.projectRoot);
     this.root = resolveReviewRunRoot({ ...opts, deniedPrefixes: this.deniedPrefixes });
     this.caps = { ...DEFAULT_REVIEW_RUN_CAPS, ...opts.caps };
-    ensureOwnedDir(this.root, 0o700);
+    if (opts.readOnly !== true) ensureOwnedDir(this.root, 0o700);
   }
 
   sessionDir(sessionID: string): string {

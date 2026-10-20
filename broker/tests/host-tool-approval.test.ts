@@ -17,6 +17,7 @@ import {
   HostToolAskError,
   buildHostToolAsk,
   buildPlanDocAppendAsk,
+  assertReviewPersistPreflightClear,
   buildReviewPersistAsk,
   buildSddArchiveComposeAsk,
   buildSddAttemptGrantAsk,
@@ -197,27 +198,65 @@ describe("host tool ask metadata", () => {
     expect(ask.always).toEqual([]);
   });
 
-  test("review persist write ask names publication, validation, and exact permission", () => {
+  test("review persist write ask names the checked artifact, verdict, provenance, and publication", () => {
     const ask = buildReviewPersistAsk({
       projectDir: "/work/project",
       runId: "0123456789abcdef0123456789abcdef",
       finalizeRef: "phase-finalize.json",
       mode: "write",
+      preflight: {
+        finalize: { name: "phase-finalize.json", bytes: 321, sha256: "digest-123" },
+        baseObjectId: "base-object",
+        headObjectId: "head-object",
+        changedPaths: 4,
+        verdict: "pass",
+        verdictSource: "plan_assessment.verdict",
+        counts: { findings_count: 3, findings: 3 },
+        finalizeInput: "inputRef",
+      },
     });
     expect(ask.permission).toBe("host_review_persist");
     expect(ask.metadata.hostOperation).toBe("reviewPersist");
     for (const detail of [
       "/work/project", "0123456789abcdef0123456789abcdef", "review-summary.json",
       "validation happens after publication", "may replace an existing summary",
-      ".context/.gitignore may be created or changed",
+      ".context/.gitignore may be created or changed", "digest-123", "pass", "artifact reference phase-finalize.json",
     ]) expect(ask.metadata.summary).toContain(detail);
     expect(ask.metadata.summary).not.toContain("NO project file will be written");
-    const defaultWriteAsk = buildReviewPersistAsk({
-      projectDir: "/work/project",
-      runId: "0123456789abcdef0123456789abcdef",
-      finalizeRef: "phase-finalize.json",
+    expect(ask.metadata).toMatchObject({
+      projectDir: "/work/project", runId: "0123456789abcdef0123456789abcdef", finalizeRef: "phase-finalize.json",
+      artifactName: "phase-finalize.json", artifactBytes: 321, artifactSha256: "digest-123",
+      baseObjectId: "base-object", headObjectId: "head-object", changedPaths: 4,
+      verdict: "pass", verdictSource: "plan_assessment.verdict", counts: "findings=3; findings_count=3",
+      finalizeInput: "artifact reference phase-finalize.json",
     });
-    expect(defaultWriteAsk.metadata.summary).toBe(ask.metadata.summary);
+    expect(ask.metadata.summary).toContain("counts findings=3; findings_count=3");
+  });
+
+  test("review persist counts render as sorted bounded flat text", () => {
+    const base = {
+      projectDir: "/work/project", runId: "0123456789abcdef0123456789abcdef", finalizeRef: "phase-finalize.json",
+      preflight: {
+        finalize: { name: "phase-finalize.json", bytes: 1, sha256: "digest" },
+        baseObjectId: null, headObjectId: null, changedPaths: 0, verdict: null, verdictSource: null,
+        finalizeInput: "unknown" as const,
+      },
+    };
+    expect(buildReviewPersistAsk({ ...base, preflight: { ...base.preflight, counts: {} } }).metadata.counts).toBe("none");
+    const counts = Object.fromEntries(Array.from({ length: 80 }, (_, index) => [`count_${String(index).padStart(2, "0")}`, index]));
+    const rendered = buildReviewPersistAsk({ ...base, preflight: { ...base.preflight, counts } }).metadata.counts;
+    expect(typeof rendered).toBe("string");
+    expect(String(rendered).length).toBeLessThanOrEqual(512);
+    expect(String(rendered).startsWith("count_00=0; count_01=1")).toBe(true);
+  });
+
+  test("review persist blockers refuse before approval with all broker reasons", () => {
+    expect(() => assertReviewPersistPreflightClear([
+      { code: "review_persist_kind", message: "not writing" },
+      { code: "review_persist_finalize_ref_mismatch", message: "wrong ref" },
+    ])).toThrow("review_persist_kind: not writing; review_persist_finalize_ref_mismatch: wrong ref");
+    try { assertReviewPersistPreflightClear([{ code: "review_persist_kind", message: "not writing" }]); }
+    catch (error) { expect(error).toMatchObject({ code: "review_persist_preflight_blocked" }); }
   });
 
   test("review persist report-only ask states that no project write or validation occurs", () => {
@@ -226,6 +265,11 @@ describe("host tool ask metadata", () => {
       runId: "0123456789abcdef0123456789abcdef",
       finalizeRef: "phase-finalize.json",
       mode: "report_only",
+      preflight: {
+        finalize: { name: "phase-finalize.json", bytes: 321, sha256: "digest-123" },
+        baseObjectId: "base-object", headObjectId: "head-object", changedPaths: 4,
+        verdict: "pass", verdictSource: "verdict", counts: {}, finalizeInput: "stdin",
+      },
     });
     expect(ask.permission).toBe("host_review_persist");
     expect(ask.metadata.hostOperation).toBe("reviewPersist");

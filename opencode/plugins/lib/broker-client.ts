@@ -123,6 +123,7 @@ export const OPERATION_TIMEOUT_MS: Record<string, number> = {
   reviewDiffRead: 10_000,
   reviewPipelineRun: 60_000,
   reviewPersist: 60_000,
+  reviewPersistPreflight: 10_000,
 };
 
 /**
