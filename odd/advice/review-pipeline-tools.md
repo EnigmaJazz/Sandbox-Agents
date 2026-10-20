@@ -85,3 +85,12 @@ The owner supplied two independent external reviews in-session. Selection rule: 
 - F-07 control directory in the allowlist — **CONFIRMED, out of scope** (pre-existing profile decision).
 - F-08 provenance bypass and post-approval artifact swap — **open**.
 - F-09 what is correct and must not change — recorded as advisory guidance, not a defect finding.
+
+### Live verification of the confinement posture (2026-10-18)
+
+Observed in the operator's `nono run --profile nono/profile/opencode-secure.json` probe:
+- Probe A returned `RUNS_CONFINED` and `HELPER_CONFINED`. Probe B, the positive control writing under `$HOME/.local/state/opencode`, succeeded. Thus nono matches by PATH BOUNDARY, not string prefix: `$HOME/.local/state/opencode` does not grant `$HOME/.local/state/opencode-sandbox`.
+- The run store and pinned helper are outside the confined agent's reach. The provenance chain's confinement assumption is verified; F-14's premise (“relocating the store is insufficient on LEAK”) does not apply because there is no leak. Empty `reviewRunDeniedPrefixes` is defense in depth, not load-bearing.
+- The external claim that the broker's systemd unit executes from `$HOME/.local/share/opencode-sandbox-control` is refuted for this repository: `ExecStart` is `/home/linuxbrew/.linuxbrew/bin/bun /home/james/agent-sandbox-integration/broker/src/main.ts`, `WorkingDirectory` is the repository's broker directory, and the control directory is empty. Its agent read-write grant grants nothing today; it is latent escalation only if the broker is deployed there.
+- Capabilities also observed: read-write `$HOME/.cache/opencode` (helper source, F7) and `$HOME/.config/opencode` (the declared helper version is tamperable, a second vector for F7); read-only project working tree; no access to `$HOME/.config/opencode-sandbox` (broker source and recorded pin remain outside reach); read-write project `.git`, mitigated by git-exec hardening's `-c` neutralisation and refusal of execution-bearing local config.
+- The verbatim probe transcript is held by the operator and is not reproduced here: a recorded response is never edited, and a partial transcription would be an edit.
