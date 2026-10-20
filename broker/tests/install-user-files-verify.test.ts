@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -11,6 +12,7 @@ import {
   readlinkSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -67,6 +69,8 @@ function fixture(options: { seedState?: boolean } = {}) {
   const helperBytes = Buffer.from("// legacy installer verification fixture\n");
   mkdirSync(resolve(helperSource, ".."), { recursive: true });
   writeFileSync(helperSource, helperBytes, { mode: 0o600 });
+  const anchorPath = resolve(home, "review-helper-anchor.txt");
+  writeFileSync(anchorPath, `3.21.0 ${createHash("sha256").update(helperBytes).digest("hex")}\n`);
   if (options.seedState !== false) {
     const pinDir = resolve(stateDir, "review-helper");
     mkdirSync(pinDir, { recursive: true, mode: 0o700 });
@@ -90,19 +94,28 @@ function fixture(options: { seedState?: boolean } = {}) {
       { flag: "a" },
     );
   };
-  const run = (mode: string | string[] = "--verify", extraEnv: Record<string, string> = {}, script = installer) => spawnSync("bash", [script, ...(Array.isArray(mode) ? mode : [mode])], {
-    encoding: "utf8",
-    env: { ...process.env, HOME: home, BROKER_STATE_DIR: stateDir, ...extraEnv },
-  });
-  return { home, stateDir, nonoDest, journal, run };
+  const run = (mode: string | string[] = "--verify", extraEnv: Record<string, string> = {}, script?: string) => {
+    const selectedScript = script ?? applyInstaller(home, anchorPath);
+    const result = spawnSync("bash", [selectedScript, ...(Array.isArray(mode) ? mode : [mode, "--review-helper-version=3.21.0"])], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home, BROKER_STATE_DIR: stateDir, ...extraEnv },
+    });
+    if (!script) unlinkSync(selectedScript);
+    return result;
+  };
+  return { home, stateDir, nonoDest, anchorPath, journal, run };
 }
 
-function applyInstaller(home: string): string {
+function applyInstaller(home: string, anchorPath = resolve(repoRoot, "scripts/review-helper-anchor.txt")): string {
   const path = resolve(home, `install-user-files-${randomUUID()}`);
   const source = readFileSync(installer, "utf8")
     .replace(
       'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
       `SCRIPT_DIR="${resolve(repoRoot, "scripts")}"`,
+    )
+    .replace(
+      'REVIEW_HELPER_ANCHOR="$REPO_ROOT/scripts/review-helper-anchor.txt"',
+      `REVIEW_HELPER_ANCHOR="${anchorPath}"`,
     )
     .replace(
       'source "$SCRIPT_DIR/secure-launcher.conf"',
@@ -172,16 +185,13 @@ describe("install-user-files --verify", () => {
     expect(result.stdout).toContain("verification failed");
   });
 
-  test("valid installed pin without a cache source is incomplete, not byte drift", () => {
-    const { home, journal, run } = fixture();
+  test("verify refuses a missing explicitly requested cache source", () => {
+    const { home, run } = fixture();
     rmSync(resolve(home, ".cache/opencode"), { recursive: true, force: true });
-    journal("file", "sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
     const result = run();
-    expect(result.status, result.stderr + result.stdout).toBe(2);
-    expect(result.stdout).toContain("source comparison unavailable");
-    expect(result.stdout).not.toContain("pinned sha256 differs from current package-cache source");
-    expect(result.stdout).not.toContain("review helper pin verified");
-    expect(result.stdout).not.toContain("verification failed");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("REVIEW_HELPER_SOURCE_MISSING");
+    expect(result.stderr).toContain("3.21.0");
   });
 
   test("reports a skipped stale check and returns the documented distinct status when the journal is absent", () => {
@@ -415,10 +425,10 @@ describe("install-user-files --verify", () => {
   });
 
   test("refuses dry-run combined with apply without creating unseeded state", () => {
-    const { home, stateDir, run } = fixture({ seedState: false });
-    const runner = applyInstaller(home);
+    const { home, stateDir, anchorPath, run } = fixture({ seedState: false });
+    const runner = applyInstaller(home, anchorPath);
     const before = snapshotTree(home);
-    const result = run(["--dry-run", "--apply"], {}, runner);
+    const result = run(["--dry-run", "--apply", "--review-helper-version=3.21.0"], {}, runner);
     expect(result.status, result.stderr).toBe(2);
     expect(result.stderr).toContain("[install] --dry-run cannot be combined with --apply");
     expect(snapshotTree(home)).toEqual(before);
@@ -440,13 +450,13 @@ describe("install-user-files --verify", () => {
   });
 
   test("apply backs up changed files, prunes old backups, and protects its new backup", () => {
-    const { home, run } = fixture();
+    const { home, anchorPath, run } = fixture();
     const target = resolve(home, ".config/opencode/plugins/sandbox-tools.ts");
     writeFileSync(target, "outdated plugin\n");
     for (const stamp of ["20200101000000", "20210101000000", "20220101000000", "20230101000000"]) {
       writeFileSync(`${target}.bak-${stamp}`, "old backup\n");
     }
-    const runner = applyInstaller(home);
+    const runner = applyInstaller(home, anchorPath);
     const result = run("--apply", {}, runner);
     expect(result.status).toBe(0);
     const backups = readdirSync(resolve(target, "..")).filter((name) => name.startsWith("sandbox-tools.ts.bak-"));
@@ -484,5 +494,77 @@ describe("install-user-files --verify", () => {
     const result = run(["--verify", "--prune-backups"]);
     expect(result.status).not.toBe(0);
     expect(snapshotTree(home)).toEqual(before);
+  });
+
+  test.each(["--apply", "--verify"])("requires --review-helper-version with %s and creates no state", (mode) => {
+    const { home, stateDir, run } = fixture({ seedState: false });
+    const script = applyInstaller(home);
+    const before = snapshotTree(home);
+    const result = run([mode], {}, script);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toContain("REVIEW_HELPER_VERSION_REQUIRED");
+    expect(result.stderr + result.stdout).toContain("--review-helper-version=<x.y.z>");
+    expect(snapshotTree(home)).toEqual(before);
+    expect(existsSync(stateDir)).toBe(false);
+  });
+
+  test("refuses a requested version absent from the repository anchor", () => {
+    const { home, stateDir, run } = fixture({ seedState: false });
+    const anchorPath = resolve(home, "review-helper-anchor.txt");
+    writeFileSync(anchorPath, "# operator anchors\n3.20.0 " + "a".repeat(64) + "\n");
+    const result = run(["--apply", "--review-helper-version=3.21.0"], {}, applyInstaller(home, anchorPath));
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toContain("REVIEW_HELPER_ANCHOR_MISSING");
+    expect(result.stderr + result.stdout).toContain("3.21.0");
+    expect(result.stderr + result.stdout).toContain(anchorPath);
+    expect(existsSync(resolve(stateDir, "review-helper/pin.json"))).toBe(false);
+    expect(existsSync(resolve(stateDir, "install-journal.tsv"))).toBe(false);
+  });
+
+  test("refuses helper bytes that differ from the requested repository anchor before pinning", () => {
+    const { home, stateDir, run } = fixture({ seedState: false });
+    const source = resolve(home, ".cache/opencode/packages/@fro.bot/systematic@3.21.0/node_modules/@fro.bot/systematic/skills/ce-review/scripts/validate-review.mjs");
+    const expected = createHash("sha256").update(readFileSync(source)).digest("hex");
+    const anchorPath = resolve(home, "review-helper-anchor.txt");
+    writeFileSync(anchorPath, `3.21.0 ${expected}\n`);
+    writeFileSync(source, "tampered helper bytes\n");
+    const observed = createHash("sha256").update(readFileSync(source)).digest("hex");
+    const result = run(["--apply", "--review-helper-version=3.21.0"], {}, applyInstaller(home, anchorPath));
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toContain("REVIEW_HELPER_ANCHOR_MISMATCH");
+    expect(result.stderr + result.stdout).toContain(expected);
+    expect(result.stderr + result.stdout).toContain(observed);
+    expect(existsSync(resolve(stateDir, "review-helper/pin.json"))).toBe(false);
+    expect(existsSync(resolve(stateDir, "install-journal.tsv"))).toBe(false);
+  });
+
+  test("pins the explicitly anchored lower version despite a higher cached version", () => {
+    const { home, stateDir, run } = fixture({ seedState: false });
+    const lower = resolve(home, ".cache/opencode/packages/@fro.bot/systematic@3.21.0/node_modules/@fro.bot/systematic/skills/ce-review/scripts/validate-review.mjs");
+    const higher = resolve(home, ".cache/opencode/packages/@fro.bot/systematic@99.0.0/node_modules/@fro.bot/systematic/skills/ce-review/scripts/validate-review.mjs");
+    mkdirSync(resolve(higher, ".."), { recursive: true });
+    writeFileSync(higher, "attacker planted higher version\n");
+    const digest = createHash("sha256").update(readFileSync(lower)).digest("hex");
+    const anchorPath = resolve(home, "review-helper-anchor.txt");
+    writeFileSync(anchorPath, `3.21.0 ${digest}\n`);
+    const result = run(["--apply", "--review-helper-version=3.21.0"], {}, applyInstaller(home, anchorPath));
+    expect(result.status, result.stderr + result.stdout).toBe(0);
+    const pin = JSON.parse(readFileSync(resolve(stateDir, "review-helper/pin.json"), "utf8"));
+    expect(pin).toEqual({ version: "3.21.0", source: lower, sha256: digest });
+    expect(readFileSync(resolve(stateDir, "install-journal.tsv"), "utf8")).toContain(`${lower}\t${resolve(stateDir, "review-helper/validate-review.mjs")}`);
+  });
+
+  test("verify reports drift when the recorded pin digest differs from the repository anchor", () => {
+    const { home, stateDir, run, journal } = fixture();
+    const source = resolve(home, ".cache/opencode/packages/@fro.bot/systematic@3.21.0/node_modules/@fro.bot/systematic/skills/ce-review/scripts/validate-review.mjs");
+    const digest = createHash("sha256").update(readFileSync(source)).digest("hex");
+    const pinPath = resolve(stateDir, "review-helper/pin.json");
+    writeFileSync(pinPath, JSON.stringify({ version: "3.21.0", source, sha256: "0".repeat(64) }) + "\n");
+    writeFileSync(resolve(home, "review-helper-anchor.txt"), `3.21.0 ${digest}\n`);
+    journal("file", "sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
+    const result = run(["--verify", "--review-helper-version=3.21.0"], {}, applyInstaller(home, resolve(home, "review-helper-anchor.txt")));
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toContain("DRIFT");
+    expect(result.stdout).toContain("anchor");
   });
 });
