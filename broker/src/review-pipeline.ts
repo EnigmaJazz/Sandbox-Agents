@@ -14,6 +14,9 @@ export const REVIEW_PIPELINE_MAX_STDIN_BYTES = 256 * 1024;
 export const REVIEW_PIPELINE_MAX_INPUT_REFS = 16;
 export const REVIEW_PIPELINE_MAX_ENVELOPE_BYTES = 32 * 1024;
 export const REVIEW_PIPELINE_MAX_CALLER_BYTES = 64 * 1024;
+const REVIEW_PIPELINE_MAX_VALIDATOR_REQUESTS = 32;
+const REVIEW_PIPELINE_MAX_VALIDATOR_FINDING_ID_LENGTH = 128;
+const REVIEW_PIPELINE_MAX_VALIDATOR_FILE_LENGTH = 512;
 // These are the ce:review persona names from the Systematic persona catalog, deliberately NOT the native 4R lens names.
 export const REVIEW_PIPELINE_REVIEWERS = [
   "correctness",
@@ -31,8 +34,9 @@ export const REVIEW_PIPELINE_REVIEWERS = [
   "kieran-typescript",
 ] as const;
 export type ReviewPipelinePhase = "screen" | "prepare" | "merge" | "finalize";
+export type ReviewPipelineInputSource = "stdin" | "inputRef" | "inputRefs";
 export type ReviewPipelineResult =
-  | { outcome: "accepted"; artifact: { name: string; bytes: number; sha256: string }; summary: { phase: ReviewPipelinePhase; topLevelKeys: string[] } }
+  | { outcome: "accepted"; artifact: { name: string; bytes: number; sha256: string }; summary: { phase: ReviewPipelinePhase; inputSource: ReviewPipelineInputSource; topLevelKeys: string[]; validator_requests?: Array<{ finding_id: string; file?: string; line?: number }>; validator_request_count?: number; validator_requests_truncated?: boolean; validator_requests_present?: boolean } }
   | { outcome: "structurally_rejected"; code: "review_pipeline_structurally_rejected"; diagnostic: string }
   | { outcome: "validation_unavailable"; code: "review_pipeline_validation_unavailable"; diagnostic: string };
 
@@ -180,6 +184,56 @@ function composeFinalize(payload: ReviewPipelinePayload, context?: ReviewPipelin
   return Buffer.from(JSON.stringify(composed), "utf8");
 }
 
+function createSummary(
+  phase: ReviewPipelinePhase,
+  output: unknown,
+): {
+  phase: ReviewPipelinePhase;
+  topLevelKeys: string[];
+  validator_requests?: Array<{ finding_id: string; file?: string; line?: number }>;
+  validator_request_count?: number;
+  validator_requests_truncated?: boolean;
+  validator_requests_present?: boolean;
+} {
+  const isObject = output !== null && typeof output === "object" && !Array.isArray(output);
+  const summary = {
+    phase,
+    topLevelKeys: isObject ? Object.keys(output).slice(0, 32).map((key) => key.slice(0, 128)) : [],
+  };
+  if (phase !== "merge") return summary;
+
+  const mergeOutput = isObject ? output as Record<string, unknown> : undefined;
+  const present = mergeOutput !== undefined && Object.prototype.hasOwnProperty.call(mergeOutput, "validator_requests");
+  const rawRequests = present ? mergeOutput!.validator_requests : undefined;
+  if (present && !Array.isArray(rawRequests)) {
+    throw new ReviewPipelineError("review_pipeline_validator_requests_invalid", `validator_requests must be an array (observed ${rawRequests === null ? "null" : typeof rawRequests})`);
+  }
+  const requests = (rawRequests ?? []) as unknown[];
+  const projected = requests.map((request, index) => {
+    if (request === null || typeof request !== "object" || Array.isArray(request)) {
+      throw new ReviewPipelineError("review_pipeline_validator_requests_invalid", `validator_requests entry at index ${index} must be an object`);
+    }
+    const entry = request as Record<string, unknown>;
+    if (typeof entry.finding_id !== "string" || entry.finding_id.length === 0) {
+      throw new ReviewPipelineError("review_pipeline_validator_requests_invalid", `validator_requests entry at index ${index} must have a non-empty string finding_id`);
+    }
+    const item: { finding_id: string; file?: string; line?: number } = {
+      finding_id: entry.finding_id.slice(0, REVIEW_PIPELINE_MAX_VALIDATOR_FINDING_ID_LENGTH),
+    };
+    if (typeof entry.file === "string") item.file = entry.file.slice(0, REVIEW_PIPELINE_MAX_VALIDATOR_FILE_LENGTH);
+    if (Number.isInteger(entry.line) && (entry.line as number) >= 0) item.line = entry.line as number;
+    return item;
+  }).slice(0, REVIEW_PIPELINE_MAX_VALIDATOR_REQUESTS);
+  return {
+    ...summary,
+    validator_requests: projected,
+    validator_request_count: requests.length,
+    validator_requests_truncated: requests.length > projected.length,
+    validator_requests_present: present,
+  };
+}
+
+
 export async function runReviewPipeline(
   payload: ReviewPipelinePayload,
   config: Pick<BrokerConfig, "reviewHelperPath" | "reviewHelperSha256" | "reviewHelperInterpreter">,
@@ -204,6 +258,7 @@ export async function runReviewPipeline(
   const hasStdin = payload.stdin !== undefined;
   const hasInputRef = payload.inputRef !== undefined;
   const hasInputRefs = payload.inputRefs !== undefined;
+  let inputSource: ReviewPipelineInputSource | undefined = phase === "merge" ? "inputRef" : phase === "finalize" ? "inputRefs" : undefined;
   let input: Buffer;
   let composedInput = false;
   if (phase === "merge") { input = composeMerge(payload, storeContext); composedInput = true; }
@@ -219,6 +274,7 @@ export async function runReviewPipeline(
   if (sourceCount > 1) {
     throw new ReviewPipelineError("review_pipeline_stdin_source_conflict", "exactly one of stdin, inputRef, or inputRefs must be supplied; multiple sources were provided");
   }
+  inputSource = hasStdin ? "stdin" : hasInputRef ? "inputRef" : "inputRefs";
   if (hasInputRefs) {
     if (phase !== "prepare") {
       throw new ReviewPipelineError("review_pipeline_input_refs_phase_forbidden", `inputRefs is only valid for prepare (received ${phase})`);
@@ -345,12 +401,10 @@ export async function runReviewPipeline(
     const name = phase === "screen" ? `phase-screen-${payload.reviewer as string}.json` : `phase-${phase}.json`;
     const artifact = storeContext.store.addArtifact(storeContext.sessionID, payload.runId as string, name, outputBytes);
     if (phase === "finalize") {
-      storeContext.store.recordFinalizeProvenance(storeContext.sessionID, payload.runId as string, { phase, outcome: "accepted", artifact });
+      storeContext.store.recordFinalizeProvenance(storeContext.sessionID, payload.runId as string, { phase, outcome: "accepted", artifact, inputSource: inputSource! });
     }
-    const topLevelKeys = output !== null && typeof output === "object" && !Array.isArray(output)
-      ? Object.keys(output).slice(0, 32).map((key) => key.slice(0, 128))
-      : [];
-    return { outcome: "accepted", artifact: { name: artifact.name, bytes: artifact.bytes, sha256: artifact.sha256 }, summary: { phase, topLevelKeys } };
+    const summary = { ...createSummary(phase, output), inputSource: inputSource! };
+    return { outcome: "accepted", artifact: { name: artifact.name, bytes: artifact.bytes, sha256: artifact.sha256 }, summary };
   }
   const stderrDiagnostic = diagnostic(result);
   const internalFailure = result.status === 1 && stderrDiagnostic.startsWith("ce-review-validator: internal error in ");
@@ -358,6 +412,7 @@ export async function runReviewPipeline(
     storeContext?.store.recordFinalizeProvenance(storeContext.sessionID, payload.runId as string, {
       phase,
       outcome: result.status === 1 && !internalFailure ? "structurally_rejected" : "validation_unavailable",
+      inputSource: inputSource!,
     });
   }
   if (result.status === 1 && !internalFailure) return { outcome: "structurally_rejected", code: "review_pipeline_structurally_rejected", diagnostic: stderrDiagnostic };

@@ -38,6 +38,113 @@ else process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), input: i
   return { helper, digest, store, project, sessionID: "phase-owner", config: { reviewHelperPath: helper, reviewHelperSha256: digest, reviewHelperInterpreter: process.execPath } };
 }
 
+async function invokeMergeWithOutput(output: unknown) {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  writer.addArtifact("phase-prepare.json", Buffer.from("{}"));
+  const spawn: SpawnFn = async () => ({ status: 0, stdout: JSON.stringify(output), stderr: "", timedOut: false });
+  const result = await runReviewPipeline(
+    { phase: "merge", runId: writer.record.runId, inputRef: "phase-prepare.json", adjudication: {} },
+    pin.config,
+    spawn,
+    { store: pin.store, sessionID: pin.sessionID },
+  );
+  return result;
+}
+
+test("merge summary projects bounded validator requests", async () => {
+  const requests = [
+    { finding_id: "finding-1", file: "src/one.ts", line: 12 },
+    { finding_id: "finding-2", file: "src/two.ts", line: 34 },
+  ];
+  const result = await invokeMergeWithOutput({ validator_requests: requests });
+  expect(result).toMatchObject({
+    outcome: "accepted",
+    summary: {
+      phase: "merge",
+      validator_requests: requests,
+      validator_request_count: 2,
+      validator_requests_truncated: false,
+      validator_requests_present: true,
+    },
+  });
+});
+
+test("merge summary caps projected validator requests and reports the total", async () => {
+  const requests = Array.from({ length: 40 }, (_, index) => ({ finding_id: `finding-${index}` }));
+  const result = await invokeMergeWithOutput({ validator_requests: requests });
+  expect(result).toMatchObject({ outcome: "accepted", summary: {
+    validator_requests: requests.slice(0, 32),
+    validator_request_count: 40,
+    validator_requests_truncated: true,
+    validator_requests_present: true,
+  } });
+});
+
+test("merge summary validates validator request fields and distinguishes absent from empty", async () => {
+  await expect(invokeMergeWithOutput({ validator_requests: [{ finding_id: 42 }] }))
+    .rejects.toMatchObject({ code: "review_pipeline_validator_requests_invalid", message: expect.stringContaining("0") });
+  await expect(invokeMergeWithOutput({ validator_requests: "invalid" }))
+    .rejects.toMatchObject({ code: "review_pipeline_validator_requests_invalid", message: expect.stringContaining("string") });
+  expect(await invokeMergeWithOutput({})).toMatchObject({ summary: {
+    validator_requests: [], validator_request_count: 0, validator_requests_truncated: false, validator_requests_present: false,
+  } });
+  expect(await invokeMergeWithOutput({ validator_requests: [] })).toMatchObject({ summary: {
+    validator_requests: [], validator_request_count: 0, validator_requests_truncated: false, validator_requests_present: true,
+  } });
+});
+
+test("merge summary omits invalid optional fields and truncates projected strings", async () => {
+  const result = await invokeMergeWithOutput({ validator_requests: [
+    { finding_id: "finding-1", file: 4, line: "12" },
+    { finding_id: "f".repeat(140), file: "p".repeat(520), line: -1 },
+  ] });
+  expect(result).toMatchObject({ outcome: "accepted", summary: {
+    validator_requests: [
+      { finding_id: "finding-1" },
+      { finding_id: "f".repeat(128), file: "p".repeat(512) },
+    ], validator_request_count: 2,
+  } });
+});
+
+test("records caller-supplied stdin and composed finalize input sources", async () => {
+  const pin = fixture();
+  const prepareWriter = pin.store.createRun(pin.sessionID);
+  const prepared = await runReviewPipeline({ phase: "prepare", runId: prepareWriter.record.runId, stdin: "{}" }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+  expect(prepared).toMatchObject({ summary: { inputSource: "stdin" } });
+
+  const screenWriter = pin.store.createRun(pin.sessionID);
+  const screened = await runReviewPipeline({ phase: "screen", reviewer: "correctness", runId: screenWriter.record.runId, stdin: "{}" }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+  expect(screened).toMatchObject({ summary: { inputSource: "stdin" } });
+  const missingWriter = pin.store.createRun(pin.sessionID);
+  await expect(runReviewPipeline({ phase: "prepare", runId: missingWriter.record.runId }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID }))
+    .rejects.toMatchObject({ code: "review_pipeline_stdin_source_missing" });
+  expect(pin.store.readRecord(pin.sessionID, missingWriter.record.runId).finalizeProvenance).toBeUndefined();
+
+  const finalizeWriter = pin.store.createRun(pin.sessionID);
+  pin.store.addArtifact(pin.sessionID, finalizeWriter.record.runId, "phase-prepare.json", Buffer.from("{}"));
+  pin.store.addArtifact(pin.sessionID, finalizeWriter.record.runId, "phase-merge.json", Buffer.from("{}"));
+  pin.store.addArtifact(pin.sessionID, finalizeWriter.record.runId, "phase-screen-correctness.json", Buffer.from("{}"));
+  await runReviewPipeline({
+    phase: "finalize", runId: finalizeWriter.record.runId,
+    preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json",
+    dispatch_records: [], validator_lifecycle_results: [], plan_assessment: {}, parent_run_metadata: {},
+  }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+  expect(pin.store.readRecord(pin.sessionID, finalizeWriter.record.runId).finalizeProvenance?.inputSource).toBe("inputRefs");
+});
+
+test("non-merge phase summary does not include validator request projections", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  const spawn: SpawnFn = async () => ({ status: 0, stdout: JSON.stringify({ validator_requests: [{ finding_id: "finding-1" }] }), stderr: "", timedOut: false });
+  const result = await runReviewPipeline(
+    { phase: "prepare", runId: writer.record.runId, stdin: "{}" }, pin.config, spawn,
+    { store: pin.store, sessionID: pin.sessionID },
+  );
+  expect(result).toMatchObject({ summary: { phase: "prepare", topLevelKeys: ["validator_requests"] } });
+  expect(result.summary).not.toHaveProperty("validator_requests");
+});
+
 test("publishes phase output by reference and refuses missing or conflicting stdin sources", async () => {
   const pin = fixture();
   const { mkdtempSync, mkdirSync, readdirSync } = await import("node:fs");
