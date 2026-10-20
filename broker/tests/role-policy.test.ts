@@ -40,7 +40,7 @@ describe("R1 — capability taxonomy / unknown effects fail closed", () => {
 
   test("unknown operation returns null and is denied", () => {
     expect(classifyOperation("unknown_tool_xyz")).toBeNull();
-    expect(classifyOperation("bash")).toBeNull(); // generic host shell is unknown → denied
+    expect(classifyOperation("bash")).toBe("HOST_ADMIN_STRUCTURED"); // known host shell is explicitly denied
     const d = decide({
       role: "researcher",
       capability: "UNKNOWN_CAP",

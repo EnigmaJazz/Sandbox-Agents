@@ -819,6 +819,7 @@ export const HOST_READ_OPERATIONS: readonly string[] = [
   "sandboxResult",
   "advisorGet",
   "advisorList",
+  "toolAdmission",
 ];
 
 /** Host mutation names; HOST_MUTATION_IDENTITY_OPERATIONS grants each identity its explicit subset. */
@@ -1028,6 +1029,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   ghIssueCreate: ["projectDir", "repo", "title", "body"],
   sandboxResult: ["projectDir", "sandboxSessionID", "compareSandboxSessionID"],
   resultDiff: ["ref"],
+  toolAdmission: ["projectDir", "tool"],
   sandboxResultInstall: ["projectDir", "sandboxSessionID", "expectedResultCommit"],
   hostSystemSummary: [],
   hostMemory: [],
@@ -1058,6 +1060,9 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
 };
 
 export function assertPayloadKeys(operation: string, payload: unknown): void {
+  if (operation === "toolAdmission" && (typeof payload !== "object" || payload === null || Array.isArray(payload) || typeof (payload as Record<string, unknown>).tool !== "string" || !/^[A-Za-z0-9_.-]{1,128}$/.test((payload as Record<string, unknown>).tool as string))) {
+    throw new ValidationError("tool must be a 1..128 character tool name using letters, digits, underscore, hyphen, or dot");
+  }
   if (payload === undefined || payload === null) return;
   if (typeof payload !== "object" || Array.isArray(payload)) {
     throw new ValidationError("payload must be a JSON object");
@@ -1066,7 +1071,8 @@ export function assertPayloadKeys(operation: string, payload: unknown): void {
   if (!allowed) {
     throw new ValidationError(`unknown operation: ${operation}`);
   }
-  for (const key of Object.keys(payload as Record<string, unknown>)) {
+  const record = payload as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
     if (!allowed.includes(key)) {
       const isForbidden = (FORBIDDEN_WORKER_FIELDS as readonly string[]).includes(key);
       throw new ValidationError(
@@ -1075,6 +1081,9 @@ export function assertPayloadKeys(operation: string, payload: unknown): void {
           : `unexpected field '${key}' in ${operation} payload`,
       );
     }
+  }
+  if (operation === "toolAdmission" && (typeof record.tool !== "string" || !/^[A-Za-z0-9_.-]{1,128}$/.test(record.tool))) {
+    throw new ValidationError("tool must be a 1..128 character tool name using letters, digits, underscore, hyphen, or dot");
   }
 }
 

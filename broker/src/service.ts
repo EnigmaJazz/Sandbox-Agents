@@ -101,6 +101,7 @@ import {
   shouldRemoveSessionArtifacts,
 } from "./artifacts.ts";
 import { PolicyError, checkAdmission, type Admission } from "./policy.ts";
+import { classifyOperation, decide, normalizeRoleKey } from "./role-policy.ts";
 import {
   PendingQueue,
   QueuedTimedOutError,
@@ -2430,6 +2431,38 @@ export function buildMetricsOp(ctx: OpContext): OpHandler {
         checkAdmission(ctx.pool, ctx.budget, {}).allowed === false,
     };
     return metrics;
+  };
+}
+
+export function buildToolAdmissionOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as { projectDir?: unknown; tool?: unknown };
+    const record = ctx.store.get(req.sessionID);
+    if (!record?.agent) throw new PolicyError("toolAdmission requires a session with a broker-bound agent identity");
+    const capability = classifyOperation(payload.tool as string);
+    if (!capability) {
+      return {
+        schema: "opencode-sandbox.tool-admission/v1",
+        tool: payload.tool,
+        classification: "unclassified",
+        decision: "deny",
+        reason: "UNCLASSIFIED_TOOL_DENIED",
+      };
+    }
+    const result = decide({
+      role: normalizeRoleKey(record.agent),
+      capability,
+      sessionState: record.state,
+      authoritativeLocation: record.projectID ?? "",
+      isReadOnlyOrchestrator: ctx.config.readOnlyAgents.includes(record.agent),
+    });
+    return {
+      schema: "opencode-sandbox.tool-admission/v1",
+      tool: payload.tool,
+      classification: capability,
+      decision: result.decision,
+      reason: result.reasonCode,
+    };
   };
 }
 

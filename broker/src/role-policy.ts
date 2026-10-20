@@ -98,9 +98,15 @@ export function normalizeRoleKey(raw: string): string {
  * exactly one capability. Unknown or ambiguous effects MUST be denied
  * (return null, caller must deny without fallback).
  */
-const OPERATION_CAPABILITY: Readonly<Record<string, Capability>> = {
+export const TOOL_CLASSIFICATION_INVENTORY: Readonly<Record<string, Capability>> = {
   // READ_PROJECT
   read: "READ_PROJECT",
+  list: "READ_PROJECT",
+  bash: "HOST_ADMIN_STRUCTURED",
+  edit: "HOST_ADMIN_STRUCTURED",
+  write: "HOST_ADMIN_STRUCTURED",
+  apply_patch: "HOST_ADMIN_STRUCTURED",
+  patch: "HOST_ADMIN_STRUCTURED",
   grep: "READ_PROJECT",
   glob: "READ_PROJECT",
   codegraph_codegraph_explore: "READ_PROJECT",
@@ -121,6 +127,50 @@ const OPERATION_CAPABILITY: Readonly<Record<string, Capability>> = {
   sandbox_discard: "MUTATE_PROJECT",
   // EXECUTE_PROJECT
   sandbox_bash: "EXECUTE_PROJECT",
+  // Host read and host mutation tool names.
+  host_sandbox_result: "HOST_READ_STRUCTURED", host_review_assess: "HOST_READ_STRUCTURED",
+  host_review_mode_status: "HOST_READ_STRUCTURED", host_review_status: "HOST_READ_STRUCTURED",
+  host_review_lens_context: "HOST_READ_STRUCTURED", host_review_diff_read: "HOST_READ_STRUCTURED",
+  host_review_materialize: "HOST_READ_STRUCTURED", host_review_pipeline_run: "MUTATE_PROJECT",
+  host_review_persist: "MUTATE_PROJECT", host_sandbox_result_install: "MUTATE_PROJECT",
+  host_git_commit: "MUTATE_PROJECT", host_git_clear_commit_intent: "MUTATE_PROJECT",
+  host_git_push: "MUTATE_PROJECT", host_gh_issue_create: "MUTATE_PROJECT", host_plan_append: "MUTATE_PROJECT",
+  host_review_start: "MUTATE_PROJECT", host_review_capture_result: "MUTATE_PROJECT",
+  host_review_capture_unachievable: "MUTATE_PROJECT", host_review_acknowledge_approved: "MUTATE_PROJECT",
+  host_review_capture_correction_plan: "MUTATE_PROJECT", host_review_capture_refuter: "MUTATE_PROJECT",
+  host_review_capture_validation: "MUTATE_PROJECT", host_review_validate: "MUTATE_PROJECT",
+  host_review_recover: "MUTATE_PROJECT", host_register_project: "MUTATE_PROJECT",
+  host_sdd_status: "HOST_READ_STRUCTURED", host_sdd_continue: "HOST_READ_STRUCTURED",
+  host_sdd_task_result: "HOST_READ_STRUCTURED", host_sdd_archive_compose: "MUTATE_PROJECT",
+  host_sdd_attempt_grant: "MUTATE_PROJECT",
+  sddArchiveCompose: "MUTATE_PROJECT", sddAttemptGrant: "MUTATE_PROJECT", planDocAppend: "MUTATE_PROJECT",
+  reviewStart: "MUTATE_PROJECT", reviewCaptureResult: "MUTATE_PROJECT", reviewCaptureUnachievable: "MUTATE_PROJECT",
+  reviewAcknowledgeApproved: "MUTATE_PROJECT", reviewCaptureCorrectionPlan: "MUTATE_PROJECT", reviewCaptureRefuter: "MUTATE_PROJECT",
+  reviewCaptureValidation: "MUTATE_PROJECT", reviewValidate: "MUTATE_PROJECT", reviewRecover: "MUTATE_PROJECT",
+  reviewMaterialize: "MUTATE_PROJECT", reviewPipelineRun: "MUTATE_PROJECT", reviewPersist: "MUTATE_PROJECT",
+  sandboxResultInstall: "MUTATE_PROJECT", resultDiff: "HOST_READ_STRUCTURED", metrics: "HOST_READ_STRUCTURED",
+  workerStatus: "READ_PROJECT", exec: "EXECUTE_PROJECT", readFile: "READ_PROJECT", writeFile: "MUTATE_PROJECT",
+  applyPatch: "MUTATE_PROJECT", listDir: "READ_PROJECT", prepareResult: "MUTATE_PROJECT", applyResult: "MUTATE_PROJECT",
+  discardResult: "MUTATE_PROJECT", keepResult: "MUTATE_PROJECT", destroyWorker: "MUTATE_PROJECT", listWorkers: "HOST_READ_STRUCTURED",
+  ast_grep_search: "READ_PROJECT", codegraph_aft_callgraph: "READ_PROJECT",
+  sddStatus: "HOST_READ_STRUCTURED", sddContinue: "HOST_READ_STRUCTURED", sddTaskResult: "HOST_READ_STRUCTURED",
+  reviewAssess: "HOST_READ_STRUCTURED", reviewModeStatus: "HOST_READ_STRUCTURED", reviewStatus: "HOST_READ_STRUCTURED",
+  reviewLensContext: "HOST_READ_STRUCTURED", reviewDiffRead: "HOST_READ_STRUCTURED", reviewPersistPreflight: "HOST_READ_STRUCTURED",
+  sandboxResult: "HOST_READ_STRUCTURED", advisorGet: "HOST_READ_STRUCTURED", advisorList: "HOST_READ_STRUCTURED",
+  hostSystemSummary: "HOST_READ_STRUCTURED", hostMemory: "HOST_READ_STRUCTURED", hostDiskUsage: "HOST_READ_STRUCTURED",
+  hostNetworkListeners: "HOST_READ_STRUCTURED", hostProcessList: "HOST_READ_STRUCTURED", hostServiceStatus: "HOST_READ_STRUCTURED",
+  hostServiceLogs: "HOST_READ_STRUCTURED", hostTailscaleStatus: "HOST_READ_STRUCTURED", hostDockerList: "HOST_READ_STRUCTURED", hostDockerLogs: "HOST_READ_STRUCTURED",
+  gitCommit: "MUTATE_PROJECT", gitClearCommitIntent: "MUTATE_PROJECT", gitPush: "MUTATE_PROJECT", ghIssueCreate: "MUTATE_PROJECT",
+  copyOutInfo: "HOST_READ_STRUCTURED", copyInInfo: "HOST_READ_STRUCTURED", copyOut: "MUTATE_PROJECT", copyIn: "MUTATE_PROJECT",
+  policy: "HOST_READ_STRUCTURED", registerProject: "MUTATE_PROJECT", advisorAsk: "CONSULT", advisorRead: "CONSULT",
+  advisorRespond: "CONSULT", evidenceKeep: "CONSULT",
+  task: "DELIBERATE", question: "CONSULT", skill: "CONSULT", systematic_skill: "CONSULT",
+  systematic_workflow_start: "CONSULT", systematic_workflow_status: "CONSULT", systematic_workflow_complete: "CONSULT",
+  codegraph_codegraph_explore: "READ_PROJECT", vision_bridge_describe_image: "READ_PROJECT", "vision-bridge_describe_image": "READ_PROJECT",
+  github: "RESEARCH_EXTERNAL",
+  aft_outline: "HOST_READ_STRUCTURED", aft_zoom: "HOST_READ_STRUCTURED", aft_search: "HOST_READ_STRUCTURED",
+  aft_callgraph: "HOST_READ_STRUCTURED", aft_inspect: "HOST_READ_STRUCTURED",
+  aft_safety: "HOST_ADMIN_STRUCTURED", aft_import: "HOST_ADMIN_STRUCTURED", ast_grep_replace: "HOST_ADMIN_STRUCTURED",
 };
 
 const READ_ONLY_AFT_OPERATIONS: readonly string[] = [
@@ -142,15 +192,7 @@ const MUTATION_AFT_OPERATIONS: readonly string[] = [
  * unknown/ambiguous effects (caller must deny).
  */
 export function classifyOperation(operation: string): Capability | null {
-  const direct = OPERATION_CAPABILITY[operation];
-  if (direct) return direct;
-  if ((READ_ONLY_AFT_OPERATIONS as readonly string[]).includes(operation)) {
-    return "HOST_READ_STRUCTURED";
-  }
-  if ((MUTATION_AFT_OPERATIONS as readonly string[]).includes(operation)) {
-    return "HOST_ADMIN_STRUCTURED";
-  }
-  return null;
+  return TOOL_CLASSIFICATION_INVENTORY[operation] ?? null;
 }
 
 /**

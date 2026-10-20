@@ -106,6 +106,7 @@ export type Operation =
   | "copyIn"
   // read-only policy/introspection (used by the routing guard plugin)
   | "policy"
+  | "toolAdmission"
   | "registerProject"
   // External advisors (advisor-records.ts): evidence records, never authority.
   | "resultDiff"
@@ -188,6 +189,7 @@ export const SANDBOX_GUARD_CLASS = {
   copyInInfo: "sandbox-dispatch-guard",
   copyIn: "sandbox-dispatch-guard",
   policy: "exempt-from-sandbox-guard",
+  toolAdmission: "exempt-from-sandbox-guard",
   registerProject: "exempt-from-sandbox-guard",
   resultDiff: "exempt-from-sandbox-guard",
   advisorAsk: "exempt-from-sandbox-guard",
@@ -266,6 +268,7 @@ export const OPERATIONS: readonly Operation[] = [
   "copyInInfo",
   "copyIn",
   "policy",
+  "toolAdmission",
   "registerProject",
   "resultDiff",
   "advisorAsk",

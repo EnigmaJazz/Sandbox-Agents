@@ -91,6 +91,7 @@ import {
   buildListWorkersOp,
   buildMetricsOp,
   buildPolicyOp,
+  buildToolAdmissionOp,
   buildPlanDocAppendOp,
   buildReviewMaterializeOp,
   buildReviewDiffReadOp,
@@ -691,7 +692,7 @@ export class BrokerServer {
           this.dispatch(envelope!, sendProgress),
         );
         // resultDiff is a strict read and must not create/touch session state.
-        if (envelope.operation !== "resultDiff" && envelope.operation !== "reviewPersistPreflight") {
+        if (envelope.operation !== "resultDiff" && envelope.operation !== "reviewPersistPreflight" && envelope.operation !== "toolAdmission") {
           try { this.ctx.store.touch(envelope.sessionID, { lastOperation: envelope.operation }, envelope.operation); } catch {}
         }
 
@@ -931,6 +932,8 @@ export class BrokerServer {
         return buildSandboxResultInstallOp(this.ctx)(req);
       case "policy":
         return buildPolicyOp(this.ctx)(req);
+      case "toolAdmission":
+        return buildToolAdmissionOp(this.ctx)(req);
       case "planDocAppend":
         return buildPlanDocAppendOp(this.ctx)(req);
       case "bindSessionAgent":
