@@ -29,6 +29,65 @@ describe("review materialization", () => {
     await expect(materializeReviewRange({ baseRef: "missing-ref-xyz" }, "owner", env.options)).rejects.toBeInstanceOf(ReviewRangeRefError);
   });
 
+  test("refuses protected paths before creating a run or publishing artifacts", async () => {
+    const env = fixture();
+    const protectedPath = ".env";
+    writeFileSync(join(env.project, protectedPath), "SECRET_CONTENT_MUST_NOT_BE_PUBLISHED\n");
+    gitAt(env.project, ["add", protectedPath]);
+    gitAt(env.project, ["commit", "-qm", "add protected file"]);
+    const head = gitAt(env.project, ["rev-parse", "HEAD"]);
+
+    await expect(materializeReviewRange({ baseRef: env.base, headRef: head }, "owner", env.options))
+      .rejects.toMatchObject({ code: "review_range_protected_content", message: expect.stringContaining(protectedPath) });
+    expect(env.store.countRunsForSession("owner")).toBe(0);
+    expect(readdirSync(env.store.root)).not.toContain("owner");
+  });
+
+  test("refuses every path class mirrored by the read-deny policy", async () => {
+    const paths = [".env.example", "server.key", "server.pem", ".git-credentials", ".netrc", ".ssh/id_rsa", ".gnupg/private-keys-v1.d/secret", ".aws/credentials", ".kube/config", ".local/share/opencode/auth.json", ".config/gh/hosts.yml", ".config/gcloud/application_default_credentials.json"];
+    for (const path of paths) {
+      const env = fixture();
+      mkdirSync(join(env.project, path.split("/").slice(0, -1).join("/") || "."), { recursive: true });
+      writeFileSync(join(env.project, path), "protected content\n");
+      gitAt(env.project, ["add", path]);
+      gitAt(env.project, ["commit", "-qm", "add protected file"]);
+      const head = gitAt(env.project, ["rev-parse", "HEAD"]);
+      await expect(materializeReviewRange({ baseRef: env.base, headRef: head }, "owner", env.options))
+        .rejects.toMatchObject({ code: "review_range_protected_content", message: expect.stringContaining(path) });
+      expect(env.store.countRunsForSession("owner")).toBe(0);
+    }
+  });
+
+  test("refuses deleted protected files because their bytes remain in the diff", async () => {
+    const env = fixture();
+    writeFileSync(join(env.project, ".env.local"), "SECRET_CONTENT_MUST_NOT_BE_PUBLISHED\n");
+    gitAt(env.project, ["add", ".env.local"]);
+    gitAt(env.project, ["commit", "-qm", "add protected file"]);
+    const base = gitAt(env.project, ["rev-parse", "HEAD"]);
+    gitAt(env.project, ["rm", ".env.local"]);
+    gitAt(env.project, ["commit", "-qm", "delete protected file"]);
+    const head = gitAt(env.project, ["rev-parse", "HEAD"]);
+
+    await expect(materializeReviewRange({ baseRef: base, headRef: head }, "owner", env.options))
+      .rejects.toMatchObject({ code: "review_range_protected_content", message: expect.stringContaining(".env.local") });
+    expect(env.store.countRunsForSession("owner")).toBe(0);
+  });
+
+  test("materializes safe paths with their slices", async () => {
+    const env = fixture();
+    for (const path of ["src/app.ts", "docs/README.md"]) {
+      mkdirSync(join(env.project, path.split("/").slice(0, -1).join("/")), { recursive: true });
+      writeFileSync(join(env.project, path), `safe ${path}\n`);
+      gitAt(env.project, ["add", path]);
+    }
+    gitAt(env.project, ["commit", "-qm", "add safe files"]);
+    const head = gitAt(env.project, ["rev-parse", "HEAD"]);
+    const index = await materializeReviewRange({ baseRef: env.head, headRef: head }, "owner", env.options);
+    expect(index.changedPaths).toEqual(["docs/README.md", "src/app.ts"]);
+    expect(index.sliceCount).toBeGreaterThan(0);
+    expect(readdirSync(env.store.runDir("owner", index.runId))).toContain("scope.diff");
+  });
+
   test("returns only a bounded index and writes no project files", async () => {
     const env = fixture();
     const before = projectSnapshot(env.project);

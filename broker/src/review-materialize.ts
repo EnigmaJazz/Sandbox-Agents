@@ -20,6 +20,34 @@ const OBJECT_ID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 export class ReviewMaterializeError extends ReviewRunError {
   constructor(code: string, message: string) { super(code, message); }
 }
+
+/**
+ * Mirrors the read-deny path rules in opencode/config-fragments/sandbox-permissions.jsonc.
+ * Matching is case-sensitive, exactly like the fragment. This is deliberately stricter than
+ * "secrets only": it mirrors the read deny so materialize cannot publish what a session may not read.
+ */
+export const REVIEW_RANGE_PROTECTED_PATH_PATTERNS = [
+  /(?:^|\/)(?:\.ssh|\.gnupg|\.aws|\.kube)(?:\/|$)/,
+  /\.local\/share\/opencode\/auth\.json$/,
+  /(?:^|\/)\.config\/gh\/hosts\.yml$/,
+  /(?:^|\/)\.config\/gcloud\//,
+  /(?:^|\/)\.env[^/]*$/,
+  /(?:^|\/)(?:\.git-credentials|\.netrc)$/,
+  /(?:^|\/)[^/]*\.(?:key|pem)$/,
+] as const;
+
+export class ReviewRangeProtectedContentError extends ReviewMaterializeError {
+  constructor(firstPath: string, additionalCount: number) {
+    const suffix = additionalCount > 0 ? ` and ${additionalCount} more protected path${additionalCount === 1 ? "" : "s"}` : "";
+    super("review_range_protected_content", `review range contains protected path '${firstPath}'${suffix}`.slice(0, 256));
+  }
+}
+
+/** Refuses materialization when the changed-path manifest includes read-denied content paths. */
+export function assertReviewRangeHasNoProtectedContent(changedPaths: readonly string[]): void {
+  const protectedPaths = changedPaths.filter((path) => REVIEW_RANGE_PROTECTED_PATH_PATTERNS.some((pattern) => pattern.test(path)));
+  if (protectedPaths.length > 0) throw new ReviewRangeProtectedContentError(protectedPaths[0]!, protectedPaths.length - 1);
+}
 export class ReviewRangeRefError extends ReviewMaterializeError {
   constructor(ref: string) { super("review_range_ref_unresolvable", `review range ref '${ref}' did not resolve to a commit`); }
 }
@@ -122,6 +150,7 @@ export async function materializeReviewRange(payload: MaterializeReviewPayload, 
   const namesResult = await invokeGit(spawn, binary, ["diff", "--no-ext-diff", "--no-color", "--no-textconv", "--name-only", "-z", baseObjectId, headObjectId, ...pathArgs], options.projectRoot, env);
   if (namesResult.status !== 0 || namesResult.timedOut || namesResult.outputTruncated) throw new ReviewMaterializeError("review_range_manifest_failed", "git changed-path manifest failed");
   const changedPaths = namesResult.stdout.split("\0").filter(Boolean);
+  assertReviewRangeHasNoProtectedContent(changedPaths);
   const sections = splitFileSections(diff, changedPaths);
   const slices = packSlices(sections);
   const writer = options.store.createRun(sessionID, { baseObjectId, headObjectId });
