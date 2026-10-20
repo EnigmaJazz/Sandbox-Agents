@@ -401,6 +401,46 @@ describe("reserved run-record name", () => {
 });
 
 describe("store ownership modes", () => {
+  test("read-only stores refuse mutations without changing the store or project tree", () => {
+    const writable = makeStore();
+    const writer = writable.createRun("sess-read-only");
+    writer.addArtifact("data.bin", "before");
+    writer.publish();
+    const store = ReviewRunStore.readOnly({ root: writable.root, projectRoot: writable.projectRoot });
+    const snapshot = (path: string): string => {
+      if (!lstatExists(path)) return "missing";
+      const stat = lstatSync(path);
+      if (stat.isDirectory()) return readdirSync(path).sort().map((name) => `${name}:${snapshot(join(path, name))}`).join("|");
+      return readFileSync(path).toString("base64");
+    };
+    const before = `${snapshot(store.root)}:${snapshot(store.projectRoot)}`;
+    const operations = [
+      () => store.createRun("sess-read-only"),
+      () => store.addArtifact("sess-read-only", writer.record.runId, "extra.bin", "x"),
+      () => store.recordFinalizeProvenance("sess-read-only", writer.record.runId, { phase: "finalize", outcome: "accepted" }),
+    ];
+    for (const operation of operations) {
+      const error = catchError(operation) as ReviewRunError;
+      expect(error).toBeInstanceOf(ReviewRunError);
+      expect(error.code).toBe("review_run_store_read_only");
+    }
+    expect(`${snapshot(store.root)}:${snapshot(store.projectRoot)}`).toBe(before);
+    expect(store.readRecord("sess-read-only", writer.record.runId).state).toBe("published");
+  });
+
+  test("writable stores continue to create, publish, and update runs", () => {
+    const store = makeStore();
+    const writer = store.createRun("sess-writable");
+    writer.addArtifact("data.bin", "before");
+    writer.publish();
+    store.addArtifact("sess-writable", writer.record.runId, "extra.bin", "after");
+    store.recordFinalizeProvenance("sess-writable", writer.record.runId, { phase: "finalize", outcome: "accepted" });
+    const record = store.readRecord("sess-writable", writer.record.runId);
+    expect(record.state).toBe("published");
+    expect(record.artifacts.map((artifact) => artifact.name)).toEqual(["data.bin", "extra.bin"]);
+    expect(record.finalizeProvenance?.outcome).toBe("accepted");
+  });
+
   test("root, session and run dirs are 0700 and files 0600 even under a hostile umask", () => {
     const store = makeStore();
     const previous = process.umask(0o777);

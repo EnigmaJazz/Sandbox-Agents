@@ -174,6 +174,11 @@ export class ReviewRunIdError extends ReviewRunError {
     super("review_run_id", message);
   }
 }
+export class ReviewRunStoreReadOnlyError extends ReviewRunError {
+  constructor() {
+    super("review_run_store_read_only", "review run store is read-only");
+  }
+}
 export class ReviewRunSessionError extends ReviewRunError {
   constructor(message: string) {
     super("review_run_session", message);
@@ -504,9 +509,11 @@ export class ReviewRunStore {
   readonly projectRoot: string;
   readonly caps: ReviewRunCaps;
   private readonly deniedPrefixes: readonly string[];
+  private readonly isReadOnly: boolean;
 
   constructor(opts: ReviewRunStoreOptions) {
     this.deniedPrefixes = opts.deniedPrefixes ?? [];
+    this.isReadOnly = opts.readOnly === true;
     this.projectRoot = canonicalForContainment(opts.projectRoot);
     this.root = resolveReviewRunRoot({ ...opts, deniedPrefixes: this.deniedPrefixes });
     this.caps = { ...DEFAULT_REVIEW_RUN_CAPS, ...opts.caps };
@@ -526,7 +533,12 @@ export class ReviewRunStore {
     return join(session, runId);
   }
 
+  private assertWritable(): void {
+    if (this.isReadOnly) throw new ReviewRunStoreReadOnlyError();
+  }
+
   addArtifact(sessionID: string, runId: string, name: string, data: Buffer | string): ReviewRunArtifact {
+    this.assertWritable();
     const record = this.readRecord(sessionID, runId);
     if (record.state === "publishing") {
       return new ReviewRunWriter(this.runDir(sessionID, runId), record, this.caps).addArtifact(name, data);
@@ -565,6 +577,7 @@ export class ReviewRunStore {
     runId: string,
     provenance: NonNullable<ReviewRunRecord["finalizeProvenance"]>,
   ): void {
+    this.assertWritable();
     const record = this.readRecord(sessionID, runId);
     record.finalizeProvenance = provenance;
     publishValidatedArtifactAtomic(this.runDir(sessionID, runId), REVIEW_RUN_METADATA_NAME, `${JSON.stringify(record, null, 2)}\n`);
@@ -593,6 +606,7 @@ export class ReviewRunStore {
 
   /** Broker-generated runId bound to the session; quota-checked first. */
   createRun(sessionID: string, evidence: ReviewRunEvidence = {}): ReviewRunWriter {
+    this.assertWritable();
     const existing = this.countRunsForSession(sessionID);
     if (existing >= this.caps.maxPerSession) {
       throw new ReviewRunQuotaError(

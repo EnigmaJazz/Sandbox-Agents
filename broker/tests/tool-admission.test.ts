@@ -67,7 +67,7 @@ test("AFT reads are allowed pre-activation while host-admin AFT tools are denied
 });
 
 test("toolAdmission rejects invalid tool names at envelope validation", () => {
-  const invalid: unknown[] = [null, 1, "", "x".repeat(129), "bad/name"];
+  const invalid: unknown[] = [undefined, null, 1, "", "x".repeat(129), "bad/name"];
   for (const tool of invalid) {
     try {
       validateEnvelope({ version: 1, id: "req-1", operation: "toolAdmission", sessionID: "session-1", payload: { tool } });
@@ -76,5 +76,15 @@ test("toolAdmission rejects invalid tool names at envelope validation", () => {
       expect(error).toBeInstanceOf(ValidationError);
       expect((error as Error).message).toMatch(/tool/i);
     }
+  }
+  for (const payload of [null, [], "not-an-object"]) {
+    expect(() => validateEnvelope({ version: 1, id: "req-1", operation: "toolAdmission", sessionID: "session-1", payload })).toThrow(ValidationError);
+  }
+  try {
+    validateEnvelope({ version: 1, id: "req-1", operation: "toolAdmission", sessionID: "session-1", payload: { tool: "valid", extra: true } });
+    throw new Error("expected unknown payload key to be rejected");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ValidationError);
+    expect((error as Error).message).toMatch(/unexpected field 'extra'/);
   }
 });

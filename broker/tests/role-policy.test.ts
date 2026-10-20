@@ -155,6 +155,7 @@ describe("R3 — AFT effect-based classification", () => {
     expect(classifyAft("aft_outline")).toBe("HOST_READ_STRUCTURED");
     expect(classifyAft("aft_zoom")).toBe("HOST_READ_STRUCTURED");
     expect(classifyAft("aft_inspect")).toBe("HOST_READ_STRUCTURED");
+    expect(classifyAft("host_sandbox_result")).toBeNull();
     expect(classifyOperation("aft_outline")).toBe("HOST_READ_STRUCTURED");
   });
 

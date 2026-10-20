@@ -173,20 +173,6 @@ export const TOOL_CLASSIFICATION_INVENTORY: Readonly<Record<string, Capability>>
   aft_safety: "HOST_ADMIN_STRUCTURED", aft_import: "HOST_ADMIN_STRUCTURED", ast_grep_replace: "HOST_ADMIN_STRUCTURED",
 };
 
-const READ_ONLY_AFT_OPERATIONS: readonly string[] = [
-  "aft_outline",
-  "aft_zoom",
-  "aft_search",
-  "aft_callgraph",
-  "aft_inspect",
-];
-
-const MUTATION_AFT_OPERATIONS: readonly string[] = [
-  "aft_safety",
-  "aft_import",
-  "ast_grep_replace",
-];
-
 /**
  * Classify a tool/operation by effect. Returns the capability or null for
  * unknown/ambiguous effects (caller must deny).
@@ -200,9 +186,9 @@ export function classifyOperation(operation: string): Capability | null {
  * if the operation is not an AFT tool.
  */
 export function classifyAft(operation: string): Capability | null {
-  if ((READ_ONLY_AFT_OPERATIONS as readonly string[]).includes(operation)) return "HOST_READ_STRUCTURED";
-  if ((MUTATION_AFT_OPERATIONS as readonly string[]).includes(operation)) return "HOST_ADMIN_STRUCTURED";
-  return null;
+  if (!operation.startsWith("aft_") && operation !== "ast_grep_replace") return null;
+  const capability = TOOL_CLASSIFICATION_INVENTORY[operation];
+  return capability === "HOST_READ_STRUCTURED" || capability === "HOST_ADMIN_STRUCTURED" ? capability : null;
 }
 
 // ---------------------------------------------------------------------------

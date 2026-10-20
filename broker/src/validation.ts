@@ -1060,8 +1060,8 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
 };
 
 export function assertPayloadKeys(operation: string, payload: unknown): void {
-  if (operation === "toolAdmission" && (typeof payload !== "object" || payload === null || Array.isArray(payload) || typeof (payload as Record<string, unknown>).tool !== "string" || !/^[A-Za-z0-9_.-]{1,128}$/.test((payload as Record<string, unknown>).tool as string))) {
-    throw new ValidationError("tool must be a 1..128 character tool name using letters, digits, underscore, hyphen, or dot");
+  if (operation === "toolAdmission" && (typeof payload !== "object" || payload === null || Array.isArray(payload))) {
+    throw new ValidationError("payload must be a JSON object");
   }
   if (payload === undefined || payload === null) return;
   if (typeof payload !== "object" || Array.isArray(payload)) {
@@ -1072,6 +1072,9 @@ export function assertPayloadKeys(operation: string, payload: unknown): void {
     throw new ValidationError(`unknown operation: ${operation}`);
   }
   const record = payload as Record<string, unknown>;
+  if (operation === "toolAdmission" && (typeof record.tool !== "string" || !/^[A-Za-z0-9_.-]{1,128}$/.test(record.tool))) {
+    throw new ValidationError("tool must be a 1..128 character tool name using letters, digits, underscore, hyphen, or dot");
+  }
   for (const key of Object.keys(record)) {
     if (!allowed.includes(key)) {
       const isForbidden = (FORBIDDEN_WORKER_FIELDS as readonly string[]).includes(key);
@@ -1081,9 +1084,6 @@ export function assertPayloadKeys(operation: string, payload: unknown): void {
           : `unexpected field '${key}' in ${operation} payload`,
       );
     }
-  }
-  if (operation === "toolAdmission" && (typeof record.tool !== "string" || !/^[A-Za-z0-9_.-]{1,128}$/.test(record.tool))) {
-    throw new ValidationError("tool must be a 1..128 character tool name using letters, digits, underscore, hyphen, or dot");
   }
 }
 
