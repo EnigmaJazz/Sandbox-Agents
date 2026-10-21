@@ -277,6 +277,9 @@ export async function runReviewPipeline(
   if (sourceCount > 1) {
     throw new ReviewPipelineError("review_pipeline_stdin_source_conflict", "exactly one of stdin, inputRef, or inputRefs must be supplied; multiple sources were provided");
   }
+  if (phase === "prepare" && Object.prototype.hasOwnProperty.call(payload, "selected_dispatches") && !hasInputRefs) {
+    throw new ReviewPipelineError("review_pipeline_selected_dispatches_requires_input_refs", "selected_dispatches is only valid when inputRefs is supplied");
+  }
   inputSource = hasStdin ? "stdin" : hasInputRef ? "inputRef" : "inputRefs";
   if (hasInputRefs) {
     if (phase !== "prepare") {

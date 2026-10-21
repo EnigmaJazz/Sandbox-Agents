@@ -224,6 +224,32 @@ test("inputRefs validates phase, grammar, run membership, JSON, count, conflicts
     .rejects.toMatchObject({ code: "review_pipeline_input_refs_too_large", message: expect.stringContaining(String(REVIEW_PIPELINE_MAX_STDIN_BYTES)) });
 });
 
+test("prepare refuses selected dispatches without inputRefs", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  const context = { store: pin.store, sessionID: pin.sessionID };
+  const selected_dispatches = [{ persona: "correctness" }];
+
+  await expect(runReviewPipeline({ phase: "prepare", runId: writer.record.runId, stdin: "{}", selected_dispatches }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_selected_dispatches_requires_input_refs" });
+
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-correctness.json", Buffer.from("{}"));
+  await expect(runReviewPipeline({ phase: "prepare", runId: writer.record.runId, inputRef: "phase-screen-correctness.json", selected_dispatches }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_selected_dispatches_requires_input_refs" });
+});
+
+test("prepare continues to accept selected dispatches with inputRefs", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-correctness.json", Buffer.from("{}"));
+
+  const result = await runReviewPipeline({
+    phase: "prepare", runId: writer.record.runId,
+    inputRefs: ["phase-screen-correctness.json"], selected_dispatches: [{ persona: "correctness" }],
+  }, pin.config, undefined, { store: pin.store, sessionID: pin.sessionID });
+  expect(result).toMatchObject({ outcome: "accepted", summary: { inputSource: "inputRefs" } });
+});
+
 test("prepare wraps screen artifacts with broker-derived reviewers and matches selected dispatches", async () => {
   const pin = fixture();
   const writer = pin.store.createRun(pin.sessionID);
