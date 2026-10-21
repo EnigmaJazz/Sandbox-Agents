@@ -244,6 +244,9 @@ export async function runReviewPipeline(
     throw new ReviewPipelineError("review_pipeline_phase_invalid", "phase must be screen, prepare, merge, or finalize");
   }
   const phase = payload.phase as ReviewPipelinePhase;
+  if (phase !== "prepare" && Object.prototype.hasOwnProperty.call(payload, "selected_dispatches")) {
+    throw new ReviewPipelineError("review_pipeline_selected_dispatches_phase_forbidden", `selected_dispatches is only valid for prepare (received ${phase})`);
+  }
   if (phase === "screen") {
     if (typeof payload.reviewer !== "string" || !(REVIEW_PIPELINE_REVIEWERS as readonly string[]).includes(payload.reviewer)) {
       throw new ReviewPipelineError("review_pipeline_reviewer_invalid", "screen requires an enumerated reviewer persona");
@@ -294,11 +297,14 @@ export async function runReviewPipeline(
     const selectedDispatchBytes = callerBytes([["selected_dispatches", payload.selected_dispatches]]);
     const selectedDispatches = JSON.parse(selectedDispatchBytes[0]!.toString("utf8")) as unknown[];
     const selectedPersonas = new Set<string>();
+    const uniqueSelectedDispatches: unknown[] = [];
     for (const dispatch of selectedDispatches) {
       if (dispatch === null || typeof dispatch !== "object" || Array.isArray(dispatch) || typeof (dispatch as Record<string, unknown>).persona !== "string") {
         throw new ReviewPipelineError("review_pipeline_selected_dispatches_invalid", "each selected_dispatches entry must be an object with a persona string");
       }
-      selectedPersonas.add((dispatch as Record<string, unknown>).persona as string);
+      const persona = (dispatch as Record<string, unknown>).persona as string;
+      if (!selectedPersonas.has(persona)) uniqueSelectedDispatches.push(dispatch);
+      selectedPersonas.add(persona);
     }
     const seenRefs = new Set<string>();
     const screenResults: { reviewer: string; result: Record<string, unknown> }[] = [];
@@ -327,7 +333,7 @@ export async function runReviewPipeline(
     }
     input = Buffer.from(JSON.stringify({
       screen_results: screenResults,
-      selected_dispatches: JSON.parse(selectedDispatchBytes[0]!.toString("utf8")),
+      selected_dispatches: uniqueSelectedDispatches,
     }), "utf8");
   } else if (hasInputRef) {
     if (typeof payload.inputRef !== "string" || !storeContext) {

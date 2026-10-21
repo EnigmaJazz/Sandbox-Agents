@@ -237,12 +237,64 @@ test("prepare wraps screen artifacts with broker-derived reviewers and matches s
   await expect(run([])).rejects.toMatchObject({ code: "review_pipeline_selected_dispatches_missing" });
   await expect(run([{ persona: "testing" }])).rejects.toMatchObject({ code: "review_pipeline_input_refs_persona_unselected", message: expect.stringContaining("correctness") });
   await expect(run([{ persona: "correctness" }, { persona: "testing" }])).rejects.toMatchObject({ code: "review_pipeline_selected_dispatches_screen_missing", message: expect.stringContaining("testing") });
+  for (const malformed of ["bad", 1, null, [], {}, { persona: 1 }]) {
+    await expect(run([malformed])).rejects.toMatchObject({ code: "review_pipeline_selected_dispatches_invalid" });
+  }
   await run([{ persona: "correctness", selection_surface: ["finding-1"] }]);
   const saved = JSON.parse(readFileSync(join(pin.store.runDir(pin.sessionID, writer.record.runId), "phase-prepare.json"), "utf8")) as { input: string };
   expect(JSON.parse(saved.input)).toEqual({
     screen_results: [{ reviewer: "correctness", result: screen }],
     selected_dispatches: [{ persona: "correctness", selection_surface: ["finding-1"] }],
   });
+});
+
+test("prepare forwards selected dispatches de-duplicated in first-occurrence order", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-correctness.json", Buffer.from("{}"));
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-testing.json", Buffer.from("{}"));
+  let capturedStdin = "";
+  const spawn: SpawnFn = async (_argv, options) => {
+    capturedStdin = options.stdin.toString("utf8");
+    return { status: 0, stdout: "{}", stderr: "", timedOut: false };
+  };
+  const first = { persona: "correctness", marker: "first" };
+  const duplicate = { persona: "correctness", marker: "duplicate" };
+  const second = { persona: "testing", marker: "second" };
+  await runReviewPipeline({
+    phase: "prepare", runId: writer.record.runId,
+    inputRefs: ["phase-screen-correctness.json", "phase-screen-testing.json"],
+    selected_dispatches: [first, duplicate, second],
+  }, pin.config, spawn, { store: pin.store, sessionID: pin.sessionID });
+  expect(capturedStdin).toBe(JSON.stringify({
+    screen_results: [{ reviewer: "correctness", result: {} }, { reviewer: "testing", result: {} }],
+    selected_dispatches: [first, second],
+  }));
+});
+
+test("rejects selected_dispatches outside prepare without rejecting parent metadata", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-prepare.json", Buffer.from("{}"));
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-merge.json", Buffer.from("{}"));
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-correctness.json", Buffer.from("{}"));
+  const context = { store: pin.store, sessionID: pin.sessionID };
+  const selected_dispatches = [{ persona: "correctness" }];
+  for (const source of [{ stdin: "{}" }, { inputRef: "phase-prepare.json" }]) {
+    await expect(runReviewPipeline({ phase: "screen", runId: writer.record.runId, reviewer: "correctness", selected_dispatches, ...source }, pin.config, undefined, context))
+      .rejects.toMatchObject({ code: "review_pipeline_selected_dispatches_phase_forbidden", message: expect.stringContaining("screen") });
+  }
+  await expect(runReviewPipeline({ phase: "merge", runId: writer.record.runId, inputRef: "phase-prepare.json", adjudication: {}, selected_dispatches }, pin.config, undefined, context))
+    .rejects.toMatchObject({ code: "review_pipeline_selected_dispatches_phase_forbidden", message: expect.stringContaining("merge") });
+  await expect(runReviewPipeline({
+    phase: "finalize", runId: writer.record.runId, preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json",
+    dispatch_records: [], validator_lifecycle_results: [], plan_assessment: {}, selected_dispatches,
+    parent_run_metadata: { selected_dispatches: ["kept"] },
+  }, pin.config, undefined, context)).rejects.toMatchObject({ code: "review_pipeline_selected_dispatches_phase_forbidden", message: expect.stringContaining("finalize") });
+  await expect(runReviewPipeline({
+    phase: "finalize", runId: writer.record.runId, preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json",
+    dispatch_records: [], validator_lifecycle_results: [], plan_assessment: {}, parent_run_metadata: { selected_dispatches: ["kept"] },
+  }, pin.config, undefined, context)).resolves.toMatchObject({ outcome: "accepted" });
 });
 
 test("accepts a persona-named screen artifact as a later phase inputRef", async () => {
