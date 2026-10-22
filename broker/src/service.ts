@@ -2453,7 +2453,7 @@ export function buildToolAdmissionOp(ctx: OpContext): OpHandler {
       const state = record?.state ?? "HOST_READ_ONLY";
       // Unbound sessions have no broker-trusted identity, so only non-mutating capabilities are allowed.
       // Mutation, execution, and host administration stay denied; structured host reads stop after activation.
-      const mutationClasses = ["MUTATE_PROJECT", "EXECUTE_PROJECT", "SECURITY_MUTATION", "HOST_ADMIN_STRUCTURED"];
+      const mutationClasses = ["MUTATE_PROJECT", "HOST_APPROVED_MUTATION", "EXECUTE_PROJECT", "SECURITY_MUTATION", "HOST_ADMIN_STRUCTURED"];
       if (mutationClasses.includes(capability)) {
         return { schema, tool: payload.tool, classification: capability, decision: "deny", reason: "UNBOUND_SESSION_MUTATION_DENIED" };
       }
