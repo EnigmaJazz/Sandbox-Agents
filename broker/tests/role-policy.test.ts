@@ -425,6 +425,31 @@ describe("orchestrator-readonly — R2 broker read-only enforcement", () => {
     expect(invalidCapability).toMatchObject({ decision: "deny", reasonCode: "UNKNOWN_CAPABILITY" });
   });
 
+  test("allows approved host mutations for orchestrators but denies them to normal roles", () => {
+    expect(decide({
+      role: "gentle-orchestrator",
+      capability: "HOST_APPROVED_MUTATION",
+      sessionState: "HOST_READ_ONLY",
+      authoritativeLocation: "/project",
+      isReadOnlyOrchestrator: true,
+    })).toMatchObject({ decision: "allow", reasonCode: "ORCHESTRATOR_READ_ONLY_ALLOWED" });
+
+    expect(decide({
+      role: "general",
+      capability: "HOST_APPROVED_MUTATION",
+      sessionState: "HOST_READ_ONLY",
+      authoritativeLocation: "/project",
+    })).toMatchObject({ decision: "deny", reasonCode: "ROLE_CAPABILITY_DENIED" });
+
+    expect(decide({
+      role: "gentle-orchestrator",
+      capability: "MUTATE_PROJECT",
+      sessionState: "HOST_READ_ONLY",
+      authoritativeLocation: "/project",
+      isReadOnlyOrchestrator: true,
+    })).toMatchObject({ decision: "deny", reasonCode: "ORCHESTRATOR_READ_ONLY" });
+  });
+
   test("decide denies orchestrator mutation/execution even with worker role claim", () => {
     const d = decide({
       role: "worker",

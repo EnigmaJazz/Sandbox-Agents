@@ -80,7 +80,7 @@ test("unbound sessions allow only non-mutating admission classes", async () => {
     expect(result.decision, tool).toBe("allow");
     expect(result.reason, tool).toBe("UNBOUND_SESSION_READ_ONLY_CLASS");
   }
-  for (const tool of ["bash", "write", "edit", "ast_grep_replace", "aft_safety"]) {
+  for (const tool of ["bash", "write", "edit", "ast_grep_replace", "aft_safety", "host_sandbox_result_install"]) {
     const result = await request(tool);
     expect(result.decision, tool).toBe("deny");
     expect(result.reason, tool).toBe("UNBOUND_SESSION_MUTATION_DENIED");
@@ -118,6 +118,10 @@ test("bound orchestrators retain broker policy decisions", async () => {
   expect(await request("bash")).toMatchObject({ decision: "deny", reason: "ORCHESTRATOR_READ_ONLY" });
   expect(await request("todowrite")).toMatchObject({ decision: "allow", reason: "ORCHESTRATOR_READ_ONLY_ALLOWED" });
   expect(await request("aft_outline")).toMatchObject({ decision: "allow", reason: "ORCHESTRATOR_READ_ONLY_ALLOWED" });
+  expect(await request("host_sandbox_result_install")).toMatchObject({
+    decision: "allow", reason: "ORCHESTRATOR_READ_ONLY_ALLOWED",
+  });
+  expect(await request("sandbox_write")).toMatchObject({ decision: "deny", reason: "ORCHESTRATOR_READ_ONLY" });
 });
 
 test("toolAdmission rejects invalid tool names at envelope validation", () => {
