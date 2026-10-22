@@ -116,6 +116,28 @@ export const TOOL_CLASSIFICATION_INVENTORY: Readonly<Record<string, Capability>>
   sandbox_diff: "READ_PROJECT",
   // RESEARCH_EXTERNAL
   webfetch: "RESEARCH_EXTERNAL",
+  github_ro_get_commit: "RESEARCH_EXTERNAL",
+  github_ro_get_file_contents: "RESEARCH_EXTERNAL",
+  github_ro_get_label: "RESEARCH_EXTERNAL",
+  github_ro_get_latest_release: "RESEARCH_EXTERNAL",
+  github_ro_get_release_by_tag: "RESEARCH_EXTERNAL",
+  github_ro_get_tag: "RESEARCH_EXTERNAL",
+  github_ro_issue_read: "RESEARCH_EXTERNAL",
+  github_ro_list_branches: "RESEARCH_EXTERNAL",
+  github_ro_list_commits: "RESEARCH_EXTERNAL",
+  github_ro_list_issue_fields: "RESEARCH_EXTERNAL",
+  github_ro_list_issue_types: "RESEARCH_EXTERNAL",
+  github_ro_list_issues: "RESEARCH_EXTERNAL",
+  github_ro_list_pull_requests: "RESEARCH_EXTERNAL",
+  github_ro_list_releases: "RESEARCH_EXTERNAL",
+  github_ro_list_repository_collaborators: "RESEARCH_EXTERNAL",
+  github_ro_list_tags: "RESEARCH_EXTERNAL",
+  github_ro_pull_request_read: "RESEARCH_EXTERNAL",
+  github_ro_search_code: "RESEARCH_EXTERNAL",
+  github_ro_search_commits: "RESEARCH_EXTERNAL",
+  github_ro_search_issues: "RESEARCH_EXTERNAL",
+  github_ro_search_pull_requests: "RESEARCH_EXTERNAL",
+  github_ro_search_repositories: "RESEARCH_EXTERNAL",
   // MUTATE_PROJECT
   sandbox_write: "MUTATE_PROJECT",
   sandbox_edit: "MUTATE_PROJECT",
@@ -165,6 +187,8 @@ export const TOOL_CLASSIFICATION_INVENTORY: Readonly<Record<string, Capability>>
   policy: "HOST_READ_STRUCTURED", registerProject: "MUTATE_PROJECT", advisorAsk: "CONSULT", advisorRead: "CONSULT",
   advisorRespond: "CONSULT", evidenceKeep: "CONSULT",
   task: "DELIBERATE", question: "CONSULT", skill: "CONSULT", systematic_skill: "CONSULT",
+  todowrite: "CONSULT",
+  ctx_search: "CONSULT", ctx_expand: "CONSULT", ctx_reduce: "CONSULT", ctx_memory: "CONSULT", ctx_note: "CONSULT",
   systematic_workflow_start: "CONSULT", systematic_workflow_status: "CONSULT", systematic_workflow_complete: "CONSULT",
   codegraph_codegraph_explore: "READ_PROJECT", vision_bridge_describe_image: "READ_PROJECT", "vision-bridge_describe_image": "READ_PROJECT",
   github: "RESEARCH_EXTERNAL",
@@ -379,6 +403,11 @@ export function decide(ctx: AuthorizationContext): DecisionResult {
     if (cap === "MUTATE_PROJECT" || cap === "EXECUTE_PROJECT" || cap === "SECURITY_MUTATION" || cap === "HOST_ADMIN_STRUCTURED") {
       return { decision: "deny", reasonCode: "ORCHESTRATOR_READ_ONLY" };
     }
+    if (!isCapability(ctx.capability)) {
+      return { decision: "deny", reasonCode: "UNKNOWN_CAPABILITY" };
+    }
+    // Read-only orchestrator identities are not role keys, so role validation must not be reached.
+    return { decision: "allow", reasonCode: "ORCHESTRATOR_READ_ONLY_ALLOWED" };
   }
 
   if (!isRole(ctx.role)) {
