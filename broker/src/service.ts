@@ -2437,17 +2437,30 @@ export function buildMetricsOp(ctx: OpContext): OpHandler {
 export function buildToolAdmissionOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const payload = payloadOf(req) as { projectDir?: unknown; tool?: unknown };
-    const record = ctx.store.get(req.sessionID);
-    if (!record?.agent) throw new PolicyError("toolAdmission requires a session with a broker-bound agent identity");
+    const schema = "opencode-sandbox.tool-admission/v1";
     const capability = classifyOperation(payload.tool as string);
     if (!capability) {
       return {
-        schema: "opencode-sandbox.tool-admission/v1",
+        schema,
         tool: payload.tool,
         classification: "unclassified",
         decision: "deny",
         reason: "UNCLASSIFIED_TOOL_DENIED",
       };
+    }
+    const record = ctx.store.get(req.sessionID);
+    if (!record?.agent) {
+      const state = record?.state ?? "HOST_READ_ONLY";
+      // Unbound sessions have no broker-trusted identity, so only non-mutating capabilities are allowed.
+      // Mutation, execution, and host administration stay denied; structured host reads stop after activation.
+      const mutationClasses = ["MUTATE_PROJECT", "EXECUTE_PROJECT", "SECURITY_MUTATION", "HOST_ADMIN_STRUCTURED"];
+      if (mutationClasses.includes(capability)) {
+        return { schema, tool: payload.tool, classification: capability, decision: "deny", reason: "UNBOUND_SESSION_MUTATION_DENIED" };
+      }
+      if (capability === "HOST_READ_STRUCTURED" && state !== "HOST_READ_ONLY") {
+        return { schema, tool: payload.tool, classification: capability, decision: "deny", reason: "UNBOUND_SESSION_POST_ACTIVATION_DENIED" };
+      }
+      return { schema, tool: payload.tool, classification: capability, decision: "allow", reason: "UNBOUND_SESSION_READ_ONLY_CLASS" };
     }
     const result = decide({
       role: normalizeRoleKey(record.agent),
@@ -2457,7 +2470,7 @@ export function buildToolAdmissionOp(ctx: OpContext): OpHandler {
       isReadOnlyOrchestrator: ctx.config.readOnlyAgents.includes(record.agent),
     });
     return {
-      schema: "opencode-sandbox.tool-admission/v1",
+      schema,
       tool: payload.tool,
       classification: capability,
       decision: result.decision,

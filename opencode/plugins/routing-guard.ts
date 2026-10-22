@@ -31,9 +31,6 @@ const REDIRECT_MSG =
   "This session has an active isolated workspace. " +
   "Use sandbox_read/sandbox_grep/sandbox_list so you see the modified sandbox state.";
 
-const MUTATION_BLOCK_MSG =
-  "Ordinary host mutation/execution tools are disabled in this secured environment (S1/S10). " +
-  "Use sandbox_write / sandbox_edit / sandbox_apply_patch / sandbox_bash to work inside your isolated worker.";
 const APPLY_PREVIEW_TOOLS = new Set([
   "applyPreview",
   "sandbox_apply_preview",
@@ -41,18 +38,21 @@ const APPLY_PREVIEW_TOOLS = new Set([
 ]);
 /** Tools the guard routes or blocks. */
 const READ_TOOLS = new Set(["read", "grep", "glob", "list"]);
-// Temporary containment only. The durable fix is broker-owned admission with default-deny,
-// per odd/tasks/routing-guard-admission.md.
-const MUTATION_TOOLS = new Set([
-  "bash",
-  "edit",
-  "write",
-  "apply_patch",
-  "patch",
-  "ast_grep_replace",
-  "aft_import",
-  "aft_safety",
+const STATE_CHANGING_TOOLS = new Set([
+  "sandbox_write",
+  "sandbox_edit",
+  "sandbox_apply_patch",
+  "sandbox_bash",
+  "sandbox_finish",
+  "sandbox_apply",
+  "sandbox_discard",
+  "sandbox_copy_in",
+  "sandbox_copy_out",
 ]);
+const admissionCache = new Map<
+  string,
+  { classification: string; decision: "allow" | "deny"; reason: string }
+>();
 /** args fields that carry path/pattern targets, per tool. */
 const READ_PATH_ARGS: Record<string, string[]> = {
   read: ["filePath"],
@@ -116,6 +116,13 @@ function pathArgsFor(
     .map((k) => String(args![k]));
 }
 
+function clearAdmissionCache(sessionID: string): void {
+  const prefix = `${sessionID}\u0000`;
+  for (const key of admissionCache.keys()) {
+    if (key.startsWith(prefix)) admissionCache.delete(key);
+  }
+}
+
 export default function routingGuardPlugin(): Plugin {
   return {
     "tool.execute.before": async (input, output) => {
@@ -159,9 +166,46 @@ export default function routingGuardPlugin(): Plugin {
         }
         return; // HOST_READ_ONLY: host reads are the intended mode (S3)
       }
-      if (MUTATION_TOOLS.has(toolName)) {
-        // S1/S10: throw to cancel ordinary host mutation and preserve the block message.
-        throw new Error(MUTATION_BLOCK_MSG);
+      if (toolName.startsWith("sandbox_")) {
+        if (STATE_CHANGING_TOOLS.has(toolName)) clearAdmissionCache(sessionID);
+        return;
+      }
+
+      const cacheKey = `${sessionID}\u0000${toolName}`;
+      let admission = admissionCache.get(cacheKey);
+      if (!admission) {
+        const c = await broker();
+        const reply: unknown = await c.request(
+          "toolAdmission",
+          sessionID,
+          { tool: toolName },
+          undefined,
+        );
+        if (
+          reply === null ||
+          typeof reply !== "object" ||
+          Array.isArray(reply) ||
+          (reply as Record<string, unknown>).schema !== "opencode-sandbox.tool-admission/v1" ||
+          (reply as Record<string, unknown>).tool !== toolName ||
+          typeof (reply as Record<string, unknown>).classification !== "string" ||
+          ((reply as Record<string, unknown>).decision !== "allow" &&
+            (reply as Record<string, unknown>).decision !== "deny") ||
+          typeof (reply as Record<string, unknown>).reason !== "string"
+        ) {
+          throw new Error(`Tool "${toolName}" broker admission returned a malformed reply.`);
+        }
+        admission = {
+          classification: (reply as Record<string, unknown>).classification as string,
+          decision: (reply as Record<string, unknown>).decision as "allow" | "deny",
+          reason: (reply as Record<string, unknown>).reason as string,
+        };
+        admissionCache.set(cacheKey, admission);
+      }
+      if (admission.decision === "deny" || admission.classification === "unclassified") {
+        const reason = admission.reason.replace(/[\\r\\n]+/g, " ");
+        throw new Error(
+          `Tool "${toolName}" is denied by broker admission (${reason}). Legitimate tools are classified in TOOL_CLASSIFICATION_INVENTORY (broker/src/role-policy.ts); sandbox tools are not affected.`,
+        );
       }
     },
     "experimental.chat.system.transform": async (input, output) => {

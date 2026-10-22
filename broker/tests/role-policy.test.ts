@@ -38,7 +38,49 @@ describe("R1 — capability taxonomy / unknown effects fail closed", () => {
     expect(classifyOperation("sandbox_bash")).toBe("EXECUTE_PROJECT");
   });
 
+  test("every required live tool has an explicit classification", () => {
+    const expected: Record<string, string> = {
+      todowrite: "CONSULT",
+      ctx_search: "CONSULT",
+      ctx_expand: "CONSULT",
+      ctx_reduce: "CONSULT",
+      ctx_memory: "CONSULT",
+      ctx_note: "CONSULT",
+      list_mcp_resources: "CONSULT",
+      read_mcp_resource: "CONSULT",
+      websearch: "RESEARCH_EXTERNAL",
+      "context7_resolve-library-id": "RESEARCH_EXTERNAL",
+      "context7_query-docs": "RESEARCH_EXTERNAL",
+      github_ro_get_commit: "RESEARCH_EXTERNAL",
+      github_ro_get_file_contents: "RESEARCH_EXTERNAL",
+      github_ro_get_label: "RESEARCH_EXTERNAL",
+      github_ro_get_latest_release: "RESEARCH_EXTERNAL",
+      github_ro_get_release_by_tag: "RESEARCH_EXTERNAL",
+      github_ro_get_tag: "RESEARCH_EXTERNAL",
+      github_ro_issue_read: "RESEARCH_EXTERNAL",
+      github_ro_list_branches: "RESEARCH_EXTERNAL",
+      github_ro_list_commits: "RESEARCH_EXTERNAL",
+      github_ro_list_issue_fields: "RESEARCH_EXTERNAL",
+      github_ro_list_issue_types: "RESEARCH_EXTERNAL",
+      github_ro_list_issues: "RESEARCH_EXTERNAL",
+      github_ro_list_pull_requests: "RESEARCH_EXTERNAL",
+      github_ro_list_releases: "RESEARCH_EXTERNAL",
+      github_ro_list_repository_collaborators: "RESEARCH_EXTERNAL",
+      github_ro_list_tags: "RESEARCH_EXTERNAL",
+      github_ro_pull_request_read: "RESEARCH_EXTERNAL",
+      github_ro_search_code: "RESEARCH_EXTERNAL",
+      github_ro_search_commits: "RESEARCH_EXTERNAL",
+      github_ro_search_issues: "RESEARCH_EXTERNAL",
+      github_ro_search_pull_requests: "RESEARCH_EXTERNAL",
+      github_ro_search_repositories: "RESEARCH_EXTERNAL",
+    };
+    for (const [tool, expectedClassification] of Object.entries(expected)) {
+      expect(classifyOperation(tool)).toBe(expectedClassification);
+    }
+  });
+
   test("unknown operation returns null and is denied", () => {
+    expect(classifyOperation("definitely_not_a_tool")).toBeNull();
     expect(classifyOperation("unknown_tool_xyz")).toBeNull();
     expect(classifyOperation("bash")).toBe("HOST_ADMIN_STRUCTURED"); // known host shell is explicitly denied
     const d = decide({
@@ -352,6 +394,35 @@ describe("orchestrator-readonly — R2 broker read-only enforcement", () => {
     // If stored session says orchestrator, refusal prevails even if caller says worker.
     // Here we model that shouldRefuseEnsureWorker checks the trusted value.
     expect(shouldRefuseEnsureWorker("gentle-orchestrator", DEFAULT_READ_ONLY_AGENTS)).toBe(true);
+  });
+
+  test("read-only orchestrator identities bypass role validation for allowed capabilities", () => {
+    const allowed = decide({
+      role: "gentle-orchestrator",
+      capability: "CONSULT",
+      sessionState: "HOST_READ_ONLY",
+      authoritativeLocation: "/project",
+      isReadOnlyOrchestrator: true,
+    });
+    expect(allowed).toMatchObject({ decision: "allow", reasonCode: "ORCHESTRATOR_READ_ONLY_ALLOWED" });
+
+    const structuredRead = decide({
+      role: "gentle-orchestrator",
+      capability: "HOST_READ_STRUCTURED",
+      sessionState: "HOST_READ_ONLY",
+      authoritativeLocation: "/project",
+      isReadOnlyOrchestrator: true,
+    });
+    expect(structuredRead).toMatchObject({ decision: "allow", reasonCode: "ORCHESTRATOR_READ_ONLY_ALLOWED" });
+
+    const invalidCapability = decide({
+      role: "gentle-orchestrator",
+      capability: "UNKNOWN_CAP",
+      sessionState: "HOST_READ_ONLY",
+      authoritativeLocation: "/project",
+      isReadOnlyOrchestrator: true,
+    });
+    expect(invalidCapability).toMatchObject({ decision: "deny", reasonCode: "UNKNOWN_CAPABILITY" });
   });
 
   test("decide denies orchestrator mutation/execution even with worker role claim", () => {
