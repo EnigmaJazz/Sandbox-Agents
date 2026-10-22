@@ -37,6 +37,7 @@ export type ReviewPipelinePhase = "screen" | "prepare" | "merge" | "finalize";
 export type ReviewPipelineInputSource = "stdin" | "inputRef" | "inputRefs";
 export type ReviewPipelineResult =
   | { outcome: "accepted"; artifact: { name: string; bytes: number; sha256: string }; summary: { phase: ReviewPipelinePhase; inputSource: ReviewPipelineInputSource; topLevelKeys: string[]; validator_requests?: Array<{ finding_id: string; file?: string; line?: number }>; validator_request_count?: number; validator_requests_truncated?: boolean; validator_requests_present?: boolean } }
+  | { outcome: "invalid_output"; code: "review_pipeline_validator_requests_invalid"; diagnostic: string; artifact: { name: string; bytes: number; sha256: string }; inputSource: ReviewPipelineInputSource }
   | { outcome: "structurally_rejected"; code: "review_pipeline_structurally_rejected"; diagnostic: string }
   | { outcome: "validation_unavailable"; code: "review_pipeline_validation_unavailable"; diagnostic: string };
 
@@ -200,7 +201,7 @@ function createSummary(
     phase,
     topLevelKeys: isObject ? Object.keys(output).slice(0, 32).map((key) => key.slice(0, 128)) : [],
   };
-  if (phase !== "merge") return summary;
+  if (phase !== "merge" && phase !== "finalize") return summary;
 
   const mergeOutput = isObject ? output as Record<string, unknown> : undefined;
   const present = mergeOutput !== undefined && Object.prototype.hasOwnProperty.call(mergeOutput, "validator_requests");
@@ -409,10 +410,22 @@ export async function runReviewPipeline(
     }
     const name = phase === "screen" ? `phase-screen-${payload.reviewer as string}.json` : `phase-${phase}.json`;
     const artifact = storeContext.store.addArtifact(storeContext.sessionID, payload.runId as string, name, outputBytes);
+    let summary: ReturnType<typeof createSummary> & { inputSource: ReviewPipelineInputSource };
+    try {
+      summary = { ...createSummary(phase, output), inputSource: inputSource! };
+    } catch (cause) {
+      if (!(cause instanceof ReviewPipelineError) || cause.code !== "review_pipeline_validator_requests_invalid") throw cause;
+      return {
+        outcome: "invalid_output",
+        code: "review_pipeline_validator_requests_invalid",
+        diagnostic: cause.message.slice(0, STDERR_MAX_BYTES),
+        artifact: { name: artifact.name, bytes: artifact.bytes, sha256: artifact.sha256 },
+        inputSource: inputSource!,
+      };
+    }
     if (phase === "finalize") {
       storeContext.store.recordFinalizeProvenance(storeContext.sessionID, payload.runId as string, { phase, outcome: "accepted", artifact, inputSource: inputSource! });
     }
-    const summary = { ...createSummary(phase, output), inputSource: inputSource! };
     return { outcome: "accepted", artifact: { name: artifact.name, bytes: artifact.bytes, sha256: artifact.sha256 }, summary };
   }
   const stderrDiagnostic = diagnostic(result);

@@ -118,7 +118,20 @@ describe("review helper installer pin", () => {
     expect(readFileSync(resolve(stateDir, "install-journal.tsv"), "utf8")).toContain(`interpreter=${process.execPath}`);
     expect(result.stdout).toContain(`selected 3.19.0 ${sources.get("3.19.0")!}`);
     expect(result.stdout).not.toContain(sources.get("3.21.0")!);
-    expect(JSON.parse(readFileSync(resolve(stateDir, "review-helper/pin.json"), "utf8")).version).toBe("3.19.0");
+    const pin = JSON.parse(readFileSync(resolve(stateDir, "review-helper/pin.json"), "utf8"));
+    expect(pin.version).toBe("3.19.0");
+    expect(pin.sha256).toBe(createHash("sha256").update(readFileSync(dest)).digest("hex"));
+  });
+
+  test("apply refuses cache bytes that no longer match the anchor without creating pin state", () => {
+    const { home, stateDir, sources, run } = fixture();
+    writeFileSync(sources.get("3.21.0")!, "changed cache helper bytes\\n");
+    const result = run("--review-helper-version=3.21.0", "--apply");
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toContain("REVIEW_HELPER_ANCHOR_MISMATCH");
+    expect(() => statSync(destination(stateDir))).toThrow();
+    expect(() => statSync(resolve(stateDir, "review-helper/pin.json"))).toThrow();
+    expect(() => statSync(config(home))).toThrow();
   });
 
   test("repeat apply keeps exactly one interpreter assignment", () => {
