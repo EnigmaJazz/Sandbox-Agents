@@ -66,6 +66,60 @@ test("AFT reads are allowed pre-activation while host-admin AFT tools are denied
   expect((await request("ast_grep_replace") as { decision: string }).decision).toBe("deny");
 });
 
+test("unbound sessions allow only non-mutating admission classes", async () => {
+  const admission = buildToolAdmissionOp({
+    store: { get: () => undefined },
+    config: { readOnlyAgents: [] },
+  } as never);
+  const request = (tool: string) => admission({
+    version: 1, id: "req-unbound", operation: "toolAdmission", sessionID: "unbound", payload: { tool },
+  } as never) as Promise<{ schema: string; decision: string; reason: string }>;
+
+  for (const tool of ["todowrite", "ctx_search"]) {
+    const result = await request(tool);
+    expect(result.decision, tool).toBe("allow");
+    expect(result.reason, tool).toBe("UNBOUND_SESSION_READ_ONLY_CLASS");
+  }
+  for (const tool of ["bash", "write", "edit", "ast_grep_replace", "aft_safety"]) {
+    const result = await request(tool);
+    expect(result.decision, tool).toBe("deny");
+    expect(result.reason, tool).toBe("UNBOUND_SESSION_MUTATION_DENIED");
+  }
+  expect((await request("definitely_not_a_tool")).reason).toBe("UNCLASSIFIED_TOOL_DENIED");
+});
+
+test("unbound structured host reads are denied after activation", async () => {
+  const admission = buildToolAdmissionOp({
+    store: { get: () => ({ state: "HOST_READ_ONLY" }) },
+    config: { readOnlyAgents: [] },
+  } as never);
+  const request = (tool: string) => admission({
+    version: 1, id: "req-unbound", operation: "toolAdmission", sessionID: "unbound", payload: { tool },
+  } as never) as Promise<{ decision: string; reason: string }>;
+  expect(await request("aft_outline")).toMatchObject({ decision: "allow", reason: "UNBOUND_SESSION_READ_ONLY_CLASS" });
+
+  const activated = buildToolAdmissionOp({
+    store: { get: () => ({ state: "SANDBOX_ACTIVE" }) },
+    config: { readOnlyAgents: [] },
+  } as never);
+  await expect(activated({
+    version: 1, id: "req-active", operation: "toolAdmission", sessionID: "unbound", payload: { tool: "aft_outline" },
+  } as never)).resolves.toMatchObject({ decision: "deny", reason: "UNBOUND_SESSION_POST_ACTIVATION_DENIED" });
+});
+
+test("bound orchestrators retain broker policy decisions", async () => {
+  const admission = buildToolAdmissionOp({
+    store: { get: () => ({ agent: "gentle-orchestrator", state: "HOST_READ_ONLY", projectID: "repo" }) },
+    config: { readOnlyAgents: ["gentle-orchestrator"] },
+  } as never);
+  const request = (tool: string) => admission({
+    version: 1, id: "req-bound", operation: "toolAdmission", sessionID: "orchestrator", payload: { tool },
+  } as never) as Promise<{ decision: string; reason: string }>;
+  expect(await request("bash")).toMatchObject({ decision: "deny", reason: "ORCHESTRATOR_READ_ONLY" });
+  expect(await request("todowrite")).toMatchObject({ decision: "allow", reason: "ORCHESTRATOR_READ_ONLY_ALLOWED" });
+  expect(await request("aft_outline")).toMatchObject({ decision: "allow", reason: "ORCHESTRATOR_READ_ONLY_ALLOWED" });
+});
+
 test("toolAdmission rejects invalid tool names at envelope validation", () => {
   const invalid: unknown[] = [undefined, null, 1, "", "x".repeat(129), "bad/name"];
   for (const tool of invalid) {
