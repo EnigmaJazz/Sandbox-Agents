@@ -124,6 +124,55 @@ describe("routing guard tool admission", () => {
     expect(callsByTool.get("after_write_tool")).toBe(2);
   });
 
+  test("reconnects when the broker socket path changes", async () => {
+    const secondSocketPath = join(tmpdir(), `routing-guard-${randomUUID()}.sock`);
+    const originalSocketPath = process.env.BROKER_SOCKET;
+    let secondAdmissionCount = 0;
+    let buffer = "";
+    const secondServer = Bun.listen({
+      unix: secondSocketPath,
+      socket: {
+        data(sock, chunk) {
+          buffer += chunk.toString("utf8");
+          let newline: number;
+          while ((newline = buffer.indexOf("\n")) !== -1) {
+            const request = JSON.parse(buffer.slice(0, newline)) as Request;
+            buffer = buffer.slice(newline + 1);
+            if (request.operation !== "toolAdmission") continue;
+            secondAdmissionCount += 1;
+            const tool = request.payload?.tool ?? "";
+            sock.write(`${JSON.stringify({
+              id: request.id,
+              ok: true,
+              result: {
+                schema: "opencode-sandbox.tool-admission/v1",
+                tool,
+                classification: "CONSULT",
+                decision: "allow",
+                reason: "AUTHORIZED",
+              },
+            })}\n`);
+          }
+        },
+      },
+    });
+
+    try {
+      process.env.BROKER_SOCKET = socketPath;
+      await before({ tool: "first_socket_tool", sessionID: "first-socket-session" }, { args: {} });
+      expect(callsByTool.get("first_socket_tool")).toBe(1);
+
+      process.env.BROKER_SOCKET = secondSocketPath;
+      await before({ tool: "second_socket_tool", sessionID: "second-socket-session" }, { args: {} });
+      expect(secondAdmissionCount).toBe(1);
+    } finally {
+      secondServer.stop(true);
+      await unlink(secondSocketPath).catch(() => {});
+      if (originalSocketPath === undefined) delete process.env.BROKER_SOCKET;
+      else process.env.BROKER_SOCKET = originalSocketPath;
+    }
+  });
+
   test("read tools keep their worker-status path without tool admission", async () => {
     const sessionID = "read-session";
     await expect(before({ tool: "read", sessionID }, { args: { filePath: "/project/file" } })).resolves.toBeUndefined();

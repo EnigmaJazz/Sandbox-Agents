@@ -62,16 +62,27 @@ const READ_PATH_ARGS: Record<string, string[]> = {
 };
 
 let clientPromise: Promise<BrokerClient> | null = null;
+let clientSocketPath: string | null = null;
 let policyCache: { roots: string[]; protectedPaths: string[] } | null = null;
 
 async function broker(): Promise<BrokerClient> {
+  const socketPath = brokerSocketPath();
+  if (clientPromise && clientSocketPath !== socketPath) {
+    void clientPromise.then((client) => client.close(), () => {});
+    clientPromise = null;
+    clientSocketPath = null;
+  }
   if (!clientPromise) {
-    clientPromise = createBrokerClient({
-      socketPath: brokerSocketPath(),
-    }).catch((err) => {
-      clientPromise = null;
+    clientSocketPath = socketPath;
+    let pending: Promise<BrokerClient>;
+    pending = createBrokerClient({ socketPath }).catch((err) => {
+      if (clientPromise === pending) {
+        clientPromise = null;
+        clientSocketPath = null;
+      }
       throw err;
     });
+    clientPromise = pending;
   }
   return clientPromise;
 }
