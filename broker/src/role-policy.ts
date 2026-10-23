@@ -64,7 +64,9 @@ export type Role =
   | "solver"
   | "challenger"
   | "judge"
-  | "fresh_eyes";
+  | "fresh_eyes"
+  | "planner"
+  | "pm";
 
 export const ROLES: readonly Role[] = [
   "general",
@@ -75,6 +77,8 @@ export const ROLES: readonly Role[] = [
   "challenger",
   "judge",
   "fresh_eyes",
+  "planner",
+  "pm",
 ] as const;
 
 export function isRole(value: unknown): value is Role {
@@ -88,6 +92,7 @@ export function isRole(value: unknown): value is Role {
  */
 export function normalizeRoleKey(raw: string): string {
   if (raw === "fresh-eyes") return "fresh_eyes";
+  if (raw === "pm-odd" || raw === "pm-systematic") return "pm";
   return raw;
 }
 
@@ -161,7 +166,7 @@ export const TOOL_CLASSIFICATION_INVENTORY: Readonly<Record<string, Capability>>
   host_review_materialize: "HOST_READ_STRUCTURED", host_review_pipeline_run: "HOST_APPROVED_MUTATION",
   host_review_persist: "HOST_APPROVED_MUTATION", host_sandbox_result_install: "HOST_APPROVED_MUTATION",
   host_git_commit: "HOST_APPROVED_MUTATION", host_git_clear_commit_intent: "HOST_APPROVED_MUTATION",
-  host_git_push: "HOST_APPROVED_MUTATION", host_gh_issue_create: "HOST_APPROVED_MUTATION", host_plan_append: "HOST_APPROVED_MUTATION",
+  host_git_push: "HOST_APPROVED_MUTATION", host_gh_issue_create: "HOST_APPROVED_MUTATION", host_plan_append: "HOST_APPROVED_MUTATION", host_plan_write: "HOST_APPROVED_MUTATION",
   host_review_start: "HOST_APPROVED_MUTATION", host_review_capture_result: "HOST_APPROVED_MUTATION",
   host_review_capture_unachievable: "HOST_APPROVED_MUTATION", host_review_acknowledge_approved: "HOST_APPROVED_MUTATION",
   host_review_capture_correction_plan: "HOST_APPROVED_MUTATION", host_review_capture_refuter: "HOST_APPROVED_MUTATION",
@@ -405,6 +410,30 @@ const ROLE_CAPABILITY_MATRIX: Readonly<Record<Role, Readonly<Record<Capability, 
     HOST_ADMIN_STRUCTURED: false,
     SECURITY_MUTATION: false,
     CONSULT: false,
+    DELIBERATE: true,
+  },
+  planner: {
+    READ_PROJECT: true,
+    RESEARCH_EXTERNAL: true,
+    MUTATE_PROJECT: false,
+    HOST_APPROVED_MUTATION: true,
+    EXECUTE_PROJECT: false,
+    HOST_READ_STRUCTURED: true,
+    HOST_ADMIN_STRUCTURED: false,
+    SECURITY_MUTATION: false,
+    CONSULT: true,
+    DELIBERATE: true,
+  },
+  pm: {
+    READ_PROJECT: true,
+    RESEARCH_EXTERNAL: false,
+    MUTATE_PROJECT: false,
+    HOST_APPROVED_MUTATION: true,
+    EXECUTE_PROJECT: false,
+    HOST_READ_STRUCTURED: true,
+    HOST_ADMIN_STRUCTURED: false,
+    SECURITY_MUTATION: false,
+    CONSULT: true,
     DELIBERATE: true,
   },
 };

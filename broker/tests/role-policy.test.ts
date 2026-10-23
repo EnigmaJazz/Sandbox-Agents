@@ -10,6 +10,7 @@
  * Specs: role-model R1–R5, orchestrator-readonly R1–R3
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   decide,
   classifyOperation,
@@ -23,6 +24,7 @@ import {
   normalizeRoleKey,
   CAPABILITIES,
   ROLES,
+  TOOL_CLASSIFICATION_INVENTORY,
 } from "../src/role-policy.ts";
 import { defaultConfig, DEFAULT_READ_ONLY_AGENTS, DEFAULT_ROLE_MODELS } from "../src/config.ts";
 
@@ -102,6 +104,13 @@ describe("R1 — capability taxonomy / unknown effects fail closed", () => {
     });
     expect(d.decision).toBe("deny");
     expect(d.reasonCode).toBe("UNKNOWN_ROLE");
+  });
+
+  test("sandbox host tools are all present in the classification inventory", () => {
+    const source = readFileSync("../opencode/plugins/sandbox-tools.ts", "utf8");
+    const tools = [...new Set([...source.matchAll(/\b(host_[a-z0-9_]+)\s*:\s*tool\(/g)].map((match) => match[1]))];
+    const missing = tools.filter((tool) => !TOOL_CLASSIFICATION_INVENTORY[tool]);
+    expect(missing, `Missing tool classifications: ${missing.join(", ")}`).toEqual([]);
   });
 
   test("every governed operation maps to one listed capability or is denied", () => {
@@ -285,6 +294,36 @@ describe("R4 — independently configurable role models", () => {
     expect(cfg2.roleModels.researcher[0]).toBe("other/model");
   });
 
+  test("planner and PM roles may use approved host mutations only", () => {
+    for (const role of ["planner", "pm-odd", "pm-systematic"]) {
+      expect(decide({
+        role: normalizeRoleKey(role), capability: "HOST_APPROVED_MUTATION",
+        sessionState: "HOST_READ_ONLY", authoritativeLocation: "/project",
+      })).toMatchObject({ decision: "allow", reasonCode: "ALLOWED" });
+    }
+    for (const role of ["planner", "pm"]) {
+      for (const capability of ["MUTATE_PROJECT", "EXECUTE_PROJECT", "SECURITY_MUTATION", "HOST_ADMIN_STRUCTURED"]) {
+        expect(decide({
+          role, capability, sessionState: "HOST_READ_ONLY", authoritativeLocation: "/project",
+        })).toMatchObject({ decision: "deny" });
+      }
+    }
+  });
+
+  test("unknown bound identities remain denied by role", () => {
+    expect(decide({
+      role: "some-random-agent", capability: "HOST_APPROVED_MUTATION",
+      sessionState: "HOST_READ_ONLY", authoritativeLocation: "/project",
+    })).toMatchObject({ decision: "deny", reasonCode: "UNKNOWN_ROLE" });
+  });
+
+  test("PM aliases normalize while planner remains canonical", () => {
+    expect(normalizeRoleKey("pm-odd")).toBe("pm");
+    expect(normalizeRoleKey("pm-systematic")).toBe("pm");
+    expect(normalizeRoleKey("planner")).toBe("planner");
+    expect(normalizeRoleKey("other-agent")).toBe("other-agent");
+  });
+
   test("fresh_eyes hyphen normalization", () => {
     expect(normalizeRoleKey("fresh-eyes")).toBe("fresh_eyes");
     expect(normalizeRoleKey("fresh_eyes")).toBe("fresh_eyes");
@@ -297,9 +336,9 @@ describe("R4 — independently configurable role models", () => {
     expect(d.decision).toBe("allow");
   });
 
-  test("default role models include all 8 roles", () => {
+  test("default role models include the configured model roles", () => {
     const cfg = defaultConfig();
-    for (const r of ROLES) {
+    for (const r of ["general", "researcher", "worker", "advisor", "solver", "challenger", "judge", "fresh_eyes"]) {
       expect(cfg.roleModels).toHaveProperty(r);
     }
     expect(cfg.roleModels.general).toEqual([]);
