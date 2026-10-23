@@ -101,7 +101,7 @@ import {
   shouldRemoveSessionArtifacts,
 } from "./artifacts.ts";
 import { PolicyError, checkAdmission, type Admission } from "./policy.ts";
-import { classifyOperation, decide, normalizeRoleKey } from "./role-policy.ts";
+import { classifyOperation, decide, isRole, normalizeRoleKey } from "./role-policy.ts";
 import {
   PendingQueue,
   QueuedTimedOutError,
@@ -176,28 +176,40 @@ function payloadOf(req: BrokerRequestEnvelope): Payload {
  * envelope `agent` is caller-controlled and never authorizes: only the broker
  * session record's agent is trusted, so an unknown session fails closed.
  */
+export type HostDispatchCategory = "orchestrator" | "plan-writer";
+
 export function authorizeHostDispatch(
   ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> },
   operation: string,
   sessionID: string,
   _reqAgent?: string,
+  category: HostDispatchCategory = "orchestrator",
 ): HostToolAccess {
   const policy = new HostToolPolicy(ctx.config.readOnlyAgents);
   const existing = ctx.store.get(sessionID);
   const trusted = existing?.agent;
+  const access = policy.access(operation);
+  if (category === "plan-writer") {
+    if (
+      (operation === "planDocWrite" || operation === "gateVerdict") &&
+      trusted && ["planner", "pm"].includes(normalizeRoleKey(trusted))
+    ) return access;
+    throw new PolicyError(
+      `host ${access} tool "${operation}" requires plan-writer category (HOST_MUTATION_NOT_PLAN_WRITER)`,
+    );
+  }
   const decision = policy.decide(operation, trusted);
   if (!decision.allowed) {
     throw new PolicyError(
-      `host ${decision.access} tool "${operation}" is orchestrator-only (${decision.reasonCode})`,
+      `host ${decision.access} tool "${operation}" is orchestrator-only (${decision.reasonCode}) [required category=orchestrator]`,
     );
   }
   return decision.access;
 }
 
 /**
- * Orchestrator identities the host plugin may bind: exactly the broker's
- * `readOnlyAgents` allowlist. A model-supplied or unknown agent is refused, so
- * the binding can only ever record a host-authoritative orchestrator identity.
+ * Identities the host plugin may bind: configured read-only agents or known
+ * roles. Binding records the host-resolved identity; authorization is separate.
  */
 function assertBindableAgent(
   config: Pick<BrokerConfig, "readOnlyAgents">,
@@ -210,9 +222,9 @@ function assertBindableAgent(
     throw new ValidationError("bindSessionAgent agent exceeds 128 bytes");
   }
   const allow = config.readOnlyAgents;
-  if (!allow.includes(agent)) {
+  if (!allow.includes(agent) && !isRole(normalizeRoleKey(agent))) {
     throw new PolicyError(
-      `session agent binding refused: "${agent}" is not a host-authoritative orchestrator identity`,
+      `session agent binding refused: "${agent}" is neither a host-authoritative identity nor a known role`,
     );
   }
   return agent;
@@ -228,11 +240,9 @@ function assertBindableAgent(
  * classified as a host read or mutation, so a model (including a sandbox-worker
  * model, whose only broker reach is the sandbox tool surface) cannot invoke it;
  * `ensureWorker` - the only model-reachable path that writes `record.agent` -
- * refuses orchestrator identities before any side effect. The bound agent must
- * be in the orchestrator allowlist, and the first host-authoritative binding
- * wins: an existing binding for a different agent is refused, never
- * overwritten, so a model-reachable writer can never be the first writer of an
- * orchestrator identity.
+ * refuses orchestrator identities before any side effect. The host-resolved
+ * identity is recorded once; a different later binding is refused, never
+ * overwritten, and each operation category checks its own authority.
  */
 export function bindSessionAgent(
   ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> },
@@ -3983,7 +3993,14 @@ export function buildGateVerdictOp(ctx: OpContext): OpHandler {
       projectDir?: unknown; name?: unknown; taskId?: unknown; verdict?: unknown;
       refinementPlan?: unknown; evidenceRef?: unknown; agent?: unknown;
     };
-    authorizeHostDispatch(ctx, "gateVerdict", req.sessionID, req.agent);
+    authorizeHostDispatch(ctx, "gateVerdict", req.sessionID, req.agent, "plan-writer");
+    const boundIdentity = ctx.store.get(req.sessionID)?.agent;
+    if (typeof payload.agent !== "string") {
+      throw new ValidationError("GATE_VERDICT_AGENT_NOT_BOUND: agent must match the bound session identity");
+    }
+    if (!boundIdentity || payload.agent !== boundIdentity) {
+      throw new ValidationError("GATE_VERDICT_AGENT_MISMATCH: agent must match the bound session identity");
+    }
     assertPlanDocWriteName(payload.name);
     if (typeof payload.taskId !== "string" || !GATE_TASK_ID_RE.test(payload.taskId)) {
       throw new ValidationError("GATE_VERDICT_TASK_ID_INVALID: taskId must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
@@ -4015,7 +4032,7 @@ export function buildGateVerdictOp(ctx: OpContext): OpHandler {
     const rejected = checkProtectedPaths([relative], [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles]);
     if (rejected.length > 0) throw new ValidationError(`GATE_VERDICT_PROTECTED_PATH: ${rejected.join(", ")}`);
     const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-    const line = `- ${payload.taskId} ${payload.verdict} ${timestamp} ${payload.agent}` +
+    const line = `- ${payload.taskId} ${payload.verdict} ${timestamp} ${boundIdentity}` +
       (payload.evidenceRef !== undefined ? ` ref=${payload.evidenceRef}` : "") +
       (payload.refinementPlan !== undefined ? ` :: ${payload.refinementPlan.trim()}` : "");
     const gates = await withPlanDocLock(destination, () => appendGateVerdictAtomically(projectRoot, destination, line));
@@ -4029,7 +4046,14 @@ export function buildPlanDocWriteOp(ctx: OpContext): OpHandler {
       projectDir?: unknown; target?: unknown; name?: unknown; content?: unknown;
       expectedRevision?: unknown; note?: unknown; agent?: unknown;
     };
-    authorizeHostDispatch(ctx, "planDocWrite", req.sessionID, req.agent);
+    authorizeHostDispatch(ctx, "planDocWrite", req.sessionID, req.agent, "plan-writer");
+    const boundIdentity = ctx.store.get(req.sessionID)?.agent;
+    if (typeof payload.agent !== "string") {
+      throw new ValidationError("PLAN_WRITE_AGENT_NOT_BOUND: agent must match the bound session identity");
+    }
+    if (!boundIdentity || payload.agent !== boundIdentity) {
+      throw new ValidationError("PLAN_WRITE_AGENT_MISMATCH: agent must match the bound session identity");
+    }
     if (payload.target !== "tasks" && payload.target !== "mini") {
       throw new ValidationError("PLAN_WRITE_TARGET_INVALID: target must be tasks or mini");
     }
@@ -4059,7 +4083,7 @@ export function buildPlanDocWriteOp(ctx: OpContext): OpHandler {
     const rejected = checkProtectedPaths([relative], [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles]);
     if (rejected.length > 0) throw new ValidationError(`PLAN_WRITE_PROTECTED_PATH: ${rejected.join(", ")}`);
     const result = await withPlanDocLock(destination, () =>
-      writePlanDocAtomically(projectRoot, destination, payload.content as string, payload.agent as string, payload.note as string, payload.expectedRevision as number),
+      writePlanDocAtomically(projectRoot, destination, payload.content as string, boundIdentity, payload.note as string, payload.expectedRevision as number),
     );
     return { target: payload.target, path: relative, ...result };
   };

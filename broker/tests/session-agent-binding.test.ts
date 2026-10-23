@@ -691,6 +691,19 @@ describe("host-authoritative session→agent binding", () => {
     }
   });
 
+  test("planner binding cannot use orchestrator-category operations", () => {
+    const { store, dir } = freshStore();
+    try {
+      const ctx = bindingCtx(store);
+      bindSessionAgent(ctx, "planner-session", { agent: "planner" });
+      expect(() => authorizeHostDispatch(ctx, "registerProject", "planner-session")).toThrow(
+        'host mutation tool "registerProject" is orchestrator-only (HOST_MUTATION_NOT_ORCHESTRATOR) [required category=orchestrator]',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("request-envelope agent claims cannot override the broker session identity", () => {
     const { store, dir } = freshStore();
     try {
@@ -787,10 +800,12 @@ describe("host-authoritative session→agent binding", () => {
       expect(() =>
         authorizeHostDispatch(ctx, "gitCommit", "worker-1", ORCHESTRATOR),
       ).toThrow(PolicyError);
-      // 3. The binding op refuses a non-orchestrator/model-supplied agent and
-      //    creates no record.
-      expect(() => bindSessionAgent(ctx, "worker-1", { agent: "general" })).toThrow(PolicyError);
-      expect(store.get("worker-1")).toBeUndefined();
+      // Binding records identity; the role matrix, not binding, decides authority.
+      expect(bindSessionAgent(ctx, "worker-1", { agent: "general" }).agent).toBe("general");
+      expect(() => authorizeHostDispatch(ctx, "registerProject", "worker-1")).toThrow(
+        'host mutation tool "registerProject" is orchestrator-only (HOST_MUTATION_NOT_ORCHESTRATOR)',
+      );
+      expect(() => bindSessionAgent(ctx, "worker-1", { agent: "not-a-role" })).toThrow(PolicyError);
       // 4. A missing or ill-typed agent is refused too.
       expect(() => bindSessionAgent(ctx, "worker-1", {})).toThrow(ValidationError);
       expect(() => bindSessionAgent(ctx, "worker-1", { agent: 7 })).toThrow(ValidationError);

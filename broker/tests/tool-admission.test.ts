@@ -154,6 +154,7 @@ test("bound orchestrators retain broker policy decisions", async () => {
     decision: "allow", reason: "ORCHESTRATOR_READ_ONLY_ALLOWED",
   });
   expect(await request("sandbox_write")).toMatchObject({ decision: "deny", reason: "ORCHESTRATOR_READ_ONLY" });
+  expect(await request("host_plan_append")).toMatchObject({ decision: "allow" });
 });
 
 test("toolAdmission rejects invalid tool names at envelope validation", () => {

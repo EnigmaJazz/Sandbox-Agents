@@ -9,7 +9,7 @@ import type { BrokerRequestEnvelope, SessionRecord } from "../src/types.ts";
 
 const ORCHESTRATOR = "gentle-orchestrator";
 
-function makeContext(root: string, overrides: Record<string, unknown> = {}) {
+function makeContext(root: string, boundIdentity = "planner", overrides: Record<string, unknown> = {}) {
   const config = defaultConfig({
     projects: [{ id: "write-test", path: root }],
     readOnlyAgents: [ORCHESTRATOR],
@@ -18,7 +18,7 @@ function makeContext(root: string, overrides: Record<string, unknown> = {}) {
   const record: SessionRecord = {
     sessionID: "session-write",
     state: "HOST_READ_ONLY",
-    agent: ORCHESTRATOR,
+    agent: boundIdentity,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
   };
@@ -44,8 +44,8 @@ function withProject(run: (root: string) => Promise<void>) {
   };
 }
 
-async function write(root: string, payload: Record<string, unknown>, agent?: string) {
-  return buildPlanDocWriteOp(makeContext(root))(request(root, payload, agent));
+async function write(root: string, payload: Record<string, unknown>, agent?: string, boundIdentity = "planner", overrides: Record<string, unknown> = {}) {
+  return buildPlanDocWriteOp(makeContext(root, boundIdentity, overrides))(request(root, payload, agent));
 }
 
 const rejectsValidation = async (promise: Promise<unknown>, expected: RegExp) => {
@@ -59,6 +59,17 @@ describe("host plan document write", () => {
     expect(config.planWriterAgents).toEqual(["planner"]);
     expect(config.planMiniWriterAgents).toEqual(["pm-odd", "pm-systematic"]);
   });
+
+  test("planner and PM sessions may write only through their bound identity", withProject(async (root) => {
+    await expect(write(root, {}, "planner", "planner")).resolves.toMatchObject({ revision: 1 });
+    await expect(write(root, { target: "mini", name: "mini-plan" }, "pm-odd", "pm-odd")).resolves.toMatchObject({ revision: 1 });
+    await expect(write(root, { name: "orchestrator-plan" }, "planner", ORCHESTRATOR)).rejects.toThrow(/plan-writer category/i);
+  }));
+
+  test("refuses payload agent spoofing and missing agent", withProject(async (root) => {
+    await rejectsValidation(write(root, { agent: "pm-odd" }, "planner", "planner"), /agent.*bound|bound.*agent/i);
+    await rejectsValidation(write(root, { agent: undefined }, "planner", "planner"), /agent.*bound|bound.*agent/i);
+  }));
 
   test("creates the first revision atomically", withProject(async (root) => {
     const result = await write(root, {});
@@ -99,10 +110,11 @@ describe("host plan document write", () => {
   }));
 
   test("uses target-specific agent allowlists", withProject(async (root) => {
-    await rejectsValidation(write(root, {}, "not-allowed"), /tasks.*allowed/i);
-    await rejectsValidation(write(root, { target: "mini", name: "mini-plan" }, "not-allowed"), /mini.*allowed/i);
-    await write(root, { target: "mini", name: "mini-plan" }, "pm-odd");
-    await rejectsValidation(write(root, { target: "tasks", name: "task-plan" }, "pm-odd"), /tasks.*allowed/i);
+    const restricted = { planWriterAgents: ["other"] };
+    await rejectsValidation(write(root, {}, "planner", "planner", restricted), /tasks.*allowed/i);
+    await rejectsValidation(write(root, { target: "mini", name: "mini-plan" }, "planner", "planner", restricted), /mini.*allowed/i);
+    await write(root, { target: "mini", name: "mini-plan" }, "pm-odd", "pm-odd");
+    await rejectsValidation(write(root, { target: "tasks", name: "task-plan" }, "pm-odd", "pm-odd"), /tasks.*allowed/i);
   }));
 
   test("refuses a symlinked destination", withProject(async (root) => {
@@ -121,7 +133,7 @@ describe("host plan document write", () => {
   }));
 
   test("removes the sibling temp after a forced atomic rename failure", withProject(async (root) => {
-    const source = `import { mock } from "bun:test"; const fs = await import("node:fs"); mock.module("node:fs", () => ({ ...fs, renameSync: () => { throw new Error("forced rename failure"); } })); const { defaultConfig } = await import("./src/config.ts"); const { buildPlanDocWriteOp } = await import("./src/service.ts"); const { join } = await import("node:path"); const root = ${JSON.stringify(root)}; const config = defaultConfig({ projects: [{ id: "test", path: root }], readOnlyAgents: ["gentle-orchestrator"] }); const record = { sessionID: "s", state: "HOST_READ_ONLY", agent: "gentle-orchestrator", createdAt: "now", updatedAt: "now" }; const handler = buildPlanDocWriteOp({ config, store: { get: () => record } }); let failed = false; try { await handler({ version: 1, id: "x", operation: "planDocWrite", sessionID: "s", payload: { projectDir: root, target: "tasks", name: "failed", content: "x", expectedRevision: 0, note: "n", agent: "planner" } }); } catch { failed = true; } const names = fs.readdirSync(join(root, "odd/tasks")); if (!failed || names.some((name) => name.startsWith(".plan-doc-"))) process.exit(1);`;
+    const source = `import { mock } from "bun:test"; const fs = await import("node:fs"); mock.module("node:fs", () => ({ ...fs, renameSync: () => { throw new Error("forced rename failure"); } })); const { defaultConfig } = await import("./src/config.ts"); const { buildPlanDocWriteOp } = await import("./src/service.ts"); const { join } = await import("node:path"); const root = ${JSON.stringify(root)}; const config = defaultConfig({ projects: [{ id: "test", path: root }], readOnlyAgents: ["gentle-orchestrator"] }); const record = { sessionID: "s", state: "HOST_READ_ONLY", agent: "planner", createdAt: "now", updatedAt: "now" }; const handler = buildPlanDocWriteOp({ config, store: { get: () => record } }); let failed = false; try { await handler({ version: 1, id: "x", operation: "planDocWrite", sessionID: "s", payload: { projectDir: root, target: "tasks", name: "failed", content: "x", expectedRevision: 0, note: "n", agent: "planner" } }); } catch { failed = true; } const names = fs.readdirSync(join(root, "odd/tasks")); if (!failed || names.some((name) => name.startsWith(".plan-doc-"))) process.exit(1);`;
     const child = Bun.spawn(["bun", "-e", source], { cwd: `${import.meta.dir}/..`, stdout: "pipe", stderr: "pipe" });
     const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited]);
     expect(exitCode, stderr).toBe(0);

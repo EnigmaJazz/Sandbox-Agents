@@ -16,7 +16,7 @@ function makeRoot(): string {
   return root;
 }
 
-function makeContext(root: string, allowedAgents = ["planner"]) {
+function makeContext(root: string, allowedAgents = ["planner"], boundIdentity = "planner") {
   const config = defaultConfig({
     projects: [{ id: "gate-test", path: root }],
     readOnlyAgents: [ORCHESTRATOR],
@@ -25,7 +25,7 @@ function makeContext(root: string, allowedAgents = ["planner"]) {
   const record: SessionRecord = {
     sessionID: "session-gate",
     state: "HOST_READ_ONLY",
-    agent: ORCHESTRATOR,
+    agent: boundIdentity,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
   };
@@ -43,8 +43,8 @@ function request(root: string, payload: Record<string, unknown>, agent = "planne
   } as BrokerRequestEnvelope;
 }
 
-async function submit(root: string, payload: Record<string, unknown> = {}, agent = "planner") {
-  return buildGateVerdictOp(makeContext(root))(request(root, payload, agent));
+async function submit(root: string, payload: Record<string, unknown> = {}, agent = "planner", boundIdentity = "planner") {
+  return buildGateVerdictOp(makeContext(root, ["planner"], boundIdentity))(request(root, payload, agent));
 }
 
 async function rejectsValidation(promise: Promise<unknown>, expected: RegExp) {
@@ -65,6 +65,15 @@ afterEach(() => {
 });
 
 describe("host gate verdict", () => {
+  test("refuses orchestrator authority and payload agent spoofing", async () => {
+    const root = makeRoot();
+    const { path } = createPlan(root);
+    await expect(submit(root, {}, "planner", ORCHESTRATOR)).rejects.toThrow(/plan-writer category/i);
+    await rejectsValidation(submit(root, { agent: "pm-odd" }, "planner", "planner"), /agent.*bound|bound.*agent/i);
+    await rejectsValidation(submit(root, { agent: undefined }, "planner", "planner"), /agent.*bound|bound.*agent/i);
+    expect(readFileSync(path, "utf8")).not.toContain("## Gates");
+  });
+
   test("appends PASS under a new Gates section and preserves prior document bytes", async () => {
     const root = makeRoot();
     const { path, content } = createPlan(root);
@@ -131,7 +140,7 @@ describe("host gate verdict", () => {
   test("refuses an agent outside planWriterAgents and names the allowed set", async () => {
     const root = makeRoot();
     createPlan(root);
-    await rejectsValidation(submit(root, {}, "untrusted-planner"), /allowed.*planner/i);
+    await rejectsValidation(submit(root, {}, "pm-odd", "pm-odd"), /allowed.*planner/i);
   });
 
   test("refuses a symlinked plan document", async () => {
