@@ -62,6 +62,7 @@ export type Operation =
   | "sddAttemptGrant"
   | "planDocAppend"
   | "planDocWrite"
+  | "testRun"
   | "gateVerdict"
   // Host sandbox-result read (T1): fixed argv, read-only, no worker (§31).
   | "sandboxResult"

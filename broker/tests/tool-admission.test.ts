@@ -7,7 +7,7 @@ const expectedTools = [
   "read", "grep", "glob", "codegraph_codegraph_explore", "sandbox_read", "sandbox_list", "sandbox_grep", "sandbox_diff",
   "sandbox_write", "sandbox_edit", "sandbox_apply_patch", "sandbox_finish", "sandbox_apply", "sandbox_copy_in", "sandbox_copy_out", "sandbox_discard", "sandbox_bash",
   "bash", "edit", "write", "apply_patch", "patch", "read", "grep", "glob", "list", "task", "question", "skill", "systematic_skill", "systematic_workflow_start", "systematic_workflow_status", "systematic_workflow_complete",
-  "host_sandbox_result", "host_sandbox_result_install", "host_review_assess", "host_review_mode_status", "host_review_status", "host_review_lens_context", "host_review_diff_read", "host_review_materialize", "host_review_pipeline_run", "host_review_persist", "host_git_commit", "host_git_clear_commit_intent", "host_git_push", "host_gh_issue_create", "host_plan_append", "host_plan_write", "host_review_start", "host_review_capture_result", "host_review_capture_unachievable", "host_review_acknowledge_approved", "host_review_capture_correction_plan", "host_review_capture_refuter", "host_review_capture_validation", "host_review_validate", "host_review_recover", "host_register_project", "host_sdd_status", "host_sdd_continue", "host_sdd_task_result", "host_sdd_archive_compose", "host_sdd_attempt_grant",
+  "host_sandbox_result", "host_sandbox_result_install", "host_review_assess", "host_review_mode_status", "host_review_status", "host_review_lens_context", "host_review_diff_read", "host_review_materialize", "host_review_pipeline_run", "host_review_persist", "host_git_commit", "host_git_clear_commit_intent", "host_git_push", "host_gh_issue_create", "host_plan_append", "host_plan_write", "host_review_start", "host_review_capture_result", "host_review_capture_unachievable", "host_review_acknowledge_approved", "host_review_capture_correction_plan", "host_review_capture_refuter", "host_review_capture_validation", "host_review_validate", "host_review_recover", "host_register_project", "host_sdd_status", "host_sdd_continue", "host_sdd_task_result", "host_sdd_archive_compose", "host_sdd_attempt_grant", "host_test_run",
   "aft_outline", "aft_zoom", "aft_search", "aft_callgraph", "aft_inspect", "aft_safety", "aft_import", "ast_grep_replace", "vision-bridge_describe_image", "webfetch", "github",
 ];
 
@@ -101,6 +101,23 @@ test("planner and PM identities can request approved host plan writes", async ()
   }
 });
 
+test("host test execution is denied to planners and unbound sessions", async () => {
+  const planner = buildToolAdmissionOp({
+    store: { get: () => ({ agent: "planner", state: "HOST_READ_ONLY", projectID: "repo" }) },
+    config: { readOnlyAgents: [] },
+  } as never);
+  await expect(planner({
+    version: 1, id: "req-test", operation: "toolAdmission", sessionID: "planner-session",
+    payload: { tool: "host_test_run" },
+  } as never)).resolves.toMatchObject({ decision: "deny" });
+
+  const unbound = buildToolAdmissionOp({ store: { get: () => undefined }, config: { readOnlyAgents: [] } } as never);
+  await expect(unbound({
+    version: 1, id: "req-test", operation: "toolAdmission", sessionID: "unbound",
+    payload: { tool: "host_test_run" },
+  } as never)).resolves.toMatchObject({ decision: "deny", reason: "UNBOUND_SESSION_MUTATION_DENIED" });
+});
+
 test("unknown bound identities are denied approved host plan writes", async () => {
   const admission = buildToolAdmissionOp({
     store: { get: () => ({ agent: "some-random-agent", state: "HOST_READ_ONLY", projectID: "repo" }) },
@@ -155,6 +172,8 @@ test("bound orchestrators retain broker policy decisions", async () => {
   });
   expect(await request("sandbox_write")).toMatchObject({ decision: "deny", reason: "ORCHESTRATOR_READ_ONLY" });
   expect(await request("host_plan_append")).toMatchObject({ decision: "allow" });
+  expect(await request("host_test_run")).toMatchObject({ decision: "allow" });
+  expect(await request("sandbox_bash")).toMatchObject({ decision: "deny", reason: "ORCHESTRATOR_READ_ONLY" });
 });
 
 test("toolAdmission rejects invalid tool names at envelope validation", () => {

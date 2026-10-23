@@ -9,7 +9,9 @@
  * result steps verify and FAIL with a clear message instead of running git
  * against the host repo. Set BROKER_GIT_MODE=real only after Gate 5 review.
  */
+import { spawn } from "node:child_process";
 import {
+  accessSync,
   existsSync,
   mkdirSync,
   writeFileSync,
@@ -24,7 +26,7 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import type { BrokerConfig } from "./config.ts";
+import type { BrokerConfig, TestRunnerConfig } from "./config.ts";
 import { RESULT_EXCLUDE_PATHS } from "./diff-spec.ts";
 import { gitSubcommand } from "./gitguard.ts";
 import type { SessionStore } from "./state.ts";
@@ -2463,7 +2465,7 @@ export function buildToolAdmissionOp(ctx: OpContext): OpHandler {
       const state = record?.state ?? "HOST_READ_ONLY";
       // Unbound sessions have no broker-trusted identity, so only non-mutating capabilities are allowed.
       // Mutation, execution, and host administration stay denied; structured host reads stop after activation.
-      const mutationClasses = ["MUTATE_PROJECT", "HOST_APPROVED_MUTATION", "EXECUTE_PROJECT", "SECURITY_MUTATION", "HOST_ADMIN_STRUCTURED"];
+      const mutationClasses = ["MUTATE_PROJECT", "HOST_APPROVED_MUTATION", "EXECUTE_PROJECT", "TEST_EXECUTION", "SECURITY_MUTATION", "HOST_ADMIN_STRUCTURED"];
       if (mutationClasses.includes(capability)) {
         return { schema, tool: payload.tool, classification: capability, decision: "deny", reason: "UNBOUND_SESSION_MUTATION_DENIED" };
       }
@@ -3830,6 +3832,148 @@ export function buildPlanDocAppendOp(ctx: OpContext): OpHandler {
       bytes: result.bytes,
     };
   };
+}
+
+const testRunLocks = new Map<string, Promise<unknown>>();
+
+async function withTestRunLock<T>(projectRoot: string, run: () => Promise<T>): Promise<T> {
+  const previous = testRunLocks.get(projectRoot) ?? Promise.resolve();
+  const next = previous.then(run, run);
+  testRunLocks.set(projectRoot, next.then(() => undefined, () => undefined));
+  return next;
+}
+
+function testRunRefusal(code: string, detail: string): ValidationError {
+  return new ValidationError(`${code}: ${detail}`);
+}
+
+export function buildTestRunOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const trustedAgent = ctx.store.get(req.sessionID)?.agent;
+    if (!trustedAgent || !ctx.config.readOnlyAgents.includes(trustedAgent)) {
+      throw new PolicyError("testRun requires a session-bound read-only orchestrator identity (TEST_EXECUTION_DENIED)");
+    }
+    const payload = payloadOf(req) as { projectDir?: unknown; runner?: unknown };
+    const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    if (ctx.config.testRunners.length === 0) {
+      throw testRunRefusal("TEST_RUNNERS_UNCONFIGURED", "no test runners are configured");
+    }
+    if (typeof payload.runner !== "string") throw testRunRefusal("TEST_RUNNER_UNKNOWN", `runner must be an id; known ids: ${ctx.config.testRunners.map((r) => r.id).join(", ")}`);
+    const runner = ctx.config.testRunners.find((entry) => entry.id === payload.runner);
+    if (!runner) throw testRunRefusal("TEST_RUNNER_UNKNOWN", `unknown runner '${payload.runner}'; known ids: ${ctx.config.testRunners.map((r) => r.id).join(", ")}`);
+    return withTestRunLock(projectRoot, async () => {
+      const executable = runner.argv[0]!;
+      try {
+        const info = statSync(executable);
+        accessSync(executable, constants.X_OK);
+        if (!info.isFile()) throw new Error("not a regular file");
+      } catch {
+        throw testRunRefusal("TEST_RUNNER_EXECUTABLE_INVALID", `configured executable is not a regular executable file: ${executable}`);
+      }
+      const cwd = resolve(projectRoot, runner.cwd);
+      if (!isWithin(projectRoot, cwd)) throw testRunRefusal("TEST_RUN_CWD_ESCAPE", `runner cwd escapes the project root: ${runner.cwd}`);
+      const realCwd = (() => { try { return realpathSync(cwd); } catch { return cwd; } })();
+      if (!isWithin(projectRoot, realCwd)) throw testRunRefusal("TEST_RUN_CWD_ESCAPE", `runner cwd resolves outside the project root: ${runner.cwd}`);
+      const gitEnvironment: Record<string, string> = {
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "core.fsmonitor",
+        GIT_CONFIG_VALUE_0: "false",
+      };
+      for (const key of ["PATH", "HOME", "TMPDIR", "LANG"] as const) {
+        if (process.env[key] !== undefined) gitEnvironment[key] = process.env[key]!;
+      }
+      const status = await runTestCommand(["git", "-C", projectRoot, "status", "--porcelain", "--untracked-files=no"], projectRoot, 30_000, 64 * 1024, gitEnvironment);
+      if (status.exitCode !== 0) throw testRunRefusal("TEST_RUN_GIT_STATUS_FAILED", `git status exited ${String(status.exitCode)}: ${status.stderr.toString("utf8").slice(-2048)}`);
+      if (status.stdout.length > 0) {
+        const paths = status.stdout.toString("utf8").split("\n").filter(Boolean).slice(0, 3).map((line) => line.slice(3));
+        throw testRunRefusal("TEST_RUN_DIRTY_TREE", `check=git_status_porcelain paths=${paths.join(", ")}`);
+      }
+      try {
+        if (!statSync(cwd).isDirectory()) throw new Error("not a directory");
+      } catch {
+        throw testRunRefusal("TEST_RUN_CWD_NOT_DIRECTORY", `runner cwd is not a directory: ${cwd}`);
+      }
+      const environment: Record<string, string> = { NO_COLOR: "1", CI: "1" };
+      for (const key of ["PATH", "HOME", "TMPDIR", "LANG"] as const) {
+        if (process.env[key] !== undefined) environment[key] = process.env[key]!;
+      }
+      const startedAt = Date.now();
+      const result = await runTestCommand(runner.argv, cwd, runner.timeoutMs, runner.maxOutputBytes, environment);
+      const stdoutTail = result.stdout.subarray(-8192).toString("utf8");
+      const stderrTail = result.stderr.subarray(-8192).toString("utf8");
+      let logArtifact: string | null = null;
+      try {
+        const directory = join(ctx.config.stateDir, "test-runs");
+        if (isWithin(projectRoot, directory)) throw new Error("test-run artifact directory is inside the project");
+        mkdirSync(directory, { recursive: true, mode: 0o700 });
+        const path = join(directory, `${randomUUID()}.log`);
+        const temporary = `${path}.tmp`;
+        writeFileSync(temporary, Buffer.concat([
+          Buffer.from(`runner=${runner.id} exitCode=${String(result.exitCode)} signal=${String(result.signal)} timedOut=${result.timedOut} truncated=${result.truncated}\\nstdout\\n`),
+          result.stdout,
+          Buffer.from("\\nstderr\\n"),
+          result.stderr,
+          ...(result.truncated ? [Buffer.from("\\n[output truncated at configured combined cap]\\n")] : []),
+        ]), { mode: 0o600, flag: "wx" });
+        renameSync(temporary, path);
+        logArtifact = path;
+      } catch {
+        // Artifact storage is best-effort; never write test output into the project.
+      }
+      return {
+        runner: runner.id,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        timedOut: result.timedOut,
+        truncated: result.truncated,
+        durationMs: Date.now() - startedAt,
+        stdoutTail,
+        stderrTail,
+        logArtifact,
+      };
+    });
+  };
+}
+
+async function runTestCommand(
+  argv: readonly string[], cwd: string, timeoutMs: number, maxOutputBytes: number, env: NodeJS.ProcessEnv,
+): Promise<{ exitCode: number | null; signal: NodeJS.Signals | null; timedOut: boolean; truncated: boolean; stdout: Buffer; stderr: Buffer }> {
+  return new Promise((resolvePromise, reject) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(argv[0]!, argv.slice(1), { cwd, env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined)), detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) { reject(error); return; }
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let captured = 0;
+    let timedOut = false;
+    let truncated = false;
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const terminateGroup = () => {
+      if (!child.pid) return;
+      try { process.kill(-child.pid, "SIGTERM"); } catch { /* process already exited */ }
+      graceTimer = setTimeout(() => { try { process.kill(-child.pid!, "SIGKILL"); } catch { /* process already exited */ } }, 2000);
+    };
+    const collect = (target: Buffer[], chunk: Buffer) => {
+      const remaining = Math.max(0, maxOutputBytes - captured);
+      const kept = chunk.subarray(0, remaining);
+      if (kept.length) { target.push(kept); captured += kept.length; }
+      if (kept.length < chunk.length && !truncated) { truncated = true; terminateGroup(); }
+    };
+    child.stdout.on("data", (chunk: Buffer) => collect(stdout, chunk));
+    child.stderr.on("data", (chunk: Buffer) => collect(stderr, chunk));
+    child.once("error", (error) => { clearTimeout(timer); clearTimeout(graceTimer); reject(error); });
+    timer = setTimeout(() => { timedOut = true; terminateGroup(); }, timeoutMs);
+    child.once("close", (exitCode, signal) => {
+      clearTimeout(timer);
+      clearTimeout(graceTimer);
+      resolvePromise({ exitCode, signal, timedOut, truncated, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) });
+    });
+  });
 }
 
 const PLAN_DOC_WRITE_MAX_BYTES = 256 * 1024;

@@ -92,6 +92,7 @@ import {
   buildMetricsOp,
   buildPolicyOp,
   buildToolAdmissionOp,
+  buildTestRunOp,
   buildPlanDocAppendOp,
   buildPlanDocWriteOp,
   buildGateVerdictOp,
@@ -940,6 +941,8 @@ export class BrokerServer {
         return buildPlanDocAppendOp(this.ctx)(req);
       case "planDocWrite":
         return buildPlanDocWriteOp(this.ctx)(req);
+      case "testRun":
+        return buildTestRunOp(this.ctx)(req);
       case "gateVerdict":
         return buildGateVerdictOp(this.ctx)(req);
       case "bindSessionAgent":

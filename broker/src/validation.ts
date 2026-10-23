@@ -975,6 +975,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   ],
   planDocAppend: ["projectDir", "doc", "content", "heading"],
   planDocWrite: ["projectDir", "target", "name", "content", "expectedRevision", "note", "agent"],
+  testRun: ["projectDir", "runner"],
   gateVerdict: ["projectDir", "name", "taskId", "verdict", "refinementPlan", "evidenceRef", "agent"],
   // Host-authoritative session→agent binding: the host plugin supplies exactly
   // the host-resolved agent. No other key is accepted; this is never a model

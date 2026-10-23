@@ -38,6 +38,32 @@ describe("R1 — capability taxonomy / unknown effects fail closed", () => {
     expect(classifyOperation("webfetch")).toBe("RESEARCH_EXTERNAL");
     expect(classifyOperation("sandbox_write")).toBe("MUTATE_PROJECT");
     expect(classifyOperation("sandbox_bash")).toBe("EXECUTE_PROJECT");
+    expect(classifyOperation("host_test_run")).toBe("TEST_EXECUTION");
+    expect(TOOL_CLASSIFICATION_INVENTORY.host_test_run).toBe("TEST_EXECUTION");
+  });
+
+  test("TEST_EXECUTION is exclusive to read-only orchestrators", () => {
+    expect(decide({
+      role: "unknown_role",
+      capability: "TEST_EXECUTION",
+      sessionState: "HOST_READ_ONLY",
+      authoritativeLocation: "/project",
+      isReadOnlyOrchestrator: true,
+    }).decision).toBe("allow");
+    for (const role of ROLES) {
+      expect(decide({
+        role,
+        capability: "TEST_EXECUTION",
+        sessionState: "HOST_READ_ONLY",
+        authoritativeLocation: "/project",
+      }).decision).toBe("deny");
+    }
+    expect(decide({
+      role: "unknown_role",
+      capability: "TEST_EXECUTION",
+      sessionState: "HOST_READ_ONLY",
+      authoritativeLocation: "/project",
+    }).decision).toBe("deny");
   });
 
   test("every required live tool has an explicit classification", () => {

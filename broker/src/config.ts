@@ -99,6 +99,15 @@ export interface HostReadConfig {
   applyPreview: HostReadToolConfig;
 }
 
+export interface TestRunnerConfig {
+  id: string;
+  language: string;
+  argv: string[];
+  cwd: string;
+  timeoutMs: number;
+  maxOutputBytes: number;
+}
+
 export interface SddRuntimeConfig {
   /** Trusted host executable; never supplied by a request payload. */
   binary: string;
@@ -249,6 +258,7 @@ export interface BrokerConfig {
   resource: ResourceConfig;
   hostRead: HostReadConfig;
   sddRuntime: SddRuntimeConfig;
+  testRunners: TestRunnerConfig[];
   network: { mode: "deny-by-default"; note: string };
 }
 
@@ -372,6 +382,33 @@ function positiveIntEnv(name: string, fallback: number): number {
  * Read an optional string env knob: unset or empty yields null (the fail-closed
  * "not configured" state), never an empty-string value.
  */
+function parseTestRunners(raw: string | undefined): TestRunnerConfig[] {
+  if (raw === undefined || raw === "") return [];
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new ConfigError("invalid BROKER_TEST_RUNNERS: expected a JSON array");
+  }
+  if (!Array.isArray(value)) throw new ConfigError("invalid BROKER_TEST_RUNNERS: expected a JSON array");
+  const ids = new Set<string>();
+  return value.map((entry, index) => {
+    const fail = (field: string): never => { throw new ConfigError(`invalid BROKER_TEST_RUNNERS[${index}].${field}`); };
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) fail("entry");
+    const runner = entry as Record<string, unknown>;
+    if (typeof runner.id !== "string" || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(runner.id)) fail("id");
+    if (ids.has(runner.id)) throw new ConfigError(`invalid BROKER_TEST_RUNNERS: duplicate id '${runner.id}'`);
+    ids.add(runner.id);
+    if (typeof runner.language !== "string" || runner.language.length === 0) fail("language");
+    if (!Array.isArray(runner.argv) || runner.argv.length === 0 || runner.argv.some((arg) => typeof arg !== "string" || Buffer.byteLength(arg, "utf8") > 4096)) fail("argv");
+    if (!isAbsolute(runner.argv[0] as string)) fail("argv[0] must be absolute");
+    if (typeof runner.cwd !== "string" || runner.cwd.length === 0 || (runner.cwd !== "." && (runner.cwd.startsWith("/") || runner.cwd.split(/[\\/]/).includes("..")))) fail("cwd");
+    if (!Number.isInteger(runner.timeoutMs) || (runner.timeoutMs as number) < 1000 || (runner.timeoutMs as number) > 600000) fail("timeoutMs");
+    if (!Number.isInteger(runner.maxOutputBytes) || (runner.maxOutputBytes as number) < 1024 || (runner.maxOutputBytes as number) > 4194304) fail("maxOutputBytes");
+    return { id: runner.id, language: runner.language, argv: [...runner.argv] as string[], cwd: runner.cwd, timeoutMs: runner.timeoutMs as number, maxOutputBytes: runner.maxOutputBytes as number };
+  });
+}
+
 function optionalStringEnv(name: string): string | null {
   const raw = process.env[name];
   return raw === undefined || raw === "" ? null : raw;
@@ -424,6 +461,7 @@ export function defaultConfig(
     workerRootDisk: process.env.BROKER_WORKER_ROOT_DISK || undefined,
     workerNamePrefix: "oc-sandbox",
     projects: DEFAULT_PROJECTS,
+    testRunners: parseTestRunners(process.env.BROKER_TEST_RUNNERS),
     approvedExternalReadRoots: DEFAULT_APPROVED_EXTERNAL_READ_ROOTS,
     externalCopyTargets: DEFAULT_EXTERNAL_COPY_TARGETS,
     protectedPaths: DEFAULT_PROTECTED_PATHS,
