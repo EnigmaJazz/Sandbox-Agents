@@ -3519,11 +3519,23 @@ function scanPlanDocHeadings(existing: string): PlanDocHeading[] {
   const headings: PlanDocHeading[] = [];
   const lines = existing.split("\n");
   let offset = 0;
+  let fence: { character: string; length: number } | undefined;
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
-    const match = PLAN_DOC_ATX_HEADING_RE.exec(line);
-    if (match) {
-      headings.push({ index, level: match[1]!.length, text: match[2]!.trim(), offset });
+    const logicalLine = line.endsWith("\r") ? line.slice(0, -1) : line;
+    if (fence) {
+      const closing = new RegExp(`^[ \\t]{0,3}${fence.character}{${fence.length},}[ \\t]*$`);
+      if (closing.test(logicalLine)) fence = undefined;
+    } else {
+      const opening = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(logicalLine);
+      if (opening) {
+        fence = { character: opening[1]![0]!, length: opening[1]!.length };
+      } else {
+        const match = PLAN_DOC_ATX_HEADING_RE.exec(logicalLine);
+        if (match) {
+          headings.push({ index, level: match[1]!.length, text: match[2]!.trim(), offset });
+        }
+      }
     }
     offset += line.length + 1;
   }
@@ -3843,11 +3855,11 @@ function assertPlanDocWriteNoSymlinks(projectRoot: string, destination: string):
 
 function planDocRevisionSection(existing: string): { revision: number; lines: string[] } {
   const lines = existing.split("\n");
-  const heading = lines.findIndex((line) => /^## Revisions[ \t]*\r?$/.test(line));
-  if (heading < 0) return { revision: 0, lines: [] };
-  let end = heading + 1;
-  while (end < lines.length && !/^#{1,2}[ \t]+/.test(lines[end]!)) end++;
-  const sectionLines = lines.slice(heading + 1, end);
+  const headings = scanPlanDocHeadings(existing);
+  const heading = headings.find((entry) => entry.level === 2 && entry.text === "Revisions");
+  if (!heading) return { revision: 0, lines: [] };
+  const nextHeading = headings.find((entry) => entry.index > heading.index && entry.level <= 2);
+  const sectionLines = lines.slice(heading.index + 1, nextHeading?.index ?? lines.length);
   let revision = 0;
   for (const line of sectionLines) {
     const match = /^- r([0-9]+) /.exec(line);
@@ -3871,6 +3883,9 @@ async function writePlanDocAtomically(
   const existingStat = lstatIfExists(destination);
   if (existingStat !== undefined && !existingStat.isFile()) {
     throw new ValidationError(`PLAN_WRITE_NOT_REGULAR: ${destination}`);
+  }
+  if (existingStat && existingStat.nlink > 1) {
+    throw new ValidationError(`PLAN_WRITE_HARDLINK_REFUSED: ${destination} link count=${existingStat.nlink}`);
   }
   const existing = existingStat ? readFileSync(destination, "utf8") : "";
   const section = planDocRevisionSection(existing);
@@ -3900,6 +3915,10 @@ async function writePlanDocAtomically(
     if (currentEntry !== undefined && !currentEntry.isFile()) {
       throw new ValidationError(`PLAN_WRITE_NOT_REGULAR: ${destination}`);
     }
+    if (currentEntry && currentEntry.nlink > 1) {
+      throw new ValidationError(`PLAN_WRITE_HARDLINK_REFUSED: ${destination} link count=${currentEntry.nlink}`);
+    }
+    // A concurrent project-tree writer could swap the parent for a symlink after this check; plan-root apply protection is intended to remove that attacker precondition, and Node does not expose the directory-fd renameat needed to close this residual window.
     renameSync(tempPath, destination);
     tempWritten = false;
     fsyncPlanDocDirectory(parent);
@@ -3917,15 +3936,17 @@ export interface LatestGateVerdict {
 }
 
 const GATE_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const GATE_LINE_RE = /^- ([A-Za-z0-9][A-Za-z0-9._-]{0,63}) (PASS|REFINE|ESCALATE) (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) ([^\s]+)(?: ref=([^\r\n]+))?(?: :: ([^\r\n]+))?$/;
+const GATE_LINE_RE = /^- ([A-Za-z0-9][A-Za-z0-9._-]{0,63}) (PASS|REFINE|ESCALATE) (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) ([^\s]+)(?: ref=([^\r\n]+))?(?: :: ([^\r\n]+))?\r?$/;
 
 /** Parse the last recorded verdict for a task from its Gates section. */
 export function readLatestGateVerdict(document: string, taskId: string): LatestGateVerdict | undefined {
   const lines = document.split("\n");
-  const heading = lines.findIndex((line) => /^## Gates[ \t]*\r?$/.test(line));
-  if (heading < 0) return undefined;
+  const headings = scanPlanDocHeadings(document);
+  const heading = headings.filter((entry) => entry.level === 2 && entry.text === "Gates").at(-1);
+  if (!heading) return undefined;
+  const nextHeading = headings.find((entry) => entry.index > heading.index && entry.level <= 2);
   let latest: LatestGateVerdict | undefined;
-  for (let index = heading + 1; index < lines.length && !/^#{1,2}[ \t]+/.test(lines[index]!); index++) {
+  for (let index = heading.index + 1; index < (nextHeading?.index ?? lines.length); index++) {
     const match = GATE_LINE_RE.exec(lines[index]!);
     if (match?.[1] === taskId) latest = { verdict: match[2] as LatestGateVerdict["verdict"], at: match[3]! };
   }
@@ -3955,6 +3976,9 @@ async function appendGateVerdictAtomically(projectRoot: string, destination: str
   const existingStat = lstatIfExists(destination);
   if (existingStat === undefined) throw new ValidationError("GATE_VERDICT_DOCUMENT_MISSING: plan document must already exist");
   if (!existingStat.isFile()) throw new ValidationError(`GATE_VERDICT_NOT_REGULAR: ${destination}`);
+  if (existingStat.nlink > 1) {
+    throw new ValidationError(`GATE_VERDICT_HARDLINK_REFUSED: ${destination} link count=${existingStat.nlink}`);
+  }
   assertBeneathProjectRoot(projectRoot, parent);
   assertBeneathProjectRoot(projectRoot, destination);
   const current = readFileSync(destination, "utf8");
@@ -3975,7 +3999,11 @@ async function appendGateVerdictAtomically(projectRoot: string, destination: str
     if (currentEntry === undefined || !currentEntry.isFile()) {
       throw new ValidationError("GATE_VERDICT_DESTINATION_CHANGED: plan document is no longer a regular file");
     }
+    if (currentEntry.nlink > 1) {
+      throw new ValidationError(`GATE_VERDICT_HARDLINK_REFUSED: ${destination} link count=${currentEntry.nlink}`);
+    }
     assertBeneathProjectRoot(projectRoot, parent);
+    // A concurrent project-tree writer could swap the parent for a symlink after this check; plan-root apply protection is intended to remove that attacker precondition, and Node does not expose the directory-fd renameat needed to close this residual window.
     renameSync(tempPath, destination);
     tempWritten = false;
     fsyncPlanDocDirectory(parent);
@@ -4063,6 +4091,12 @@ export function buildPlanDocWriteOp(ctx: OpContext): OpHandler {
     if (contentBytes < 1) throw new ValidationError("PLAN_WRITE_CONTENT_INVALID: content must be at least 1 byte");
     if (contentBytes > PLAN_DOC_WRITE_MAX_BYTES) {
       throw new ValidationError(`PLAN_WRITE_CONTENT_TOO_LARGE: cap=${PLAN_DOC_WRITE_MAX_BYTES} observed=${contentBytes}`);
+    }
+    const embeddedSection = scanPlanDocHeadings(payload.content).find((heading) =>
+      heading.level === 2 && (heading.text === "Revisions" || heading.text === "Gates"),
+    );
+    if (embeddedSection) {
+      throw new ValidationError(`PLAN_WRITE_CONTENT_SECTION_REFUSED: ## ${embeddedSection.text}`);
     }
     if (typeof payload.note !== "string" || payload.note.trim().length === 0 || payload.note.trim().length > 200 || /[\r\n]/.test(payload.note)) {
       throw new ValidationError("PLAN_WRITE_NOTE_INVALID: note must be non-empty, at most 200 characters, and contain no newline");

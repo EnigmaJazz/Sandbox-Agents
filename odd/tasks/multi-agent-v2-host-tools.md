@@ -71,5 +71,8 @@ b47924e docs(todo): record the correction_required diagnosis and the install div
 
 Unit status evidence: T1 has no matching commit subject in the top-ten log and no tracked worktree changes; status is not established. T2 has commit `3c17309`; T3 has commit `a8b2b13`; T4 has commit `b4d2500`. For T2 to T4, the available Git commands identify Git commits, not separate `host_sandbox_result_install` result-commit IDs. The only uncommitted path reported is the untracked bundle above, not unit source.
 
+## Accepted residual risks
+- A concurrent writer with access to the project tree could swap the destination parent for a symlink between the final path check and `renameSync`; plan-root apply protection is intended to remove this attacker precondition, while closing the race requires directory-fd `renameat` support that Node does not expose.
+
 ## Next step
 T5 (`host_task_mark`) with the injected assessor, preceded by the post-code advisor pass over T1 to T4.

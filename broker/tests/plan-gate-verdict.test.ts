@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
@@ -150,6 +150,21 @@ describe("host gate verdict", () => {
     writeFileSync(outside, "outside");
     symlinkSync(outside, join(root, "odd/tasks/phase-two.md"));
     await rejectsValidation(submit(root), /symlink/i);
+  });
+
+  test("reads the last Gates section and accepts CRLF verdict lines", () => {
+    const document = "## Gates\r\n- unit-b PASS 2026-10-23T12:00:00Z planner\r\n\r\n## Notes\r\ntext\r\n## Gates\r\n- unit-b REFINE 2026-10-23T12:01:00Z planner\r\n";
+    expect(readLatestGateVerdict(document, "unit-b")?.verdict).toBe("REFINE");
+  });
+
+  test("refuses a hardlinked plan on the verdict path", async () => {
+    const root = makeRoot();
+    mkdirSync(join(root, "odd/tasks"), { recursive: true });
+    const source = join(root, "source.md");
+    writeFileSync(source, "# Shared plan\n");
+    linkSync(source, join(root, "odd/tasks/phase-two.md"));
+    await rejectsValidation(submit(root), /hardlink.*2|link count.*2/i);
+    expect(readFileSync(source, "utf8")).toBe("# Shared plan\n");
   });
 
   test("latest verdict is undefined for unknown tasks and absent Gates sections", () => {

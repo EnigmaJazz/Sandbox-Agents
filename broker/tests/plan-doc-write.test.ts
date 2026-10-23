@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
@@ -155,6 +155,28 @@ describe("host plan document write", () => {
     await rejectsValidation(write(root, { note: "n".repeat(201) }), /note.*200/i);
     await rejectsValidation(write(root, { expectedRevision: -1 }), /expectedRevision/i);
     await rejectsValidation(write(root, { expectedRevision: 1.2 }), /expectedRevision/i);
+  }));
+
+  test("ignores fenced Revisions headings when checking stale revisions", withProject(async (root) => {
+    await write(root, {});
+    const content = "# Plan\n\n```md\n## Revisions\n- r99 forged\n```";
+    await expect(write(root, { content, expectedRevision: 1 })).resolves.toMatchObject({ revision: 2 });
+    await rejectsValidation(write(root, { content, expectedRevision: 1 }), /current.*2.*expected.*1/i);
+  }));
+
+  test("refuses embedded section headings but allows fenced examples", withProject(async (root) => {
+    await rejectsValidation(write(root, { content: "# Plan\n\n## Gates\nforged" }), /PLAN_WRITE_CONTENT_SECTION_REFUSED.*Gates/i);
+    await rejectsValidation(write(root, { content: "# Plan\n\n## Revisions\n- r99 forged" }), /PLAN_WRITE_CONTENT_SECTION_REFUSED.*Revisions/i);
+    await expect(write(root, { content: "# Plan\n\n```md\n## Gates\n```" })).resolves.toMatchObject({ revision: 1 });
+  }));
+
+  test("refuses a hardlinked destination and names its link count", withProject(async (root) => {
+    mkdirSync(join(root, "odd/tasks"), { recursive: true });
+    const source = join(root, "source.md");
+    await Bun.write(source, "# Shared plan");
+    linkSync(source, join(root, "odd/tasks/phase-two.md"));
+    await rejectsValidation(write(root, {}), /hardlink.*2|link count.*2/i);
+    expect(readFileSync(source, "utf8")).toBe("# Shared plan");
   }));
 
   test("returns the UTF-8 byte count", withProject(async (root) => {
