@@ -68,16 +68,25 @@ function makeHarness() {
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
   };
+  const mapWorkerPath = (path: string): string =>
+    path === "/work"
+      ? workerDir
+      : path.startsWith("/work/")
+        ? join(workerDir, path.slice("/work/".length))
+        : path;
   const adapter = {
     exec: async (
       _worker: string,
       argv: string[],
       opts?: { cwd?: string; env?: Record<string, string>; maxOutputBytes?: number },
     ) => {
-      const result = spawnSync(argv[0]!, argv.slice(1), {
-        cwd: opts?.cwd === "/work" ? workerDir : workerDir,
+      const workerEnv = Object.fromEntries(
+        Object.entries(opts?.env ?? {}).map(([key, value]) => [key, mapWorkerPath(value)]),
+      );
+      const result = spawnSync(argv[0]!, argv.slice(1).map(mapWorkerPath), {
+        cwd: mapWorkerPath(opts?.cwd ?? "/work"),
         encoding: "utf8",
-        env: { ...process.env, ...(opts?.env ?? {}) },
+        env: { ...process.env, ...workerEnv },
       });
       const cap = opts?.maxOutputBytes ?? Number.POSITIVE_INFINITY;
       const stdout = capped(result.stdout, cap);

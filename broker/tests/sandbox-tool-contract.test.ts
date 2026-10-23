@@ -1,4 +1,4 @@
-import { expect, mock, test } from "bun:test";
+import { afterAll, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
 const schema = new Proxy({}, {
   get: () => () => schema,
@@ -9,6 +9,8 @@ mock.module("zod", () => ({
     get: () => () => schema,
   }),
 }));
+
+afterAll(() => mock.restore());
 async function runIsolatedReviewToolProbe(): Promise<{ requests: unknown[]; outputs: string[]; pipelineAsks: number; persistMode: string; persistAskSummary: string }> {
   const source = `
     import { mock } from "bun:test";

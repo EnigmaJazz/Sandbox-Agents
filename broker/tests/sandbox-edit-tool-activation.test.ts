@@ -1,4 +1,5 @@
-import { expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, expect, mock, test } from "bun:test";
+import { setBrokerClientOverride } from "../../opencode/plugins/lib/broker-client.ts";
 
 const schema = new Proxy({}, { get: () => () => schema });
 mock.module("@opencode-ai/plugin", () => ({ tool: (definition: unknown) => definition }));
@@ -8,9 +9,8 @@ mock.module("zod", () => ({
 
 const operations: string[] = [];
 let workerActive = false;
-mock.module("../../opencode/plugins/lib/broker-client.ts", () => ({
-  brokerSocketPath: () => "/tmp/sandbox-edit-activation.sock",
-  createBrokerClient: async () => ({
+beforeAll(() => {
+  setBrokerClientOverride(async () => ({
     request: async (operation: string) => {
       operations.push(operation);
       if (operation === "ensureWorker") {
@@ -24,10 +24,16 @@ mock.module("../../opencode/plugins/lib/broker-client.ts", () => ({
       if (operation === "writeFile") return { path: "sample.md" };
       throw new Error(`unexpected broker operation: ${operation}`);
     },
-  }),
-}));
+    close: () => {},
+  }));
+});
 
 const { default: sandboxToolsPlugin } = await import("../../opencode/plugins/sandbox-tools.ts");
+
+afterAll(() => {
+  setBrokerClientOverride(null);
+  mock.restore();
+});
 
  test("sandbox_edit succeeds when it is the first worker-touching operation", async () => {
   operations.length = 0;

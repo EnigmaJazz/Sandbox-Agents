@@ -132,7 +132,15 @@ export const OPERATION_TIMEOUT_MS: Record<string, number> = {
  * a broker restart closes the socket, but the next request opens a fresh one
  * instead of failing closed forever (Gate 5 live finding).
  */
+// Test-only process-wide override; never configurable through runtime inputs.
+let brokerClientOverride: (() => Promise<BrokerClient>) | null = null;
+
+export function setBrokerClientOverride(factory: (() => Promise<BrokerClient>) | null): void {
+  brokerClientOverride = factory;
+}
+
 export async function createBrokerClient(opts: BrokerClientOptions): Promise<BrokerClient> {
+  if (brokerClientOverride) return brokerClientOverride();
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const queuedHoldTimeoutMs = opts.queuedHoldTimeoutMs ?? 600_000;
   const pending = new Map<string, Pending>();

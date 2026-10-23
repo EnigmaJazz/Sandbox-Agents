@@ -3,7 +3,7 @@
  * registered when OPENCODE_SANDBOX_LEGACY_SDD=1, with unchanged argument
  * schemas; every other tool is unaffected. Plan: docs/upgrades/gentle-ai-4.md.
  */
-import { afterEach, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, expect, mock, test } from "bun:test";
 
 const schema = new Proxy({}, { get: () => () => schema });
 mock.module("@opencode-ai/plugin", () => ({ tool: (definition: unknown) => definition }));
@@ -21,6 +21,8 @@ const EXPECTED_ARGS: Record<string, string[]> = {
   host_sdd_attempt_grant: ["actor", "change", "changeInstance", "expectedRevision", "reason", "requestId", "roots"],
   host_sdd_archive_compose: ["canonical", "delta", "output"],
 };
+
+afterAll(() => mock.restore());
 
 const saved = process.env[LEGACY_SDD_ENV];
 afterEach(() => {
