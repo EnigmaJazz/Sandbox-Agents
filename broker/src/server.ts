@@ -93,6 +93,8 @@ import {
   buildPolicyOp,
   buildToolAdmissionOp,
   buildPlanDocAppendOp,
+  buildPlanDocWriteOp,
+  buildGateVerdictOp,
   buildReviewMaterializeOp,
   buildReviewDiffReadOp,
   buildReviewPipelineRunOp,
@@ -936,6 +938,10 @@ export class BrokerServer {
         return buildToolAdmissionOp(this.ctx)(req);
       case "planDocAppend":
         return buildPlanDocAppendOp(this.ctx)(req);
+      case "planDocWrite":
+        return buildPlanDocWriteOp(this.ctx)(req);
+      case "gateVerdict":
+        return buildGateVerdictOp(this.ctx)(req);
       case "bindSessionAgent":
         return buildBindSessionAgentOp(this.ctx)(req);
       case "reviewStart":

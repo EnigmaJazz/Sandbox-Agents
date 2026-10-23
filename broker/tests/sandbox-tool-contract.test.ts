@@ -70,6 +70,76 @@ async function runIsolatedReviewToolProbe(): Promise<{ requests: unknown[]; outp
 }
 const { applyTargetedEdit } = await import("../../opencode/plugins/lib/sandbox-edit-core.ts");
 
+async function runIsolatedPlanWriteProbe(): Promise<{ calls: unknown[]; asks: number }> {
+  const source = `
+    import { mock } from "bun:test";
+    const schema = new Proxy({}, { get: () => () => schema });
+    mock.module("@opencode-ai/plugin", () => ({ tool: (definition) => definition }));
+    mock.module("zod", () => ({ z: new Proxy({}, { get: () => () => schema }) }));
+    const calls = [];
+    mock.module("./opencode/plugins/lib/broker-client.ts", () => ({
+      createBrokerClient: async () => ({
+        request: async (operation, sessionID, payload, agent) => {
+          calls.push({ operation, sessionID, payload, agent });
+          return { target: payload.target, revision: 1 };
+        },
+        close: () => {},
+      }),
+      brokerSocketPath: () => "/tmp/unreachable-test.sock",
+    }));
+    const { default: plugin } = await import("./opencode/plugins/sandbox-tools.ts");
+    let asks = 0;
+    const result = await plugin().tool.host_plan_write.execute({
+      target: "tasks", name: "phase-two", content: "# Plan", expectedRevision: 0, note: "initial",
+    }, {
+      sessionID: "session-write", directory: "/work/project", agent: "planner",
+      ask: async () => { asks += 1; throw new Error("approval must not be requested"); },
+    });
+    console.log(JSON.stringify({ calls, asks, result }));
+  `;
+  const child = Bun.spawn(["bun", "-e", source], { cwd: `${import.meta.dir}/../..`, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(`isolated plan write probe failed: ${stderr}`);
+  return JSON.parse(stdout.trim());
+}
+
+async function runIsolatedGateVerdictProbe(): Promise<{ calls: unknown[]; asks: number }> {
+  const source = `
+    import { mock } from "bun:test";
+    const schema = new Proxy({}, { get: () => () => schema });
+    mock.module("@opencode-ai/plugin", () => ({ tool: (definition) => definition }));
+    mock.module("zod", () => ({ z: new Proxy({}, { get: () => () => schema }) }));
+    const calls = [];
+    mock.module("./opencode/plugins/lib/broker-client.ts", () => ({
+      createBrokerClient: async () => ({
+        request: async (operation, sessionID, payload, agent) => {
+          calls.push({ operation, sessionID, payload, agent });
+          return { name: payload.name, taskId: payload.taskId, verdict: payload.verdict, gates: 1 };
+        },
+        close: () => {},
+      }),
+      brokerSocketPath: () => "/tmp/unreachable-test.sock",
+    }));
+    const { default: plugin } = await import("./opencode/plugins/sandbox-tools.ts");
+    let asks = 0;
+    const result = await plugin().tool.host_gate_verdict.execute({
+      name: "phase-two", taskId: "unit-b", verdict: "PASS",
+    }, {
+      sessionID: "session-gate", directory: "/work/project", agent: "planner",
+      ask: async () => { asks += 1; throw new Error("approval must not be requested"); },
+    });
+    console.log(JSON.stringify({ calls, asks, result }));
+  `;
+  const child = Bun.spawn(["bun", "-e", source], { cwd: `${import.meta.dir}/../..`, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(`isolated gate verdict probe failed: ${stderr}`);
+  return JSON.parse(stdout.trim());
+}
+
 const sandboxTools = readFileSync(
   new URL("../../opencode/plugins/sandbox-tools.ts", import.meta.url),
   "utf8",
@@ -271,4 +341,29 @@ test("sandbox_apply_patch gives an actionable remedy for invalid unified diffs",
   expect(service).toContain("end-of-file append-only hunk is valid");
   expect(sandboxTools).toContain("EOF append-only hunks may");
   expect(sandboxTools).toContain("sandbox_apply_patch failed:");
+});
+
+test("host_gate_verdict forwards planner identity without requesting approval", async () => {
+  const result = await runIsolatedGateVerdictProbe();
+  expect(result.asks).toBe(0);
+  expect(result.calls).toEqual([{
+    operation: "gateVerdict",
+    sessionID: "session-gate",
+    payload: { projectDir: "/work/project", name: "phase-two", taskId: "unit-b", verdict: "PASS", agent: "planner" },
+    agent: "planner",
+  }]);
+});
+
+test("host_plan_write forwards ctx.agent without requesting approval", async () => {
+  const result = await runIsolatedPlanWriteProbe();
+  expect(result.asks).toBe(0);
+  expect(result.calls).toEqual([{
+    operation: "planDocWrite",
+    sessionID: "session-write",
+    payload: {
+      projectDir: "/work/project", target: "tasks", name: "phase-two", content: "# Plan",
+      expectedRevision: 0, note: "initial", agent: "planner",
+    },
+    agent: "planner",
+  }]);
 });

@@ -166,7 +166,7 @@ export const TOOL_CLASSIFICATION_INVENTORY: Readonly<Record<string, Capability>>
   host_review_materialize: "HOST_READ_STRUCTURED", host_review_pipeline_run: "HOST_APPROVED_MUTATION",
   host_review_persist: "HOST_APPROVED_MUTATION", host_sandbox_result_install: "HOST_APPROVED_MUTATION",
   host_git_commit: "HOST_APPROVED_MUTATION", host_git_clear_commit_intent: "HOST_APPROVED_MUTATION",
-  host_git_push: "HOST_APPROVED_MUTATION", host_gh_issue_create: "HOST_APPROVED_MUTATION", host_plan_append: "HOST_APPROVED_MUTATION", host_plan_write: "HOST_APPROVED_MUTATION",
+  host_git_push: "HOST_APPROVED_MUTATION", host_gh_issue_create: "HOST_APPROVED_MUTATION", host_plan_append: "HOST_APPROVED_MUTATION", host_plan_write: "HOST_APPROVED_MUTATION", host_gate_verdict: "HOST_APPROVED_MUTATION",
   host_review_start: "HOST_APPROVED_MUTATION", host_review_capture_result: "HOST_APPROVED_MUTATION",
   host_review_capture_unachievable: "HOST_APPROVED_MUTATION", host_review_acknowledge_approved: "HOST_APPROVED_MUTATION",
   host_review_capture_correction_plan: "HOST_APPROVED_MUTATION", host_review_capture_refuter: "HOST_APPROVED_MUTATION",

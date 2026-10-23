@@ -1018,6 +1018,30 @@ export default function sandboxToolsPlugin() {
         },
       }),
 
+      host_gate_verdict: tool({
+        description:
+          "Record a planner gate verdict in the append-only gate log at the end of an existing task document. " +
+          "Plan text is not authority; the broker validates the planner identity and preserves every prior verdict. " +
+          "No approval is requested because the append-only gate log is the compensating control. Returns JSON.",
+        args: {
+          name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+          taskId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
+          verdict: z.enum(["PASS", "REFINE", "ESCALATE"]),
+          refinementPlan: z.string().max(600).optional(),
+          evidenceRef: z.string().max(200).optional(),
+        },
+        execute: async (args, ctx) => {
+          // The append-only gate log is the compensating control for this no-approval verdict write.
+          const c = await client();
+          const result = await c.request("gateVerdict", ctx.sessionID, {
+            projectDir: currentProjectDirectory(ctx.directory),
+            ...args,
+            agent: ctx.agent,
+          }, ctx.agent);
+          return JSON.stringify(result, null, 2);
+        },
+      }),
+
       host_plan_append: tool({
         description:
           "Append approved content to an allowlisted plan document (orchestrator-only mutation; " +
