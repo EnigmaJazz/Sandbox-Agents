@@ -99,6 +99,7 @@
     "host_git_push": "ask",
     "host_gh_issue_create": "ask",
     "host_plan_append": "ask",
+    "host_plan_write": "allow",
     "host_register_project": "ask",
     "host_review_start": "ask",
     "host_review_capture_result": "ask",

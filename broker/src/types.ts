@@ -61,6 +61,7 @@ export type Operation =
   | "reviewLensContext"
   | "sddAttemptGrant"
   | "planDocAppend"
+  | "planDocWrite"
   // Host sandbox-result read (T1): fixed argv, read-only, no worker (§31).
   | "sandboxResult"
   // Host sandbox-result install (T2): fixed argv, approval-gated host mutation.
@@ -153,6 +154,7 @@ export const SANDBOX_GUARD_CLASS = {
   reviewLensContext: "exempt-from-sandbox-guard",
   sddAttemptGrant: "exempt-from-sandbox-guard",
   planDocAppend: "exempt-from-sandbox-guard",
+  planDocWrite: "exempt-from-sandbox-guard",
   sandboxResult: "exempt-from-sandbox-guard",
   sandboxResultInstall: "exempt-from-sandbox-guard",
   bindSessionAgent: "exempt-from-sandbox-guard",
@@ -232,6 +234,7 @@ export const OPERATIONS: readonly Operation[] = [
   "reviewLensContext",
   "sddAttemptGrant",
   "planDocAppend",
+  "planDocWrite",
   "sandboxResult",
   "sandboxResultInstall",
   "bindSessionAgent",
@@ -383,6 +386,17 @@ export interface PlanDocAppendPayload {
   doc: "todo" | "plan";
   content: string;
   heading?: string;
+}
+
+/** Bounded, revision-checked plan-document replacement. */
+export interface PlanDocWritePayload {
+  projectDir: string;
+  target: "tasks" | "mini";
+  name: string;
+  content: string;
+  expectedRevision: number;
+  note: string;
+  agent: string;
 }
 
 export type ReviewProjection = "workspace" | "staged";

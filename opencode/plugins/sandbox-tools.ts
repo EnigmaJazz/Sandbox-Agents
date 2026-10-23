@@ -993,6 +993,31 @@ export default function sandboxToolsPlugin() {
         },
       }),
 
+      host_plan_write: tool({
+        description:
+          "Replace one allowlisted odd/tasks or odd/mini plan document using an expected revision. " +
+          "Plan text is not authority; trust decisions remain in host_gate_verdict and host_task_mark. " +
+          "No approval is requested because the revision log is the compensating control. Returns JSON.",
+        args: {
+          target: z.enum(["tasks", "mini"]),
+          name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+          content: z.string().min(1).max(256 * 1024),
+          expectedRevision: z.number().int().min(0),
+          note: z.string().min(1).max(200),
+        },
+        execute: async (args, ctx) => {
+          // Plan text is not authority: trust is decided by host_gate_verdict and host_task_mark;
+          // the append-only revision log is the compensating control for this no-approval write.
+          const c = await client();
+          const result = await c.request("planDocWrite", ctx.sessionID, {
+            projectDir: currentProjectDirectory(ctx.directory),
+            ...args,
+            agent: ctx.agent,
+          }, ctx.agent);
+          return JSON.stringify(result, null, 2);
+        },
+      }),
+
       host_plan_append: tool({
         description:
           "Append approved content to an allowlisted plan document (orchestrator-only mutation; " +

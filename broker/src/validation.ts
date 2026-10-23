@@ -832,6 +832,7 @@ export const HOST_MUTATION_OPERATIONS: readonly string[] = [
   "registerProject",
   "sddAttemptGrant",
   "planDocAppend",
+  "planDocWrite",
   "reviewStart",
   "reviewCaptureResult",
   "reviewCaptureUnachievable",
@@ -972,6 +973,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
     "reason",
   ],
   planDocAppend: ["projectDir", "doc", "content", "heading"],
+  planDocWrite: ["projectDir", "target", "name", "content", "expectedRevision", "note", "agent"],
   // Host-authoritative session→agent binding: the host plugin supplies exactly
   // the host-resolved agent. No other key is accepted; this is never a model
   // tool, so `hostToolAccess` deliberately does not classify it.

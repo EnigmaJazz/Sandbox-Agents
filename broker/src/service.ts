@@ -3810,6 +3810,139 @@ export function buildPlanDocAppendOp(ctx: OpContext): OpHandler {
   };
 }
 
+const PLAN_DOC_WRITE_MAX_BYTES = 256 * 1024;
+const PLAN_DOC_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+function assertPlanDocWriteName(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !PLAN_DOC_NAME_RE.test(value)) {
+    throw new ValidationError("PLAN_WRITE_NAME_INVALID: name must match ^[a-z0-9][a-z0-9-]{0,63}$");
+  }
+}
+
+function assertPlanDocWriteNoSymlinks(projectRoot: string, destination: string): void {
+  const relative = destination.slice(projectRoot.length).split(/[\\/]/).filter(Boolean);
+  let path = projectRoot;
+  for (const segment of relative) {
+    path = join(path, segment);
+    const stat = lstatIfExists(path);
+    if (stat?.isSymbolicLink()) {
+      throw new ValidationError(`PLAN_WRITE_SYMLINK_REFUSED: ${path}`);
+    }
+  }
+}
+
+function planDocRevisionSection(existing: string): { revision: number; lines: string[] } {
+  const lines = existing.split("\n");
+  const heading = lines.findIndex((line) => /^## Revisions[ \t]*\r?$/.test(line));
+  if (heading < 0) return { revision: 0, lines: [] };
+  let end = heading + 1;
+  while (end < lines.length && !/^#{1,2}[ \t]+/.test(lines[end]!)) end++;
+  const sectionLines = lines.slice(heading + 1, end);
+  let revision = 0;
+  for (const line of sectionLines) {
+    const match = /^- r([0-9]+) /.exec(line);
+    if (match) revision = Math.max(revision, Number(match[1]));
+  }
+  return { revision, lines: sectionLines };
+}
+
+async function writePlanDocAtomically(
+  projectRoot: string,
+  destination: string,
+  body: string,
+  agent: string,
+  note: string,
+  expectedRevision: number,
+): Promise<{ revision: number; created: boolean; bytes: number }> {
+  const parent = dirname(destination);
+  assertPlanDocWriteNoSymlinks(projectRoot, destination);
+  mkdirSync(parent, { recursive: true, mode: 0o755 });
+  assertPlanDocWriteNoSymlinks(projectRoot, destination);
+  const existingStat = lstatIfExists(destination);
+  if (existingStat !== undefined && !existingStat.isFile()) {
+    throw new ValidationError(`PLAN_WRITE_NOT_REGULAR: ${destination}`);
+  }
+  const existing = existingStat ? readFileSync(destination, "utf8") : "";
+  const section = planDocRevisionSection(existing);
+  if (section.revision !== expectedRevision) {
+    throw new ValidationError(`PLAN_WRITE_STALE_REVISION: current=${section.revision} expected=${expectedRevision}`);
+  }
+  const revision = section.revision + 1;
+  const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const revisionLine = `- r${revision} ${timestamp} ${agent}: ${note.trim()}`;
+  const priorLines = section.lines.filter((line, index) =>
+    !(index === section.lines.length - 1 && line === ""),
+  );
+  const nextText = `${body}\n\n## Revisions\n${[...priorLines, revisionLine].join("\n")}\n`;
+  const tempPath = join(parent, `.plan-doc-${randomUUID()}.tmp`);
+  let tempWritten = false;
+  try {
+    const fd = openSync(tempPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+    tempWritten = true;
+    try {
+      writeFileSync(fd, nextText, { encoding: "utf8" });
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    assertPlanDocWriteNoSymlinks(projectRoot, destination);
+    const currentEntry = lstatIfExists(destination);
+    if (currentEntry !== undefined && !currentEntry.isFile()) {
+      throw new ValidationError(`PLAN_WRITE_NOT_REGULAR: ${destination}`);
+    }
+    renameSync(tempPath, destination);
+    tempWritten = false;
+    fsyncPlanDocDirectory(parent);
+    return { revision, created: existingStat === undefined, bytes: Buffer.byteLength(nextText, "utf8") };
+  } finally {
+    if (tempWritten) {
+      try { unlinkSync(tempPath); } catch { /* best-effort cleanup */ }
+    }
+  }
+}
+
+export function buildPlanDocWriteOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as {
+      projectDir?: unknown; target?: unknown; name?: unknown; content?: unknown;
+      expectedRevision?: unknown; note?: unknown; agent?: unknown;
+    };
+    authorizeHostDispatch(ctx, "planDocWrite", req.sessionID, req.agent);
+    if (payload.target !== "tasks" && payload.target !== "mini") {
+      throw new ValidationError("PLAN_WRITE_TARGET_INVALID: target must be tasks or mini");
+    }
+    assertPlanDocWriteName(payload.name);
+    if (typeof payload.content !== "string") throw new ValidationError("PLAN_WRITE_CONTENT_INVALID: content must be a string");
+    const contentBytes = Buffer.byteLength(payload.content, "utf8");
+    if (contentBytes < 1) throw new ValidationError("PLAN_WRITE_CONTENT_INVALID: content must be at least 1 byte");
+    if (contentBytes > PLAN_DOC_WRITE_MAX_BYTES) {
+      throw new ValidationError(`PLAN_WRITE_CONTENT_TOO_LARGE: cap=${PLAN_DOC_WRITE_MAX_BYTES} observed=${contentBytes}`);
+    }
+    if (typeof payload.note !== "string" || payload.note.trim().length === 0 || payload.note.trim().length > 200 || /[\r\n]/.test(payload.note)) {
+      throw new ValidationError("PLAN_WRITE_NOTE_INVALID: note must be non-empty, at most 200 characters, and contain no newline");
+    }
+    if (typeof payload.expectedRevision !== "number" || !Number.isInteger(payload.expectedRevision) || payload.expectedRevision < 0) {
+      throw new ValidationError("PLAN_WRITE_REVISION_INVALID: expectedRevision must be an integer >= 0");
+    }
+    const allowedAgents = payload.target === "tasks"
+      ? ctx.config.planWriterAgents
+      : [...new Set([...ctx.config.planWriterAgents, ...ctx.config.planMiniWriterAgents])];
+    if (typeof payload.agent !== "string" || !allowedAgents.includes(payload.agent)) {
+      throw new ValidationError(`PLAN_WRITE_AGENT_REFUSED: target=${payload.target} allowed=[${allowedAgents.join(", ")}]`);
+    }
+    const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const relative = `odd/${payload.target}/${payload.name}.md`;
+    const destination = resolve(projectRoot, relative);
+    if (!isWithin(projectRoot, destination)) throw new ValidationError("PLAN_WRITE_PATH_ESCAPE: destination escapes project root");
+    const rejected = checkProtectedPaths([relative], [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles]);
+    if (rejected.length > 0) throw new ValidationError(`PLAN_WRITE_PROTECTED_PATH: ${rejected.join(", ")}`);
+    const result = await withPlanDocLock(destination, () =>
+      writePlanDocAtomically(projectRoot, destination, payload.content as string, payload.agent as string, payload.note as string, payload.expectedRevision as number),
+    );
+    return { target: payload.target, path: relative, ...result };
+  };
+}
+
 export const registerProjectOperationMap = {
   registerProject: buildRegisterProjectOp,
 };
