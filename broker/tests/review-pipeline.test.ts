@@ -82,16 +82,50 @@ test("merge summary caps projected validator requests and reports the total", as
 });
 
 test("merge summary validates validator request fields and distinguishes absent from empty", async () => {
-  await expect(invokeMergeWithOutput({ validator_requests: [{ finding_id: 42 }] }))
-    .rejects.toMatchObject({ code: "review_pipeline_validator_requests_invalid", message: expect.stringContaining("0") });
-  await expect(invokeMergeWithOutput({ validator_requests: "invalid" }))
-    .rejects.toMatchObject({ code: "review_pipeline_validator_requests_invalid", message: expect.stringContaining("string") });
+  expect(await invokeMergeWithOutput({ validator_requests: [{ finding_id: 42 }] }))
+    .toMatchObject({ outcome: "invalid_output", code: "review_pipeline_validator_requests_invalid", diagnostic: expect.stringContaining("0") });
+  expect(await invokeMergeWithOutput({ validator_requests: "invalid" }))
+    .toMatchObject({ outcome: "invalid_output", code: "review_pipeline_validator_requests_invalid", diagnostic: expect.stringContaining("string") });
   expect(await invokeMergeWithOutput({})).toMatchObject({ summary: {
     validator_requests: [], validator_request_count: 0, validator_requests_truncated: false, validator_requests_present: false,
   } });
   expect(await invokeMergeWithOutput({ validator_requests: [] })).toMatchObject({ summary: {
     validator_requests: [], validator_request_count: 0, validator_requests_truncated: false, validator_requests_present: true,
   } });
+});
+
+test("merge returns malformed helper output with its published artifact reference", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-prepare.json", Buffer.from("{}"));
+  const bytes = Buffer.from('{"validator_requests":[null]}');
+  const spawn: SpawnFn = async () => ({ status: 0, stdout: bytes.toString(), stderr: "", timedOut: false });
+  const result = await runReviewPipeline(
+    { phase: "merge", runId: writer.record.runId, inputRef: "phase-prepare.json", adjudication: {} },
+    pin.config, spawn, { store: pin.store, sessionID: pin.sessionID },
+  );
+  expect(result).toMatchObject({ outcome: "invalid_output", code: "review_pipeline_validator_requests_invalid", artifact: { name: "phase-merge.json", sha256: expect.stringMatching(/^[0-9a-f]{64}$/) } });
+  if (result.outcome !== "invalid_output") throw new Error("expected invalid_output");
+  expect(readFileSync(join(pin.store.runDir(pin.sessionID, writer.record.runId), result.artifact.name))).toEqual(bytes);
+});
+
+test("finalize rejects malformed validator requests without accepted provenance", async () => {
+  const pin = fixture();
+  const writer = pin.store.createRun(pin.sessionID);
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-prepare.json", Buffer.from("{}"));
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-merge.json", Buffer.from("{}"));
+  pin.store.addArtifact(pin.sessionID, writer.record.runId, "phase-screen-correctness.json", Buffer.from("{}"));
+  const spawn: SpawnFn = async () => ({ status: 0, stdout: '{"validator_requests":[null]}', stderr: "", timedOut: false });
+  const result = await runReviewPipeline({
+    phase: "finalize", runId: writer.record.runId, preparedRef: "phase-prepare.json", mergeRef: "phase-merge.json",
+    dispatch_records: [], validator_lifecycle_results: [], plan_assessment: {}, parent_run_metadata: {},
+  }, pin.config, spawn, { store: pin.store, sessionID: pin.sessionID });
+  expect(result).toMatchObject({ outcome: "invalid_output", code: "review_pipeline_validator_requests_invalid" });
+  expect(pin.store.readRecord(pin.sessionID, writer.record.runId).finalizeProvenance).toBeUndefined();
+});
+
+test("normal merge output remains accepted", async () => {
+  expect(await invokeMergeWithOutput({ validator_requests: [] })).toMatchObject({ outcome: "accepted" });
 });
 
 test("merge summary omits invalid optional fields and truncates projected strings", async () => {

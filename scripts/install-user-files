@@ -588,8 +588,17 @@ elif [[ "$VERIFY" != "1" ]]; then
     if ! resolve_review_helper_interpreter; then exit 1; fi
     mkdir -p "$REVIEW_HELPER_DIR"
     chmod 700 "$REVIEW_HELPER_DIR"
-    cp "$REVIEW_HELPER_SOURCE" "$REVIEW_HELPER_DEST"
-    chmod 600 "$REVIEW_HELPER_DEST"
+    REVIEW_HELPER_TEMP="$(mktemp "$REVIEW_HELPER_DIR/.validate-review.XXXXXX")"
+    chmod 600 "$REVIEW_HELPER_TEMP"
+    cp "$REVIEW_HELPER_SOURCE" "$REVIEW_HELPER_TEMP"
+    INSTALLED_HELPER_SHA256="$(sha256sum "$REVIEW_HELPER_TEMP" | cut -d ' ' -f 1)"
+    if [[ "$INSTALLED_HELPER_SHA256" != "$ANCHORED_HELPER_SHA256" ]]; then
+      rm -f "$REVIEW_HELPER_TEMP"
+      log "error: REVIEW_HELPER_ANCHOR_MISMATCH expected $ANCHORED_HELPER_SHA256 observed $INSTALLED_HELPER_SHA256"
+      exit 1
+    fi
+    mv -f "$REVIEW_HELPER_TEMP" "$REVIEW_HELPER_DEST"
+    REVIEW_HELPER_SHA256="$INSTALLED_HELPER_SHA256"
     printf '{"version":"%s","source":"%s","sha256":"%s"}\n' "$REVIEW_HELPER_VERSION" "$REVIEW_HELPER_SOURCE" "$REVIEW_HELPER_SHA256" >"$REVIEW_HELPER_PIN"
     chmod 600 "$REVIEW_HELPER_PIN"
     sed -i '/^BROKER_REVIEW_HELPER_PATH=/d; /^BROKER_REVIEW_HELPER_SHA256=/d; /^BROKER_REVIEW_HELPER_INTERPRETER=/d' "$BROKER_ENV_DEST"
