@@ -186,6 +186,10 @@ export interface BrokerConfig {
   approvedExternalReadRoots: string[];
   /** Explicit absolute host FILE targets sandbox_copy_out/in may use (S15). */
   externalCopyTargets: string[];
+  /** Agents permitted to author task plan documents. */
+  planWriterAgents: string[];
+  /** Agents permitted to author mini plan documents, in addition to planWriterAgents. */
+  planMiniWriterAgents: string[];
   /** S7 + S17 protected paths (glob patterns, applied to canonical paths). */
   protectedPaths: string[];
   /** S17: security components agents must never modify. */
@@ -424,6 +428,8 @@ export function defaultConfig(
     externalCopyTargets: DEFAULT_EXTERNAL_COPY_TARGETS,
     protectedPaths: DEFAULT_PROTECTED_PATHS,
     protectedSecurityFiles: DEFAULT_PROTECTED_SECURITY_FILES,
+    planWriterAgents: (process.env.BROKER_PLAN_WRITER_AGENTS ?? "planner").split(",").map((agent) => agent.trim()).filter(Boolean),
+    planMiniWriterAgents: (process.env.BROKER_PLAN_MINI_WRITER_AGENTS ?? "pm-odd,pm-systematic").split(",").map((agent) => agent.trim()).filter(Boolean),
     advisorProjects: [],
     reapIntervalMs: positiveIntEnv("BROKER_REAP_INTERVAL_MS", 60_000),
     reapIdleMs: positiveIntEnv("BROKER_REAP_IDLE_MS", 3_600_000),
