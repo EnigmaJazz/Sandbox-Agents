@@ -101,6 +101,8 @@ export interface BrokerClient {
 
 export const OPERATION_TIMEOUT_MS: Record<string, number> = {
   exec: 130_000,
+  // The broker accepts runner timeouts up to 600000 ms; the client budget must exceed that.
+  testRun: 620_000,
   bindSessionAgent: 10_000,
   ensureWorker: 120_000,
   gitCommit: 130_000,

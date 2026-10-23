@@ -3,9 +3,15 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unlink } from "node:fs/promises";
-import { BrokerClientError, createBrokerClient } from "../../opencode/plugins/lib/broker-client.ts";
+import { BrokerClientError, createBrokerClient, OPERATION_TIMEOUT_MS } from "../../opencode/plugins/lib/broker-client.ts";
 
 describe("broker-client NDJSON framing", () => {
+  test("testRun client timeout exceeds the broker's maximum runner timeout", () => {
+    // broker/src/config.ts:406 validates runner timeouts up to 600000 ms.
+    expect(OPERATION_TIMEOUT_MS.testRun).toBeDefined();
+    expect(OPERATION_TIMEOUT_MS.testRun).toBeGreaterThan(600_000);
+  });
+
   test("resolves a response fragmented across multiple socket reads", async () => {
     const socketPath = join(tmpdir(), `broker-client-${randomUUID()}.sock`);
     const server = Bun.listen({ unix: socketPath, socket: { data(sock, chunk) {
