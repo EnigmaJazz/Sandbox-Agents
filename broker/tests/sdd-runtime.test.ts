@@ -549,6 +549,42 @@ describe("host-side review status forwarding", () => {
     expect(result.json).toEqual({ eligible_untracked_inventory: `sha256:${"b".repeat(64)}` });
   });
 
+  test("review status adds guidance only to the terminal correction-required envelope", async () => {
+    const terminal = {
+      schema: "gentle-ai.review-integration.status/v2",
+      next_transition: { kind: "stop", reason_code: "corrupted_or_unverifiable_authority" },
+      authority: { state: "correction_required" },
+    };
+    const terminalSpawn: SpawnFn = async () => ({
+      status: 0,
+      stdout: JSON.stringify(terminal),
+      stderr: "",
+      timedOut: false,
+    });
+    const terminalResult = await makeExecutor(terminalSpawn).reviewStatus({
+      projectDir: configuredProjectRoot,
+    });
+    expect(
+      (terminalResult.json as { operator_guidance?: { condition?: string } }).operator_guidance?.condition,
+    ).toBe("correction_required_unreachable");
+
+    const healthy = {
+      ...terminal,
+      next_transition: { kind: "collect" },
+    };
+    const healthySpawn: SpawnFn = async () => ({
+      status: 0,
+      stdout: JSON.stringify(healthy),
+      stderr: "",
+      timedOut: false,
+    });
+    const healthyResult = await makeExecutor(healthySpawn).reviewStatus({
+      projectDir: configuredProjectRoot,
+    });
+    expect(healthyResult.json).toEqual(healthy);
+    expect(healthyResult.json).not.toHaveProperty("operator_guidance");
+  });
+
   test("surfaces bounded stderr when stdout is empty or not JSON", async () => {
     const emptySpawn: SpawnFn = async () => ({
       status: 1,

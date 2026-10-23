@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { ProjectConfig } from "./config.ts";
+import { addOperatorGuidance } from "./review-guidance.ts";
 import type { SpawnFn } from "./msb.ts";
 import type { ReviewLens } from "./types.ts";
 import { capAndRedact } from "./gitops.ts";
@@ -678,7 +679,7 @@ export class SddRuntimeExecutor {
     intendedUntrackedSelection?: unknown;
   }): Promise<SddRuntimeResult> {
     const projectRoot = this.resolveProjectRoot(payload.projectDir);
-    return this.run(
+    const result = await this.run(
       buildReviewStatusArgv({
         binary: this.options.binary,
         projectRoot,
@@ -703,6 +704,7 @@ export class SddRuntimeExecutor {
       }),
       projectRoot,
     );
+    return { ...result, json: addOperatorGuidance(result.json) };
   }
 
   /**
