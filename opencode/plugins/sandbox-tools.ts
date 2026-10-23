@@ -993,6 +993,31 @@ export default function sandboxToolsPlugin() {
         },
       }),
 
+      host_plan_write: tool({
+        description:
+          "Replace one allowlisted odd/tasks or odd/mini plan document using an expected revision. " +
+          "Plan text is not authority; trust decisions remain in host_gate_verdict and host_task_mark. " +
+          "No approval is requested because the revision log is the compensating control. Returns JSON.",
+        args: {
+          target: z.enum(["tasks", "mini"]),
+          name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+          content: z.string().min(1).max(256 * 1024),
+          expectedRevision: z.number().int().min(0),
+          note: z.string().min(1).max(200),
+        },
+        execute: async (args, ctx) => {
+          // Plan text is not authority: trust is decided by host_gate_verdict and host_task_mark;
+          // the append-only revision log is the compensating control for this no-approval write.
+          const c = await client();
+          const result = await c.request("planDocWrite", ctx.sessionID, {
+            projectDir: currentProjectDirectory(ctx.directory),
+            ...args,
+            agent: ctx.agent,
+          }, ctx.agent);
+          return JSON.stringify(result, null, 2);
+        },
+      }),
+
       host_plan_append: tool({
         description:
           "Append approved content to an allowlisted plan document (orchestrator-only mutation; " +
@@ -1306,11 +1331,14 @@ export default function sandboxToolsPlugin() {
         : {}),
     },
     "chat.params": async (input: unknown) => {
-      // Host-authoritative session->agent binding: only a host-resolved
-      // orchestrator identity is recorded, and only via this plugin hook (the
-      // operation is never a host_* / sandbox_* tool). Best-effort failure
+      // Host-authoritative session->agent binding: the broker records who the
+      // host says the session is. Authorization remains in the role matrix, so
+      // an unknown identity binds and is then denied. Best-effort failure
       // leaves host mutations failing closed rather than blocking the chat.
-      const binding = hostSessionBinding(input, READ_ONLY_AGENTS);
+      const binding = hostSessionBinding(
+        input,
+        [typeof input === "object" && input !== null && "agent" in input && typeof input.agent === "string" ? input.agent : ""],
+      );
       if (!binding) return;
       try {
         const c = await client();
