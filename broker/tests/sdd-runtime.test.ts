@@ -1260,3 +1260,46 @@ describe("host-side review lens-context and inline capture", () => {
     }
   });
 });
+
+describe("closure guidance on review captures", () => {
+  const closure = {
+    schema: "gentle-ai.review-last-event-closure/v1",
+    state: "correction_required",
+    status_continuation: { token: "status-token" },
+  };
+
+  test("adds closure guidance to refuter and result captures without changing status or stderr", async () => {
+    const spawn: SpawnFn = async () => ({
+      status: 17,
+      stdout: JSON.stringify(closure),
+      stderr: "provider stderr",
+      timedOut: false,
+    });
+    const executor = makeExecutor(spawn);
+
+    const refuter = await executor.reviewCaptureRefuter({ projectDir: configuredProjectRoot });
+    const result = await executor.reviewCaptureResult({ projectDir: configuredProjectRoot });
+
+    for (const capture of [refuter, result]) {
+      expect((capture.json as Record<string, unknown>).operator_guidance).toMatchObject({
+        condition: "correction_required_reached",
+      });
+      expect(capture.status).toBe(17);
+      expect(capture.stderr).toBe("provider stderr");
+    }
+  });
+
+  test("does not add guidance to approved closure capture", async () => {
+    const spawn: SpawnFn = async () => ({
+      status: 0,
+      stdout: JSON.stringify({ ...closure, state: "approved" }),
+      stderr: "",
+      timedOut: false,
+    });
+    const result = await makeExecutor(spawn).reviewCaptureResult({
+      projectDir: configuredProjectRoot,
+    });
+
+    expect(result.json).not.toHaveProperty("operator_guidance");
+  });
+});

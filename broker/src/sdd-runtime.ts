@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { ProjectConfig } from "./config.ts";
-import { addOperatorGuidance } from "./review-guidance.ts";
+import { addClosureGuidance, addOperatorGuidance } from "./review-guidance.ts";
 import type { SpawnFn } from "./msb.ts";
 import type { ReviewLens } from "./types.ts";
 import { capAndRedact } from "./gitops.ts";
@@ -797,7 +797,7 @@ export class SddRuntimeExecutor {
       stagedInput = stageReviewInputJson(this.requireReviewInputDir(), rawInputJson);
     }
     try {
-      return await this.run(
+      const result = await this.run(
         buildReviewArgv("reviewCaptureResult", {
           binary: this.options.binary,
           projectRoot,
@@ -807,6 +807,7 @@ export class SddRuntimeExecutor {
         projectRoot,
         true,
       );
+      return { ...result, json: addClosureGuidance(result.json) };
     } finally {
       if (stagedInput !== undefined && stagedInput !== "-") {
         try {
@@ -840,7 +841,8 @@ export class SddRuntimeExecutor {
     return this.runReview("reviewCaptureCorrectionPlan", payload);
   }
   async reviewCaptureRefuter(payload: Record<string, unknown>): Promise<SddRuntimeResult> {
-    return this.runReview("reviewCaptureRefuter", payload);
+    const result = await this.runReview("reviewCaptureRefuter", payload);
+    return { ...result, json: addClosureGuidance(result.json) };
   }
   async reviewCaptureValidation(payload: Record<string, unknown>): Promise<SddRuntimeResult> {
     return this.runReview("reviewCaptureValidation", payload);

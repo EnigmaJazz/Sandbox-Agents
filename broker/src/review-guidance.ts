@@ -22,7 +22,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// This guidance is emitted only on that exact pair and carries the observed build so it can be retired when upstream fixes the defect.
+// These two guidance variants carry the observed build so they can be retired when upstream fixes the defect. Status guidance requires a terminal stop with corrupted authority; closure guidance is weaker because correction_required may still lead to a healthy correction phase.
 export function addOperatorGuidance(json: unknown): unknown {
   if (!isRecord(json)) return json;
 
@@ -41,4 +41,25 @@ export function addOperatorGuidance(json: unknown): unknown {
   }
 
   return { ...json, operator_guidance: { ...REVIEW_OPERATOR_GUIDANCE } };
+}
+
+const REVIEW_CLOSURE_GUIDANCE = {
+  condition: "correction_required_reached",
+  upstream: "https://github.com/Gentleman-Programming/gentle-ai/issues/4571",
+  observed_on: REVIEW_GUIDANCE_OBSERVED_BUILD,
+  next_step:
+    "Run the returned status_continuation verbatim, with its tokens unchanged. If that status reports reason_code corrupted_or_unverifiable_authority, this lineage is unreachable: do not run review recover without a maintainer authorization value; fix the corroborated finding if it is real, commit, and start a new lineage on the new target.",
+} as const;
+
+export function addClosureGuidance(json: unknown): unknown {
+  if (
+    !isRecord(json) ||
+    typeof json.schema !== "string" ||
+    !json.schema.startsWith("gentle-ai.review-last-event-closure/") ||
+    json.state !== "correction_required"
+  ) {
+    return json;
+  }
+
+  return { ...json, operator_guidance: { ...REVIEW_CLOSURE_GUIDANCE } };
 }
