@@ -176,7 +176,9 @@ function payloadOf(req: BrokerRequestEnvelope): Payload {
  * only). Reads are open to every agent; mutations require the broker-derived
  * trusted agent to be an orchestrator identity (config `readOnlyAgents`). The
  * envelope `agent` is caller-controlled and never authorizes: only the broker
- * session record's agent is trusted, so an unknown session fails closed.
+ * session record's agent is trusted, so an unknown session fails closed. In the
+ * plan-writer category, plan roles may write and certify while configured
+ * read-only orchestrators may write drafts only.
  */
 export type HostDispatchCategory = "orchestrator" | "plan-writer";
 
@@ -192,9 +194,10 @@ export function authorizeHostDispatch(
   const trusted = existing?.agent;
   const access = policy.access(operation);
   if (category === "plan-writer") {
+    const isPlanRole = trusted && ["planner", "pm"].includes(normalizeRoleKey(trusted));
     if (
-      (operation === "planDocWrite" || operation === "gateVerdict") &&
-      trusted && ["planner", "pm"].includes(normalizeRoleKey(trusted))
+      (operation === "planDocWrite" && trusted && (isPlanRole || ctx.config.readOnlyAgents.includes(trusted))) ||
+      (operation === "gateVerdict" && isPlanRole)
     ) return access;
     throw new PolicyError(
       `host ${access} tool "${operation}" requires plan-writer category (HOST_MUTATION_NOT_PLAN_WRITER)`,

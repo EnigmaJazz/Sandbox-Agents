@@ -3,7 +3,7 @@ import { linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, sy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
-import { assertPlanDocBytesUnchanged, buildGateVerdictOp, buildPlanDocWriteOp, readLatestGateVerdict } from "../src/service.ts";
+import { assertPlanDocBytesUnchanged, authorizeHostDispatch, buildGateVerdictOp, buildPlanDocWriteOp, readLatestGateVerdict } from "../src/service.ts";
 import { ValidationError } from "../src/validation.ts";
 import type { BrokerRequestEnvelope, SessionRecord } from "../src/types.ts";
 
@@ -60,10 +60,31 @@ describe("host plan document write", () => {
     expect(config.planMiniWriterAgents).toEqual(["pm-odd", "pm-systematic"]);
   });
 
+  test("authorizes draft writes for plan roles and configured read-only orchestrators only", () => {
+    const root = mkdtempSync(join(tmpdir(), "plan-doc-auth-"));
+    try {
+      const authorize = (identity: string, operation: string) =>
+        authorizeHostDispatch(makeContext(root, identity), operation, "session-write", undefined, "plan-writer");
+
+      expect(authorize("planner", "planDocWrite")).toBe("mutation");
+      expect(authorize("pm-odd", "planDocWrite")).toBe("mutation");
+      expect(authorize(ORCHESTRATOR, "planDocWrite")).toBe("mutation");
+      expect(authorize("planner", "gateVerdict")).toBe("mutation");
+      expect(() => authorize(ORCHESTRATOR, "gateVerdict")).toThrow(/HOST_MUTATION_NOT_PLAN_WRITER/);
+
+      const unbound = makeContext(root, "planner") as { config: { readOnlyAgents: string[] }; store: { get: () => undefined } };
+      unbound.store = { get: () => undefined };
+      expect(() => authorizeHostDispatch(unbound as never, "planDocWrite", "session-write", undefined, "plan-writer"))
+        .toThrow(/HOST_MUTATION_NOT_PLAN_WRITER/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("planner and PM sessions may write only through their bound identity", withProject(async (root) => {
     await expect(write(root, {}, "planner", "planner")).resolves.toMatchObject({ revision: 1 });
     await expect(write(root, { target: "mini", name: "mini-plan", content: "---\nroute: odd\n---\n# Mini" }, "pm-odd", "pm-odd")).resolves.toMatchObject({ revision: 1 });
-    await expect(write(root, { name: "orchestrator-plan" }, "planner", ORCHESTRATOR)).rejects.toThrow(/plan-writer category/i);
+    await expect(write(root, { name: "orchestrator-plan" }, "planner", ORCHESTRATOR)).rejects.toThrow(/PLAN_WRITE_AGENT_MISMATCH/);
   }));
 
   test("refuses payload agent spoofing and missing agent", withProject(async (root) => {
