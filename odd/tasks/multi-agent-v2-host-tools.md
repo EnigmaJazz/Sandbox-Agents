@@ -26,8 +26,8 @@ Out: native 4R review changes; the ce:review contract revision; Magic Context mi
 - **T3** Bind every host-resolved session identity. Status: committed as `a8b2b13`.
 - **T4** `host_gate_verdict` broker operation and plugin tool, append-only gate log and `readLatestGateVerdict`. Status: committed as `b4d2500`.
 - **T5** `host_task_mark` with an injected tier assessor in `OpContext`. Status: NOT STARTED.
-- **T6** Plan-root apply protection behind a config flag. Status: NOT STARTED.
-- **T7** Coordinated flip: workflow text plus protection enablement. Status: NOT STARTED.
+- **T6** Plan-root apply protection behind a config flag. Status: NOT STARTED. Must be written as its own work unit capped at 400 authored changed lines.
+- **T7** Coordinated flip: workflow text plus protection enablement. Status: NOT STARTED. Must be written as a separate work unit capped at 400 authored changed lines.
 - **T8** Threat-model entry for the no-ask decision. Status: OWNER.
 
 ## Acceptance criteria
@@ -70,6 +70,21 @@ b47924e docs(todo): record the correction_required diagnosis and the install div
 `bun --cwd broker test --reporter=dot` — 1272 pass / 0 fail.
 
 Unit status evidence: T1 has no matching commit subject in the top-ten log and no tracked worktree changes; status is not established. T2 has commit `3c17309`; T3 has commit `a8b2b13`; T4 has commit `b4d2500`. For T2 to T4, the available Git commands identify Git commits, not separate `host_sandbox_result_install` result-commit IDs. The only uncommitted path reported is the untracked bundle above, not unit source.
+
+## Native review history and boundary decision
+
+The native review lineage history for the multi-agent v2 tool surface starts from base `3a2e734`:
+
+- **`review-d8ed42856e727cd2`** — 29 paths, 1942 lines, high risk. Four lenses and a refuter. Two CRITICAL findings were corroborated: a `planDocWrite` after a `gateVerdict` erased the `## Gates` section, and `authorizeHostDispatch` changed denial text for existing operations. Both were fixed in `ebb485a`. The lineage wedged in `correction_required`; no authority was issued.
+- **`review-668150ccd508581c`** — 30 paths, 2118 lines, high risk. Four lenses and a refuter. Four findings were corroborated: broker-owned plan frontmatter was accepted; PM mini writes were unrestricted by route; the plugin still advertised a clean-tree gate the broker no longer enforced; provenance work was unbounded and synchronous inside the lock. One finding was `inconclusive`: registry missing `testRun`, contradicted by successful live calls. All four corroborated findings were fixed in `0985475`. The lineage wedged in `correction_required`; no authority was issued.
+- The root cause of both wedges is the upstream Gentle AI defect, open as `Gentleman-Programming/gentle-ai#4571`: `correction_required` is written with `fix_delta_hash` equal to the SHA-256 of empty input at `capture_phase_epoch: 1`, and the only transition offered in that state cannot supply a correction delta. We observed this on 4.2.0; other reporters have reported it from 2.8.2 onward.
+- **Third attempt: NOT STARTED.** The owner decided to stop growing the candidate rather than run a third review of a 2220-line slice.
+
+**Owner decision:** the reviewed boundary is advanced to `0985475` **without native review authority**. This is an explicit owner decision, not a review result. The slice grew because each correction round added code to the same candidate; a 2000+ line candidate on this surface keeps producing real defects, and each round makes the next candidate larger, so no round can converge while the defect blocks correction cycles.
+
+**Residual risk:** 2220 lines of broker, plugin and config changes are covered by the 1306-test suite, two independent post-code advisory passes, and two rounds of evidence-based review findings that were fixed — but they carry no native review authority record.
+
+**Policy from this point:** one work unit per candidate, capped at about 400 authored changed lines, reviewed before the next unit starts, with `--base-ref` set to the previous reviewed commit. If a unit would exceed the cap, split it before writing code, not after.
 
 ## Accepted residual risks
 - A concurrent writer with access to the project tree could swap the destination parent for a symlink between the final path check and `renameSync`; plan-root apply protection is intended to remove this attacker precondition, while closing the race requires directory-fd `renameat` support that Node does not expose.
