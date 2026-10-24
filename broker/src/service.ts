@@ -2011,11 +2011,10 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
       baselineRefName,
       resultRefName,
     );
-    // These planner-owned roots are protected only at apply time, when opted in.
+    // S7/S17 protections are evaluated first and retain their existing refusal.
     const rejectedProtected = checkProtectedPaths(changed, [
       ...ctx.config.protectedPaths,
       ...ctx.config.protectedSecurityFiles,
-      ...planRootPatterns(ctx.config),
     ]);
     if (rejectedProtected.length > 0) {
       ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
@@ -2024,6 +2023,14 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
       throw new StateError(
         `result touches protected paths (S7/S17): ${rejectedProtected.join(", ")}`,
       );
+    }
+
+    // These planner-owned roots are protected only at apply time, when opted in.
+    const rejectedPlanRoot = checkProtectedPaths(changed, planRootPatterns(ctx.config));
+    if (rejectedPlanRoot.length > 0) {
+      const error = `result touches plan-root paths (BROKER_PLAN_ROOT_PROTECTION): ${rejectedPlanRoot.join(", ")}`;
+      ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", { error });
+      throw new StateError(error);
     }
 
     const rawChanges = await rawChangesBetween(

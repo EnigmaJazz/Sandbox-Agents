@@ -16,9 +16,10 @@ const applyRequest: BrokerRequestEnvelope = {
   payload: { confirm: "APPLY" },
 };
 
-function makeApplyContext(changedPath: string, planRootProtection?: boolean): {
+function makeApplyContext(changedPath: string | string[], planRootProtection?: boolean): {
   ctx: OpContext;
   calls: string[][];
+  getRecord: () => SessionRecord;
 } {
   const stateDir = mkdtempSync(join(tmpdir(), "plan-root-protection-"));
   stateDirs.push(stateDir);
@@ -73,12 +74,12 @@ function makeApplyContext(changedPath: string, planRootProtection?: boolean): {
         calls.push(argv);
         if (argv.includes("ls-files")) return ok("100644 base 0\topenspec/link\n");
         if (argv.includes("ls-tree")) return ok("100644 blob base\topenspec/link\n");
-        if (argv.includes("--name-only")) return ok(`${changedPath}\0`);
+        if (argv.includes("--name-only")) return ok(`${(typeof changedPath === "string" ? [changedPath] : changedPath).join("\0")}\0`);
         return ok("");
       },
     },
   } as unknown as OpContext;
-  return { ctx, calls };
+  return { ctx, calls, getRecord: () => record };
 }
 
 afterEach(() => {
@@ -236,10 +237,14 @@ describe("apply-time plan-root protection", () => {
   test.each(["odd/tasks/some-task.md", "odd/mini/some-plan.md"])(
     "refuses %s when plan-root protection is enabled and names the path",
     async (path) => {
-      const { ctx, calls } = makeApplyContext(path, true);
-      await expect(buildApplyResultOp(ctx)(applyRequest)).rejects.toThrow(
-        `result touches protected paths (S7/S17): ${path}`,
+      const { ctx, calls, getRecord } = makeApplyContext(path, true);
+      const error = buildApplyResultOp(ctx)(applyRequest);
+      await expect(error).rejects.toThrow(
+        `result touches plan-root paths (BROKER_PLAN_ROOT_PROTECTION): ${path}`,
       );
+      await expect(error).rejects.not.toThrow("S7/S17");
+      expect(getRecord().state).toBe("RESULT_READY");
+      expect(getRecord().error).toBe(`result touches plan-root paths (BROKER_PLAN_ROOT_PROTECTION): ${path}`);
       expect(calls.some((argv) => argv.includes("apply"))).toBe(false);
     },
   );
@@ -250,6 +255,15 @@ describe("apply-time plan-root protection", () => {
     await expect(buildApplyResultOp(ctx)(applyRequest)).rejects.toThrow(
       `result touches protected paths (S7/S17): ${path}`,
     );
+  });
+
+  test("reports S7/S17 before plan-root protection when both match", async () => {
+    const paths = ["odd/tasks/x.md", "broker/src/service.ts"];
+    const { ctx, getRecord } = makeApplyContext(paths, true);
+    const expected = "result touches protected paths (S7/S17): broker/src/service.ts";
+    await expect(buildApplyResultOp(ctx)(applyRequest)).rejects.toThrow(expected);
+    expect(getRecord().state).toBe("RESULT_READY");
+    expect(getRecord().error).toBe("result touches protected paths: broker/src/service.ts");
   });
 
   test("allows unrelated changes when plan-root protection is enabled", async () => {
