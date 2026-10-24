@@ -3847,28 +3847,53 @@ function testRunRefusal(code: string, detail: string): ValidationError {
   return new ValidationError(`${code}: ${detail}`);
 }
 
-/** Pre-run snapshot only; no post-run divergence flag is emitted because that would require hashing the worktree twice. */
+/** Pre-run snapshot only; synchronous provenance is limited to 50 dirty paths and a 5-second total git budget. */
 type TestRunProvenance = {
   gitHead: string | null;
   dirtyPaths: string[];
   dirtyPathsTruncated?: true;
+  provenanceTruncated?: true;
   worktreeDigest: string | null;
 };
 
-function testRunProvenance(projectRoot: string, environment: Record<string, string>): TestRunProvenance {
-  const empty: TestRunProvenance = { gitHead: null, dirtyPaths: [], worktreeDigest: null };
-  try {
-    const git = (args: string[]) => spawnSync("git", ["-C", projectRoot, ...args], {
+const TEST_RUN_PROVENANCE_MAX_PATHS = 50;
+const TEST_RUN_PROVENANCE_BUDGET_MS = 5_000;
+
+type ProvenanceGitResult = { status: number | null; stdout: string };
+type ProvenanceGitRunner = (args: string[], timeoutMs: number) => ProvenanceGitResult;
+
+export function testRunProvenance(
+  projectRoot: string,
+  environment: Record<string, string>,
+  runGit: ProvenanceGitRunner = (args, timeoutMs) => {
+    const result = spawnSync("git", ["-C", projectRoot, ...args], {
       env: environment,
       encoding: "utf8",
-      timeout: 30_000,
+      timeout: timeoutMs,
       maxBuffer: 2 * 1024 * 1024,
     });
+    return { status: result.status, stdout: result.stdout };
+  },
+): TestRunProvenance {
+  const empty: TestRunProvenance = { gitHead: null, dirtyPaths: [], worktreeDigest: null };
+  const startedAt = Date.now();
+  let provenanceTruncated = false;
+  const git = (args: string[]): ProvenanceGitResult => {
+    const remainingMs = TEST_RUN_PROVENANCE_BUDGET_MS - (Date.now() - startedAt);
+    if (remainingMs <= 0) {
+      provenanceTruncated = true;
+      return { status: null, stdout: "" };
+    }
+    const result = runGit(args, Math.max(1, remainingMs));
+    if (result.status === null || Date.now() - startedAt >= TEST_RUN_PROVENANCE_BUDGET_MS) provenanceTruncated = true;
+    return result;
+  };
+  try {
     const headResult = git(["rev-parse", "--verify", "HEAD"]);
     const headText = headResult.status === 0 ? headResult.stdout.trim() : "";
     const gitHead = /^[0-9a-f]{40}$/.test(headText) ? headText : null;
     const status = git(["status", "--porcelain=v1", "-z"]);
-    if (status.status !== 0) return empty;
+    if (status.status !== 0) return { ...empty, ...(provenanceTruncated ? { provenanceTruncated: true as const } : {}) };
     const records = status.stdout.split("\0").filter(Boolean);
     const paths = new Set<string>();
     for (let index = 0; index < records.length; index++) {
@@ -3880,11 +3905,15 @@ function testRunProvenance(projectRoot: string, environment: Record<string, stri
     const sortedPaths = [...paths].sort();
     const digest = createHash("sha256");
     digest.update(JSON.stringify([gitHead, sortedPaths]));
-    for (const path of sortedPaths) {
+    if (sortedPaths.length > TEST_RUN_PROVENANCE_MAX_PATHS) provenanceTruncated = true;
+    for (const path of sortedPaths.slice(0, TEST_RUN_PROVENANCE_MAX_PATHS)) {
+      if (provenanceTruncated && Date.now() - startedAt >= TEST_RUN_PROVENANCE_BUDGET_MS) break;
       // Hash both the index blob and worktree bytes; NUL framing makes serialization unambiguous.
-      const staged = git(["ls-files", "--stage", "-z", "--", path]).stdout;
-      const stagedHash = staged.split("\0").filter(Boolean).map((line) => line.split(/\s+/)[1] ?? "").sort();
+      const staged = git(["ls-files", "--stage", "-z", "--", path]);
+      if (staged.status === null || Date.now() - startedAt >= TEST_RUN_PROVENANCE_BUDGET_MS) break;
+      const stagedHash = staged.stdout.split("\0").filter(Boolean).map((line) => line.split(/\s+/)[1] ?? "").sort();
       const worktree = git(["hash-object", "--", path]);
+      if (worktree.status === null || Date.now() - startedAt >= TEST_RUN_PROVENANCE_BUDGET_MS) break;
       const worktreeHash = worktree.status === 0 ? worktree.stdout.trim() : "";
       digest.update("\0").update(path).update("\0").update(JSON.stringify(stagedHash)).update("\0").update(worktreeHash);
     }
@@ -3892,10 +3921,11 @@ function testRunProvenance(projectRoot: string, environment: Record<string, stri
       gitHead,
       dirtyPaths: sortedPaths.slice(0, 200),
       ...(sortedPaths.length > 200 ? { dirtyPathsTruncated: true as const } : {}),
+      ...(provenanceTruncated ? { provenanceTruncated: true as const } : {}),
       worktreeDigest: `sha256:${digest.digest("hex")}`,
     };
   } catch {
-    return empty;
+    return { ...empty, ...(provenanceTruncated ? { provenanceTruncated: true as const } : {}) };
   }
 }
 
@@ -4288,6 +4318,21 @@ export function buildGateVerdictOp(ctx: OpContext): OpHandler {
   };
 }
 
+function leadingPlanFrontmatter(content: string): string | null {
+  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(content);
+  return match?.[1] ?? null;
+}
+
+function hasFrontmatterKey(frontmatter: string, key: string): boolean {
+  return frontmatter.split(/\r?\n/).some((line) => new RegExp(`^${key}:[ \t]*`).test(line));
+}
+
+function frontmatterValue(frontmatter: string, key: string): string | null {
+  const line = frontmatter.split(/\r?\n/).find((entry) => new RegExp(`^${key}:[ \t]*`).test(entry));
+  if (line === undefined) return null;
+  return line.slice(line.indexOf(":") + 1).replace(/\s+#.*$/, "").trim().replace(/^(['"])(.*)\1$/, "$2");
+}
+
 export function buildPlanDocWriteOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const payload = payloadOf(req) as {
@@ -4311,6 +4356,22 @@ export function buildPlanDocWriteOp(ctx: OpContext): OpHandler {
     if (contentBytes < 1) throw new ValidationError("PLAN_WRITE_CONTENT_INVALID: content must be at least 1 byte");
     if (contentBytes > PLAN_DOC_WRITE_MAX_BYTES) {
       throw new ValidationError(`PLAN_WRITE_CONTENT_TOO_LARGE: cap=${PLAN_DOC_WRITE_MAX_BYTES} observed=${contentBytes}`);
+    }
+    const frontmatter = leadingPlanFrontmatter(payload.content);
+    const route = frontmatter === null ? null : frontmatterValue(frontmatter, "route");
+    if (payload.target === "mini" && boundIdentity !== "planner") {
+      // The contract does not define a canonical Sol route spelling; refuse the token case-insensitively.
+      if (!route || route.toLowerCase() === "sol") {
+        throw new ValidationError("PLAN_WRITE_PM_ROUTE_REFUSED: PM mini plans require a frontmatter route other than Sol");
+      }
+    }
+    if (frontmatter !== null) {
+      const brokerKeys = ["route", "tier", "gate"].filter((key) => hasFrontmatterKey(frontmatter, key));
+      const permittedMiniRoute = payload.target === "mini" && route !== null && route.toLowerCase() !== "sol";
+      const refusedKeys = brokerKeys.filter((key) => key !== "route" || !permittedMiniRoute);
+      if (refusedKeys.length > 0) {
+        throw new ValidationError(`PLAN_WRITE_BROKER_FRONTMATTER_REFUSED: ${refusedKeys.join(", ")}`);
+      }
     }
     const embeddedSection = scanPlanDocHeadings(payload.content).find((heading) =>
       heading.level === 2 && (heading.text === "Revisions" || heading.text === "Gates"),

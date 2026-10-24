@@ -995,11 +995,12 @@ export default function sandboxToolsPlugin() {
 
       host_test_run: tool({
         description:
-          "Run one broker-configured test runner against a registered project only when its tracked working tree is clean. " +
+          "Run one broker-configured test runner against the current working tree of a registered project, including uncommitted changes. " +
+          "The result reports gitHead, dirtyPaths, and worktreeDigest so the caller knows which bytes ran. " +
           "The broker owns the fixed executable, argv, environment, timeout, output cap, and log artifact; no command text is accepted. Returns JSON.",
         args: { runner: z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/) },
         execute: async (args, ctx) => {
-          // The broker's clean-tree precondition is the compensating control against executing uncommitted agent-written code.
+          // The broker records pre-run provenance for the current working tree, including uncommitted changes.
           const c = await client();
           const result = await c.request("testRun", ctx.sessionID, {
             projectDir: currentProjectDirectory(ctx.directory),

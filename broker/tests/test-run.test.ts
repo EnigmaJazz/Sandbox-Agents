@@ -3,7 +3,8 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
-import { buildTestRunOp } from "../src/service.ts";
+import { buildTestRunOp, testRunProvenance } from "../src/service.ts";
+import { validateEnvelope } from "../src/validation.ts";
 import type { BrokerRequestEnvelope } from "../src/types.ts";
 
 const roots: string[] = [];
@@ -48,6 +49,10 @@ async function initializeRepo(root: string): Promise<void> {
   Bun.spawnSync(["git", "add", "tracked.txt"], { cwd: root });
   Bun.spawnSync(["git", "commit", "-qm", "initial"], { cwd: root });
 }
+
+test("testRun is accepted by the canonical request envelope registry", () => {
+  expect(validateEnvelope(request("/project"))).toMatchObject({ operation: "testRun" });
+});
 
 test("runner configuration rejects duplicate IDs", () => {
   process.env.BROKER_TEST_RUNNERS = JSON.stringify([runner(".", ["/usr/bin/true"]), runner(".", ["/usr/bin/true"])]);
@@ -101,10 +106,28 @@ test("dirty path provenance is capped at 200 and marks truncation", async () => 
   await initializeRepo(root);
   for (let index = 0; index < 205; index++) writeFileSync(join(root, `dirty-${index}.txt`), "new\n");
   const op = buildTestRunOp(context(root));
-  const result = await op(request(root)) as { dirtyPaths: string[]; dirtyPathsTruncated?: boolean };
+  const result = await op(request(root)) as { dirtyPaths: string[]; dirtyPathsTruncated?: boolean; provenanceTruncated?: boolean };
   expect(result.dirtyPaths).toHaveLength(200);
   expect(result.dirtyPathsTruncated).toBe(true);
+  expect(result.provenanceTruncated).toBe(true);
 });
+
+test("provenance truncates when a slow git call consumes its remaining budget", () => {
+  const root = tempRoot();
+  let hashTimeout = 0;
+  const result = testRunProvenance(root, {}, (args, timeoutMs) => {
+    if (args[0] === "rev-parse") return { status: 0, stdout: `${"a".repeat(40)}\n` };
+    if (args[0] === "status") return { status: 0, stdout: " M tracked.txt\0" };
+    if (args[0] === "ls-files") return { status: 0, stdout: "" };
+    hashTimeout = timeoutMs;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, timeoutMs + 20);
+    return { status: null, stdout: "" };
+  });
+  expect(hashTimeout).toBeGreaterThan(0);
+  expect(hashTimeout).toBeLessThanOrEqual(5000);
+  expect(result.dirtyPaths).toContain("tracked.txt");
+  expect(result.provenanceTruncated).toBe(true);
+}, 7_000);
 
 test("worktree digest is stable and changes when dirty content changes", async () => {
   const root = tempRoot();

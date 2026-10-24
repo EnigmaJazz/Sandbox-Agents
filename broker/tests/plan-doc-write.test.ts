@@ -62,7 +62,7 @@ describe("host plan document write", () => {
 
   test("planner and PM sessions may write only through their bound identity", withProject(async (root) => {
     await expect(write(root, {}, "planner", "planner")).resolves.toMatchObject({ revision: 1 });
-    await expect(write(root, { target: "mini", name: "mini-plan" }, "pm-odd", "pm-odd")).resolves.toMatchObject({ revision: 1 });
+    await expect(write(root, { target: "mini", name: "mini-plan", content: "---\nroute: odd\n---\n# Mini" }, "pm-odd", "pm-odd")).resolves.toMatchObject({ revision: 1 });
     await expect(write(root, { name: "orchestrator-plan" }, "planner", ORCHESTRATOR)).rejects.toThrow(/plan-writer category/i);
   }));
 
@@ -145,8 +145,8 @@ describe("host plan document write", () => {
   test("uses target-specific agent allowlists", withProject(async (root) => {
     const restricted = { planWriterAgents: ["other"] };
     await rejectsValidation(write(root, {}, "planner", "planner", restricted), /tasks.*allowed/i);
-    await rejectsValidation(write(root, { target: "mini", name: "mini-plan" }, "planner", "planner", restricted), /mini.*allowed/i);
-    await write(root, { target: "mini", name: "mini-plan" }, "pm-odd", "pm-odd");
+    await rejectsValidation(write(root, { target: "mini", name: "mini-plan", content: "---\nroute: odd\n---\n# Mini" }, "planner", "planner", restricted), /mini.*allowed/i);
+    await write(root, { target: "mini", name: "mini-plan", content: "---\nroute: odd\n---\n# Mini" }, "pm-odd", "pm-odd");
     await rejectsValidation(write(root, { target: "tasks", name: "task-plan" }, "pm-odd", "pm-odd"), /tasks.*allowed/i);
   }));
 
@@ -210,6 +210,21 @@ describe("host plan document write", () => {
     linkSync(source, join(root, "odd/tasks/phase-two.md"));
     await rejectsValidation(write(root, {}), /hardlink.*2|link count.*2/i);
     expect(readFileSync(source, "utf8")).toBe("# Shared plan");
+  }));
+
+  test("refuses broker-owned frontmatter keys but ignores body mentions", withProject(async (root) => {
+    for (const key of ["route", "tier", "gate"]) {
+      await rejectsValidation(write(root, { content: `---\n${key}: value\n---\n# Plan` }), /PLAN_WRITE_BROKER_FRONTMATTER_REFUSED/);
+    }
+    await expect(write(root, { content: "# Plan\n\ntier: mentioned in the body" })).resolves.toMatchObject({ revision: 1 });
+  }));
+
+  test("PM mini writes require a no-Sol frontmatter route", withProject(async (root) => {
+    const pmWrite = (content: string) => write(root, { target: "mini", name: "mini-plan", content }, "pm-odd", "pm-odd");
+    await rejectsValidation(pmWrite("---\nroute: sol\n---\n# Mini"), /PLAN_WRITE_PM_ROUTE_REFUSED/);
+    await expect(pmWrite("---\nroute: odd\n---\n# Mini")).resolves.toMatchObject({ revision: 1 });
+    await rejectsValidation(pmWrite("# Mini without route"), /PLAN_WRITE_PM_ROUTE_REFUSED/);
+    await expect(write(root, { target: "tasks", content: "# Task without route" })).resolves.toMatchObject({ revision: 1 });
   }));
 
   test("returns the UTF-8 byte count", withProject(async (root) => {
