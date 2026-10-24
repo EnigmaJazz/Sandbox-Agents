@@ -1976,9 +1976,13 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
       baselineRefName,
       resultRefName,
     );
+    // These planner-owned roots are protected only at apply time, when opted in.
     const rejectedProtected = checkProtectedPaths(changed, [
       ...ctx.config.protectedPaths,
       ...ctx.config.protectedSecurityFiles,
+      ...(ctx.config.planRootProtection
+        ? ["odd/tasks/**", "odd/mini/**"]
+        : []),
     ]);
     if (rejectedProtected.length > 0) {
       ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {

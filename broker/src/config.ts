@@ -203,6 +203,8 @@ export interface BrokerConfig {
   protectedPaths: string[];
   /** S17: security components agents must never modify. */
   protectedSecurityFiles: string[];
+  /** Optional apply-time protection for planner-owned ODD roots; defaults off. */
+  planRootProtection: boolean;
   /**
    * Registered project ids that get an external-advisor socket
    * (advisor-socket.ts). Empty means no advisor listener at all.
@@ -466,6 +468,9 @@ export function defaultConfig(
     externalCopyTargets: DEFAULT_EXTERNAL_COPY_TARGETS,
     protectedPaths: DEFAULT_PROTECTED_PATHS,
     protectedSecurityFiles: DEFAULT_PROTECTED_SECURITY_FILES,
+    planRootProtection: ["1", "true"].includes(
+      (process.env.BROKER_PLAN_ROOT_PROTECTION ?? "").toLowerCase(),
+    ),
     planWriterAgents: (process.env.BROKER_PLAN_WRITER_AGENTS ?? "planner").split(",").map((agent) => agent.trim()).filter(Boolean),
     planMiniWriterAgents: (process.env.BROKER_PLAN_MINI_WRITER_AGENTS ?? "pm-odd,pm-systematic").split(",").map((agent) => agent.trim()).filter(Boolean),
     advisorProjects: [],
