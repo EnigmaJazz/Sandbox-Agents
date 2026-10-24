@@ -96,6 +96,7 @@
       "/home/james/.nanobot/.auto-update-history.json"
     ],
     "read": [
+      "$HOME/.agents/skills",
       "$HOME/agent-sandbox-integration",
       "/mnt/ai_storage/kinver-hub/proxy",
       "/home/james/peak-redir",
