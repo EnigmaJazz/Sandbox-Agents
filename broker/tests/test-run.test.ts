@@ -81,15 +81,42 @@ test("unknown runners are refused with the configured runner IDs", async () => {
   await expect(op(request(root, "missing"))).rejects.toThrow(/unknown.*missing.*unit/i);
 });
 
-test("dirty tracked trees refuse before executing the configured runner", async () => {
+test("dirty trees run and return git provenance", async () => {
   const root = tempRoot();
   await initializeRepo(root);
-  const marker = join(root, "ran");
-  const command = "/usr/bin/touch";
   writeFileSync(join(root, "tracked.txt"), "dirty\n");
-  const op = buildTestRunOp(context(root, [runner(root, [command, marker])]));
-  await expect(op(request(root))).rejects.toThrow(/TEST_RUN_DIRTY_TREE/);
-  expect(() => readFileSync(marker)).toThrow();
+  expect(Bun.spawnSync(["git", "add", "tracked.txt"], { cwd: root }).exitCode).toBe(0);
+  writeFileSync(join(root, "untracked.txt"), "new\n");
+  const op = buildTestRunOp(context(root));
+  const result = await op(request(root)) as { gitHead: string | null; dirtyPaths: string[]; dirtyPathsTruncated?: boolean; worktreeDigest: string | null };
+  expect(result.gitHead).toMatch(/^[0-9a-f]{40}$/);
+  expect(result.dirtyPaths).toContain("tracked.txt");
+  expect(result.dirtyPaths).toContain("untracked.txt");
+  expect(result.dirtyPathsTruncated).toBeUndefined();
+  expect(result.worktreeDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+});
+
+test("dirty path provenance is capped at 200 and marks truncation", async () => {
+  const root = tempRoot();
+  await initializeRepo(root);
+  for (let index = 0; index < 205; index++) writeFileSync(join(root, `dirty-${index}.txt`), "new\n");
+  const op = buildTestRunOp(context(root));
+  const result = await op(request(root)) as { dirtyPaths: string[]; dirtyPathsTruncated?: boolean };
+  expect(result.dirtyPaths).toHaveLength(200);
+  expect(result.dirtyPathsTruncated).toBe(true);
+});
+
+test("worktree digest is stable and changes when dirty content changes", async () => {
+  const root = tempRoot();
+  await initializeRepo(root);
+  writeFileSync(join(root, "tracked.txt"), "first\n");
+  const op = buildTestRunOp(context(root));
+  const first = await op(request(root)) as { worktreeDigest: string | null };
+  const second = await op(request(root)) as { worktreeDigest: string | null };
+  expect(second.worktreeDigest).toBe(first.worktreeDigest);
+  writeFileSync(join(root, "tracked.txt"), "second\n");
+  const third = await op(request(root)) as { worktreeDigest: string | null };
+  expect(third.worktreeDigest).not.toBe(first.worktreeDigest);
 });
 
 test("clean trees execute configured argv and return the process exit code", async () => {
