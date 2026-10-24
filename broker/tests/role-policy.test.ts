@@ -132,11 +132,17 @@ describe("R1 — capability taxonomy / unknown effects fail closed", () => {
     expect(d.reasonCode).toBe("UNKNOWN_ROLE");
   });
 
-  test("sandbox host tools are all present in the classification inventory", () => {
+  test("sandbox host tools are all present in the classification inventory regardless of registration shape", () => {
     const source = readFileSync("../opencode/plugins/sandbox-tools.ts", "utf8");
-    const tools = [...new Set([...source.matchAll(/\b(host_[a-z0-9_]+)\s*:\s*tool\(/g)].map((match) => match[1]))];
-    const missing = tools.filter((tool) => !TOOL_CLASSIFICATION_INVENTORY[tool]);
+    const codeLines = source.split("\n").filter((line) => !/^\s*(?:\/\/|\/\*|\*\/|\*)/.test(line));
+    const tools = [...new Set(codeLines.flatMap((line) => [...line.matchAll(/\b(host_[a-z0-9_]+)\s*:/g)].map((match) => match[1]!)))];
+    const missingFrom = (inventory: Record<string, unknown>) => tools.filter((tool) => !inventory[tool]);
+    const missing = missingFrom(TOOL_CLASSIFICATION_INVENTORY);
     expect(missing, `Missing tool classifications: ${missing.join(", ")}`).toEqual([]);
+
+    const intentionallyIncompleteInventory: Record<string, unknown> = { ...TOOL_CLASSIFICATION_INVENTORY };
+    delete intentionallyIncompleteInventory[tools[0]!];
+    expect(missingFrom(intentionallyIncompleteInventory)).toContain(tools[0]);
   });
 
   test("every governed operation maps to one listed capability or is denied", () => {

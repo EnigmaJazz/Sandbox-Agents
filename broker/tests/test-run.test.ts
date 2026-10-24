@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
@@ -117,6 +117,41 @@ test("worktree digest is stable and changes when dirty content changes", async (
   writeFileSync(join(root, "tracked.txt"), "second\n");
   const third = await op(request(root)) as { worktreeDigest: string | null };
   expect(third.worktreeDigest).not.toBe(first.worktreeDigest);
+});
+
+test("provenance snapshots the worktree before the runner mutates it", async () => {
+  const root = tempRoot();
+  await initializeRepo(root);
+  const baseline = await buildTestRunOp(context(root, [runner(root, ["/usr/bin/true"])]))(request(root)) as { worktreeDigest: string | null };
+  const mutation = `require('node:fs').writeFileSync(${JSON.stringify(join(root, "tracked.txt"))}, 'changed by test\\n')`;
+  const op = buildTestRunOp(context(root, [runner(root, [process.execPath, "-e", mutation])]));
+
+  const result = await op(request(root)) as { exitCode: number | null; dirtyPaths: string[]; worktreeDigest: string | null };
+
+  expect(result.exitCode).toBe(0);
+  expect(result.dirtyPaths).toEqual([]);
+  expect(result.worktreeDigest).toBe(baseline.worktreeDigest);
+});
+
+test("git provenance failure does not change the runner result", async () => {
+  const root = tempRoot();
+  await initializeRepo(root);
+  const fakeBin = join(root, "fake-bin");
+  const fakeGit = join(fakeBin, "git");
+  const originalPath = process.env.PATH;
+  const op = buildTestRunOp(context(root, [runner(root, ["/usr/bin/true"])]));
+  const priorPath = process.env.PATH ?? "";
+  mkdirSync(fakeBin);
+  writeFileSync(fakeGit, "#!/bin/sh\nexit 1\n");
+  chmodSync(fakeGit, 0o755);
+  process.env.PATH = `${fakeBin}:${priorPath}`;
+  try {
+    const result = await op(request(root)) as { exitCode: number | null; gitHead: string | null; dirtyPaths: string[] };
+    expect(result).toMatchObject({ exitCode: 0, gitHead: null, dirtyPaths: [] });
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+  }
 });
 
 test("clean trees execute configured argv and return the process exit code", async () => {

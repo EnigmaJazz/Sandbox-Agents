@@ -3847,6 +3847,7 @@ function testRunRefusal(code: string, detail: string): ValidationError {
   return new ValidationError(`${code}: ${detail}`);
 }
 
+/** Pre-run snapshot only; no post-run divergence flag is emitted because that would require hashing the worktree twice. */
 type TestRunProvenance = {
   gitHead: string | null;
   dirtyPaths: string[];
@@ -3946,8 +3947,9 @@ export function buildTestRunOp(ctx: OpContext): OpHandler {
         if (process.env[key] !== undefined) environment[key] = process.env[key]!;
       }
       const startedAt = Date.now();
-      const result = await runTestCommand(runner.argv, cwd, runner.timeoutMs, runner.maxOutputBytes, environment);
+      // This snapshot is pre-run by design: it describes the worktree bytes the runner was asked to test.
       const provenance = testRunProvenance(projectRoot, gitEnvironment);
+      const result = await runTestCommand(runner.argv, cwd, runner.timeoutMs, runner.maxOutputBytes, environment);
       const stdoutTail = result.stdout.subarray(-8192).toString("utf8");
       const stderrTail = result.stderr.subarray(-8192).toString("utf8");
       let logArtifact: string | null = null;
