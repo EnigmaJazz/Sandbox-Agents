@@ -946,6 +946,18 @@ async function gcSessionArtifacts(
 // Worker file/exec ops — all argv vectors, all validation-gated (§28)
 // ---------------------------------------------------------------------------
 
+function planRootPatterns(config: OpContext["config"]): string[] {
+  return config.planRootProtection ? ["odd/tasks/**", "odd/mini/**"] : [];
+}
+
+function refusePlanRootMutation(ctx: OpContext, path: string): void {
+  if (checkProtectedPaths([path], planRootPatterns(ctx.config)).length > 0) {
+    throw new ValidationError(
+      `PLAN_ROOT_PROTECTED: ${path} is a plan-root path; workers may not modify it (BROKER_PLAN_ROOT_PROTECTION)`,
+    );
+  }
+}
+
 export function buildExecOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const payload = payloadOf(req) as {
@@ -1064,6 +1076,11 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
     const payload = payloadOf(req) as { path?: unknown; content?: unknown };
     assertSandboxPath(payload.path, ctx.config.resource.pathMaxBytes);
     assertContent(payload.content, ctx.config.resource.contentMaxBytes);
+    const targetPath = payload.path as string;
+    refusePlanRootMutation(ctx, targetPath);
+    // sandbox_bash can modify any path by argv and is deliberately not inspected;
+    // install-time refusal enforces plan-root protection for that path.
+
     const record = recordOr404(ctx.store, req.sessionID);
     const worker = requireActiveWorker(record);
 
@@ -1073,7 +1090,6 @@ export function buildWriteFileOp(ctx: OpContext): OpHandler {
       `write-${req.sessionID}-${randomUUID()}.tmp`,
     );
     const workerTmp = `/work/.broker-tmp/write-${randomUUID()}.tmp`;
-    const targetPath = payload.path as string;
     let stageTmp: string | null = null;
     try {
       mkdirSync(join(ctx.config.stateDir, "tmp"), {
@@ -1372,6 +1388,22 @@ function workerDirOf(filePath: string): string {
 
 export function buildApplyOp(ctx: OpContext): OpHandler {
   return async (req) => {
+    // applyPatch has no path fields in its validated payload today. Inspect only
+    // any path metadata present on the raw request; never parse patch text to
+    // discover paths. A patch that reaches a plan root through content is still
+    // refused at install, which remains the authoritative gate.
+    const rawPayload = req.payload as Record<string, unknown> | undefined;
+    if (rawPayload?.path !== undefined) {
+      assertSandboxPath(rawPayload.path, ctx.config.resource.pathMaxBytes);
+      refusePlanRootMutation(ctx, rawPayload.path as string);
+    }
+    if (rawPayload?.paths !== undefined) {
+      if (!Array.isArray(rawPayload.paths)) throw new ValidationError("paths must be an array");
+      for (const path of rawPayload.paths) {
+        assertSandboxPath(path, ctx.config.resource.pathMaxBytes);
+        refusePlanRootMutation(ctx, path as string);
+      }
+    }
     const payload = payloadOf(req) as { patch?: unknown };
     assertContent(payload.patch, ctx.config.resource.patchMaxBytes);
     const record = recordOr404(ctx.store, req.sessionID);
@@ -1983,9 +2015,7 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     const rejectedProtected = checkProtectedPaths(changed, [
       ...ctx.config.protectedPaths,
       ...ctx.config.protectedSecurityFiles,
-      ...(ctx.config.planRootProtection
-        ? ["odd/tasks/**", "odd/mini/**"]
-        : []),
+      ...planRootPatterns(ctx.config),
     ]);
     if (rejectedProtected.length > 0) {
       ctx.store.transition(req.sessionID, "APPLY_PENDING", "RESULT_READY", {
@@ -3079,6 +3109,12 @@ export function buildSandboxResultInstallOp(ctx: OpContext): OpHandler {
     const changed = await changedPathsBetween(ctx, projectID, baseline, result);
     if (changed.length === 0) {
       throw new StateError("cannot install result: the B→C result is empty");
+    }
+    const rejectedProtected = checkProtectedPaths(changed, planRootPatterns(ctx.config));
+    if (rejectedProtected.length > 0) {
+      throw new StateError(
+        `cannot install result: result touches protected paths: ${rejectedProtected.join(", ")}`,
+      );
     }
     if (resultRecord.installedCommit !== undefined) {
       const worktreeProof = await runHostStep(
