@@ -9,7 +9,7 @@
  * result steps verify and FAIL with a clear message instead of running git
  * against the host repo. Set BROKER_GIT_MODE=real only after Gate 5 review.
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   accessSync,
   existsSync,
@@ -203,7 +203,7 @@ export function authorizeHostDispatch(
   const decision = policy.decide(operation, trusted);
   if (!decision.allowed) {
     throw new PolicyError(
-      `host ${decision.access} tool "${operation}" is orchestrator-only (${decision.reasonCode}) [required category=orchestrator]`,
+      `host ${decision.access} tool "${operation}" is orchestrator-only (${decision.reasonCode})`,
     );
   }
   return decision.access;
@@ -3847,6 +3847,57 @@ function testRunRefusal(code: string, detail: string): ValidationError {
   return new ValidationError(`${code}: ${detail}`);
 }
 
+type TestRunProvenance = {
+  gitHead: string | null;
+  dirtyPaths: string[];
+  dirtyPathsTruncated?: true;
+  worktreeDigest: string | null;
+};
+
+function testRunProvenance(projectRoot: string, environment: Record<string, string>): TestRunProvenance {
+  const empty: TestRunProvenance = { gitHead: null, dirtyPaths: [], worktreeDigest: null };
+  try {
+    const git = (args: string[]) => spawnSync("git", ["-C", projectRoot, ...args], {
+      env: environment,
+      encoding: "utf8",
+      timeout: 30_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    const headResult = git(["rev-parse", "--verify", "HEAD"]);
+    const headText = headResult.status === 0 ? headResult.stdout.trim() : "";
+    const gitHead = /^[0-9a-f]{40}$/.test(headText) ? headText : null;
+    const status = git(["status", "--porcelain=v1", "-z"]);
+    if (status.status !== 0) return empty;
+    const records = status.stdout.split("\0").filter(Boolean);
+    const paths = new Set<string>();
+    for (let index = 0; index < records.length; index++) {
+      const record = records[index]!;
+      if (record.length < 4) continue;
+      paths.add(record.slice(3));
+      if (/^(R|C)/.test(record.slice(0, 2)) && records[index + 1]) paths.add(records[++index]!);
+    }
+    const sortedPaths = [...paths].sort();
+    const digest = createHash("sha256");
+    digest.update(JSON.stringify([gitHead, sortedPaths]));
+    for (const path of sortedPaths) {
+      // Hash both the index blob and worktree bytes; NUL framing makes serialization unambiguous.
+      const staged = git(["ls-files", "--stage", "-z", "--", path]).stdout;
+      const stagedHash = staged.split("\0").filter(Boolean).map((line) => line.split(/\s+/)[1] ?? "").sort();
+      const worktree = git(["hash-object", "--", path]);
+      const worktreeHash = worktree.status === 0 ? worktree.stdout.trim() : "";
+      digest.update("\0").update(path).update("\0").update(JSON.stringify(stagedHash)).update("\0").update(worktreeHash);
+    }
+    return {
+      gitHead,
+      dirtyPaths: sortedPaths.slice(0, 200),
+      ...(sortedPaths.length > 200 ? { dirtyPathsTruncated: true as const } : {}),
+      worktreeDigest: `sha256:${digest.digest("hex")}`,
+    };
+  } catch {
+    return empty;
+  }
+}
+
 export function buildTestRunOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const trustedAgent = ctx.store.get(req.sessionID)?.agent;
@@ -3885,12 +3936,6 @@ export function buildTestRunOp(ctx: OpContext): OpHandler {
       for (const key of ["PATH", "HOME", "TMPDIR", "LANG"] as const) {
         if (process.env[key] !== undefined) gitEnvironment[key] = process.env[key]!;
       }
-      const status = await runTestCommand(["git", "-C", projectRoot, "status", "--porcelain", "--untracked-files=no"], projectRoot, 30_000, 64 * 1024, gitEnvironment);
-      if (status.exitCode !== 0) throw testRunRefusal("TEST_RUN_GIT_STATUS_FAILED", `git status exited ${String(status.exitCode)}: ${status.stderr.toString("utf8").slice(-2048)}`);
-      if (status.stdout.length > 0) {
-        const paths = status.stdout.toString("utf8").split("\n").filter(Boolean).slice(0, 3).map((line) => line.slice(3));
-        throw testRunRefusal("TEST_RUN_DIRTY_TREE", `check=git_status_porcelain paths=${paths.join(", ")}`);
-      }
       try {
         if (!statSync(cwd).isDirectory()) throw new Error("not a directory");
       } catch {
@@ -3902,6 +3947,7 @@ export function buildTestRunOp(ctx: OpContext): OpHandler {
       }
       const startedAt = Date.now();
       const result = await runTestCommand(runner.argv, cwd, runner.timeoutMs, runner.maxOutputBytes, environment);
+      const provenance = testRunProvenance(projectRoot, gitEnvironment);
       const stdoutTail = result.stdout.subarray(-8192).toString("utf8");
       const stderrTail = result.stderr.subarray(-8192).toString("utf8");
       let logArtifact: string | null = null;
@@ -3933,6 +3979,7 @@ export function buildTestRunOp(ctx: OpContext): OpHandler {
         stdoutTail,
         stderrTail,
         logArtifact,
+        ...provenance,
       };
     });
   };
@@ -3985,6 +4032,17 @@ function assertPlanDocWriteName(value: unknown): asserts value is string {
   }
 }
 
+export function assertPlanDocBytesUnchanged(
+  destination: string,
+  expected: Buffer | undefined,
+  current: Buffer | undefined,
+): void {
+  if (expected === undefined !== (current === undefined) ||
+    (expected && current && !current.equals(expected))) {
+    throw new ValidationError(`PLAN_WRITE_CONCURRENT_MODIFICATION: ${destination}`);
+  }
+}
+
 function assertPlanDocWriteNoSymlinks(projectRoot: string, destination: string): void {
   const relative = destination.slice(projectRoot.length).split(/[\\/]/).filter(Boolean);
   let path = projectRoot;
@@ -4031,8 +4089,21 @@ async function writePlanDocAtomically(
   if (existingStat && existingStat.nlink > 1) {
     throw new ValidationError(`PLAN_WRITE_HARDLINK_REFUSED: ${destination} link count=${existingStat.nlink}`);
   }
-  const existing = existingStat ? readFileSync(destination, "utf8") : "";
+  const existingBytes = existingStat ? readFileSync(destination) : undefined;
+  const existing = existingBytes?.toString("utf8") ?? "";
   const section = planDocRevisionSection(existing);
+  const headings = scanPlanDocHeadings(existing);
+  const gateHeadings = headings.filter((heading) => heading.level === 2 && heading.text === "Gates");
+  if (gateHeadings.length > 1) {
+    throw new ValidationError(`PLAN_WRITE_MULTIPLE_GATES_SECTIONS: ${destination}`);
+  }
+  const finalGateHeading = gateHeadings[0];
+  const finalSectionHeading = finalGateHeading && headings.find((heading) =>
+    heading.index > finalGateHeading.index && heading.level <= 2,
+  );
+  const carriedGates = finalGateHeading && !finalSectionHeading
+    ? existing.slice(finalGateHeading.offset)
+    : "";
   if (section.revision !== expectedRevision) {
     throw new ValidationError(`PLAN_WRITE_STALE_REVISION: current=${section.revision} expected=${expectedRevision}`);
   }
@@ -4042,7 +4113,8 @@ async function writePlanDocAtomically(
   const priorLines = section.lines.filter((line, index) =>
     !(index === section.lines.length - 1 && line === ""),
   );
-  const nextText = `${body}\n\n## Revisions\n${[...priorLines, revisionLine].join("\n")}\n`;
+  const revisionsText = `${body}\n\n## Revisions\n${[...priorLines, revisionLine].join("\n")}\n`;
+  const nextText = carriedGates ? `${revisionsText}\n${carriedGates}` : revisionsText;
   const tempPath = join(parent, `.plan-doc-${randomUUID()}.tmp`);
   let tempWritten = false;
   try {
@@ -4062,6 +4134,8 @@ async function writePlanDocAtomically(
     if (currentEntry && currentEntry.nlink > 1) {
       throw new ValidationError(`PLAN_WRITE_HARDLINK_REFUSED: ${destination} link count=${currentEntry.nlink}`);
     }
+    const currentBytes = currentEntry ? readFileSync(destination) : undefined;
+    assertPlanDocBytesUnchanged(destination, existingBytes, currentBytes);
     // A concurrent project-tree writer could swap the parent for a symlink after this check; plan-root apply protection is intended to remove that attacker precondition, and Node does not expose the directory-fd renameat needed to close this residual window.
     renameSync(tempPath, destination);
     tempWritten = false;

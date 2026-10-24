@@ -697,7 +697,7 @@ describe("host-authoritative session→agent binding", () => {
       const ctx = bindingCtx(store);
       bindSessionAgent(ctx, "planner-session", { agent: "planner" });
       expect(() => authorizeHostDispatch(ctx, "registerProject", "planner-session")).toThrow(
-        'host mutation tool "registerProject" is orchestrator-only (HOST_MUTATION_NOT_ORCHESTRATOR) [required category=orchestrator]',
+        'host mutation tool "registerProject" is orchestrator-only (HOST_MUTATION_NOT_ORCHESTRATOR)',
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });

@@ -3,7 +3,7 @@ import { linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, sy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
-import { buildPlanDocWriteOp } from "../src/service.ts";
+import { assertPlanDocBytesUnchanged, buildGateVerdictOp, buildPlanDocWriteOp, readLatestGateVerdict } from "../src/service.ts";
 import { ValidationError } from "../src/validation.ts";
 import type { BrokerRequestEnvelope, SessionRecord } from "../src/types.ts";
 
@@ -87,6 +87,39 @@ describe("host plan document write", () => {
     expect(result).toMatchObject({ revision: 2, created: false });
     expect(text.indexOf(first!)).toBeLessThan(text.indexOf("planner: second"));
     expect(text).toContain(`${first}\n- r2 `);
+  }));
+
+  test("preserves the final Gates section byte-for-byte across a plan revision", withProject(async (root) => {
+    await write(root, {});
+    const gate = buildGateVerdictOp(makeContext(root));
+    for (const verdict of ["PASS", "REFINE"] as const) {
+      await gate({
+        version: 1, id: "gate", operation: "gateVerdict", sessionID: "session-write", agent: "planner",
+        payload: { projectDir: root, name: "phase-two", taskId: "unit-a", verdict,
+          ...(verdict === "REFINE" ? { refinementPlan: "Clarify the criteria." } : {}), agent: "planner" },
+      } as BrokerRequestEnvelope);
+    }
+    const path = join(root, "odd/tasks/phase-two.md");
+    const before = readFileSync(path, "utf8");
+    const carriedGates = before.slice(before.indexOf("## Gates"));
+    await write(root, { content: "# Revised plan", expectedRevision: 1, note: "preserve gate log" });
+    const after = readFileSync(path, "utf8");
+    expect(after.slice(after.indexOf("## Gates"))).toBe(carriedGates);
+    expect(after.indexOf("## Revisions")).toBeLessThan(after.indexOf("## Gates"));
+    expect(readLatestGateVerdict(after, "unit-a")).toEqual(readLatestGateVerdict(before, "unit-a"));
+    expect(readLatestGateVerdict(after, "unit-a")?.verdict).toBe("REFINE");
+  }));
+
+  test("refuses a changed destination byte snapshot with its path", () => {
+    expect(() => assertPlanDocBytesUnchanged("/project/odd/tasks/phase-two.md", Buffer.from("before"), Buffer.from("after")))
+      .toThrow("PLAN_WRITE_CONCURRENT_MODIFICATION: /project/odd/tasks/phase-two.md");
+  });
+
+  test("refuses documents with multiple unfenced Gates sections", withProject(async (root) => {
+    const directory = join(root, "odd/tasks");
+    mkdirSync(directory, { recursive: true });
+    await Bun.write(join(directory, "phase-two.md"), "# Plan\n\n## Gates\n- unit-a PASS 2026-10-24T07:00:00Z planner\n\n## Notes\ntext\n\n## Gates\n- unit-a REFINE 2026-10-24T07:01:00Z planner\n");
+    await rejectsValidation(write(root, { expectedRevision: 0 }), /PLAN_WRITE_MULTIPLE_GATES_SECTIONS.*phase-two\.md/);
   }));
 
   test("refuses stale revisions with both values", withProject(async (root) => {
