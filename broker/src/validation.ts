@@ -833,6 +833,7 @@ export const HOST_MUTATION_OPERATIONS: readonly string[] = [
   "sddAttemptGrant",
   "planDocAppend",
   "planDocWrite",
+  "taskMark",
   "gateVerdict",
   "reviewStart",
   "reviewCaptureResult",
@@ -870,7 +871,8 @@ export interface HostToolDecision {
  * broker-derived trusted agent, never a raw envelope claim.
  */
 export const HOST_MUTATION_IDENTITY_OPERATIONS: Readonly<Record<string, readonly string[]>> = {
-  "gentle-orchestrator": HOST_MUTATION_OPERATIONS,
+  pm: ["taskMark"],
+  "gentle-orchestrator": HOST_MUTATION_OPERATIONS.filter((operation) => operation !== "taskMark"),
   "pm-odd": HOST_MUTATION_OPERATIONS.filter((operation) => operation !== "registerProject"),
   "pm-systematic": HOST_MUTATION_OPERATIONS.filter((operation) => operation !== "registerProject"),
   "pm-sdd": HOST_MUTATION_OPERATIONS.filter((operation) => operation !== "registerProject"),
@@ -975,6 +977,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   ],
   planDocAppend: ["projectDir", "doc", "content", "heading"],
   planDocWrite: ["projectDir", "target", "name", "content", "expectedRevision", "note", "agent"],
+  taskMark: ["projectDir", "target", "name", "taskId", "status", "evidenceCommit", "note"],
   testRun: ["projectDir", "runner"],
   gateVerdict: ["projectDir", "name", "taskId", "verdict", "refinementPlan", "evidenceRef", "agent"],
   // Host-authoritative session→agent binding: the host plugin supplies exactly

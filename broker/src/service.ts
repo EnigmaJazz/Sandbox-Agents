@@ -160,6 +160,7 @@ export interface OpContext {
     /** "planned" (Gate 1 default) or "real" (Gate 5+, after review). */
     runnerMode: "planned" | "real";
   };
+  reviewAssess?: (payload: { projectDir: string; baseRef: string; committedOnly: true }) => Promise<{ status: number | null; json: unknown }>;
 }
 
 export type OpHandler = (req: BrokerRequestEnvelope) => Promise<unknown>;
@@ -195,9 +196,13 @@ export function authorizeHostDispatch(
   const access = policy.access(operation);
   if (category === "plan-writer") {
     const isPlanRole = trusted && ["planner", "pm"].includes(normalizeRoleKey(trusted));
+    if (operation === "taskMark" && normalizeRoleKey(trusted ?? "") !== "pm") {
+      throw new PolicyError(`TASK_MARK_PM_ONLY: host operation "${operation}" requires a PM identity`);
+    }
     if (
       (operation === "planDocWrite" && trusted && (isPlanRole || ctx.config.readOnlyAgents.includes(trusted))) ||
-      (operation === "gateVerdict" && isPlanRole)
+      (operation === "gateVerdict" && isPlanRole) ||
+      (operation === "taskMark" && normalizeRoleKey(trusted ?? "") === "pm")
     ) return access;
     throw new PolicyError(
       `host ${access} tool "${operation}" requires plan-writer category (HOST_MUTATION_NOT_PLAN_WRITER)`,
@@ -4451,6 +4456,167 @@ export function buildPlanDocWriteOp(ctx: OpContext): OpHandler {
       writePlanDocAtomically(projectRoot, destination, payload.content as string, boundIdentity, payload.note as string, payload.expectedRevision as number),
     );
     return { target: payload.target, path: relative, ...result };
+  };
+}
+
+const TASK_MARK_ID_RE = /^T[0-9]{1,3}$/;
+const TASK_MARK_COMMIT_RE = /^[0-9a-f]{40}$/;
+const TASK_MARK_ASSESS_TIMEOUT_MS = 120_000;
+
+type ReviewTier = "high" | "medium" | "passive";
+
+function assessmentTier(value: unknown): ReviewTier {
+  if (typeof value !== "object" || value === null) return "high";
+  const result = value as { status?: unknown; json?: unknown };
+  if (result.status !== 0) return "high";
+  const json = result.json;
+  if (typeof json !== "object" || json === null) return "high";
+  const record = json as { tier?: unknown; assessment?: { tier?: unknown } };
+  const tier = record.tier ?? record.assessment?.tier;
+  return tier === "high" || tier === "medium" || tier === "passive" ? tier : "high";
+}
+
+async function taskMarkTier(ctx: OpContext, projectRoot: string, evidenceCommit: string): Promise<ReviewTier> {
+  if (!ctx.reviewAssess) return "high";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("review assessor timed out")), TASK_MARK_ASSESS_TIMEOUT_MS);
+    });
+    const result = await Promise.race([
+      ctx.reviewAssess({ projectDir: projectRoot, baseRef: evidenceCommit, committedOnly: true }),
+      timeout,
+    ]);
+    return assessmentTier(result);
+  } catch {
+    return "high";
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function appendTaskMarkTick(existing: string, taskId: string, status: "passed" | "failed", evidenceCommit: string, tier: ReviewTier, agent: string, note: string): { text: string; revision: number } {
+  const headings = scanPlanDocHeadings(existing);
+  const ticks = headings.filter((entry) => entry.level === 2 && entry.text === "Ticks");
+  if (ticks.length > 1) throw new ValidationError("TASK_MARK_MULTIPLE_TICKS_SECTIONS: plan document has ambiguous Ticks sections");
+  let text = existing;
+  if (ticks.length === 1) {
+    const tick = ticks[0]!;
+    const following = headings.find((entry) => entry.index > tick.index && entry.level <= 2);
+    if (following) throw new ValidationError("TASK_MARK_TICKS_NOT_FINAL: Ticks must be the final section");
+  }
+  const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const tickLine = `${taskId} ${status} evidence=${evidenceCommit} tier=${tier} ${timestamp} ${agent}${note.length > 0 ? `: ${note}` : ""}`;
+  if (ticks.length === 0) {
+    text = `${text.replace(/\s*$/, "")}\n\n## Ticks\n${tickLine}\n`;
+  } else {
+    text = `${text.replace(/\s*$/, "")}\n${tickLine}\n`;
+  }
+
+  const section = planDocRevisionSection(text);
+  const revision = section.revision + 1;
+  const revisionLine = `- r${revision} ${timestamp} ${agent}: task mark ${taskId} ${status}`;
+  const revisionHeadings = scanPlanDocHeadings(text).filter((entry) => entry.level === 2 && entry.text === "Revisions");
+  if (revisionHeadings.length > 1) throw new ValidationError("TASK_MARK_MULTIPLE_REVISIONS_SECTIONS: plan document has ambiguous Revisions sections");
+  if (revisionHeadings.length === 0) {
+    text = computePlanDocAppend(text, `## Revisions\n${revisionLine}`, "Ticks");
+  } else {
+    text = computePlanDocAppend(text, revisionLine, "Revisions");
+  }
+  return { text, revision };
+}
+
+async function writeTaskMarkAtomically(
+  projectRoot: string,
+  destination: string,
+  taskId: string,
+  status: "passed" | "failed",
+  evidenceCommit: string,
+  tier: ReviewTier,
+  agent: string,
+  note: string,
+): Promise<{ revision: number; bytes: number }> {
+  const parent = dirname(destination);
+  assertPlanDocWriteNoSymlinks(projectRoot, destination);
+  const existingStat = lstatIfExists(destination);
+  if (existingStat === undefined || !existingStat.isFile()) {
+    throw new ValidationError("TASK_MARK_DOCUMENT_MISSING: plan document must already exist as a regular file");
+  }
+  if (existingStat.nlink > 1) throw new ValidationError(`PLAN_WRITE_HARDLINK_REFUSED: ${destination} link count=${existingStat.nlink}`);
+  assertBeneathProjectRoot(projectRoot, parent);
+  assertBeneathProjectRoot(projectRoot, destination);
+  const existingBytes = readFileSync(destination);
+  const existing = existingBytes.toString("utf8");
+  const next = appendTaskMarkTick(existing, taskId, status, evidenceCommit, tier, agent, note);
+  const tempPath = join(parent, `.plan-doc-${randomUUID()}.tmp`);
+  let tempWritten = false;
+  try {
+    const fd = openSync(tempPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+    tempWritten = true;
+    try { writeFileSync(fd, next.text, { encoding: "utf8" }); fsyncSync(fd); } finally { closeSync(fd); }
+    assertPlanDocWriteNoSymlinks(projectRoot, destination);
+    const currentEntry = lstatIfExists(destination);
+    if (currentEntry === undefined || !currentEntry.isFile()) throw new ValidationError("TASK_MARK_DESTINATION_CHANGED: plan document is no longer a regular file");
+    if (currentEntry.nlink > 1) throw new ValidationError(`PLAN_WRITE_HARDLINK_REFUSED: ${destination} link count=${currentEntry.nlink}`);
+    const currentBytes = readFileSync(destination);
+    assertPlanDocBytesUnchanged(destination, existingBytes, currentBytes);
+    renameSync(tempPath, destination);
+    tempWritten = false;
+    fsyncPlanDocDirectory(parent);
+    return { revision: next.revision, bytes: Buffer.byteLength(next.text, "utf8") };
+  } finally {
+    if (tempWritten) { try { unlinkSync(tempPath); } catch { /* best-effort cleanup */ } }
+  }
+}
+
+export function buildTaskMarkOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as {
+      projectDir?: unknown; target?: unknown; name?: unknown; taskId?: unknown;
+      status?: unknown; evidenceCommit?: unknown; note?: unknown;
+    };
+    authorizeHostDispatch(ctx, "taskMark", req.sessionID, req.agent, "plan-writer");
+    const boundIdentity = ctx.store.get(req.sessionID)?.agent;
+    if (!boundIdentity || normalizeRoleKey(boundIdentity) !== "pm") {
+      throw new PolicyError("TASK_MARK_PM_ONLY: only PM identities may mark plan tasks");
+    }
+    if (payload.target !== "tasks" && payload.target !== "mini") throw new ValidationError("TASK_MARK_TARGET_INVALID: target must be tasks or mini");
+    assertPlanDocWriteName(payload.name);
+    if (typeof payload.taskId !== "string" || !TASK_MARK_ID_RE.test(payload.taskId)) {
+      throw new ValidationError("TASK_MARK_TASK_ID_INVALID: taskId must match ^T[0-9]{1,3}$");
+    }
+    if (payload.status !== "passed" && payload.status !== "failed") throw new ValidationError("TASK_MARK_STATUS_INVALID: status must be passed or failed");
+    if (typeof payload.evidenceCommit !== "string" || !TASK_MARK_COMMIT_RE.test(payload.evidenceCommit)) {
+      throw new ValidationError("TASK_MARK_EVIDENCE_COMMIT_INVALID: evidenceCommit must be a full lowercase 40-hex commit id");
+    }
+    if (payload.note !== undefined && typeof payload.note !== "string") throw new ValidationError("TASK_MARK_NOTE_INVALID: note must be a string");
+    const note = typeof payload.note === "string"
+      ? payload.note.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200)
+      : "";
+    const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const commitCheck = await runHostStep(ctx, ["git", "cat-file", "-e", `${payload.evidenceCommit}^{commit}`], projectRoot);
+    if (commitCheck.status !== 0 || commitCheck.timedOut || commitCheck.stdoutTruncated || commitCheck.stderrTruncated) {
+      throw new ValidationError("TASK_MARK_EVIDENCE_COMMIT_UNKNOWN: evidenceCommit does not resolve to a commit in the project");
+    }
+    const relative = `odd/${payload.target}/${payload.name}.md`;
+    const destination = resolve(projectRoot, relative);
+    if (!isWithin(projectRoot, destination)) throw new ValidationError("TASK_MARK_PATH_ESCAPE: destination escapes project root");
+    const rejected = checkProtectedPaths([relative], [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles]);
+    if (rejected.length > 0) throw new ValidationError(`TASK_MARK_PROTECTED_PATH: ${rejected.join(", ")}`);
+    const assessorTier = await taskMarkTier(ctx, projectRoot, payload.evidenceCommit);
+    const result = await withPlanDocLock(destination, async () => {
+      const currentStat = lstatIfExists(destination);
+      if (currentStat === undefined || !currentStat.isFile()) throw new ValidationError("TASK_MARK_DOCUMENT_MISSING: plan document must already exist as a regular file");
+      const current = readFileSync(destination, "utf8");
+      const frontmatter = leadingPlanFrontmatter(current);
+      const route = frontmatter === null ? null : frontmatterValue(frontmatter, "route");
+      const gateSectionExists = scanPlanDocHeadings(current).some((heading) => heading.level === 2 && heading.text === "Gates");
+      if (route !== null && route.length > 0 && gateSectionExists && readLatestGateVerdict(current, payload.taskId)?.verdict !== "PASS") {
+        throw new ValidationError("TASK_MARK_GATE_NOT_PASSED: routed plan tasks require a latest PASS gate verdict");
+      }
+      return writeTaskMarkAtomically(projectRoot, destination, payload.taskId as string, payload.status as "passed" | "failed", payload.evidenceCommit as string, assessorTier, boundIdentity, note);
+    });
+    return { target: payload.target, path: relative, tier: assessorTier, ...result };
   };
 }
 

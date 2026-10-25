@@ -96,6 +96,7 @@ import {
   buildPlanDocAppendOp,
   buildPlanDocWriteOp,
   buildGateVerdictOp,
+  buildTaskMarkOp,
   buildReviewMaterializeOp,
   buildReviewDiffReadOp,
   buildReviewPipelineRunOp,
@@ -434,6 +435,7 @@ export class BrokerServer {
       activeLocks: this.activeLocks,
       hostRead,
       sddRuntime,
+      reviewAssess: (payload) => sddRuntime.reviewAssess(payload),
       logger: this.logger,
       git: {
         spawn,
@@ -941,6 +943,8 @@ export class BrokerServer {
         return buildPlanDocAppendOp(this.ctx)(req);
       case "planDocWrite":
         return buildPlanDocWriteOp(this.ctx)(req);
+      case "taskMark":
+        return buildTaskMarkOp(this.ctx)(req);
       case "testRun":
         return buildTestRunOp(this.ctx)(req);
       case "gateVerdict":

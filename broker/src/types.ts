@@ -62,6 +62,7 @@ export type Operation =
   | "sddAttemptGrant"
   | "planDocAppend"
   | "planDocWrite"
+  | "taskMark"
   | "testRun"
   | "gateVerdict"
   // Host sandbox-result read (T1): fixed argv, read-only, no worker (§31).
@@ -157,6 +158,7 @@ export const SANDBOX_GUARD_CLASS = {
   sddAttemptGrant: "exempt-from-sandbox-guard",
   planDocAppend: "exempt-from-sandbox-guard",
   planDocWrite: "exempt-from-sandbox-guard",
+  taskMark: "exempt-from-sandbox-guard",
   testRun: "exempt-from-sandbox-guard",
   gateVerdict: "exempt-from-sandbox-guard",
   sandboxResult: "exempt-from-sandbox-guard",
@@ -239,6 +241,7 @@ export const OPERATIONS: readonly Operation[] = [
   "sddAttemptGrant",
   "planDocAppend",
   "planDocWrite",
+  "taskMark",
   "testRun",
   "gateVerdict",
   "sandboxResult",
@@ -403,6 +406,17 @@ export interface PlanDocWritePayload {
   expectedRevision: number;
   note: string;
   agent: string;
+}
+
+/** PM-authored task tick with broker-derived review tier and commit evidence. */
+export interface TaskMarkPayload {
+  projectDir: string;
+  target: "tasks" | "mini";
+  name: string;
+  taskId: string;
+  status: "passed" | "failed";
+  evidenceCommit: string;
+  note?: string;
 }
 
 /** Planner-authored append-only gate verdict for an existing task document. */
