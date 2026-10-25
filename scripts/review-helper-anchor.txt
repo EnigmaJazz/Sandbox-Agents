@@ -2,3 +2,4 @@
 # Entries are operator-authored; add one by hand using the format <version> <sha256> (one per line).
 # Lines beginning with # are comments. Unanchored versions are refused.
 3.22.4 edcd5c05d9f9457d79ea6b71bd55c7435b55fdc84d127ce5a8294a4f6ea45a28
+3.26.0 f869899dfc100fad08a6b76ccf85f6dec06eaa38a2fa8fb6ef0ef8d63ad36263
