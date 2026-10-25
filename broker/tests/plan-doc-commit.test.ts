@@ -234,6 +234,22 @@ describe("plan document commits", () => {
     expect(readFileSync(path, "utf8")).toContain(`T5 passed evidence=${seed}`);
   }));
 
+  test("commits a gated task tick with the verdict hash in the message", withProject(async (root, seed) => {
+    const path = seedPlan(root, "odd/tasks/phase-gated.md", "# Phase gated\n\n## Revisions\n- r1 2026-01-01T00:00:00Z pm-odd: initial\n");
+    const gate = await buildGateVerdictOp(makeContext(root, "planner"))(
+      gateRequest(root, "phase-gated", "T5", "PASS"),
+    ) as { verdictHash: string };
+    const result = await buildTaskMarkOp(makeContext(root, "pm-odd"))(
+      taskMarkRequest(root, "phase-gated", seed, { gateRef: gate.verdictHash }),
+    ) as Record<string, unknown>;
+    expect(result).toMatchObject({ committed: true });
+    const shortHash = gate.verdictHash.slice("sha256:".length, "sha256:".length + 12);
+    expect(shortHash).toMatch(/^[0-9a-f]{12}$/);
+    expect(lastMessage(root)).toBe(`docs(odd): phase-gated tick T5 passed gate ${shortHash}`);
+    expect(readFileSync(path, "utf8")).toContain(`T5 passed evidence=${seed} gate=${gate.verdictHash}`);
+    expect(lastCommitPaths(root)).toEqual(["odd/tasks/phase-gated.md"]);
+  }));
+
   test("refuses a tick without PASS: no commit and no revision bump", withProject(async (root, seed) => {
     const path = seedPlan(
       root,

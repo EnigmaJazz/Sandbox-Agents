@@ -416,6 +416,8 @@ export interface TaskMarkPayload {
   taskId: string;
   status: "passed" | "failed";
   evidenceCommit: string;
+  /** Hash of the latest PASS gate verdict this tick honours (required with a Gates section). */
+  gateRef?: string;
   note?: string;
 }
 

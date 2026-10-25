@@ -4355,10 +4355,21 @@ export async function commitPlanDocRevision(
 export interface LatestGateVerdict {
   verdict: "PASS" | "REFINE" | "ESCALATE";
   at: string;
+  /** Exact document line the verdict was parsed from, without the trailing newline. */
+  line: string;
 }
 
 const GATE_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const GATE_LINE_RE = /^- ([A-Za-z0-9][A-Za-z0-9._-]{0,63}) (PASS|REFINE|ESCALATE) (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) ([^\s]+)(?: ref=([^\r\n]+))?(?: :: ([^\r\n]+))?\r?$/;
+const GATE_REF_RE = /^sha256:[0-9a-f]{64}$/;
+
+/**
+ * Hash of the canonical verdict line. The canonical bytes are exactly what
+ * `appendGateLine` writes to `## Gates`: the line plus its trailing newline.
+ */
+export function gateVerdictHash(line: string): string {
+  return `sha256:${createHash("sha256").update(`${line}\n`, "utf8").digest("hex")}`;
+}
 
 /** Parse the last recorded verdict for a task from its Gates section. */
 export function readLatestGateVerdict(document: string, taskId: string): LatestGateVerdict | undefined {
@@ -4370,7 +4381,9 @@ export function readLatestGateVerdict(document: string, taskId: string): LatestG
   let latest: LatestGateVerdict | undefined;
   for (let index = heading.index + 1; index < (nextHeading?.index ?? lines.length); index++) {
     const match = GATE_LINE_RE.exec(lines[index]!);
-    if (match?.[1] === taskId) latest = { verdict: match[2] as LatestGateVerdict["verdict"], at: match[3]! };
+    if (match?.[1] === taskId) {
+      latest = { verdict: match[2] as LatestGateVerdict["verdict"], at: match[3]!, line: lines[index]! };
+    }
   }
   return latest;
 }
@@ -4491,7 +4504,7 @@ export function buildGateVerdictOp(ctx: OpContext): OpHandler {
       const commit = await commitPlanDocRevision(ctx, projectRoot, relative, `docs(odd): ${payload.name} gate ${payload.taskId} ${payload.verdict}`);
       return { gates, ...commit };
     });
-    return { name: payload.name, taskId: payload.taskId, verdict: payload.verdict, path: relative, ...result };
+    return { name: payload.name, taskId: payload.taskId, verdict: payload.verdict, path: relative, verdictHash: gateVerdictHash(line), ...result };
   };
 }
 
@@ -4620,13 +4633,14 @@ async function taskMarkTier(ctx: OpContext, projectRoot: string, evidenceCommit:
   }
 }
 
-function appendTaskMarkTick(existing: string, taskId: string, status: "passed" | "failed", evidenceCommit: string, tier: ReviewTier, agent: string, note: string): { text: string; revision: number } {
+function appendTaskMarkTick(existing: string, taskId: string, status: "passed" | "failed", evidenceCommit: string, gate: string | undefined, tier: ReviewTier, agent: string, note: string): { text: string; revision: number } {
   const headings = scanPlanDocHeadings(existing);
   const ticks = headings.filter((entry) => entry.level === 2 && entry.text === "Ticks");
   if (ticks.length > 1) throw new ValidationError("TASK_MARK_MULTIPLE_TICKS_SECTIONS: plan document has ambiguous Ticks sections");
   const gates = headings.filter((entry) => entry.level === 2 && entry.text === "Gates");
   const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-  const tickLine = `${taskId} ${status} evidence=${evidenceCommit} tier=${tier} ${timestamp} ${agent}${note.length > 0 ? `: ${note}` : ""}`;
+  const gateField = gate === undefined ? "" : ` gate=${gate}`;
+  const tickLine = `${taskId} ${status} evidence=${evidenceCommit}${gateField} tier=${tier} ${timestamp} ${agent}${note.length > 0 ? `: ${note}` : ""}`;
   let text = existing;
   const finalGate = gates[0];
   const ticksBeforeGate = ticks[0] && finalGate && ticks[0].index < finalGate.index;
@@ -4669,6 +4683,7 @@ async function writeTaskMarkAtomically(
   taskId: string,
   status: "passed" | "failed",
   evidenceCommit: string,
+  gate: string | undefined,
   tier: ReviewTier,
   agent: string,
   note: string,
@@ -4684,7 +4699,7 @@ async function writeTaskMarkAtomically(
   assertBeneathProjectRoot(projectRoot, destination);
   const existingBytes = readFileSync(destination);
   const existing = existingBytes.toString("utf8");
-  const next = appendTaskMarkTick(existing, taskId, status, evidenceCommit, tier, agent, note);
+  const next = appendTaskMarkTick(existing, taskId, status, evidenceCommit, gate, tier, agent, note);
   const tempPath = join(parent, `.plan-doc-${randomUUID()}.tmp`);
   let tempWritten = false;
   try {
@@ -4710,7 +4725,7 @@ export function buildTaskMarkOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const payload = payloadOf(req) as {
       projectDir?: unknown; target?: unknown; name?: unknown; taskId?: unknown;
-      status?: unknown; evidenceCommit?: unknown; note?: unknown;
+      status?: unknown; evidenceCommit?: unknown; note?: unknown; gateRef?: unknown;
     };
     authorizeHostDispatch(ctx, "taskMark", req.sessionID, req.agent, "plan-writer");
     const boundIdentity = ctx.store.get(req.sessionID)?.agent;
@@ -4749,11 +4764,37 @@ export function buildTaskMarkOp(ctx: OpContext): OpHandler {
       const frontmatter = leadingPlanFrontmatter(current);
       const route = frontmatter === null ? null : frontmatterValue(frontmatter, "route");
       const gateSectionExists = scanPlanDocHeadings(current).some((heading) => heading.level === 2 && heading.text === "Gates");
-      if ((route !== null && route.length > 0 || gateSectionExists) && readLatestGateVerdict(current, payload.taskId)?.verdict !== "PASS") {
-        throw new ValidationError("TASK_MARK_GATE_NOT_PASSED: routed plan tasks require a latest PASS gate verdict");
+      const latest = readLatestGateVerdict(current, payload.taskId);
+      const routed = route !== null && route.length > 0;
+      let gateHash: string | undefined;
+      if (routed || gateSectionExists) {
+        if (!latest || latest.verdict !== "PASS") {
+          // Preserve the historical no-PASS refusal unless the caller supplied
+          // a gate reference that cannot match any PASS verdict.
+          if (payload.gateRef !== undefined) {
+            throw new ValidationError("TASK_MARK_GATE_REF_MISMATCH: gateRef does not match the latest PASS gate verdict");
+          }
+          throw new ValidationError("TASK_MARK_GATE_NOT_PASSED: routed plan tasks require a latest PASS gate verdict");
+        }
+        if (gateSectionExists) {
+          if (payload.gateRef === undefined) {
+            throw new ValidationError("TASK_MARK_GATE_REF_REQUIRED: a Gates section requires gateRef from the latest PASS verdict");
+          }
+          if (typeof payload.gateRef !== "string" || !GATE_REF_RE.test(payload.gateRef)) {
+            throw new ValidationError("TASK_MARK_GATE_REF_INVALID: gateRef must match ^sha256:[0-9a-f]{64}$");
+          }
+          const expectedGateRef = gateVerdictHash(latest.line);
+          if (payload.gateRef !== expectedGateRef) {
+            throw new ValidationError("TASK_MARK_GATE_REF_MISMATCH: gateRef does not match the latest PASS gate verdict");
+          }
+          gateHash = payload.gateRef;
+        }
       }
-      const written = await writeTaskMarkAtomically(projectRoot, destination, payload.taskId as string, payload.status as "passed" | "failed", payload.evidenceCommit as string, assessorTier, boundIdentity, note);
-      const commit = await commitPlanDocRevision(ctx, projectRoot, relative, `docs(odd): ${payload.name} tick ${payload.taskId} ${payload.status}`);
+      const written = await writeTaskMarkAtomically(projectRoot, destination, payload.taskId as string, payload.status as "passed" | "failed", payload.evidenceCommit as string, gateHash, assessorTier, boundIdentity, note);
+      const tickMessage = gateHash === undefined
+        ? `docs(odd): ${payload.name} tick ${payload.taskId} ${payload.status}`
+        : `docs(odd): ${payload.name} tick ${payload.taskId} ${payload.status} gate ${gateHash.slice("sha256:".length, "sha256:".length + 12)}`;
+      const commit = await commitPlanDocRevision(ctx, projectRoot, relative, tickMessage);
       return { ...written, ...commit };
     });
     return { target: payload.target, path: relative, tier: assessorTier, ...result };

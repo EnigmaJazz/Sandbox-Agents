@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -82,6 +83,19 @@ describe("host gate verdict", () => {
     expect(result).toMatchObject({ name: "phase-two", taskId: "unit-b", verdict: "PASS", path: "odd/tasks/phase-two.md", gates: 1 });
     expect(saved.startsWith(content)).toBe(true);
     expect(saved.slice(content.length)).toMatch(/^\n## Gates\n- unit-b PASS \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ planner\n$/);
+  });
+
+  test("returns a verdictHash of the exact appended verdict line", async () => {
+    const root = makeRoot();
+    const { path } = createPlan(root);
+    const result = await submit(root) as { verdictHash?: string };
+    const saved = readFileSync(path, "utf8");
+    const gateLine = saved.split("\n").find((line) => line.startsWith("- unit-b PASS "));
+    expect(gateLine).toBeDefined();
+    const expected = `sha256:${createHash("sha256").update(`${gateLine}\n`, "utf8").digest("hex")}`;
+    expect(result.verdictHash).toBe(expected);
+    expect(result.verdictHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(readLatestGateVerdict(saved, "unit-b")?.line).toBe(gateLine);
   });
 
   test("appends repeated task verdicts in order and reads the latest", async () => {

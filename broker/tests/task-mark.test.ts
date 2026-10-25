@@ -74,6 +74,26 @@ function runMark(root: string, evidenceCommit: string, payload: Record<string, u
   return buildTaskMarkOp(makeContext(root, identity, assessor))(request(root, evidenceCommit, payload, identity));
 }
 
+/** Record a real gate verdict through the operation and return its hash. */
+async function runGate(
+  root: string,
+  taskId = "T5",
+  verdict: "PASS" | "REFINE" | "ESCALATE" = "PASS",
+  payload: Record<string, unknown> = {},
+): Promise<string> {
+  const gate = buildGateVerdictOp(makeContext(root, "planner"));
+  const result = await gate({
+    version: 1,
+    id: "gate",
+    operation: "gateVerdict",
+    sessionID: "session-task-mark",
+    agent: "planner",
+    payload: { projectDir: root, name: "phase-five", taskId, verdict, agent: "planner", ...payload },
+  } as BrokerRequestEnvelope) as { verdictHash?: string };
+  if (typeof result.verdictHash !== "string") throw new Error("gateVerdict did not return a verdictHash");
+  return result.verdictHash;
+}
+
 describe("taskMark", () => {
   test("appends one tick, derives tier, bumps revision, and sanitizes the note", withProject(async (root, commit) => {
     const path = preparePlan(root);
@@ -143,9 +163,12 @@ describe("taskMark", () => {
   }));
 
   test("accepts a last PASS verdict when a Gates section has no route", withProject(async (root, commit) => {
-    const path = preparePlan(root, "# Phase five\n\n## Gates\n- T5 PASS 2026-01-01T00:00:00Z pm-odd\n\n## Revisions\n- r1 2026-01-01T00:00:00Z pm-odd: initial\n");
-    await expect(runMark(root, commit)).resolves.toMatchObject({ tier: "medium" });
-    expect(readFileSync(path, "utf8")).toContain(`T5 passed evidence=${commit}`);
+    const path = preparePlan(root);
+    const gateRef = await runGate(root);
+    await expect(runMark(root, commit, { gateRef })).resolves.toMatchObject({ tier: "medium" });
+    const text = readFileSync(path, "utf8");
+    expect(text).toContain(`T5 passed evidence=${commit} gate=${gateRef}`);
+    expect(text).toContain("## Gates");
   }));
 
   test("allows plans without route or a Gates section", withProject(async (root, commit) => {
@@ -158,30 +181,30 @@ describe("taskMark", () => {
   }));
 
   test("places one Ticks section immediately before final Gates", withProject(async (root, commit) => {
-    const path = preparePlan(root, "# Phase five\n\n## Revisions\n- r1 2026-01-01T00:00:00Z pm-odd: initial\n\n## Gates\n- T5 PASS 2026-01-01T00:00:00Z planner\n");
-    await expect(runMark(root, commit)).resolves.toMatchObject({ tier: "medium" });
+    const path = preparePlan(root);
+    const gateRef = await runGate(root);
+    await expect(runMark(root, commit, { gateRef })).resolves.toMatchObject({ tier: "medium" });
     const text = readFileSync(path, "utf8");
     expect(text.match(/^## Ticks$/gm)).toHaveLength(1);
     expect(text.indexOf("## Ticks")).toBeLessThan(text.indexOf("## Gates"));
-    expect(text.trimEnd().endsWith("## Gates\n- T5 PASS 2026-01-01T00:00:00Z planner")).toBe(true);
+    expect(text.trimEnd()).toMatch(/## Gates\n- T5 PASS \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ planner$/);
   }));
 
   test("appends ticks to the existing Ticks section before Gates", withProject(async (root, commit) => {
-    const path = preparePlan(root, "# Phase five\n\n## Revisions\n- r1 2026-01-01T00:00:00Z pm-odd: initial\n\n## Ticks\nT5 passed evidence=old tier=medium 2026-01-01T00:00:00Z pm-odd\n\n## Gates\n- T5 PASS 2026-01-01T00:00:00Z planner\n");
-    await expect(runMark(root, commit)).resolves.toMatchObject({ tier: "medium" });
+    const path = preparePlan(root, "# Phase five\n\n## Revisions\n- r1 2026-01-01T00:00:00Z pm-odd: initial\n\n## Ticks\nT5 passed evidence=old tier=medium 2026-01-01T00:00:00Z pm-odd\n");
+    const gateRef = await runGate(root);
+    await expect(runMark(root, commit, { gateRef })).resolves.toMatchObject({ tier: "medium" });
     const text = readFileSync(path, "utf8");
     expect(text.match(/^## Ticks$/gm)).toHaveLength(1);
     expect(text.indexOf(`evidence=${commit}`)).toBeLessThan(text.indexOf("## Gates"));
-    expect(text.trimEnd().endsWith("## Gates\n- T5 PASS 2026-01-01T00:00:00Z planner")).toBe(true);
+    expect(text.trimEnd()).toMatch(/## Gates\n- T5 PASS \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ planner$/);
   }));
 
   test("allows a gate verdict after tick and reads the latest verdict", withProject(async (root, commit) => {
-    const path = preparePlan(root, "# Phase five\n\n## Revisions\n- r1 2026-01-01T00:00:00Z pm-odd: initial\n\n## Gates\n- T5 PASS 2026-01-01T00:00:00Z planner\n");
-    await expect(runMark(root, commit)).resolves.toMatchObject({ tier: "medium" });
-    const config = defaultConfig({ projects: [{ id: "task-mark-test", path: root }], readOnlyAgents: [ORCHESTRATOR] });
-    const record: SessionRecord = { sessionID: "session-gate", state: "HOST_READ_ONLY", agent: "planner", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" };
-    const gate = buildGateVerdictOp({ config, store: { get: () => record }, adapter: {}, budget: {}, resources: {}, pool: {}, hostRead: { has: () => false }, logger: {}, git: { runnerMode: "planned", spawn: async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }) } } as never);
-    await gate({ version: 1, id: "gate", operation: "gateVerdict", sessionID: "session-gate", agent: "planner", payload: { projectDir: root, name: "phase-five", taskId: "T5", verdict: "REFINE", refinementPlan: "Update evidence", agent: "planner" } } as BrokerRequestEnvelope);
+    const path = preparePlan(root);
+    const passRef = await runGate(root);
+    await expect(runMark(root, commit, { gateRef: passRef })).resolves.toMatchObject({ tier: "medium" });
+    await runGate(root, "T5", "REFINE", { refinementPlan: "Update evidence" });
     expect(readLatestGateVerdict(readFileSync(path, "utf8"), "T5")?.verdict).toBe("REFINE");
   }));
 
@@ -190,18 +213,47 @@ describe("taskMark", () => {
     await expect(runMark(root, commit)).rejects.toThrow("TASK_MARK_GATE_NOT_PASSED");
   }));
 
-  test("uses the last Gates section, matching readLatestGateVerdict", withProject(async (root, commit) => {
-    const path = preparePlan(root, "# Phase five\n\n## Gates\n- T5 PASS 2026-01-01T00:00:00Z pm-odd\n\n## Gates\n- T5 FAIL 2026-01-02T00:00:00Z pm-odd\n\n## Revisions\n- r1 2026-01-01T00:00:00Z pm-odd: initial\n");
+  test("uses the latest verdict, matching readLatestGateVerdict", withProject(async (root, commit) => {
+    const path = preparePlan(root);
+    await runGate(root, "T5", "PASS");
+    await runGate(root, "T5", "REFINE", { refinementPlan: "Needs another pass" });
+    expect(readLatestGateVerdict(readFileSync(path, "utf8"), "T5")?.verdict).toBe("REFINE");
     await expect(runMark(root, commit)).rejects.toThrow("TASK_MARK_GATE_NOT_PASSED");
-    writeFileSync(path, "# Phase five\n\n## Gates\n- T5 FAIL 2026-01-01T00:00:00Z pm-odd\n\n## Gates\n- T5 PASS 2026-01-02T00:00:00Z pm-odd\n\n## Revisions\n- r1 2026-01-01T00:00:00Z pm-odd: initial\n");
-    await expect(runMark(root, commit)).resolves.toMatchObject({ tier: "medium" });
+
+    writeFileSync(path, "# Phase five\n\n## Revisions\n- r1 2026-01-01T00:00:00Z pm-odd: initial\n");
+    await runGate(root, "T5", "REFINE", { refinementPlan: "Needs another pass" });
+    const passRef = await runGate(root, "T5", "PASS");
+    expect(readLatestGateVerdict(readFileSync(path, "utf8"), "T5")?.verdict).toBe("PASS");
+    await expect(runMark(root, commit, { gateRef: passRef })).resolves.toMatchObject({ tier: "medium" });
   }));
 
   test("requires PASS for routed plans with a Gates section", withProject(async (root, commit) => {
-    const path = preparePlan(root, "---\nroute: odd\n---\n# Phase five\n\n## Gates\n- T5 REFINE 2026-01-01T00:00:00Z pm-odd\n");
+    const path = preparePlan(root, "---\nroute: odd\n---\n# Phase five\n\n## Revisions\n- r1 2026-01-01T00:00:00Z pm-odd: initial\n");
+    await runGate(root, "T5", "REFINE", { refinementPlan: "Needs another pass" });
     await expect(runMark(root, commit)).rejects.toThrow("TASK_MARK_GATE_NOT_PASSED");
-    writeFileSync(path, "---\nroute: odd\n---\n# Phase five\n\n## Gates\n- T5 PASS 2026-01-01T00:00:00Z pm-odd\n");
-    await expect(runMark(root, commit)).resolves.toMatchObject({ tier: "medium" });
+    const passRef = await runGate(root, "T5", "PASS");
+    await expect(runMark(root, commit, { gateRef: passRef })).resolves.toMatchObject({ tier: "medium" });
+    expect(readFileSync(path, "utf8")).toContain(`gate=${passRef}`);
+  }));
+
+  test("requires a gateRef when a Gates section exists", withProject(async (root, commit) => {
+    preparePlan(root);
+    await runGate(root);
+    await expect(runMark(root, commit)).rejects.toThrow("TASK_MARK_GATE_REF_REQUIRED");
+  }));
+
+  test("refuses a stale gateRef when a later PASS exists", withProject(async (root, commit) => {
+    preparePlan(root);
+    const staleRef = await runGate(root);
+    await runGate(root, "T5", "PASS", { evidenceRef: "second-review" });
+    await expect(runMark(root, commit, { gateRef: staleRef })).rejects.toThrow("TASK_MARK_GATE_REF_MISMATCH");
+  }));
+
+  test("refuses a gateRef belonging to a different task", withProject(async (root, commit) => {
+    preparePlan(root);
+    const otherTaskRef = await runGate(root, "T4");
+    await runGate(root, "T5");
+    await expect(runMark(root, commit, { gateRef: otherTaskRef })).rejects.toThrow("TASK_MARK_GATE_REF_MISMATCH");
   }));
 
   test("accumulates ticks in call order", withProject(async (root, commit) => {
