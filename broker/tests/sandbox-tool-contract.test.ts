@@ -323,21 +323,24 @@ test("review pipeline and persist tools expose only their allowed schema keys", 
 test("host_task_mark forwards the broker payload and caller identity without approval", async () => {
   const result = await runIsolatedTaskMarkProbe();
   expect(result.asks).toBe(0);
-  expect(result.calls).toEqual([{
-    operation: "taskMark",
-    sessionID: "session-task-mark",
-    payload: {
-      projectDir: "/work/project",
-      target: "tasks",
-      name: "phase-two",
-      taskId: "T12",
-      status: "passed",
-      evidenceCommit: "a".repeat(40),
-      note: "verified",
-      agent: "pm-odd",
-    },
-    agent: "pm-odd",
-  }]);
+  expect(result.calls).toHaveLength(1);
+  const [call] = result.calls as Array<{ operation: string; sessionID: string; payload: Record<string, unknown>; agent: string }>;
+  expect(call.operation).toBe("taskMark");
+  expect(call.sessionID).toBe("session-task-mark");
+  expect(Object.keys(call.payload).sort()).toEqual([
+    "evidenceCommit", "name", "note", "projectDir", "status", "target", "taskId",
+  ]);
+  expect(call.payload).not.toHaveProperty("agent");
+  expect(call.payload).toEqual({
+    projectDir: "/work/project",
+    target: "tasks",
+    name: "phase-two",
+    taskId: "T12",
+    status: "passed",
+    evidenceCommit: "a".repeat(40),
+    note: "verified",
+  });
+  expect(call.agent).toBe("pm-odd");
 });
 
 test("task mark has an allow permission entry", () => {

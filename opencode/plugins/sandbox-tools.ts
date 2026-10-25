@@ -1051,7 +1051,6 @@ export default function sandboxToolsPlugin() {
           const result = await c.request("taskMark", ctx.sessionID, {
             projectDir: currentProjectDirectory(ctx.directory),
             ...args,
-            agent: ctx.agent,
           }, ctx.agent);
           return JSON.stringify(result, null, 2);
         },
