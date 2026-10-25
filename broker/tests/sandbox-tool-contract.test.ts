@@ -162,7 +162,8 @@ async function runIsolatedTaskMarkProbe(): Promise<{ calls: unknown[]; asks: num
     const { default: plugin } = await import("./opencode/plugins/sandbox-tools.ts");
     let asks = 0;
     const result = await plugin().tool.host_task_mark.execute({
-      target: "tasks", name: "phase-two", taskId: "T12", status: "passed", evidenceCommit: "a".repeat(40), note: "verified",
+      target: "tasks", name: "phase-two", taskId: "T12", status: "passed", evidenceCommit: "a".repeat(40),
+      gateRef: "sha256:" + "b".repeat(64), evidenceBaseRef: "c".repeat(40), note: "verified",
     }, {
       sessionID: "session-task-mark", directory: "/work/project", agent: "pm-odd",
       ask: async () => { asks += 1; throw new Error("approval must not be requested"); },
@@ -174,6 +175,194 @@ async function runIsolatedTaskMarkProbe(): Promise<{ calls: unknown[]; asks: num
     new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
   ]);
   if (exitCode !== 0) throw new Error(`isolated task mark probe failed: ${stderr}`);
+  return JSON.parse(stdout.trim());
+}
+
+async function runIsolatedTaskMarkSchemaProbe(): Promise<{
+  calls: unknown[];
+  callsAfterValid: number;
+  callsAfterMalformed: number;
+  malformedError: string | null;
+  gateAcceptsValid: boolean;
+  gateRejectsMalformed: boolean;
+}> {
+  const source = `
+    import { mock } from "bun:test";
+    const schemaFor = (kind, state = { optional: false }) => {
+      const schema = new Proxy(function () {}, {
+        get(_target, prop) {
+          if (prop === "__optional") return state.optional;
+          if (prop === "optional") return () => { state.optional = true; return schema; };
+          if (prop === "regex") return (pattern) => { state.regex = pattern; return schema; };
+          if (prop === "length") return (length) => { state.length = length; return schema; };
+          if (prop === "min") return (min) => { state.min = min; return schema; };
+          if (prop === "max") return (max) => { state.max = max; return schema; };
+          if (prop === "parse") return (value) => {
+            if (kind === "string" && typeof value !== "string") throw new Error("expected string");
+            if (typeof state.length === "number" && value.length !== state.length) throw new Error("unexpected length");
+            if (state.regex instanceof RegExp && !state.regex.test(value)) throw new Error("pattern mismatch");
+            return value;
+          };
+          if (prop === "safeParse") return (value) => {
+            try { schema.parse(value); return { success: true, data: value }; }
+            catch (error) { return { success: false, error }; }
+          };
+          return () => schema;
+        },
+      });
+      return schema;
+    };
+    const z = new Proxy({}, { get: (_target, kind) => () => schemaFor(kind) });
+    mock.module("zod", () => ({ z }));
+    mock.module("@opencode-ai/plugin", () => ({
+      tool: (definition) => ({
+        ...definition,
+        execute: async (args, ctx) => {
+          for (const [name, schema] of Object.entries(definition.args)) {
+            const value = args[name];
+            if (value === undefined) {
+              if (schema.__optional !== true) throw new Error("missing required argument: " + name);
+              continue;
+            }
+            schema.parse(value);
+          }
+          return definition.execute(args, ctx);
+        },
+      }),
+    }));
+    const calls = [];
+    mock.module("./opencode/plugins/lib/broker-client.ts", () => ({
+      createBrokerClient: async () => ({
+        request: async (operation, sessionID, payload, agent) => {
+          calls.push({ operation, sessionID, payload, agent });
+          return { target: payload.target, name: payload.name, taskId: payload.taskId, status: payload.status, tier: "medium" };
+        },
+        close: () => {},
+      }),
+      brokerSocketPath: () => "/tmp/unreachable-test.sock",
+    }));
+    const { default: plugin } = await import("./opencode/plugins/sandbox-tools.ts");
+    const tool = plugin().tool.host_task_mark;
+    const ctx = {
+      sessionID: "session-task-mark-schema", directory: "/work/project", agent: "pm-odd",
+      ask: async () => { throw new Error("approval must not be requested"); },
+    };
+    const gateRef = "sha256:" + "b".repeat(64);
+    const baseArgs = { target: "tasks", name: "phase-two", taskId: "T12", status: "passed", evidenceCommit: "a".repeat(40) };
+    const validResult = await tool.execute({ ...baseArgs, gateRef, evidenceBaseRef: "c".repeat(40) }, ctx);
+    const callsAfterValid = calls.length;
+    let malformedError = null;
+    try {
+      await tool.execute({ ...baseArgs, gateRef: "gate-abc" }, ctx);
+    } catch (error) {
+      malformedError = error instanceof Error ? error.message : String(error);
+    }
+    const callsAfterMalformed = calls.length;
+    console.log(JSON.stringify({
+      calls, validResult, callsAfterValid, callsAfterMalformed, malformedError,
+      gateAcceptsValid: tool.args.gateRef.safeParse(gateRef).success === true,
+      gateRejectsMalformed: tool.args.gateRef.safeParse("gate-abc").success === false,
+    }));
+  `;
+  const child = Bun.spawn(["bun", "-e", source], { cwd: `${import.meta.dir}/../..`, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(`isolated task mark schema probe failed: ${stderr}`);
+  return JSON.parse(stdout.trim());
+}
+
+async function runIsolatedTaskMarkTaskIdSchemaProbe(): Promise<{
+  acceptsLong: boolean;
+  rejectsLeadingDash: boolean;
+  rejectsEmpty: boolean;
+  callsAfterLong: number;
+  callsAfterRejections: number;
+  longTaskIdPayload: Record<string, unknown> | null;
+}> {
+  const source = `
+    import { mock } from "bun:test";
+    const schemaFor = (kind) => {
+      const state = {};
+      const schema = new Proxy(function () {}, {
+        get(_target, prop) {
+          if (prop === "optional") return () => schema;
+          if (prop === "regex") return (pattern) => { state.regex = pattern; return schema; };
+          if (prop === "length") return (length) => { state.length = length; return schema; };
+          if (prop === "min") return (min) => { state.min = min; return schema; };
+          if (prop === "max") return (max) => { state.max = max; return schema; };
+          if (prop === "parse") return (value) => {
+            if (kind === "string" && typeof value !== "string") throw new Error("expected string");
+            if (typeof state.length === "number" && value.length !== state.length) throw new Error("unexpected length");
+            if (typeof state.min === "number" && value.length < state.min) throw new Error("too short");
+            if (typeof state.max === "number" && value.length > state.max) throw new Error("too long");
+            if (state.regex instanceof RegExp && !state.regex.test(value)) throw new Error("pattern mismatch");
+            return value;
+          };
+          if (prop === "safeParse") return (value) => {
+            try { schema.parse(value); return { success: true, data: value }; }
+            catch (error) { return { success: false, error }; }
+          };
+          return () => schema;
+        },
+      });
+      return schema;
+    };
+    const z = new Proxy({}, { get: (_target, kind) => () => schemaFor(kind) });
+    mock.module("zod", () => ({ z }));
+    mock.module("@opencode-ai/plugin", () => ({
+      tool: (definition) => ({
+        ...definition,
+        execute: async (args, ctx) => {
+          for (const [name, schema] of Object.entries(definition.args)) {
+            const value = args[name];
+            if (value === undefined) continue;
+            schema.parse(value);
+          }
+          return definition.execute(args, ctx);
+        },
+      }),
+    }));
+    const calls = [];
+    mock.module("./opencode/plugins/lib/broker-client.ts", () => ({
+      createBrokerClient: async () => ({
+        request: async (operation, sessionID, payload, agent) => {
+          calls.push({ operation, sessionID, payload, agent });
+          return { target: payload.target, name: payload.name, taskId: payload.taskId, status: payload.status, tier: "medium" };
+        },
+        close: () => {},
+      }),
+      brokerSocketPath: () => "/tmp/unreachable-test.sock",
+    }));
+    const { default: plugin } = await import("./opencode/plugins/sandbox-tools.ts");
+    const tool = plugin().tool.host_task_mark;
+    const ctx = {
+      sessionID: "session-task-id-schema", directory: "/work/project", agent: "pm-odd",
+      ask: async () => { throw new Error("approval must not be requested"); },
+    };
+    const gateRef = "sha256:" + "b".repeat(64);
+    const longTaskId = "ST1-implementation-task";
+    const baseArgs = { target: "tasks", name: "phase-two", status: "passed", evidenceCommit: "a".repeat(40), gateRef };
+    await tool.execute({ ...baseArgs, taskId: longTaskId }, ctx);
+    const callsAfterLong = calls.length;
+    for (const taskId of ["-bad", ""]) {
+      try { await tool.execute({ ...baseArgs, taskId }, ctx); } catch {}
+    }
+    const callsAfterRejections = calls.length;
+    console.log(JSON.stringify({
+      acceptsLong: tool.args.taskId.safeParse(longTaskId).success === true,
+      rejectsLeadingDash: tool.args.taskId.safeParse("-bad").success === false,
+      rejectsEmpty: tool.args.taskId.safeParse("").success === false,
+      callsAfterLong,
+      callsAfterRejections,
+      longTaskIdPayload: callsAfterLong > 0 ? calls[0].payload : null,
+    }));
+  `;
+  const child = Bun.spawn(["bun", "-e", source], { cwd: `${import.meta.dir}/../..`, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(`isolated task id schema probe failed: ${stderr}`);
   return JSON.parse(stdout.trim());
 }
 
@@ -328,7 +517,7 @@ test("host_task_mark forwards the broker payload and caller identity without app
   expect(call.operation).toBe("taskMark");
   expect(call.sessionID).toBe("session-task-mark");
   expect(Object.keys(call.payload).sort()).toEqual([
-    "evidenceCommit", "name", "note", "projectDir", "status", "target", "taskId",
+    "evidenceBaseRef", "evidenceCommit", "gateRef", "name", "note", "projectDir", "status", "target", "taskId",
   ]);
   expect(call.payload).not.toHaveProperty("agent");
   expect(call.payload).toEqual({
@@ -338,9 +527,39 @@ test("host_task_mark forwards the broker payload and caller identity without app
     taskId: "T12",
     status: "passed",
     evidenceCommit: "a".repeat(40),
+    gateRef: "sha256:" + "b".repeat(64),
+    evidenceBaseRef: "c".repeat(40),
     note: "verified",
   });
   expect(call.agent).toBe("pm-odd");
+});
+
+test("host_task_mark rejects a malformed gateRef at the schema boundary before any request", async () => {
+  const result = await runIsolatedTaskMarkSchemaProbe();
+  expect(result.gateAcceptsValid).toBe(true);
+  expect(result.gateRejectsMalformed).toBe(true);
+  expect(result.malformedError).not.toBeNull();
+  expect(result.callsAfterValid).toBe(1);
+  expect(result.callsAfterMalformed).toBe(1);
+  expect(result.calls).toHaveLength(1);
+});
+
+test("host_task_mark accepts a long taskId and rejects malformed task ids before any request", async () => {
+  const result = await runIsolatedTaskMarkTaskIdSchemaProbe();
+  expect(result.acceptsLong).toBe(true);
+  expect(result.rejectsLeadingDash).toBe(true);
+  expect(result.rejectsEmpty).toBe(true);
+  expect(result.callsAfterLong).toBe(1);
+  expect(result.callsAfterRejections).toBe(1);
+  expect(result.longTaskIdPayload).toEqual({
+    projectDir: "/work/project",
+    target: "tasks",
+    name: "phase-two",
+    taskId: "ST1-implementation-task",
+    status: "passed",
+    evidenceCommit: "a".repeat(40),
+    gateRef: "sha256:" + "b".repeat(64),
+  });
 });
 
 test("task mark has an allow permission entry", () => {

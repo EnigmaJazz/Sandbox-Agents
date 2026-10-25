@@ -1037,13 +1037,21 @@ export default function sandboxToolsPlugin() {
 
       host_task_mark: tool({
         description:
-          "Record a PM-authored task mark with broker-derived review tier from evidenceCommit. Assessment failure means high tier. Only PM identities may call this tool. Returns JSON.",
+          "Record a PM-authored task mark with broker-derived review tier from evidenceCommit. " +
+          "Assessment failure means high tier. Only PM identities may call this tool. A gated tick " +
+          "requires gateRef: the verdictHash returned by host_gate_verdict for the latest PASS on " +
+          "this task, required by the broker whenever the document has a `## Gates` section; " +
+          "omitting it fails with TASK_MARK_GATE_REF_REQUIRED. evidenceBaseRef is the base commit " +
+          "for the review assessment; omit it to let the broker use the evidence commit's first " +
+          "parent. Returns JSON.",
         args: {
           target: z.enum(["tasks", "mini"]),
           name: z.string().min(1).max(64),
-          taskId: z.string().min(1).max(8),
+          taskId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
           status: z.enum(["passed", "failed"]),
           evidenceCommit: z.string().length(40),
+          gateRef: z.string().regex(/^sha256:[0-9a-f]{64}$/).optional(),
+          evidenceBaseRef: z.string().length(40).optional(),
           note: z.string().max(200).optional(),
         },
         execute: async (args, ctx) => {
