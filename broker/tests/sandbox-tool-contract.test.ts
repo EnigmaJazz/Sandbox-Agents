@@ -142,6 +142,41 @@ async function runIsolatedGateVerdictProbe(): Promise<{ calls: unknown[]; asks: 
   return JSON.parse(stdout.trim());
 }
 
+async function runIsolatedTaskMarkProbe(): Promise<{ calls: unknown[]; asks: number }> {
+  const source = `
+    import { mock } from "bun:test";
+    const schema = new Proxy({}, { get: () => () => schema });
+    mock.module("@opencode-ai/plugin", () => ({ tool: (definition) => definition }));
+    mock.module("zod", () => ({ z: new Proxy({}, { get: () => () => schema }) }));
+    const calls = [];
+    mock.module("./opencode/plugins/lib/broker-client.ts", () => ({
+      createBrokerClient: async () => ({
+        request: async (operation, sessionID, payload, agent) => {
+          calls.push({ operation, sessionID, payload, agent });
+          return { target: payload.target, name: payload.name, taskId: payload.taskId, status: payload.status, tier: "medium" };
+        },
+        close: () => {},
+      }),
+      brokerSocketPath: () => "/tmp/unreachable-test.sock",
+    }));
+    const { default: plugin } = await import("./opencode/plugins/sandbox-tools.ts");
+    let asks = 0;
+    const result = await plugin().tool.host_task_mark.execute({
+      target: "tasks", name: "phase-two", taskId: "T12", status: "passed", evidenceCommit: "a".repeat(40), note: "verified",
+    }, {
+      sessionID: "session-task-mark", directory: "/work/project", agent: "pm-odd",
+      ask: async () => { asks += 1; throw new Error("approval must not be requested"); },
+    });
+    console.log(JSON.stringify({ calls, asks, result }));
+  `;
+  const child = Bun.spawn(["bun", "-e", source], { cwd: `${import.meta.dir}/../..`, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(`isolated task mark probe failed: ${stderr}`);
+  return JSON.parse(stdout.trim());
+}
+
 const sandboxTools = readFileSync(
   new URL("../../opencode/plugins/sandbox-tools.ts", import.meta.url),
   "utf8",
@@ -283,6 +318,30 @@ test("review pipeline and persist tools expose only their allowed schema keys", 
     expect(acceptsKeys(args, [...Object.keys(args), "unknown"])).toBe(false);
     expect(acceptsKeys(args, [...Object.keys(args), "projectDir"])).toBe(false);
   }
+});
+
+test("host_task_mark forwards the broker payload and caller identity without approval", async () => {
+  const result = await runIsolatedTaskMarkProbe();
+  expect(result.asks).toBe(0);
+  expect(result.calls).toEqual([{
+    operation: "taskMark",
+    sessionID: "session-task-mark",
+    payload: {
+      projectDir: "/work/project",
+      target: "tasks",
+      name: "phase-two",
+      taskId: "T12",
+      status: "passed",
+      evidenceCommit: "a".repeat(40),
+      note: "verified",
+      agent: "pm-odd",
+    },
+    agent: "pm-odd",
+  }]);
+});
+
+test("task mark has an allow permission entry", () => {
+  expect(permissionFragment).toContain('"host_task_mark": "allow"');
 });
 
 test("pipeline tool description requires an existing materialized run directory", () => {

@@ -1035,6 +1035,28 @@ export default function sandboxToolsPlugin() {
         },
       }),
 
+      host_task_mark: tool({
+        description:
+          "Record a PM-authored task mark with broker-derived review tier from evidenceCommit. Assessment failure means high tier. Only PM identities may call this tool. Returns JSON.",
+        args: {
+          target: z.enum(["tasks", "mini"]),
+          name: z.string().min(1).max(64),
+          taskId: z.string().min(1).max(8),
+          status: z.enum(["passed", "failed"]),
+          evidenceCommit: z.string().length(40),
+          note: z.string().max(200).optional(),
+        },
+        execute: async (args, ctx) => {
+          const c = await client();
+          const result = await c.request("taskMark", ctx.sessionID, {
+            projectDir: currentProjectDirectory(ctx.directory),
+            ...args,
+            agent: ctx.agent,
+          }, ctx.agent);
+          return JSON.stringify(result, null, 2);
+        },
+      }),
+
       host_gate_verdict: tool({
         description:
           "Record a planner gate verdict in the append-only gate log at the end of an existing task document. " +

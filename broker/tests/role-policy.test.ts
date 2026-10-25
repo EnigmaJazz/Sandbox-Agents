@@ -37,6 +37,8 @@ describe("R1 — capability taxonomy / unknown effects fail closed", () => {
     expect(classifyOperation("read")).toBe("READ_PROJECT");
     expect(classifyOperation("webfetch")).toBe("RESEARCH_EXTERNAL");
     expect(classifyOperation("sandbox_write")).toBe("MUTATE_PROJECT");
+    expect(classifyOperation("taskMark")).toBe("MUTATE_PROJECT");
+    expect(classifyOperation("host_task_mark")).toBe("HOST_APPROVED_MUTATION");
     expect(classifyOperation("sandbox_bash")).toBe("EXECUTE_PROJECT");
     expect(classifyOperation("host_test_run")).toBe("TEST_EXECUTION");
     expect(TOOL_CLASSIFICATION_INVENTORY.host_test_run).toBe("TEST_EXECUTION");
