@@ -4611,7 +4611,7 @@ export function buildTaskMarkOp(ctx: OpContext): OpHandler {
       const frontmatter = leadingPlanFrontmatter(current);
       const route = frontmatter === null ? null : frontmatterValue(frontmatter, "route");
       const gateSectionExists = scanPlanDocHeadings(current).some((heading) => heading.level === 2 && heading.text === "Gates");
-      if (route !== null && route.length > 0 && gateSectionExists && readLatestGateVerdict(current, payload.taskId)?.verdict !== "PASS") {
+      if ((route !== null && route.length > 0 || gateSectionExists) && readLatestGateVerdict(current, payload.taskId)?.verdict !== "PASS") {
         throw new ValidationError("TASK_MARK_GATE_NOT_PASSED: routed plan tasks require a latest PASS gate verdict");
       }
       return writeTaskMarkAtomically(projectRoot, destination, payload.taskId as string, payload.status as "passed" | "failed", payload.evidenceCommit as string, assessorTier, boundIdentity, note);
