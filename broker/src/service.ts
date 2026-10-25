@@ -817,6 +817,19 @@ async function pinnedSnapshotIdentity(
   };
 }
 
+/**
+ * Broker-owned commit identity for sandbox-pinned commits. Supplying it through
+ * the environment means a repository-local or global user identity can never
+ * override the broker's own, and a repository with no `user.email` still
+ * commits.
+ */
+const SANDBOX_COMMIT_IDENTITY: Record<string, string> = {
+  GIT_AUTHOR_NAME: "opencode-sandbox",
+  GIT_AUTHOR_EMAIL: "sandbox@local",
+  GIT_COMMITTER_NAME: "opencode-sandbox",
+  GIT_COMMITTER_EMAIL: "sandbox@local",
+};
+
 async function runSnapshot(
   ctx: OpContext,
   repoDir: string,
@@ -835,10 +848,7 @@ async function runSnapshot(
   const env = {
     GIT_DIR: gitDir,
     GIT_INDEX_FILE: tmpIndex,
-    GIT_AUTHOR_NAME: "opencode-sandbox",
-    GIT_AUTHOR_EMAIL: "sandbox@local",
-    GIT_COMMITTER_NAME: "opencode-sandbox",
-    GIT_COMMITTER_EMAIL: "sandbox@local",
+    ...SANDBOX_COMMIT_IDENTITY,
   };
   const git = (argv: string[], timeoutMs = 120_000) =>
     ctx.git.spawn(argv, { env, cwd: repoDir, timeoutMs });
@@ -4246,11 +4256,17 @@ async function writePlanDocAtomically(
 // commits exactly that one document.
 // ---------------------------------------------------------------------------
 
-/** Plan document commit environment: no system/global config, no optional locks. */
+/**
+ * Plan document commit environment: no system/global config and no optional
+ * locks. The broker's fixed sandbox identity is supplied through
+ * `GIT_AUTHOR_*`/`GIT_COMMITTER_*`, so a repository with no `user.email` still
+ * commits without inheriting the host user's identity.
+ */
 const PLAN_DOC_COMMIT_ENV: Record<string, string> = {
   GIT_CONFIG_NOSYSTEM: "1",
   GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_OPTIONAL_LOCKS: "0",
+  ...SANDBOX_COMMIT_IDENTITY,
 };
 
 const PLAN_DOC_COMMIT_TIMEOUT_MS = 30_000;
@@ -4549,7 +4565,11 @@ export function buildPlanDocWriteOp(ctx: OpContext): OpHandler {
     }
     const frontmatter = leadingPlanFrontmatter(payload.content);
     const route = frontmatter === null ? null : frontmatterValue(frontmatter, "route");
-    if (payload.target === "mini" && boundIdentity !== "planner") {
+    const isPmWriter = normalizeRoleKey(boundIdentity) === "pm";
+    if (payload.target === "mini" && isPmWriter) {
+      // PM-authored mini plans require a frontmatter route other than Sol. The
+      // orchestrator, the planner and any other configured plan writer may
+      // draft a mini plan without one.
       // The contract does not define a canonical Sol route spelling; refuse the token case-insensitively.
       if (!route || route.toLowerCase() === "sol") {
         throw new ValidationError("PLAN_WRITE_PM_ROUTE_REFUSED: PM mini plans require a frontmatter route other than Sol");
@@ -4577,7 +4597,9 @@ export function buildPlanDocWriteOp(ctx: OpContext): OpHandler {
     }
     const allowedAgents = payload.target === "tasks"
       ? ctx.config.planWriterAgents
-      : [...new Set([...ctx.config.planWriterAgents, ...ctx.config.planMiniWriterAgents])];
+      // Mini drafts admit the plan writers plus the read-only orchestrator
+      // identities that `planDocWrite` already authorizes for draft writes.
+      : [...new Set([...ctx.config.planWriterAgents, ...ctx.config.planMiniWriterAgents, ...ctx.config.readOnlyAgents])];
     if (typeof payload.agent !== "string" || !allowedAgents.includes(payload.agent)) {
       throw new ValidationError(`PLAN_WRITE_AGENT_REFUSED: target=${payload.target} allowed=[${allowedAgents.join(", ")}]`);
     }
@@ -4597,7 +4619,6 @@ export function buildPlanDocWriteOp(ctx: OpContext): OpHandler {
   };
 }
 
-const TASK_MARK_ID_RE = /^T[0-9]{1,3}$/;
 const TASK_MARK_COMMIT_RE = /^[0-9a-f]{40}$/;
 const TASK_MARK_ASSESS_TIMEOUT_MS = 120_000;
 
@@ -4614,15 +4635,36 @@ function assessmentTier(value: unknown): ReviewTier {
   return tier === "high" || tier === "medium" || tier === "passive" ? tier : "high";
 }
 
-async function taskMarkTier(ctx: OpContext, projectRoot: string, evidenceCommit: string): Promise<ReviewTier> {
+/**
+ * First parent of the evidence commit, or undefined when the commit is a root
+ * commit (or otherwise unresolvable). `git rev-parse <commit>^` is argv-only and
+ * never widens the assessed range to a branch name.
+ */
+async function resolveEvidenceParent(ctx: OpContext, projectRoot: string, evidenceCommit: string): Promise<string | undefined> {
+  const parent = await runHostStep(ctx, ["git", "rev-parse", `${evidenceCommit}^`], projectRoot);
+  const id = parent.stdout.trim();
+  if (parent.status !== 0 || parent.timedOut || parent.stdoutTruncated || !TASK_MARK_COMMIT_RE.test(id)) return undefined;
+  return id;
+}
+
+/**
+ * Tier for a tick, derived from `baseRef..evidenceCommit`. The evidence commit
+ * is normally HEAD, so assessing it as its own base is an empty range that fails
+ * closed to `high`; the first parent is the base that makes the range real. An
+ * explicit `evidenceBaseRef` wins. A root or unresolvable parent, a failed
+ * assessment and a missing assessor all keep the fail-closed `high` tier.
+ */
+async function taskMarkTier(ctx: OpContext, projectRoot: string, evidenceCommit: string, evidenceBaseRef?: string): Promise<ReviewTier> {
   if (!ctx.reviewAssess) return "high";
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
+    const baseRef = evidenceBaseRef ?? await resolveEvidenceParent(ctx, projectRoot, evidenceCommit);
+    if (baseRef === undefined) return "high";
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error("review assessor timed out")), TASK_MARK_ASSESS_TIMEOUT_MS);
     });
     const result = await Promise.race([
-      ctx.reviewAssess({ projectDir: projectRoot, baseRef: evidenceCommit, committedOnly: true }),
+      ctx.reviewAssess({ projectDir: projectRoot, baseRef, committedOnly: true }),
       timeout,
     ]);
     return assessmentTier(result);
@@ -4725,7 +4767,7 @@ export function buildTaskMarkOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const payload = payloadOf(req) as {
       projectDir?: unknown; target?: unknown; name?: unknown; taskId?: unknown;
-      status?: unknown; evidenceCommit?: unknown; note?: unknown; gateRef?: unknown;
+      status?: unknown; evidenceCommit?: unknown; evidenceBaseRef?: unknown; note?: unknown; gateRef?: unknown;
     };
     authorizeHostDispatch(ctx, "taskMark", req.sessionID, req.agent, "plan-writer");
     const boundIdentity = ctx.store.get(req.sessionID)?.agent;
@@ -4734,12 +4776,15 @@ export function buildTaskMarkOp(ctx: OpContext): OpHandler {
     }
     if (payload.target !== "tasks" && payload.target !== "mini") throw new ValidationError("TASK_MARK_TARGET_INVALID: target must be tasks or mini");
     assertPlanDocWriteName(payload.name);
-    if (typeof payload.taskId !== "string" || !TASK_MARK_ID_RE.test(payload.taskId)) {
-      throw new ValidationError("TASK_MARK_TASK_ID_INVALID: taskId must match ^T[0-9]{1,3}$");
+    if (typeof payload.taskId !== "string" || !GATE_TASK_ID_RE.test(payload.taskId)) {
+      throw new ValidationError("TASK_MARK_TASK_ID_INVALID: taskId must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
     }
     if (payload.status !== "passed" && payload.status !== "failed") throw new ValidationError("TASK_MARK_STATUS_INVALID: status must be passed or failed");
     if (typeof payload.evidenceCommit !== "string" || !TASK_MARK_COMMIT_RE.test(payload.evidenceCommit)) {
       throw new ValidationError("TASK_MARK_EVIDENCE_COMMIT_INVALID: evidenceCommit must be a full lowercase 40-hex commit id");
+    }
+    if (payload.evidenceBaseRef !== undefined && (typeof payload.evidenceBaseRef !== "string" || !TASK_MARK_COMMIT_RE.test(payload.evidenceBaseRef))) {
+      throw new ValidationError("TASK_MARK_EVIDENCE_BASE_REF_INVALID: evidenceBaseRef must be a full lowercase 40-hex commit id");
     }
     if (payload.note !== undefined && typeof payload.note !== "string") throw new ValidationError("TASK_MARK_NOTE_INVALID: note must be a string");
     const note = typeof payload.note === "string"
@@ -4756,7 +4801,7 @@ export function buildTaskMarkOp(ctx: OpContext): OpHandler {
     if (!isWithin(projectRoot, destination)) throw new ValidationError("TASK_MARK_PATH_ESCAPE: destination escapes project root");
     const rejected = checkProtectedPaths([relative], [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles]);
     if (rejected.length > 0) throw new ValidationError(`TASK_MARK_PROTECTED_PATH: ${rejected.join(", ")}`);
-    const assessorTier = await taskMarkTier(ctx, projectRoot, payload.evidenceCommit);
+    const assessorTier = await taskMarkTier(ctx, projectRoot, payload.evidenceCommit, payload.evidenceBaseRef);
     const result = await withPlanDocLock(destination, async () => {
       const currentStat = lstatIfExists(destination);
       if (currentStat === undefined || !currentStat.isFile()) throw new ValidationError("TASK_MARK_DOCUMENT_MISSING: plan document must already exist as a regular file");

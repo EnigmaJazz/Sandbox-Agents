@@ -83,7 +83,7 @@ function withProject(run: (root: string, seed: string) => Promise<void>) {
   };
 }
 
-/** Repo without identity: `git commit` has no user.email to write a commit. */
+/** Repo with no local or global identity: only the broker-supplied identity can commit. */
 function withBareRepo(run: (root: string) => Promise<void>) {
   return async () => {
     const root = mkdtempSync(join(tmpdir(), "plan-doc-commit-noid-"));
@@ -164,6 +164,10 @@ function headOf(root: string): string {
 
 function lastMessage(root: string): string {
   return execFileSync("git", ["-C", root, "log", "-1", "--format=%s"], { encoding: "utf8" }).trim();
+}
+
+function lastAuthorName(root: string): string {
+  return execFileSync("git", ["-C", root, "log", "-1", "--format=%an"], { encoding: "utf8" }).trim();
 }
 
 function lastCommitPaths(root: string): string[] {
@@ -267,21 +271,18 @@ describe("plan document commits", () => {
     expect(lastMessage(root)).toBe("seed plan");
   }));
 
-  test("a commit failure keeps the durable write and reports a bounded commitError", withBareRepo(async (root) => {
+  test("commits with the fixed sandbox identity when no repo or global identity is configured", withBareRepo(async (root) => {
     const result = await buildPlanDocWriteOp(makeContext(root, "planner", spawnRealGit({ sanitizeIdentity: true })))(
       planWriteRequest(root),
     ) as Record<string, unknown>;
 
-    expect(result).toMatchObject({ revision: 1, committed: false });
-    const commitError = String(result.commitError);
-    expect(commitError.length).toBeGreaterThan(0);
-    expect(commitError.length).toBeLessThanOrEqual(200);
-    expect(commitError).not.toContain("\n");
+    expect(result).toMatchObject({ revision: 1, created: true, committed: true });
+    expect(String(result.commit)).toMatch(/^[0-9a-f]{40}$/);
+    expect(lastAuthorName(root)).toBe("opencode-sandbox");
 
     const text = readFileSync(join(root, "odd/tasks/phase-commit.md"), "utf8");
     expect(text).toContain("## Revisions");
     expect(text).toContain("- r1 ");
-    expect(() => headOf(root)).toThrow();
   }));
 
   test("leaves an unchanged plan document uncommitted (no-op write)", withProject(async (root) => {

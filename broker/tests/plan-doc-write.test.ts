@@ -248,6 +248,17 @@ describe("host plan document write", () => {
     await expect(write(root, { target: "tasks", content: "# Task without route" })).resolves.toMatchObject({ revision: 1 });
   }));
 
+  test("orchestrator mini drafts need no route while PM mini drafts still do", withProject(async (root) => {
+    await expect(write(root, { target: "mini", name: "mini-plan", content: "# Mini without route" }, ORCHESTRATOR, ORCHESTRATOR))
+      .resolves.toMatchObject({ revision: 1 });
+    await rejectsValidation(
+      write(root, { target: "mini", name: "mini-plan", content: "# Mini without route" }, "pm-odd", "pm-odd"),
+      /PLAN_WRITE_PM_ROUTE_REFUSED/,
+    );
+    await expect(write(root, { target: "mini", name: "mini-plan", content: "---\nroute: odd\n---\n# Mini", expectedRevision: 1 }, "pm-odd", "pm-odd"))
+      .resolves.toMatchObject({ revision: 2 });
+  }));
+
   test("returns the UTF-8 byte count", withProject(async (root) => {
     const result = await write(root, { content: "é\n" });
     const text = readFileSync(join(root, "odd/tasks/phase-two.md"), "utf8");

@@ -9,7 +9,7 @@ import type { BrokerRequestEnvelope, SessionRecord } from "../src/types.ts";
 
 const ORCHESTRATOR = "gentle-orchestrator";
 
-function withProject(run: (root: string, evidenceCommit: string) => Promise<void>) {
+function withProject(run: (root: string, evidenceCommit: string, parentCommit: string) => Promise<void>) {
   return async () => {
     const root = mkdtempSync(join(tmpdir(), "task-mark-"));
     try {
@@ -19,15 +19,22 @@ function withProject(run: (root: string, evidenceCommit: string) => Promise<void
       writeFileSync(join(root, "seed.txt"), "seed\n");
       execFileSync("git", ["-C", root, "add", "seed.txt"]);
       execFileSync("git", ["-C", root, "commit", "-qm", "seed"]);
+      writeFileSync(join(root, "parent.txt"), "parent\n");
+      execFileSync("git", ["-C", root, "add", "parent.txt"]);
+      execFileSync("git", ["-C", root, "commit", "-qm", "parent"]);
+      const parentCommit = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      writeFileSync(join(root, "evidence.txt"), "evidence\n");
+      execFileSync("git", ["-C", root, "add", "evidence.txt"]);
+      execFileSync("git", ["-C", root, "commit", "-qm", "evidence"]);
       const evidenceCommit = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-      await run(root, evidenceCommit);
+      await run(root, evidenceCommit, parentCommit);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   };
 }
 
-function makeContext(root: string, identity = "pm-odd", assessor: () => Promise<unknown> = async () => ({ status: 0, json: { tier: "medium" } })) {
+function makeContext(root: string, identity = "pm-odd", assessor: (args?: unknown) => Promise<unknown> = async () => ({ status: 0, json: { tier: "medium" } })) {
   const config = defaultConfig({ projects: [{ id: "task-mark-test", path: root }], readOnlyAgents: [ORCHESTRATOR] });
   const record: SessionRecord = {
     sessionID: "session-task-mark",
@@ -45,10 +52,20 @@ function makeContext(root: string, identity = "pm-odd", assessor: () => Promise<
       runnerMode: "planned",
       spawn: async (argv: string[], options: { cwd: string }) => {
         try {
-          execFileSync(argv[0]!, argv.slice(1), { cwd: options.cwd, stdio: "ignore" });
-          return { status: 0, stdout: "", stderr: "", timedOut: false };
-        } catch {
-          return { status: 1, stdout: "", stderr: "", timedOut: false };
+          const stdout = execFileSync(argv[0]!, argv.slice(1), {
+            cwd: options.cwd,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          return { status: 0, stdout: String(stdout), stderr: "", timedOut: false };
+        } catch (error) {
+          const failure = error as { status?: number | null; stderr?: string | Buffer };
+          return {
+            status: typeof failure.status === "number" ? failure.status : 1,
+            stdout: "",
+            stderr: failure.stderr === undefined ? "" : String(failure.stderr),
+            timedOut: false,
+          };
         }
       },
     },
@@ -122,14 +139,49 @@ describe("taskMark", () => {
     expect(readFileSync(path, "utf8")).toContain(`evidence=${commit} tier=high `);
   }));
 
-  test("calls the assessor with the canonical project root and committed evidence", withProject(async (root, commit) => {
+  test("calls the assessor with the canonical project root and the evidence parent as baseRef", withProject(async (root, commit, parent) => {
     preparePlan(root);
     let assessmentArgs: unknown;
     await runMark(root, commit, {}, "pm-odd", async (args: unknown) => {
       assessmentArgs = args;
       return { status: 0, json: { tier: "passive" } };
     });
-    expect(assessmentArgs).toEqual({ projectDir: root, baseRef: commit, committedOnly: true });
+    expect(assessmentArgs).toEqual({ projectDir: root, baseRef: parent, committedOnly: true });
+  }));
+
+  test("records the tier from the evidence parent range", withProject(async (root, commit, parent) => {
+    const path = preparePlan(root);
+    let baseRef: unknown;
+    await expect(runMark(root, commit, {}, "pm-odd", async (args: unknown) => {
+      baseRef = (args as { baseRef?: unknown }).baseRef;
+      return { status: 0, json: { tier: "medium" } };
+    })).resolves.toMatchObject({ tier: "medium" });
+    expect(baseRef).toBe(parent);
+    expect(readFileSync(path, "utf8")).toContain(`evidence=${commit} tier=medium `);
+  }));
+
+  test("a root evidence commit with no resolvable parent records high tier", withProject(async (root) => {
+    const path = preparePlan(root);
+    const rootCommit = execFileSync("git", ["-C", root, "rev-list", "--max-parents=0", "HEAD"], { encoding: "utf8" }).trim();
+    let called = false;
+    await expect(runMark(root, rootCommit, {}, "pm-odd", async () => {
+      called = true;
+      return { status: 0, json: { tier: "medium" } };
+    })).resolves.toMatchObject({ tier: "high" });
+    expect(called).toBe(false);
+    expect(readFileSync(path, "utf8")).toContain(`evidence=${rootCommit} tier=high `);
+  }));
+
+  test("uses an explicit evidenceBaseRef instead of the resolved parent", withProject(async (root, commit, parent) => {
+    preparePlan(root);
+    const older = execFileSync("git", ["-C", root, "rev-parse", `${parent}^`], { encoding: "utf8" }).trim();
+    expect(older).not.toBe(parent);
+    let baseRef: unknown;
+    await runMark(root, commit, { evidenceBaseRef: older }, "pm-odd", async (args: unknown) => {
+      baseRef = (args as { baseRef?: unknown }).baseRef;
+      return { status: 0, json: { tier: "passive" } };
+    });
+    expect(baseRef).toBe(older);
   }));
 
   test("refuses missing or unresolvable evidence commits", withProject(async (root, commit) => {
@@ -139,10 +191,13 @@ describe("taskMark", () => {
     await expect(runMark(root, "a".repeat(40))).rejects.toThrow();
   }));
 
-  test("rejects malformed task ids", withProject(async (root, commit) => {
+  test("accepts gate-shaped task ids and refuses malformed ones", withProject(async (root, commit) => {
     preparePlan(root);
-    await expect(runMark(root, commit, { taskId: "T5x" })).rejects.toThrow();
-    await expect(runMark(root, commit, { taskId: "" })).rejects.toThrow();
+    await expect(runMark(root, commit, { taskId: "ST1" })).resolves.toMatchObject({ revision: 2 });
+    await expect(runMark(root, commit, { taskId: "T12.3" })).resolves.toMatchObject({ revision: 3 });
+    for (const taskId of ["-bad", "", "a".repeat(65)]) {
+      await expect(runMark(root, commit, { taskId })).rejects.toThrow("TASK_MARK_TASK_ID_INVALID");
+    }
   }));
 
   test("refuses planner and orchestrator identities with TASK_MARK_PM_ONLY", withProject(async (root, commit) => {
