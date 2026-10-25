@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
-import { buildTaskMarkOp } from "../src/service.ts";
+import { buildGateVerdictOp, buildTaskMarkOp, readLatestGateVerdict } from "../src/service.ts";
 import type { BrokerRequestEnvelope, SessionRecord } from "../src/types.ts";
 
 const ORCHESTRATOR = "gentle-orchestrator";
@@ -151,7 +151,38 @@ describe("taskMark", () => {
   test("allows plans without route or a Gates section", withProject(async (root, commit) => {
     const path = preparePlan(root, "# Phase five\n\n## Revisions\n- r1 2026-01-01T00:00:00Z pm-odd: initial\n");
     await expect(runMark(root, commit)).resolves.toMatchObject({ tier: "medium" });
-    expect(readFileSync(path, "utf8")).toContain(`T5 passed evidence=${commit}`);
+    const text = readFileSync(path, "utf8");
+    expect(text).toContain(`T5 passed evidence=${commit}`);
+    expect(text.trimEnd()).toMatch(new RegExp(`## Ticks\\nT5 passed evidence=${commit} tier=medium \\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z pm-odd(?:: done)?$`));
+    expect(text.match(/^## Ticks$/gm)).toHaveLength(1);
+  }));
+
+  test("places one Ticks section immediately before final Gates", withProject(async (root, commit) => {
+    const path = preparePlan(root, "# Phase five\n\n## Revisions\n- r1 2026-01-01T00:00:00Z pm-odd: initial\n\n## Gates\n- T5 PASS 2026-01-01T00:00:00Z planner\n");
+    await expect(runMark(root, commit)).resolves.toMatchObject({ tier: "medium" });
+    const text = readFileSync(path, "utf8");
+    expect(text.match(/^## Ticks$/gm)).toHaveLength(1);
+    expect(text.indexOf("## Ticks")).toBeLessThan(text.indexOf("## Gates"));
+    expect(text.trimEnd().endsWith("## Gates\n- T5 PASS 2026-01-01T00:00:00Z planner")).toBe(true);
+  }));
+
+  test("appends ticks to the existing Ticks section before Gates", withProject(async (root, commit) => {
+    const path = preparePlan(root, "# Phase five\n\n## Revisions\n- r1 2026-01-01T00:00:00Z pm-odd: initial\n\n## Ticks\nT5 passed evidence=old tier=medium 2026-01-01T00:00:00Z pm-odd\n\n## Gates\n- T5 PASS 2026-01-01T00:00:00Z planner\n");
+    await expect(runMark(root, commit)).resolves.toMatchObject({ tier: "medium" });
+    const text = readFileSync(path, "utf8");
+    expect(text.match(/^## Ticks$/gm)).toHaveLength(1);
+    expect(text.indexOf(`evidence=${commit}`)).toBeLessThan(text.indexOf("## Gates"));
+    expect(text.trimEnd().endsWith("## Gates\n- T5 PASS 2026-01-01T00:00:00Z planner")).toBe(true);
+  }));
+
+  test("allows a gate verdict after tick and reads the latest verdict", withProject(async (root, commit) => {
+    const path = preparePlan(root, "# Phase five\n\n## Revisions\n- r1 2026-01-01T00:00:00Z pm-odd: initial\n\n## Gates\n- T5 PASS 2026-01-01T00:00:00Z planner\n");
+    await expect(runMark(root, commit)).resolves.toMatchObject({ tier: "medium" });
+    const config = defaultConfig({ projects: [{ id: "task-mark-test", path: root }], readOnlyAgents: [ORCHESTRATOR] });
+    const record: SessionRecord = { sessionID: "session-gate", state: "HOST_READ_ONLY", agent: "planner", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" };
+    const gate = buildGateVerdictOp({ config, store: { get: () => record }, adapter: {}, budget: {}, resources: {}, pool: {}, hostRead: { has: () => false }, logger: {}, git: { runnerMode: "planned", spawn: async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }) } } as never);
+    await gate({ version: 1, id: "gate", operation: "gateVerdict", sessionID: "session-gate", agent: "planner", payload: { projectDir: root, name: "phase-five", taskId: "T5", verdict: "REFINE", refinementPlan: "Update evidence", agent: "planner" } } as BrokerRequestEnvelope);
+    expect(readLatestGateVerdict(readFileSync(path, "utf8"), "T5")?.verdict).toBe("REFINE");
   }));
 
   test("requires PASS for routed plans even without a Gates section", withProject(async (root, commit) => {

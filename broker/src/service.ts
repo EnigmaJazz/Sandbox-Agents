@@ -2615,10 +2615,12 @@ async function runHostStep(
   argv: string[],
   cwd: string,
   timeoutMs = 120_000,
+  env?: Record<string, string>,
 ): Promise<HostStepResult> {
   const result = await ctx.git.spawn(argv, {
     cwd,
     timeoutMs,
+    ...(env === undefined ? {} : { env }),
     maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
   });
   // The spawn's byte-truncation flag is the authority (Tier 4 item 56); the
@@ -4235,6 +4237,121 @@ async function writePlanDocAtomically(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Plan document commits
+//
+// Plan documents under odd/tasks/ and odd/mini/ are broker-owned bytes: workers
+// are refused on those roots, so a human should not have to commit every
+// broker-written revision by hand. After a plan mutation is durable the broker
+// commits exactly that one document.
+// ---------------------------------------------------------------------------
+
+/** Plan document commit environment: no system/global config, no optional locks. */
+const PLAN_DOC_COMMIT_ENV: Record<string, string> = {
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_OPTIONAL_LOCKS: "0",
+};
+
+const PLAN_DOC_COMMIT_TIMEOUT_MS = 30_000;
+const PLAN_DOC_COMMIT_ERROR_MAX = 200;
+const PLAN_DOC_COMMIT_PATH_RE = /^odd\/(?:tasks|mini)\/[a-z0-9][a-z0-9-]{0,63}\.md$/;
+
+export interface PlanDocCommitResult {
+  committed: boolean;
+  /** Full 40-hex commit id when `committed` is true. */
+  commit?: string;
+  /** First stderr line of the failing git step, bounded to 200 characters. */
+  commitError?: string;
+}
+
+/**
+ * Assert that a repo-relative path is exactly one plan document under
+ * `odd/tasks/` or `odd/mini/`. The plan roots are the only documents the broker
+ * may commit on its own; every other path is a programming error, not a
+ * decision to make silently.
+ */
+export function assertPlanDocCommitPath(relative: string): string {
+  if (typeof relative !== "string" || !PLAN_DOC_COMMIT_PATH_RE.test(relative)) {
+    throw new StateError(`PLAN_DOC_COMMIT_PATH_OUTSIDE_PLAN_ROOT: ${String(relative)}`);
+  }
+  return relative;
+}
+
+/** First non-empty stderr line, bounded; never multiline, never unbounded. */
+function planDocCommitError(stderr: string): string {
+  const firstLine = stderr
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0) ?? "";
+  return firstLine.slice(0, PLAN_DOC_COMMIT_ERROR_MAX);
+}
+
+/**
+ * Commit exactly one plan document after its durable write.
+ *
+ * - argv only, no shell; cwd is the canonical project root; 30s per step.
+ * - Selection is by PATHSPEC (`git commit -m <message> -- <path>`), so
+ *   unrelated staged or unstaged changes are neither included nor able to
+ *   block the commit.
+ * - A *new* document must first be known to git (a pathspec commit only
+ *   accepts paths already known to git): only that single path is registered
+ *   with `git add --`, never `-A` and never the index as the selection.
+ * - An unchanged document (bytes equal to HEAD) is not committed.
+ * - A commit failure never rolls back the durable write: it returns
+ *   `committed: false` plus a bounded `commitError`.
+ */
+export async function commitPlanDocRevision(
+  ctx: OpContext,
+  projectRoot: string,
+  relative: string,
+  message: string,
+): Promise<PlanDocCommitResult> {
+  assertPlanDocCommitPath(relative);
+  if (!isWithin(projectRoot, resolve(projectRoot, relative))) {
+    throw new StateError(`PLAN_DOC_COMMIT_PATH_ESCAPE: ${relative}`);
+  }
+  const step = (argv: string[]) =>
+    runHostStep(ctx, argv, projectRoot, PLAN_DOC_COMMIT_TIMEOUT_MS, { ...PLAN_DOC_COMMIT_ENV });
+  try {
+    const known = await step(["git", "ls-files", "--error-unmatch", "--", relative]);
+    if (known.status === 0) {
+      const changed = await step(["git", "diff", "--quiet", "HEAD", "--", relative]);
+      if (changed.status === 0) return { committed: false };
+      if (changed.status !== 1) {
+        return { committed: false, commitError: planDocCommitError(changed.stderr) };
+      }
+    } else if (known.status === 1) {
+      const added = await step(["git", "add", "--", relative]);
+      if (added.status !== 0) {
+        return { committed: false, commitError: planDocCommitError(added.stderr) };
+      }
+    } else {
+      return { committed: false, commitError: planDocCommitError(known.stderr) };
+    }
+    const commit = await step(["git", "commit", "-m", message, "--", relative]);
+    if (commit.status !== 0) {
+      return { committed: false, commitError: planDocCommitError(commit.stderr) };
+    }
+    const head = await step(["git", "rev-parse", "HEAD"]);
+    const commitID = head.stdout.trim();
+    if (head.status !== 0 || !/^[0-9a-f]{40}$/.test(commitID)) {
+      return {
+        committed: false,
+        commitError: planDocCommitError(head.stderr) || "git rev-parse HEAD returned no commit id",
+      };
+    }
+    return { committed: true, commit: commitID };
+  } catch (error) {
+    // A spawn/guard failure is reported, never thrown: the document write is
+    // already durable and must stand.
+    return {
+      committed: false,
+      commitError: planDocCommitError(error instanceof Error ? error.message : String(error)),
+    };
+  }
+}
+
 export interface LatestGateVerdict {
   verdict: "PASS" | "REFINE" | "ESCALATE";
   at: string;
@@ -4360,6 +4477,7 @@ export function buildGateVerdictOp(ctx: OpContext): OpHandler {
     }
     const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
     const relative = `odd/tasks/${payload.name}.md`;
+    assertPlanDocCommitPath(relative);
     const destination = resolve(projectRoot, relative);
     if (!isWithin(projectRoot, destination)) throw new ValidationError("GATE_VERDICT_PATH_ESCAPE: destination escapes project root");
     const rejected = checkProtectedPaths([relative], [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles]);
@@ -4368,8 +4486,12 @@ export function buildGateVerdictOp(ctx: OpContext): OpHandler {
     const line = `- ${payload.taskId} ${payload.verdict} ${timestamp} ${boundIdentity}` +
       (payload.evidenceRef !== undefined ? ` ref=${payload.evidenceRef}` : "") +
       (payload.refinementPlan !== undefined ? ` :: ${payload.refinementPlan.trim()}` : "");
-    const gates = await withPlanDocLock(destination, () => appendGateVerdictAtomically(projectRoot, destination, line));
-    return { name: payload.name, taskId: payload.taskId, verdict: payload.verdict, path: relative, gates };
+    const result = await withPlanDocLock(destination, async () => {
+      const gates = await appendGateVerdictAtomically(projectRoot, destination, line);
+      const commit = await commitPlanDocRevision(ctx, projectRoot, relative, `docs(odd): ${payload.name} gate ${payload.taskId} ${payload.verdict}`);
+      return { gates, ...commit };
+    });
+    return { name: payload.name, taskId: payload.taskId, verdict: payload.verdict, path: relative, ...result };
   };
 }
 
@@ -4448,13 +4570,16 @@ export function buildPlanDocWriteOp(ctx: OpContext): OpHandler {
     }
     const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
     const relative = `odd/${payload.target}/${payload.name}.md`;
+    assertPlanDocCommitPath(relative);
     const destination = resolve(projectRoot, relative);
     if (!isWithin(projectRoot, destination)) throw new ValidationError("PLAN_WRITE_PATH_ESCAPE: destination escapes project root");
     const rejected = checkProtectedPaths([relative], [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles]);
     if (rejected.length > 0) throw new ValidationError(`PLAN_WRITE_PROTECTED_PATH: ${rejected.join(", ")}`);
-    const result = await withPlanDocLock(destination, () =>
-      writePlanDocAtomically(projectRoot, destination, payload.content as string, boundIdentity, payload.note as string, payload.expectedRevision as number),
-    );
+    const result = await withPlanDocLock(destination, async () => {
+      const written = await writePlanDocAtomically(projectRoot, destination, payload.content as string, boundIdentity, payload.note as string, payload.expectedRevision as number);
+      const commit = await commitPlanDocRevision(ctx, projectRoot, relative, `docs(odd): ${payload.name} r${written.revision} plan revision`);
+      return { ...written, ...commit };
+    });
     return { target: payload.target, path: relative, ...result };
   };
 }
@@ -4499,18 +4624,30 @@ function appendTaskMarkTick(existing: string, taskId: string, status: "passed" |
   const headings = scanPlanDocHeadings(existing);
   const ticks = headings.filter((entry) => entry.level === 2 && entry.text === "Ticks");
   if (ticks.length > 1) throw new ValidationError("TASK_MARK_MULTIPLE_TICKS_SECTIONS: plan document has ambiguous Ticks sections");
-  let text = existing;
-  if (ticks.length === 1) {
-    const tick = ticks[0]!;
-    const following = headings.find((entry) => entry.index > tick.index && entry.level <= 2);
-    if (following) throw new ValidationError("TASK_MARK_TICKS_NOT_FINAL: Ticks must be the final section");
-  }
+  const gates = headings.filter((entry) => entry.level === 2 && entry.text === "Gates");
   const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const tickLine = `${taskId} ${status} evidence=${evidenceCommit} tier=${tier} ${timestamp} ${agent}${note.length > 0 ? `: ${note}` : ""}`;
-  if (ticks.length === 0) {
-    text = `${text.replace(/\s*$/, "")}\n\n## Ticks\n${tickLine}\n`;
+  let text = existing;
+  const finalGate = gates[0];
+  const ticksBeforeGate = ticks[0] && finalGate && ticks[0].index < finalGate.index;
+  if (finalGate) {
+    if (ticksBeforeGate) {
+      const tick = ticks[0]!;
+      const nextHeading = headings.find((entry) => entry.index > tick.index && entry.level <= 2);
+      const endOffset = nextHeading?.offset ?? existing.length;
+      const before = existing.slice(0, endOffset).replace(/\s*$/, "");
+      text = `${before}\n${tickLine}\n\n${existing.slice(endOffset).replace(/^\s*/, "")}`;
+    } else {
+      const before = existing.slice(0, finalGate.offset).replace(/\s*$/, "");
+      text = `${before}\n\n## Ticks\n${tickLine}\n\n${existing.slice(finalGate.offset)}`;
+    }
+  } else if (ticks.length === 0) {
+    text = `${existing.replace(/\s*$/, "")}\n\n## Ticks\n${tickLine}\n`;
   } else {
-    text = `${text.replace(/\s*$/, "")}\n${tickLine}\n`;
+    const tick = ticks[0]!;
+    const nextHeading = headings.find((entry) => entry.index > tick.index && entry.level <= 2);
+    if (nextHeading) throw new ValidationError("TASK_MARK_TICKS_NOT_FINAL: Ticks must be the final section");
+    text = `${existing.replace(/\s*$/, "")}\n${tickLine}\n`;
   }
 
   const section = planDocRevisionSection(text);
@@ -4599,6 +4736,7 @@ export function buildTaskMarkOp(ctx: OpContext): OpHandler {
       throw new ValidationError("TASK_MARK_EVIDENCE_COMMIT_UNKNOWN: evidenceCommit does not resolve to a commit in the project");
     }
     const relative = `odd/${payload.target}/${payload.name}.md`;
+    assertPlanDocCommitPath(relative);
     const destination = resolve(projectRoot, relative);
     if (!isWithin(projectRoot, destination)) throw new ValidationError("TASK_MARK_PATH_ESCAPE: destination escapes project root");
     const rejected = checkProtectedPaths([relative], [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles]);
@@ -4614,7 +4752,9 @@ export function buildTaskMarkOp(ctx: OpContext): OpHandler {
       if ((route !== null && route.length > 0 || gateSectionExists) && readLatestGateVerdict(current, payload.taskId)?.verdict !== "PASS") {
         throw new ValidationError("TASK_MARK_GATE_NOT_PASSED: routed plan tasks require a latest PASS gate verdict");
       }
-      return writeTaskMarkAtomically(projectRoot, destination, payload.taskId as string, payload.status as "passed" | "failed", payload.evidenceCommit as string, assessorTier, boundIdentity, note);
+      const written = await writeTaskMarkAtomically(projectRoot, destination, payload.taskId as string, payload.status as "passed" | "failed", payload.evidenceCommit as string, assessorTier, boundIdentity, note);
+      const commit = await commitPlanDocRevision(ctx, projectRoot, relative, `docs(odd): ${payload.name} tick ${payload.taskId} ${payload.status}`);
+      return { ...written, ...commit };
     });
     return { target: payload.target, path: relative, tier: assessorTier, ...result };
   };
