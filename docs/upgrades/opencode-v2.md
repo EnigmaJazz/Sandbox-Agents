@@ -61,6 +61,7 @@ Timing:
     - every gated tool's approval spec is preserved, and asks before acting;
     - `bun test` stays green with unchanged behaviour.
   - The same idea for config: keep permission and agent entries in one source, or add a parity test, so V5 can generate the V2 format rather than copying it by hand.
+- **V0 status 2026-10-29:** done for 2.2.0 in `docs/opencode-v2-discovery.md` (refresh against the cutover release). **V1 status:** a no-op; V2 session ids pass the broker allowlist, pinned by `broker/tests/v2-session-ids.test.ts`.
 - **V0 — Discovery (read-only, scratch fixtures; no installation).** Do it now, then refresh it against the exact target release just before cutover.
   - Pin the target version (≥ 2.0.15; gentle-ai proved 2.0.19 with SDK 2.0.4; re-check 2.0.21's declarations for drift).
   - Record V2's built-in tool IDs and input shapes (the equivalents of read/grep/glob/list/bash/edit/write/apply_patch, plus `subagent`).
