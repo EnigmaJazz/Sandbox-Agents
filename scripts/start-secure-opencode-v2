@@ -64,7 +64,9 @@ echo "v2 root: $V2_ROOT (cwd: $PWD)"
 
 # Isolated roots for V2; OPENCODE_DISABLE_CLAUDE_CODE hides ~/.claude skills (the nono profile denies ~/.claude and
 # ~/.agents at the OS level, which is the control that also covers ~/.agents). The password travels in the
-# environment only: exported here, inherited by nono and the server.
+# environment only: exported here, inherited by nono and the server. OpenCode V2 2.2.0 removes OPENCODE_SERVER_PASSWORD
+# and OPENCODE_PASSWORD from the environment of its shell tool and of MCP servers it starts, while other variables are
+# inherited (opencode-v2-probe FINDINGS-3.md); in-process plugins can still read it, so install only reviewed plugins.
 export OPENCODE_SERVER_PASSWORD
 export XDG_CONFIG_HOME="$V2_XDG_CONFIG_HOME" XDG_DATA_HOME="$V2_XDG_DATA_HOME" XDG_STATE_HOME="$V2_XDG_STATE_HOME" XDG_CACHE_HOME="$V2_XDG_CACHE_HOME"
 export OPENCODE_DISABLE_CLAUDE_CODE=1 OPENCODE_DISABLE_AUTOUPDATE=1

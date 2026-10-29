@@ -41,10 +41,25 @@ describe("V2 nono profile", () => {
     for (const grant of grants(v2)) expect(v1Roots).not.toContain(grant);
   });
 
-  test("grants the V2 roots, including the control directory", () => {
-    const g = grants(v2);
-    for (const root of ["config", "data", "state", "cache"]) expect(g).toContain(`$HOME/.local/share/opencode-v2/${root}`);
-    expect(g).toContain("$HOME/.local/share/opencode-sandbox-control");
+  test("grants write access to the V2 data, state and cache roots and the control directory", () => {
+    const writable = [...v2.filesystem.allow, ...(v2.filesystem.allow_file ?? [])];
+    for (const root of ["data", "state", "cache"]) expect(writable).toContain(`$HOME/.local/share/opencode-v2/${root}`);
+    expect(writable).toContain("$HOME/.local/share/opencode-sandbox-control");
+  });
+
+  test("the V2 config root, which holds the security plugins, is read-only for the confined agent", () => {
+    // Landlock cannot carve a read-only subdirectory out of a writable grant (nono refuses a deny overlap), so the
+    // whole config root is read-only: a prompt-injected agent cannot overwrite its own routing guard or fragments.
+    const configRoot = "$HOME/.local/share/opencode-v2/config";
+    const writable = [...v2.filesystem.allow, ...(v2.filesystem.allow_file ?? [])];
+    expect(writable.filter((p: string) => p === configRoot || configRoot.startsWith(`${p}/`) || p.startsWith(`${configRoot}/`))).toEqual([]);
+    expect(v2.filesystem.read).toContain(configRoot);
+  });
+
+  test("no writable grant covers the V2 root itself or any of its parents", () => {
+    const v2root = "$HOME/.local/share/opencode-v2";
+    const writable = [...v2.filesystem.allow, ...(v2.filesystem.allow_file ?? [])];
+    for (const parent of ["$HOME", "$HOME/.local", "$HOME/.local/share", v2root]) expect(writable).not.toContain(parent);
   });
 
   test("denies the sources V2 would otherwise read: ~/.claude and ~/.agents", () => {
@@ -66,7 +81,8 @@ describe("V2 nono profile", () => {
 
   test("reaches the same hosts and project roots as V1, with the same isolation", () => {
     expect(v2.network.allow_domain).toEqual(V1_PROFILE.network.allow_domain);
-    expect(v2.filesystem.read.filter((p: string) => p !== "$HOME/.local/share/opencode-v2/prefix").sort()).toEqual(
+    const v2Only = ["$HOME/.local/share/opencode-v2/prefix", "$HOME/.local/share/opencode-v2/config"];
+    expect(v2.filesystem.read.filter((p: string) => !v2Only.includes(p)).sort()).toEqual(
       V1_PROFILE.filesystem.read.filter((p: string) => p !== "$HOME/.agents/skills").sort(),
     );
     expect(v2.security).toEqual(V1_PROFILE.security);

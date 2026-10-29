@@ -1,8 +1,8 @@
 {
   "meta": {
     "name": "opencode-v2-secure",
-    "version": "0.1.0",
-    "description": "Secured host OpenCode V2 process for the parallel V2 stack (docs/upgrades/opencode-v2.md, workstream V6). Own binary, XDG roots and port; ~/.claude and ~/.agents denied because V2 also reads them as config sources; the V1 tree is not granted. NOT INSTALLED - delivery is manual (S17).",
+    "version": "0.1.1",
+    "description": "Secured host OpenCode V2 process for the parallel V2 stack (docs/upgrades/opencode-v2.md, workstream V6). Own binary, XDG roots and port; ~/.claude and ~/.agents denied because V2 also reads them as config sources; the V1 tree is not granted. The V2 config root (which holds the security plugins) is read-only. NOT INSTALLED - delivery is manual (S17).",
     "author": "agentic-sandbox-integration"
   },
   "extends": "default",
@@ -20,7 +20,6 @@
   "filesystem": {
     "allow": [
       "$HOME/.local/share/opencode-sandbox-control",
-      "$HOME/.local/share/opencode-v2/config",
       "$HOME/.local/share/opencode-v2/data",
       "$HOME/.local/share/opencode-v2/state",
       "$HOME/.local/share/opencode-v2/cache",
@@ -106,7 +105,8 @@
       "/home/james/mem-opt",
       "/home/james/agent-sandbox-integration",
       "/home/james/.nanobot/workspace",
-      "$HOME/.local/share/opencode-v2/prefix"
+      "$HOME/.local/share/opencode-v2/prefix",
+      "$HOME/.local/share/opencode-v2/config"
     ],
     "deny": [
       "$HOME/.ssh",
