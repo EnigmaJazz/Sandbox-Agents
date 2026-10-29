@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 import { defaultConfig } from "../src/config.ts";
 import { buildDiffOp, type OpContext } from "../src/service.ts";
 import type { BrokerRequestEnvelope, SessionRecord } from "../src/types.ts";
+import { sandboxPluginSources } from "./helpers/sandbox-plugin-sources.ts";
 
 const SESSION_ID = "diff-session";
 const ESC = String.fromCharCode(0x1b);
@@ -224,10 +225,7 @@ describe("coloriseDiff — single implementation with the writer", () => {
 
 describe("sandbox_apply plugin metadata", () => {
   test("surfaces both broker paths and stops writing its own temp preview", () => {
-    const plugin = readFileSync(
-      resolve(import.meta.dir, "../../opencode/plugins/sandbox-tools.ts"),
-      "utf8",
-    );
+    const plugin = sandboxPluginSources();
 
     expect(plugin).toContain("applyPreviewFiles");
     // The approval boundary fails closed through the guard, which still carries

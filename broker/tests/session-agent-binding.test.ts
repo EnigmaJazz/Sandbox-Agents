@@ -9,7 +9,7 @@
  * argument, and the operation is absent from the model-facing tool surface.
  */
 import { describe, expect, jest, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
@@ -23,6 +23,7 @@ import {
 } from "../src/service.ts";
 import { SessionStore } from "../src/state.ts";
 import { OPERATIONS, SANDBOX_OPERATIONS } from "../src/types.ts";
+import { sandboxPluginSources } from "./helpers/sandbox-plugin-sources.ts";
 import {
   HOST_MUTATION_IDENTITY_OPERATIONS,
   HOST_MUTATION_OPERATIONS,
@@ -847,17 +848,6 @@ describe("host-authoritative session→agent binding", () => {
     expect(pluginSource).not.toContain("sandbox_bind_session_agent");
   });
 });
-
-/** The V1 adapter plus the host-neutral tool runtime and tool table (P0 splits the plugin across files). */
-function sandboxPluginSources(): string {
-  const pluginsDir = new URL("../../opencode/plugins/", import.meta.url);
-  const files = ["sandbox-tools.ts", "lib/tool-runtime.ts"];
-  const specsDir = new URL("lib/tool-specs/", pluginsDir);
-  if (existsSync(specsDir)) {
-    for (const name of readdirSync(specsDir).sort()) if (name.endsWith(".ts")) files.push(`lib/tool-specs/${name}`);
-  }
-  return files.map((f) => readFileSync(new URL(f, pluginsDir), "utf8")).join("\n");
-}
 
 describe("PM host identity policy", () => {
   test("broker and plugin default identity lists stay identical", () => {

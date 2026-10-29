@@ -1,5 +1,6 @@
 import { afterAll, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { sandboxPluginSources } from "./helpers/sandbox-plugin-sources.ts";
 const schema = new Proxy({}, {
   get: () => () => schema,
 });
@@ -366,10 +367,7 @@ async function runIsolatedTaskMarkTaskIdSchemaProbe(): Promise<{
   return JSON.parse(stdout.trim());
 }
 
-const sandboxTools = readFileSync(
-  new URL("../../opencode/plugins/sandbox-tools.ts", import.meta.url),
-  "utf8",
-);
+const sandboxTools = sandboxPluginSources();
 const service = readFileSync(new URL("../src/service.ts", import.meta.url), "utf8");
 const brokerClientSource = readFileSync(new URL("../../opencode/plugins/lib/broker-client.ts", import.meta.url), "utf8");
 const permissionFragment = readFileSync(new URL("../../opencode/config-fragments/sandbox-permissions.jsonc", import.meta.url), "utf8");

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
 import { buildReadFileOp, buildWriteFileOp, type OpContext } from "../src/service.ts";
 import type { BrokerRequestEnvelope, SessionRecord } from "../src/types.ts";
+import { sandboxPluginSources } from "./helpers/sandbox-plugin-sources.ts";
 
 const roots: string[] = [];
 
@@ -44,18 +45,15 @@ function session(overrides: Partial<SessionRecord> = {}): SessionRecord {
   };
 }
 
-const sandboxTools = readFileSync(
-  new URL("../../opencode/plugins/sandbox-tools.ts", import.meta.url),
-  "utf8",
-);
+const sandboxTools = sandboxPluginSources();
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 test("sandbox_edit ensures the worker before its first internal read", () => {
-  const editStart = sandboxTools.indexOf('sandbox_edit: tool({');
-  const editEnd = sandboxTools.indexOf('sandbox_apply_patch: tool({', editStart);
+  const editStart = sandboxTools.search(/sandbox_edit: (?:tool|defineTool)\(\{/);
+  const editEnd = editStart + sandboxTools.slice(editStart).search(/sandbox_apply_patch: (?:tool|defineTool)\(\{/);
   const editTool = sandboxTools.slice(editStart, editEnd);
 
   expect(editTool.indexOf("await ensureWorker(ctx.sessionID, ctx.directory)")).toBeLessThan(

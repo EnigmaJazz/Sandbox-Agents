@@ -27,6 +27,7 @@ import {
   TOOL_CLASSIFICATION_INVENTORY,
 } from "../src/role-policy.ts";
 import { defaultConfig, DEFAULT_READ_ONLY_AGENTS, DEFAULT_ROLE_MODELS } from "../src/config.ts";
+import { sandboxPluginSources } from "./helpers/sandbox-plugin-sources.ts";
 
 // ---------------------------------------------------------------------------
 // 0.1 — R1 unknown effects must be denied without fallback
@@ -135,7 +136,7 @@ describe("R1 — capability taxonomy / unknown effects fail closed", () => {
   });
 
   test("sandbox host tools are all present in the classification inventory regardless of registration shape", () => {
-    const source = readFileSync("../opencode/plugins/sandbox-tools.ts", "utf8");
+    const source = sandboxPluginSources();
     const codeLines = source.split("\n").filter((line) => !/^\s*(?:\/\/|\/\*|\*\/|\*)/.test(line));
     const tools = [...new Set(codeLines.flatMap((line) => [...line.matchAll(/\b(host_[a-z0-9_]+)\s*:/g)].map((match) => match[1]!)))];
     const missingFrom = (inventory: Record<string, unknown>) => tools.filter((tool) => !inventory[tool]);

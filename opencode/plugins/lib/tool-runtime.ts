@@ -15,6 +15,25 @@ import {
   type BrokerClient,
 } from "./broker-client.ts";
 
+/** Per-call context a tool receives. Hosts supply it: V1 passes opencode's own context. */
+export interface HostToolContext {
+  sessionID: string;
+  agent?: string;
+  directory?: string;
+  ask: (request: any) => Promise<unknown>;
+}
+
+/** A host-neutral tool definition: what V1 passes to tool() and a V2 adapter maps to ctx.tool.transform. */
+export interface HostToolSpec {
+  description: string;
+  args: Record<string, unknown>;
+  execute: (args: any, ctx: HostToolContext) => Promise<any>;
+}
+
+export function defineTool(spec: HostToolSpec): HostToolSpec {
+  return spec;
+}
+
 export const READ_ONLY_AGENTS: readonly string[] = [
   "gentle-orchestrator",
   "pm-odd",
