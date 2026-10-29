@@ -8,7 +8,8 @@ Branch: `refactor/p0-shared-tool-table`. Review base: `2d6e222` (the commit befo
 ## 0. Before anything
 - [ ] V1 is healthy: `bash ~/ai-workspace/workflow_optimisation/verify-workflow.sh < /dev/null` passes.
 - [ ] Back up V1 data (the V1 data stays untouched, but a V2 first start may read it): `cp -a ~/.local/share/opencode ~/.local/share/opencode.bak-$(date +%Y%m%d)`.
-- [ ] Write down the OpenChamber 1.24.2 reinstall command (you will need it for rollback). Do NOT accept OpenChamber's one-click "update to OpenCode 2".
+- [ ] Back up the OpenChamber settings: `cp -a ~/.config/openchamber ~/.config/openchamber.bak-$(date +%Y%m%d)`.
+- [ ] OpenChamber 1.24.2 is installed globally with Bun (`~/.bun/bin/openchamber` links into `~/.bun/install/global/node_modules/@openchamber/web`). The exact-version reinstall for rollback is `bun add -g @openchamber/web@1.24.2` (the global `package.json` has `^1.24.2`, which would allow a later 1.x). Do NOT accept OpenChamber's one-click "update to OpenCode 2".
 
 ## 1. Read the diff (14 files, about 1,440 lines)
 ```bash
