@@ -1,0 +1,23 @@
+# Secure OpenCode V2 server (user systemd unit template, V6 of docs/upgrades/opencode-v2.md).
+# Reviewed and installed manually by the user at ~/.config/systemd/user/. Not installed by any repo script
+# (systemd-user/ is S17). It is a SEPARATE unit from secure-opencode.service: the V1 unit, binary, port 4096 and tree
+# are untouched, and the two must not both be enabled until the cutover steps in docs/upgrades/opencode-v2.md.
+# Before the first start: install the pinned CLI into ~/.local/share/opencode-v2/prefix, create
+# ~/.local/share/opencode-v2/server-password (mode 0600), and run scripts/install-user-files-v2 --apply.
+[Unit]
+Description=Secure OpenCode V2 server
+PartOf=graphical-session.target
+After=network-online.target
+Wants=network-online.target
+Conflicts=secure-opencode.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/james/ai-workspace/workflow_optimisation
+ExecStartPre=/usr/bin/mkdir -p %h/.local/share/opencode-sandbox-control
+ExecStart=/home/james/agent-sandbox-integration/scripts/start-secure-opencode-v2
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

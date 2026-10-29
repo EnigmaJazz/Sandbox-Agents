@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+#
+# install-user-files-v2 - installer for the parallel OpenCode V2 stack (docs/upgrades/opencode-v2.md, workstream V6).
+#
+# NOT to be run by an agent without the user's explicit approval. Default mode is --dry-run. It touches ONLY V2 paths:
+#   1. V2 plugins + libraries -> ~/.local/share/opencode-v2/config/opencode/plugins/
+#   2. nono profile           -> ~/.config/nono/profiles/opencode-v2-secure.json
+#   3. config fragments       -> ~/.local/share/opencode-v2/fragments/   (staged; MERGE THEM BY HAND)
+# It never edits any V2 opencode.json, never writes under ~/.config/opencode or ~/.opencode (V1), and never starts or
+# restarts a service. A destination that differs gets a timestamped .bak first. Actions are journalled for rollback-v2.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/secure-launcher-v2.conf"
+
+STATE_DIR="${BROKER_STATE_DIR:-$HOME/.local/state/opencode-sandbox}"
+JOURNAL="$STATE_DIR/install-journal-v2.tsv"
+APPLY=0
+case "${1:-}" in
+  --apply) APPLY=1 ;;
+  --dry-run|"") ;;
+  *) echo "usage: $0 [--dry-run|--apply]" >&2; exit 2 ;;
+esac
+
+log() { echo "[install-v2] $*"; }
+
+reject_symlink_path() {
+  local path="$1" cursor="" component
+  IFS=/ read -r -a components <<<"$path"
+  for component in "${components[@]}"; do
+    [[ -n "$component" ]] || continue
+    cursor="$cursor/$component"
+    if [[ -L "$cursor" ]]; then
+      log "error: symlink destination path refused: $cursor" >&2
+      return 1
+    fi
+  done
+}
+
+# install_file <repo-relative src> <dest> <mode>
+install_file() {
+  local src="$REPO_ROOT/$1" dest="$2" mode="$3"
+  [[ -f "$src" ]] || { log "error: missing source $src" >&2; return 1; }
+  reject_symlink_path "$dest"
+  if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
+    log "ok (unchanged) $dest"
+    return 0
+  fi
+  if [[ "$APPLY" != "1" ]]; then
+    if [[ -f "$dest" ]]; then log "would replace $dest (backup first)"; else log "would install $dest"; fi
+    return 0
+  fi
+  mkdir -p "$(dirname "$dest")" "$STATE_DIR"
+  if [[ -f "$dest" ]]; then
+    cp -p "$dest" "$dest.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+    log "backed up $dest"
+  fi
+  install -m "$mode" "$src" "$dest"
+  printf '%s\t%s\t%s\n' "install" "$dest" "$(sha256sum "$dest" | cut -d' ' -f1)" >>"$JOURNAL"
+  log "installed $dest"
+}
+
+for pair in "${V2_PLUGIN_FILES[@]}"; do
+  install_file "${pair%%|*}" "$V2_PLUGINS_DIR/${pair##*|}" 0644
+done
+install_file "$V2_NONO_PROFILE_SRC" "$V2_NONO_PROFILE_DEST" 0644
+for fragment in "${V2_FRAGMENT_FILES[@]}"; do
+  install_file "$fragment" "$V2_FRAGMENT_DIR/$(basename "$fragment")" 0644
+done
+
+if [[ ! -d "$V2_XDG_CONFIG_HOME/opencode/node_modules/zod" ]]; then
+  log "note: zod is not resolvable from $V2_XDG_CONFIG_HOME/opencode; sandbox-tools.ts imports it (install it there before the first V2 start)"
+fi
+log "fragments are STAGED in $V2_FRAGMENT_DIR; merge them into the V2 opencode.json by hand (S17)"
+if [[ "$APPLY" == "1" ]]; then log "done"; else log "dry-run - nothing was installed. Re-run with --apply ONLY after manual review."; fi

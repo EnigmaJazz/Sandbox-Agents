@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+#
+# start-secure-opencode-v2 - launch the secured OpenCode V2 server (docs/upgrades/opencode-v2.md, workstream V6).
+# The V2 twin of scripts/start-secure-opencode: same control-directory refusal rules, but its own binary, XDG roots,
+# port (4097), nono profile and password. It never touches the V1 tree, binary or port.
+#
+# Exit codes: 3 refused start directory, 4 missing or wrong binary/profile, 6 missing or unsafe password file.
+# NOT INSTALLED - delivery is manual (S17).
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/secure-launcher-v2.conf"
+PROFILE_FILE="$SCRIPT_DIR/../nono/profile/opencode-v2-secure.json"
+
+CONTROL_DIR_OVERRIDE=""
+[[ "${1:-}" == "--control-dir" ]] && CONTROL_DIR_OVERRIDE="${2:?}"
+[[ -n "$CONTROL_DIR_OVERRIDE" ]] && CONTROL_DIR="$CONTROL_DIR_OVERRIDE"
+BOOTSTRAP_WORKSPACE="/home/james/ai-workspace/workflow_optimisation"
+CWD_CANON="$(realpath -m "$PWD")"
+CONTROL_CANON="$(realpath -m "$CONTROL_DIR")"
+BOOTSTRAP_CANON="$(realpath -m "$BOOTSTRAP_WORKSPACE")"
+if [[ "$CWD_CANON" == "$CONTROL_CANON" || "$CWD_CANON" == "$BOOTSTRAP_CANON" ]]; then
+  : # allowed: control dir or approved bootstrap workspace
+else
+  for root in "${PROJECT_ROOTS[@]}"; do
+    [[ "$(realpath -m "$root")" == "$BOOTSTRAP_CANON" ]] && continue
+    ROOT_CANON="$(realpath -m "$root")"
+    case "$CWD_CANON" in "$ROOT_CANON"|"$ROOT_CANON"/*)
+      echo "refusing to start secure opencode from project dir: $PWD" >&2
+      echo "cd to the control dir first: $CONTROL_DIR" >&2
+      echo "or to the approved bootstrap workspace: $BOOTSTRAP_WORKSPACE" >&2
+      exit 3 ;;
+    esac
+  done
+fi
+if [[ -d "$CWD_CANON/.git" && "$CWD_CANON" != "$CONTROL_CANON" && "$CWD_CANON" != "$BOOTSTRAP_CANON" ]]; then
+  echo "refusing to start secure opencode from a git checkout: $PWD" >&2; exit 3
+fi
+
+# The V2 binary must exist and must not be (or sit inside) the V1 install.
+V2_BIN_CANON="$(realpath -m "$V2_BIN")"
+V1_CANON="$(realpath -m "$HOME/.opencode")"
+case "$V2_BIN_CANON" in "$V1_CANON"|"$V1_CANON"/*)
+  echo "refusing: the V2 binary resolves into the V1 install ($V1_CANON)" >&2; exit 4 ;;
+esac
+for bin in "$NONO_BIN" "$V2_BIN"; do [[ -x "$bin" ]] || { echo "missing required binary: $bin" >&2; exit 4; }; done
+[[ -f "$PROFILE_FILE" ]] || { echo "V2 nono profile missing in repo; cannot continue" >&2; exit 4; }
+
+# The server password: a file only the owner can read. It is never echoed, logged or passed as an argument.
+[[ -f "$V2_PASSWORD_FILE" ]] || { echo "missing V2 server-password file: $V2_PASSWORD_FILE (create it, mode 0600)" >&2; exit 6; }
+if [[ "$(stat -c '%a' "$V2_PASSWORD_FILE")" != "600" || "$(stat -c '%u' "$V2_PASSWORD_FILE")" != "$(id -u)" ]]; then
+  echo "refusing: server-password file must be owned by you with mode 0600: $V2_PASSWORD_FILE" >&2; exit 6
+fi
+OPENCODE_SERVER_PASSWORD="$(<"$V2_PASSWORD_FILE")"
+[[ -n "$OPENCODE_SERVER_PASSWORD" ]] || { echo "refusing: V2 server-password file is empty" >&2; exit 6; }
+
+mkdir -p "$CONTROL_DIR" "$V2_XDG_CONFIG_HOME" "$V2_XDG_DATA_HOME" "$V2_XDG_STATE_HOME" "$V2_XDG_CACHE_HOME"
+chmod 700 "$CONTROL_DIR" "$V2_ROOT"
+echo "validating nono profile..."
+"$NONO_BIN" profile validate "$PROFILE_FILE" >/dev/null
+"$NONO_BIN" run --dry-run --profile "$PROFILE_FILE" -- true >/dev/null
+echo "starting secured opencode V2 at ${V2_HOSTNAME}:${V2_PORT} (profile: ${V2_NONO_PROFILE})"
+echo "control dir: $CONTROL_DIR"
+echo "v2 root: $V2_ROOT (cwd: $PWD)"
+
+# Isolated roots for V2; OPENCODE_DISABLE_CLAUDE_CODE hides ~/.claude skills (the nono profile denies ~/.claude and
+# ~/.agents at the OS level, which is the control that also covers ~/.agents). The password travels in the
+# environment only: exported here, inherited by nono and the server.
+export OPENCODE_SERVER_PASSWORD
+export XDG_CONFIG_HOME="$V2_XDG_CONFIG_HOME" XDG_DATA_HOME="$V2_XDG_DATA_HOME" XDG_STATE_HOME="$V2_XDG_STATE_HOME" XDG_CACHE_HOME="$V2_XDG_CACHE_HOME"
+export OPENCODE_DISABLE_CLAUDE_CODE=1 OPENCODE_DISABLE_AUTOUPDATE=1
+export npm_config_cache="$V2_XDG_CACHE_HOME/npm-cache"
+exec "$NONO_BIN" run --profile "$PROFILE_FILE" -- "$V2_BIN" serve --hostname "$V2_HOSTNAME" --port "$V2_PORT"

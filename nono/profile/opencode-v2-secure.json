@@ -1,0 +1,157 @@
+{
+  "meta": {
+    "name": "opencode-v2-secure",
+    "version": "0.1.0",
+    "description": "Secured host OpenCode V2 process for the parallel V2 stack (docs/upgrades/opencode-v2.md, workstream V6). Own binary, XDG roots and port; ~/.claude and ~/.agents denied because V2 also reads them as config sources; the V1 tree is not granted. NOT INSTALLED - delivery is manual (S17).",
+    "author": "agentic-sandbox-integration"
+  },
+  "extends": "default",
+  "groups": {
+    "include": [
+      "git_config",
+      "node_runtime",
+      "python_runtime",
+      "bun_runtime"
+    ]
+  },
+  "workdir": {
+    "access": "read"
+  },
+  "filesystem": {
+    "allow": [
+      "$HOME/.local/share/opencode-sandbox-control",
+      "$HOME/.local/share/opencode-v2/config",
+      "$HOME/.local/share/opencode-v2/data",
+      "$HOME/.local/share/opencode-v2/state",
+      "$HOME/.local/share/opencode-v2/cache",
+      "$HOME/.cache/aft",
+      "~/.bun/install/cache",
+      "$HOME/.local/share/cortexkit",
+      "$HOME/.config/cortexkit",
+      "$HOME/.gentle-ai",
+      "$TMPDIR",
+      "$HOME/.cache/workflow-health-check",
+      "$HOME/ai-workspace/workflow_optimisation/.atl",
+      "$HOME/ai-workspace/workflow_optimisation/.codegraph",
+      "$HOME/.config/openchamber/chats/.auto-update-history.json",
+      "$HOME/.config/openchamber/chats/**/.auto-update-history.json",
+      "$HOME/agent-sandbox-integration/.atl",
+      "$HOME/agent-sandbox-integration/.codegraph",
+      "/mnt/ai_storage/kinver-hub/proxy/.atl",
+      "/mnt/ai_storage/kinver-hub/proxy/.codegraph",
+      "/home/james/peak-redir/.atl",
+      "/home/james/peak-redir/.codegraph",
+      "/home/james/opencode-workspace/.atl",
+      "/home/james/opencode-workspace/.codegraph",
+      "/home/james/ai-workspace/tasker/tesla/.atl",
+      "/home/james/ai-workspace/tasker/tesla/.codegraph",
+      "/home/james/weight_loss/.atl",
+      "/home/james/weight_loss/.codegraph",
+      "/home/james/nono-opencode-test/.atl",
+      "/home/james/nono-opencode-test/.codegraph",
+      "/home/james/omni-router-setup/.atl",
+      "/home/james/omni-router-setup/.codegraph",
+      "/home/james/mem-opt/.atl",
+      "/home/james/mem-opt/.codegraph",
+      "$HOME/agent-sandbox-integration/.git",
+      "$HOME/ai-workspace/workflow_optimisation/.git",
+      "$HOME/peak-redir/.git",
+      "$HOME/peak-redir/.atl",
+      "$HOME/peak-redir/.codegraph",
+      "$HOME/opencode-workspace/.git",
+      "$HOME/opencode-workspace/.atl",
+      "$HOME/opencode-workspace/.codegraph",
+      "$HOME/ai-workspace/tasker/tesla/.git",
+      "$HOME/ai-workspace/tasker/tesla/.atl",
+      "$HOME/ai-workspace/tasker/tesla/.codegraph",
+      "$HOME/weight_loss/.git",
+      "$HOME/weight_loss/.atl",
+      "$HOME/weight_loss/.codegraph",
+      "$HOME/nono-opencode-test/.git",
+      "$HOME/nono-opencode-test/.atl",
+      "$HOME/nono-opencode-test/.codegraph",
+      "$HOME/omni-router-setup/.git",
+      "$HOME/omni-router-setup/.atl",
+      "$HOME/omni-router-setup/.codegraph",
+      "$HOME/mem-opt/.git",
+      "$HOME/mem-opt/.atl",
+      "$HOME/mem-opt/.codegraph",
+      "/mnt/ai_storage/kinver-hub/proxy/.git",
+      "$HOME/.nanobot/workspace/.git",
+      "$HOME/.nanobot/workspace/.atl",
+      "$HOME/.nanobot/workspace/.codegraph"
+    ],
+    "allow_file": [
+      "$HOME/.auto-update-history.json",
+      "$HOME/.local/share/.auto-update-history.json",
+      "/mnt/ai_storage/kinver-hub/.auto-update-history.json",
+      "$HOME/ai-workspace/.auto-update-history.json",
+      "$HOME/ai-workspace/tasker/.auto-update-history.json",
+      "/home/james/.auto-update-history.json",
+      "/home/james/ai-workspace/.auto-update-history.json",
+      "/home/james/.config/openchamber/.auto-update-history.json",
+      "/home/james/ai-workspace/tasker/.auto-update-history.json",
+      "/home/james/.nanobot/.auto-update-history.json"
+    ],
+    "read": [
+      "$HOME/agent-sandbox-integration",
+      "/mnt/ai_storage/kinver-hub/proxy",
+      "/home/james/peak-redir",
+      "/home/james/opencode-workspace",
+      "/home/james/ai-workspace/tasker/tesla",
+      "/home/james/ai-workspace/workflow_optimisation",
+      "/home/james/weight_loss",
+      "/home/james/nono-opencode-test",
+      "/home/james/omni-router-setup",
+      "/home/james/mem-opt",
+      "/home/james/agent-sandbox-integration",
+      "/home/james/.nanobot/workspace",
+      "$HOME/.local/share/opencode-v2/prefix"
+    ],
+    "deny": [
+      "$HOME/.ssh",
+      "$HOME/.aws",
+      "$HOME/.kube",
+      "$HOME/.gnupg",
+      "$HOME/.config/gcloud",
+      "$HOME/.config/gh",
+      "$HOME/.claude",
+      "$HOME/.agents"
+    ]
+  },
+  "network": {
+    "allow_domain": [
+      "api.openai.com",
+      "auth.openai.com",
+      "chatgpt.com",
+      "opencode.ai",
+      "models.opencode.ai",
+      "openrouter.ai",
+      "generativelanguage.googleapis.com",
+      "*.googleapis.com",
+      "api.deepseek.com",
+      "mcp.context7.com",
+      "context7.com",
+      "registry.npmjs.org",
+      "registry.yarnpkg.com",
+      "api.githubcopilot.com",
+      "huggingface.co"
+    ],
+    "open_port": [
+      4097,
+      13000,
+      8788
+    ],
+    "listen_port": [
+      4097
+    ],
+    "no_proxy": [
+      "localhost"
+    ]
+  },
+  "security": {
+    "signal_mode": "isolated",
+    "process_info_mode": "isolated",
+    "capability_elevation": false
+  }
+}

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+#
+# rollback-v2 - reverse scripts/install-user-files-v2 (docs/recovery.md). Default is --dry-run; --apply removes.
+# Only files that still match the repo copy are removed, so a hand-edited file is never deleted. V2 data, config and
+# the password file are left alone; the V1 tree is never touched. Backups (*.bak-*) are left in place.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/secure-launcher-v2.conf"
+
+APPLY=0
+case "${1:-}" in
+  --apply) APPLY=1 ;;
+  --dry-run|"") ;;
+  *) echo "usage: $0 [--dry-run|--apply]" >&2; exit 2 ;;
+esac
+
+log() { echo "[rollback-v2] $*"; }
+
+remove_if_ours() { # <repo-relative src> <dest>
+  local src="$REPO_ROOT/$1" dest="$2"
+  if [[ -f "$dest" && ! -L "$dest" ]] && cmp -s "$src" "$dest"; then
+    if [[ "$APPLY" == "1" ]]; then rm -f "$dest"; log "removed $dest"; else log "would remove $dest (matches repo copy)"; fi
+  else
+    log "skip $dest (not ours, edited or already gone)"
+  fi
+}
+
+for pair in "${V2_PLUGIN_FILES[@]}"; do
+  remove_if_ours "${pair%%|*}" "$V2_PLUGINS_DIR/${pair##*|}"
+done
+remove_if_ours "$V2_NONO_PROFILE_SRC" "$V2_NONO_PROFILE_DEST"
+for fragment in "${V2_FRAGMENT_FILES[@]}"; do
+  remove_if_ours "$fragment" "$V2_FRAGMENT_DIR/$(basename "$fragment")"
+done
+if [[ "$APPLY" == "1" ]]; then log "done"; else log "dry-run - nothing was removed. Re-run with --apply to remove."; fi
