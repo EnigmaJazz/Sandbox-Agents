@@ -6,10 +6,10 @@ Branch: `refactor/p0-shared-tool-table`. Review base: `2d6e222` (the commit befo
 `docs/opencode-v2-discovery.md`; per-workstream notes: `docs/upgrades/opencode-v2.md`.
 
 ## 0. Before anything
-- [ ] V1 is healthy: `bash ~/ai-workspace/workflow_optimisation/verify-workflow.sh < /dev/null` passes.
-- [ ] Back up V1 data (the V1 data stays untouched, but a V2 first start may read it): `cp -a ~/.local/share/opencode ~/.local/share/opencode.bak-$(date +%Y%m%d)`.
-- [ ] Back up the OpenChamber settings: `cp -a ~/.config/openchamber ~/.config/openchamber.bak-$(date +%Y%m%d)`.
-- [ ] OpenChamber 1.24.2 is installed globally with Bun (`~/.bun/bin/openchamber` links into `~/.bun/install/global/node_modules/@openchamber/web`). The exact-version reinstall for rollback is `bun add -g @openchamber/web@1.24.2` (the global `package.json` has `^1.24.2`, which would allow a later 1.x). Do NOT accept OpenChamber's one-click "update to OpenCode 2".
+- [x] V1 is healthy: `bash ~/ai-workspace/workflow_optimisation/verify-workflow.sh < /dev/null` passes.
+- [x] Back up V1 data (the V1 data stays untouched, but a V2 first start may read it): `cp -a ~/.local/share/opencode ~/.local/share/opencode.bak-$(date +%Y%m%d)`.
+- [x] Back up the OpenChamber settings: `cp -a ~/.config/openchamber ~/.config/openchamber.bak-$(date +%Y%m%d)`.
+- [x] OpenChamber 1.24.2 is installed globally with Bun (`~/.bun/bin/openchamber` links into `~/.bun/install/global/node_modules/@openchamber/web`). The exact-version reinstall for rollback is `bun add -g @openchamber/web@1.24.2` (the global `package.json` has `^1.24.2`, which would allow a later 1.x). Do NOT accept OpenChamber's one-click "update to OpenCode 2".
 
 ## 1. Read the diff (14 files, about 1,440 lines)
 ```bash
@@ -51,18 +51,9 @@ bash scripts/install-user-files-v2 --apply      # writes the 19 plugin files, th
 It writes only under `~/.local/share/opencode-v2/` and `~/.config/nono/profiles/opencode-v2-secure.json`, backs up any differing file, and journals to `~/.local/state/opencode-sandbox/install-journal-v2.tsv`.
 Undo: `bash scripts/rollback-v2 --apply` (removes only files still identical to the repo copy).
 
-## 5. Build the V2 config root (derived from `global-config/`)
-```bash
-cd ~/ai-workspace/workflow_optimisation
-python3 scripts/derive-v2-config.py --source global-config --sandbox-repo ~/agent-sandbox-integration \
-  --target ~/.local/share/opencode-v2/config/opencode            # dry-run: lists what it would write, notes and warnings
-python3 scripts/derive-v2-config.py --source global-config --sandbox-repo ~/agent-sandbox-integration \
-  --target ~/.local/share/opencode-v2/config/opencode --apply    # writes; backs up differing files; never deletes
-```
-It writes `opencode.json` (plugin list as V2 `plugins` with `~x.y.z` ranges; the auto-update fork and `opencode-usage-total` dropped), `cli.json`, `AGENTS.md`, `systematic.jsonc`, `rate-limit-fallback.json`, `prompts/`, `skills/`, the repo's dual-mode `plugins/`, and a copy of the rate-limit fork under `vendor/`. Permissions are carried over from V1 unchanged.
-- [ ] Read the `note:` and `WARNING:` lines it prints and decide each: confirm dropping `opencode-usage-total`; `gentle-orchestrator` has `host_review_start: allow` (V2 will not prompt for it); the `vision-bridge` MCP command lives under `~/.config/opencode` (the V2 nono profile does not grant it: move it or grant it deliberately); three prompt files exist only in `~/.config/opencode/prompts` and are copied from there.
-- [ ] The three sandbox fragments staged in step 4 are NOT merged by this script. The V1 policy already denies the sandbox and host tools globally and grants them per agent, which is stricter than the fragments; the fragments are the fallback reference. Do not merge them on top without comparing.
-- [ ] Check the result with the isolated 2.2.2 CLI and the V2 roots: `debug agents` must show host `shell` and `edit` denied for the orchestrator, 6 `asi-review-*` agents, and `plugin list` (against the running server) must show 7 plugins: aft-opencode, astra-sol-upgrade, opencode-magic-context, rate-limit-fallback-mapped, systematic, systematic-routing-guard, workflow-health-check. Verified once on 2.2.2 in isolation. A fresh install resolves each `~` range to the newest patch, so versions can be ahead of the reviewed pins (magic-context came up as 0.49.30).
+## 5. Build the V2 `opencode.json` (NOT YET DEFINED, decide first)
+`~/.local/share/opencode-v2/config/opencode/opencode.json` does not exist, and nothing generates it. It needs: your providers and models, the agents, and the three staged fragments merged by hand from `~/.local/share/opencode-v2/fragments/`. It must NOT contain the auto-update fork reference. Plugin package entries use `~x.y.z` ranges (guarded auto-update). This is the Q46 change set: until it is written, either build the file by hand from `global-config/opencode.json` minus V1-only entries, or ask for the change set to be written first.
+- [ ] Check the result: `OPENCODE_CONFIG_DIR` unset, run `opencode2 debug agents` with `XDG_CONFIG_HOME=~/.local/share/opencode-v2/config` and confirm: host `shell` and `edit` denied, 12 read denies, every `sandbox_*` and `host_*` tool has a rule.
 
 ## 6. Install the unit (S17: `systemd-user/` is a protected path)
 ```bash
