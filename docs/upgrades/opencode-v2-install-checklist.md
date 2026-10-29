@@ -51,9 +51,19 @@ bash scripts/install-user-files-v2 --apply      # writes the 19 plugin files, th
 It writes only under `~/.local/share/opencode-v2/` and `~/.config/nono/profiles/opencode-v2-secure.json`, backs up any differing file, and journals to `~/.local/state/opencode-sandbox/install-journal-v2.tsv`.
 Undo: `bash scripts/rollback-v2 --apply` (removes only files still identical to the repo copy).
 
-## 5. Build the V2 `opencode.json` (NOT YET DEFINED, decide first)
-`~/.local/share/opencode-v2/config/opencode/opencode.json` does not exist, and nothing generates it. It needs: your providers and models, the agents, and the three staged fragments merged by hand from `~/.local/share/opencode-v2/fragments/`. It must NOT contain the auto-update fork reference. Plugin package entries use `~x.y.z` ranges (guarded auto-update). This is the Q46 change set: until it is written, either build the file by hand from `global-config/opencode.json` minus V1-only entries, or ask for the change set to be written first.
-- [ ] Check the result: `OPENCODE_CONFIG_DIR` unset, run `opencode2 debug agents` with `XDG_CONFIG_HOME=~/.local/share/opencode-v2/config` and confirm: host `shell` and `edit` denied, 12 read denies, every `sandbox_*` and `host_*` tool has a rule.
+## 5. Build the V2 config root (derived from `global-config/`)
+```bash
+cd ~/ai-workspace/workflow_optimisation
+python3 scripts/derive-v2-config.py --source global-config --sandbox-repo ~/agent-sandbox-integration \
+  --target ~/.local/share/opencode-v2/config/opencode            # dry-run: lists what it would write, notes and warnings
+python3 scripts/derive-v2-config.py --source global-config --sandbox-repo ~/agent-sandbox-integration \
+  --target ~/.local/share/opencode-v2/config/opencode --apply    # writes; backs up differing files; never deletes
+```
+It writes `opencode.json` (plugin list as V2 `plugins` with `~x.y.z` ranges; the auto-update fork and `opencode-usage-total` dropped), `cli.json`, `AGENTS.md`, `systematic.jsonc`, `rate-limit-fallback.json`, `prompts/`, `skills/`, the repo's dual-mode `plugins/`, and a copy of the rate-limit fork under `vendor/`. Permissions are carried over from V1 unchanged.
+- [ ] Read the `note:` and `WARNING:` lines it prints. Decided: `opencode-usage-total` is retired on V2; the three live-only prompts are now in `global-config/prompts/`; the vision bridge is in `global-config/mcp/vision-bridge/` and runs from the V2 root with V2-owned auth and log paths. One warning remains: `gentle-orchestrator` has `host_review_start: allow` (V2 will not prompt for it).
+- [ ] The vision bridge reads its OpenAI token from the V2 data root (`~/.local/share/opencode-v2/data/opencode/auth.json`), not from V1's `auth.json` (the V2 profile does not grant the V1 data directory, deliberately). Log V2 into OpenAI once after the first start, or the bridge has no OpenAI leg.
+- [ ] The three sandbox fragments staged in step 4 are NOT merged by this script. The V1 policy already denies the sandbox and host tools globally and grants them per agent, which is stricter than the fragments; the fragments are the fallback reference. Do not merge them on top without comparing.
+- [ ] Check the result with the isolated 2.2.2 CLI and the V2 roots: `debug agents` must show host `shell` and `edit` denied for the orchestrator, 6 `asi-review-*` agents, and `plugin list` (against the running server) must show 7 plugins: aft-opencode, astra-sol-upgrade, opencode-magic-context, rate-limit-fallback-mapped, systematic, systematic-routing-guard, workflow-health-check. Verified once on 2.2.2 in isolation. A fresh install resolves each `~` range to the newest patch, so versions can be ahead of the reviewed pins (magic-context came up as 0.49.30).
 
 ## 6. Install the unit (S17: `systemd-user/` is a protected path)
 ```bash
