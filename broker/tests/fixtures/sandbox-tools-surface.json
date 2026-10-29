@@ -1,0 +1,485 @@
+{
+  "hooks": [
+    "chat.params",
+    "tool"
+  ],
+  "tools": [
+    {
+      "name": "sandbox_read",
+      "description": "Read a file from the ACTIVE sandbox workspace. Requires an ACTIVE worker and never creates one; before activation, use host read/grep tools. path is relative to the sandbox project root, never absolute or traversal.",
+      "args": [
+        "path"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "sandbox_list",
+      "description": "List a directory inside the ACTIVE sandbox workspace. Requires an ACTIVE worker and never creates one; before activation, use host read/grep tools. path is relative to the sandbox project root, never absolute or traversal.",
+      "args": [
+        "path"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "sandbox_grep",
+      "description": "Search inside the ACTIVE sandbox workspace. Requires an ACTIVE worker and never creates one; before activation, use host grep. query is a grep pattern, not shell syntax. path is relative to the sandbox project root, never absolute or traversal.",
+      "args": [
+        "query",
+        "path"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "sandbox_write",
+      "description": "Create or overwrite a file (replace the entire file contents) in the worker-only sandbox. The first useful mutation activates the worker naturally—no dummy sandbox_bash; no approval is required and the host stays unchanged. Use sandbox_edit for targeted text changes that preserve the rest of the file. path is relative to the sandbox project root, never absolute or traversal. The broker appends a final newline when absent.",
+      "args": [
+        "path",
+        "content"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "sandbox_edit",
+      "description": "Edit a file in the worker-only sandbox by replacing only the specified text. oldString must occur exactly once unless replaceAll is true. Refuses an empty oldString, no match, multiple matches without replaceAll, or a result that would leave the file empty. For whole-file replacement, use sandbox_write. The first useful mutation activates the worker naturally—no dummy sandbox_bash; no approval is required and the host stays unchanged until sandbox_apply. path is relative to the sandbox project root, never absolute or traversal. The broker appends a final newline when absent.",
+      "args": [
+        "path",
+        "oldString",
+        "newString",
+        "replaceAll"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "sandbox_apply_patch",
+      "description": "Apply ONLY a complete plain-text Git unified diff in the worker-only sandbox. No Markdown fences, *** Begin Patch envelopes, shell commands, or code snippets. Patch paths are relative to the sandbox project root, never /work or absolute/traversal, and must match the current worker checkout. git apply --check runs first. If rejected, check hunk line counts and context: changed-line hunks need unchanged context; EOF append-only hunks may end on added lines. Include a final newline. The first useful mutation activates the worker naturally—no dummy sandbox_bash; no approval is required and the host stays unchanged.",
+      "args": [
+        "patch"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "sandbox_bash",
+      "description": "Run a read-only command in the isolated worker only. The command becomes an argv vector, never a shell: no pipes, redirection, globbing, or expansion. Do not edit files or run git apply/reset/checkout. Optional cwd is relative to the sandbox project root, never absolute. The first useful execution activates the worker naturally—no dummy activation.",
+      "args": [
+        "command",
+        "cwd",
+        "timeoutMs"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "sandbox_diff",
+      "description": "Show the active worker diff, including uncommitted changes, or the prepared/retained result diff. Active mode requires a live worker; retained mode reads the exported result.",
+      "args": [],
+      "execute": "function"
+    },
+    {
+      "name": "sandbox_finish",
+      "description": "Prepare and export the sandbox result bundle. The host working tree stays unchanged and no approval is required. Host ref import occurs only in real Git mode. Transitions to RESULT_READY and retains the worker until sandbox_apply, sandbox_discard, or keep.",
+      "args": [],
+      "execute": "function"
+    },
+    {
+      "name": "sandbox_apply",
+      "description": "Ask the user to approve applying the finished sandbox result (B->C delta) to the host project; requires explicit human approval (S15, §19). The result is prepared automatically when needed and previewed first. On approval, the broker re-checks host divergence (S16) and protected paths before applying. Success is APPLIED, releases the worker, and ends this session's worker lifecycle; denial or failure retains the result.",
+      "args": [],
+      "execute": "function"
+    },
+    {
+      "name": "sandbox_copy_out",
+      "description": "Copy a file from the ACTIVE sandbox workspace to a host file. Requires an ACTIVE worker and never activates one. workerPath is relative to the sandbox project root, never absolute or traversal; hostTarget must be absolute and in BROKER_EXTERNAL_COPY_TARGETS. Shows a preview and asks for explicit human approval (S15). Source-code targets are bounded by the fully visible review limit (maxApplyDiffLines); large code changes must use sandbox_apply or be split. If the target exists, the broker creates <target>.bak before atomic replacement.",
+      "args": [
+        "workerPath",
+        "hostTarget"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "sandbox_copy_in",
+      "description": "Copy a host file into the sandbox workspace. The first useful copy-in activates the worker naturally; no dummy sandbox_bash needed. hostSource must be absolute, existing, regular, and in BROKER_EXTERNAL_COPY_TARGETS; workerPath is relative to the sandbox project root, never absolute or traversal. Shows file info and asks for explicit human approval (S15). The host is not modified; the worker destination is overwritten.",
+      "args": [
+        "hostSource",
+        "workerPath"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "sandbox_discard",
+      "description": "Discard only a prepared or retained sandbox result. No approval is required; destroys the result and worker, leaves the host unchanged, and ends in terminal REJECTED.",
+      "args": [],
+      "execute": "function"
+    },
+    {
+      "name": "host_sandbox_result",
+      "description": "Read a sandbox result ref (read-only; no approval). Resolves the ref from a sandbox session id, returns the commit identity and timestamp, the changed paths with per-file added/removed counts, and a bounded/redacted patch. Set compareSandboxSessionID to diff two result refs. Never accepts a raw ref or a path list. Returns JSON.",
+      "args": [
+        "sandboxSessionID",
+        "compareSandboxSessionID"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_sandbox_result_install",
+      "description": "Install a sandbox result ref into the working tree (orchestrator-only mutation; requires human approval). Reads the result first and binds the install to the exact previewed commit: if the ref moves between preview and install the broker refuses (result-commit-mismatch). The broker derives every path from the result's own diff; deleted paths are removed and present paths are restored, and the index is never staged. Never accepts a raw ref or a path list. Returns JSON.",
+      "args": [
+        "sandboxSessionID"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_assess",
+      "description": "Run the read-only review risk assessment (no approval). baseRef selects an immutable base-to-HEAD candidate; committedOnly acknowledges a committed-only scope; untrackedScope/expectedUntrackedInventory/intendedUntracked forward the provider's explicit untracked declaration verbatim. Returns JSON.",
+      "args": [
+        "baseRef",
+        "committedOnly",
+        "untrackedScope",
+        "expectedUntrackedInventory",
+        "intendedUntracked"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_mode_status",
+      "description": "Read the review mode status (read-only; no approval). stdout may be non-JSON; returned as text/json. Returns JSON.",
+      "args": [],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_status",
+      "description": "Read the review integration status envelope (read-only; no approval). The broker returns the raw envelope unchanged. Returns JSON.",
+      "args": [
+        "agent",
+        "lineage",
+        "repositoryContext",
+        "projection",
+        "baseRef",
+        "committedOnly",
+        "intendedUntrackedSelection"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_lens_context",
+      "description": "Read the raw per-lens reviewer context block (read-only; no approval). Returns the multi-line plain-text block (binding line plus GENTLE_AI_REVIEW_CONTEXT ... END); it is never parsed as JSON. Returns JSON.",
+      "args": [
+        "repositoryContext",
+        "lineage",
+        "target",
+        "expectedRevision",
+        "lens"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_pipeline_run",
+      "description": "Run one review pipeline phase using the pinned helper and publish its output only into the broker-owned run store. Requires a runId from a prior host_review_materialize (or from a prior pipeline phase for inputRef); the run directory must already exist. The helper and interpreter are trusted; this operation does not write project content and does not require approval. Returns JSON.",
+      "args": [
+        "phase",
+        "reviewer",
+        "stdin",
+        "inputRef",
+        "inputRefs",
+        "adjudication",
+        "preparedRef",
+        "mergeRef",
+        "dispatch_records",
+        "validator_lifecycle_results",
+        "plan_assessment",
+        "parent_run_metadata",
+        "prepared",
+        "merge",
+        "screen_results",
+        "selected_dispatches",
+        "runId"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_persist",
+      "description": "Publish the recorded finalize artifact as review-summary.json in the canonical project run directory, then validate it. Requires explicit approval because publication may replace an existing summary and may create or change .context/.gitignore. Returns JSON.",
+      "args": [
+        "runId",
+        "finalizeRef",
+        "mode"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_diff_read",
+      "description": "Read a bounded diff for a review run owned by the caller. A text diff returns `text` with `sha256` and `bytes` and no `data`; a binary diff returns `data` with `binary: true` and no `text`. Never forward `data` into a prompt.",
+      "args": [
+        "runId",
+        "slice"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_materialize",
+      "description": "This tool materializes a git range into the broker-owned run store, writes nothing into the project, and returns only a bounded index (never diff text). reviewers are expected to fetch slices separately.",
+      "args": [
+        "baseRef",
+        "headRef",
+        "contextLines",
+        "paths"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_git_commit",
+      "description": "Commit exactly an applied B→C result's paths (orchestrator-only mutation; requires human approval). The broker derives paths from the persisted baseline/result refs, rejects protected paths (S17) and an empty result, and never uses `git add -A`. By default the caller's own applied result is committed; sandboxSessionID commits the applied result of that delegated sandbox session instead. Returns JSON.",
+      "args": [
+        "message",
+        "sandboxSessionID"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_git_clear_commit_intent",
+      "description": "Clear only a pending host-commit intent for the current session or the selected delegated session (orchestrator-only; requires human approval). Refuses when no intent exists, and reports the result commit and recorded parent that were cleared. Does not alter the session state, installed/committed markers, working tree, index, or refs. Returns JSON.",
+      "args": [
+        "sandboxSessionID"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_git_push",
+      "description": "Push the current branch with the broker-resolved remote/branch (orchestrator-only mutation; requires human approval). Refuses detached HEAD, missing upstream without setUpstream, main/master without allowProtectedBranch, and force/delete/refspec forms. Returns JSON.",
+      "args": [
+        "remote",
+        "setUpstream",
+        "allowProtectedBranch"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_gh_issue_create",
+      "description": "Create a GitHub issue with fixed argv (orchestrator-only mutation; requires human approval). Only `gh issue create --repo <repo> --title <title> --body <body>` runs; values are capped (repo/title 256 bytes, body 65536 bytes). Returns JSON.",
+      "args": [
+        "repo",
+        "title",
+        "body"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_test_run",
+      "description": "Run one broker-configured test runner against the current working tree of a registered project, including uncommitted changes. The result reports gitHead, dirtyPaths, and worktreeDigest so the caller knows which bytes ran. The broker owns the fixed executable, argv, environment, timeout, output cap, and log artifact; no command text is accepted. Returns JSON.",
+      "args": [
+        "runner"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_plan_write",
+      "description": "Replace one allowlisted odd/tasks or odd/mini plan document using an expected revision. Plan text is not authority; trust decisions remain in host_gate_verdict and host_task_mark. No approval is requested because the revision log is the compensating control. Returns JSON.",
+      "args": [
+        "target",
+        "name",
+        "content",
+        "expectedRevision",
+        "note"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_task_mark",
+      "description": "Record a PM-authored task mark with broker-derived review tier from evidenceCommit. Assessment failure means high tier. Only PM identities may call this tool. A gated tick requires gateRef: the verdictHash returned by host_gate_verdict for the latest PASS on this task, required by the broker whenever the document has a `## Gates` section; omitting it fails with TASK_MARK_GATE_REF_REQUIRED. evidenceBaseRef is the base commit for the review assessment; omit it to let the broker use the evidence commit's first parent. Returns JSON.",
+      "args": [
+        "target",
+        "name",
+        "taskId",
+        "status",
+        "evidenceCommit",
+        "gateRef",
+        "evidenceBaseRef",
+        "note"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_gate_verdict",
+      "description": "Record a planner gate verdict in the append-only gate log at the end of an existing task document. Plan text is not authority; the broker validates the planner identity and preserves every prior verdict. No approval is requested because the append-only gate log is the compensating control. Returns JSON.",
+      "args": [
+        "name",
+        "taskId",
+        "verdict",
+        "refinementPlan",
+        "evidenceRef"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_plan_append",
+      "description": "Append approved content to an allowlisted plan document (orchestrator-only mutation; requires human approval). doc is an enum: todo -> docs/TODO.md, plan -> docs/PLAN.md. The broker preserves existing bytes, creates the document when absent, and writes atomically; optional heading inserts before the next heading of equal or higher level. Returns JSON.",
+      "args": [
+        "doc",
+        "content",
+        "heading"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_start",
+      "description": "Start a review lifecycle run (orchestrator-only mutation; requires human approval). Provider-issued tokens are forwarded verbatim. Returns JSON.",
+      "args": [
+        "agent",
+        "contract",
+        "target",
+        "projection",
+        "focus",
+        "untrackedScope",
+        "expectedUntrackedInventory",
+        "intendedUntracked",
+        "baseRef",
+        "committedOnly",
+        "workspaceOverlay",
+        "lineage",
+        "consent",
+        "locale",
+        "policy",
+        "trace"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_capture_result",
+      "description": "Capture a review result (orchestrator-only mutation; requires human approval). Provide exactly one of input (a project-relative path or '-') or inputJson (an inline JSON body); the broker stages a private immutable snapshot outside the project tree. Returns JSON.",
+      "args": [
+        "agent",
+        "input",
+        "inputJson",
+        "lens",
+        "order",
+        "target",
+        "lineage",
+        "expectedRevision",
+        "repositoryContext",
+        "subjectHash",
+        "materialize",
+        "preflight"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_capture_unachievable",
+      "description": "Record an unachievable review outcome (orchestrator-only mutation; requires human approval). Returns JSON.",
+      "args": [
+        "target",
+        "lineage",
+        "expectedRevision",
+        "repositoryContext",
+        "requestHash",
+        "reason",
+        "detail",
+        "withdraw"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_acknowledge_approved",
+      "description": "Acknowledge the approved review authority (orchestrator-only mutation; requires human approval). The four provider-issued continuation values are forwarded verbatim. Returns JSON.",
+      "args": [
+        "lineage",
+        "target",
+        "expectedRevision",
+        "token"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_capture_correction_plan",
+      "description": "Capture a review correction plan (orchestrator-only mutation; requires human approval). Returns JSON.",
+      "args": [
+        "target",
+        "lineage",
+        "expectedRevision",
+        "repositoryContext",
+        "requestHash",
+        "correctionLines"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_capture_refuter",
+      "description": "Capture a refuter result (orchestrator-only mutation; requires human approval). materialize/execute are emitted only from the provider-returned continuation. Returns JSON.",
+      "args": [
+        "agent",
+        "target",
+        "lineage",
+        "expectedRevision",
+        "repositoryContext",
+        "materialize",
+        "execute"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_capture_validation",
+      "description": "Capture a validation result (orchestrator-only mutation; requires human approval). materialize/execute are emitted only from the provider-returned continuation. Returns JSON.",
+      "args": [
+        "agent",
+        "target",
+        "lineage",
+        "expectedRevision",
+        "repositoryContext",
+        "requestHash",
+        "materialize",
+        "execute"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_validate",
+      "description": "Validate the review lifecycle (orchestrator-only mutation; requires human approval). gate is an allowlisted enum; release/attestation values are passed verbatim. Returns JSON.",
+      "args": [
+        "contract",
+        "gate",
+        "baseRef",
+        "lineage",
+        "policy",
+        "prePrCiAttestation",
+        "releaseConfiguration",
+        "releaseEvidenceFreshness",
+        "releaseGenerated",
+        "releaseProvenance",
+        "releasePublicationBoundary"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_review_recover",
+      "description": "Recover the review lifecycle (orchestrator-only mutation; requires human approval). maintainerAuthorization is forwarded byte-for-byte and never shown in the approval metadata. Returns JSON.",
+      "args": [
+        "actor",
+        "disposition",
+        "expectedPredecessorRevision",
+        "predecessorLineage",
+        "successorLineage",
+        "reason",
+        "maintainerAuthorization",
+        "baseRef",
+        "committedOnly",
+        "workspaceOverlay",
+        "releaseScope",
+        "projection",
+        "untrackedScope",
+        "expectedUntrackedInventory",
+        "intendedUntracked",
+        "focus",
+        "policy"
+      ],
+      "execute": "function"
+    },
+    {
+      "name": "host_register_project",
+      "description": "Register a new project with the agentic sandbox system (host-side, creates .atl, updates profile/broker/launcher). Path must be absolute.",
+      "args": [
+        "path",
+        "dryRun",
+        "createRemote",
+        "makePublic"
+      ],
+      "execute": "function"
+    }
+  ]
+}

@@ -9,7 +9,7 @@
  * argument, and the operation is absent from the model-facing tool surface.
  */
 import { describe, expect, jest, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
@@ -848,12 +848,20 @@ describe("host-authoritative session→agent binding", () => {
   });
 });
 
+/** The V1 adapter plus the host-neutral tool runtime and tool table (P0 splits the plugin across files). */
+function sandboxPluginSources(): string {
+  const pluginsDir = new URL("../../opencode/plugins/", import.meta.url);
+  const files = ["sandbox-tools.ts", "lib/tool-runtime.ts"];
+  const specsDir = new URL("lib/tool-specs/", pluginsDir);
+  if (existsSync(specsDir)) {
+    for (const name of readdirSync(specsDir).sort()) if (name.endsWith(".ts")) files.push(`lib/tool-specs/${name}`);
+  }
+  return files.map((f) => readFileSync(new URL(f, pluginsDir), "utf8")).join("\n");
+}
+
 describe("PM host identity policy", () => {
   test("broker and plugin default identity lists stay identical", () => {
-    const pluginSource = readFileSync(
-      new URL("../../opencode/plugins/sandbox-tools.ts", import.meta.url),
-      "utf8",
-    );
+    const pluginSource = sandboxPluginSources();
     const pluginList = pluginSource.match(/const READ_ONLY_AGENTS: readonly string\[\] = (\[[^\]]*\])/s)?.[1]
       ?.match(/"([^"]+)"/g)
       ?.map((entry) => entry.slice(1, -1));
@@ -1125,10 +1133,7 @@ describe("PM host identity policy", () => {
   });
 
   test("sandbox plugin guards every mutation and read surface with the identity list", () => {
-    const pluginSource = readFileSync(
-      new URL("../../opencode/plugins/sandbox-tools.ts", import.meta.url),
-      "utf8",
-    );
+    const pluginSource = sandboxPluginSources();
     for (const tool of ["sandbox_read", "sandbox_list", "sandbox_grep", "sandbox_write", "sandbox_edit", "sandbox_apply_patch", "sandbox_bash", "sandbox_diff", "sandbox_finish", "sandbox_apply", "sandbox_copy_out", "sandbox_copy_in", "sandbox_discard"]) {
       expect(pluginSource).toContain(`assertNotOrchestrator(ctx.agent, "${tool}")`);
     }
