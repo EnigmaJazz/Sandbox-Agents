@@ -1,0 +1,110 @@
+{
+  // ──────────────────────────────────────────────────────────────────────────
+  // sandbox-permissions.jsonc (OpenCode V2) — ADDITIVE permission fragment, V5 of
+  // docs/upgrades/opencode-v2.md. The V1 original is ../../config-fragments/sandbox-permissions.jsonc
+  // and stays untouched; keep both in step (broker/tests/v2-config-fragments.test.ts checks parity).
+  //
+  // NOT INSTALLED. Merge into the V2 config root's opencode.json MANUALLY after reviewing the diff
+  // (S17: the USER installs the exact bytes). V1 and V2 must not share a config root.
+  //
+  // What differs from V1, each proved on OpenCode V2 2.2.0 (opencode-v2-probe FINDINGS-2/3):
+  //   * A plugin tool with NO rule is silently ALLOWED on V2 (base rule `* * allow`); V1 asked by default.
+  //     So every tool has an explicit rule here, including sandbox_copy_in, sandbox_copy_out and
+  //     host_git_clear_commit_intent, which V1 left to its default and which ask for approval in code.
+  //   * Native names: `shell` replaces `bash`; `edit` covers edit, write and apply_patch (V1's write and
+  //     apply_patch keys are normalised into it, so they are not repeated).
+  //   * `read` is a pattern map (pattern -> effect). The V1 fragment's {allow, deny} object form is
+  //     rejected as invalid config by both V1 and V2, so it is rewritten here.
+  //   * A tool config `deny` removes the tool from the model's list; `ask` prompts, and the tool's own
+  //     ctx.permission.assert (opencode/plugins-v2/lib/v2-adapter.ts) asks again: two layers, as in V1.
+  //   * Not expressible in config: the ~/.claude and ~/.agents sources V2 also reads. Confine them in the
+  //     nono profile (workstream V6).
+  // ──────────────────────────────────────────────────────────────────────────
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "shell": "deny",
+    "edit": "deny",
+    "read": {
+      "**/.local/share/opencode/auth.json": "deny",
+      "**/.ssh/**": "deny",
+      "**/.gnupg/**": "deny",
+      "**/.aws/**": "deny",
+      "**/.kube/**": "deny",
+      "**/.config/gcloud/**": "deny",
+      "**/.config/gh/hosts.yml": "deny",
+      "**/.git-credentials": "deny",
+      "**/.netrc": "deny",
+      "**/.env*": "deny",
+      "**/*.key": "deny",
+      "**/*.pem": "deny"
+    },
+    "sandbox_read": "allow",
+    "sandbox_list": "allow",
+    "sandbox_grep": "allow",
+    "sandbox_write": "allow",
+    "sandbox_edit": "allow",
+    "sandbox_apply_patch": "allow",
+    "sandbox_bash": "allow",
+    "sandbox_diff": "allow",
+    "sandbox_finish": "allow",
+    "sandbox_apply": "ask",
+    "sandbox_copy_in": "ask",
+    "sandbox_copy_out": "ask",
+    "sandbox_discard": "allow",
+    "host_system": "allow",
+    "host_service_status": "allow",
+    "host_service_logs": "allow",
+    "host_tailscale_status": "allow",
+    "host_memory": "allow",
+    "host_disk_usage": "allow",
+    "host_network_listeners": "allow",
+    "host_process_list": "allow",
+    "host_docker_list": "allow",
+    "host_docker_logs": "allow",
+    // Dormant since gentle-ai 4 (docs/upgrades/gentle-ai-4.md); rollback: restore host_sdd_status/host_sdd_continue/host_sdd_task_result to "allow" and host_sdd_attempt_grant/host_sdd_archive_compose to "ask".
+    "host_sdd_status": "deny",
+    "host_sdd_continue": "deny",
+    "host_sdd_verify_validate": "deny",
+    "host_sdd_task_result": "deny",
+    "host_review_assess": "allow",
+    "host_review_mode_status": "allow",
+    "host_review_status": "allow",
+    "host_review_materialize": "allow",
+    "host_review_diff_read": "allow",
+    "host_review_pipeline_run": "allow",
+    "host_review_persist": "ask",
+    "host_review_lens_context": "allow",
+    "host_sandbox_result": "allow",
+    "host_sandbox_result_install": "ask",
+    "host_sdd_attempt_acquire": "deny",
+    "host_sdd_attempt_status": "deny",
+    "host_sdd_attempt_begin": "deny",
+    "host_sdd_attempt_rescope": "deny",
+    "host_sdd_attempt_finish": "deny",
+    "host_sdd_attempt_reset": "deny",
+    // Dormant per the gentle-ai 4 note above; restore to "ask" on rollback.
+    "host_sdd_attempt_grant": "deny",
+    "host_sdd_attempt_settle": "deny",
+    "host_git_commit": "ask",
+    "host_git_push": "ask",
+    "host_git_clear_commit_intent": "ask",
+    "host_gh_issue_create": "ask",
+    "host_plan_append": "ask",
+    "host_plan_write": "allow",
+    "host_task_mark": "allow",
+    "host_test_run": "allow",
+    "host_gate_verdict": "allow",
+    "host_register_project": "ask",
+    "host_review_start": "ask",
+    "host_review_capture_result": "ask",
+    "host_review_capture_unachievable": "ask",
+    "host_review_acknowledge_approved": "ask",
+    "host_review_capture_correction_plan": "ask",
+    "host_review_capture_refuter": "ask",
+    "host_review_capture_validation": "ask",
+    "host_review_validate": "ask",
+    "host_review_recover": "ask",
+    // Dormant per the gentle-ai 4 note above; restore to "ask" on rollback.
+    "host_sdd_archive_compose": "deny"
+  }
+}
