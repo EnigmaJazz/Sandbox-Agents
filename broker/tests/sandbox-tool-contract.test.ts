@@ -463,7 +463,7 @@ test("sandbox_edit and sandbox_write descriptions distinguish targeted and whole
 });
 
 test("host_review_materialize exposes only a bounded index and preserves broker errors", () => {
-  expect(sandboxTools).toContain("host_review_materialize: tool({");
+  expect(sandboxTools).toMatch(/host_review_materialize: (?:tool|defineTool)\(\{/);
   expect(sandboxTools).toContain('c.request("reviewMaterialize", ctx.sessionID, payload, ctx.agent)');
   expect(sandboxTools).toContain("materializes a git range into the broker-owned run store");
   expect(sandboxTools).toContain("returns only a bounded index");

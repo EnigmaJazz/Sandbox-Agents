@@ -746,13 +746,11 @@ describe("host-authoritative session→agent binding", () => {
       expect(() => authorizeHostDispatch(ctx, "registerProject", "argument-pm", forgedArgsForPm.agent)).toThrow(
         'host mutation tool "registerProject" is orchestrator-only (HOST_MUTATION_NOT_ORCHESTRATOR)',
       );
-      const pluginSource = readFileSync(
-        new URL("../../opencode/plugins/sandbox-tools.ts", import.meta.url),
-        "utf8",
-      );
+      const pluginSource = sandboxPluginSources();
+      const commitStart = pluginSource.search(/host_git_commit: (?:tool|defineTool)\(\{/);
       const hostCommit = pluginSource.slice(
-        pluginSource.indexOf("host_git_commit: tool({"),
-        pluginSource.indexOf("host_git_clear_commit_intent: tool({"),
+        commitStart,
+        commitStart + pluginSource.slice(commitStart).search(/host_git_clear_commit_intent: (?:tool|defineTool)\(\{/),
       );
       expect(hostCommit).toContain("}, ctx.agent)");
       expect(hostCommit).not.toContain("args.agent");

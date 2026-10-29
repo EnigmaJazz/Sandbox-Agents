@@ -337,7 +337,7 @@ describe("install-user-files --verify", () => {
     journal("file", "sandbox-broker.service", resolve(home, ".config/systemd/user/sandbox-broker.service"));
     const result = run();
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("verification passed: 16 installed files verified");
+    expect(result.stdout).toContain("verification passed: 18 installed files verified");
     expect(result.stdout).toContain("config fragment excluded (manual merge; no installed counterpart)");
   });
 
@@ -372,7 +372,7 @@ describe("install-user-files --verify", () => {
     }
     const result = run();
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("verification passed: 16 installed files verified; 2 installer backups");
+    expect(result.stdout).toContain("verification passed: 18 installed files verified; 2 installer backups");
   });
 
   test("backup enumeration uses escaped, end-anchored installer names", () => {
