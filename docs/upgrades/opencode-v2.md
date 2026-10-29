@@ -68,6 +68,7 @@ Timing:
   - Output: `docs/opencode-v2-discovery.md`, with sources.
 - **V1 — Broker.** Expected to be a no-op. Confirm V2 session IDs pass validation and add a regression test.
 - **V2 — Thin V2 adapter, `opencode/plugins-v2/sandbox-tools.ts` (late: written just before cutover, not in advance).**
+  - **Status 2026-10-29 (written early at the owner's request, under a session-scoped S17 waiver for `opencode/plugins-v2/`; NOT installed):** entry `opencode/plugins-v2/sandbox-tools.ts` + pure mapping `opencode/plugins-v2/lib/v2-adapter.ts`, tests `broker/tests/v2-adapter.test.ts`. Verified on isolated V2 2.2.0: it loads and offers exactly the 42 tool names of the V1 table. Not verified live: the approval round trip (`ctx.permission.assert`) and broker calls (needs a broker). Agent binding is made from the tool context on each call (replaces the V1 `chat.params` hook). Still open: V3 guard and system rule, V4 relay, V5 config (permission rules for each gated tool name must exist, or `assert` has nothing to ask about), V6 launch, V7 host fixture.
   - Map P0's shared tool table to `ctx.tool.transform`. No tool logic is written here. The directory comes from `ctx.location.directory` at setup, the agent from `Tool.Context.agent`.
   - Map approval specs to V2 permissions, per V0's findings (replacing `ctx.ask`).
   - Parity test: the V2 adapter registers exactly the same tool names, and preserves every approval spec, as the V1 adapter.
