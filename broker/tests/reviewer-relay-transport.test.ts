@@ -53,6 +53,7 @@ import {
   type TransportSpawnSpec,
 } from "../../opencode/plugins/lib/reviewer-relay-core.ts";
 import * as reviewerRelayPlugin from "../../opencode/plugins/reviewer-relay-transport.ts";
+import { sandboxPluginSources } from "./helpers/sandbox-plugin-sources.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -1679,10 +1680,7 @@ describe("reviewer relay Task-name mapping", () => {
     new URL("../../openspec/changes/agent-host-tools/design.md", import.meta.url),
     "utf8",
   );
-  const sandboxToolsSource = readFileSync(
-    new URL("../../opencode/plugins/sandbox-tools.ts", import.meta.url),
-    "utf8",
-  );
+  const sandboxToolsSource = sandboxPluginSources();
 
   test("AGENTS.md maps every provider lens to its asi-review-* Task name", () => {
     for (const [lens, taskName] of Object.entries(LENS_TASK_NAMES)) {

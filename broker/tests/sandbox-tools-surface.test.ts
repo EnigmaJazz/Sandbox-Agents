@@ -22,6 +22,8 @@ async function surface() {
       description: t.description,
       args: Object.keys(t.args),
       execute: typeof t.execute,
+      // approval prompts the tool body can raise; a dropped ctx.ask would silently remove a gate
+      asks: (String(t.execute).match(/ctx\.ask\(/g) ?? []).length,
     })),
   };
 }
@@ -49,4 +51,13 @@ test("the recorded baseline lists every expected tool group", () => {
     expect(names).toContain(required);
   }
   expect(names.length).toBe(42);
+});
+
+test("approval prompts are preserved: 20 ctx.ask call sites, as in the pre-P0 plugin (the 21st grep hit was a header comment)", () => {
+  const tools = JSON.parse(readFileSync(FIXTURE, "utf-8")).tools as { name: string; asks: number }[];
+  expect(tools.reduce((sum, t) => sum + t.asks, 0)).toBe(20);
+  const gated = tools.filter((t) => t.asks > 0).map((t) => t.name);
+  for (const required of ["sandbox_apply", "sandbox_copy_out", "sandbox_copy_in", "host_git_commit", "host_git_push", "host_register_project"]) {
+    expect(gated).toContain(required);
+  }
 });
