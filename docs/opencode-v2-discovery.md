@@ -6,8 +6,9 @@ for cutover. Source evidence: `~/opencode-v2-probe/` (`FINDINGS.md`, `FINDINGS-2
 `run_probe*.py` scripts) and the host fixture `broker/tests/v2-host.test.ts`. [V] observed, [I] inferred, [U] unknown.
 
 ## Target version
-- [V] The V2 plugin API and every fact below are from 2.2.0. gentle-ai's review proof was on 2.0.19; OpenChamber needs at least 2.0.15.
-- [U] 2.2.1 is published and was not probed. The owner chooses the cutover version; re-run the fixture against it.
+- **Owner decision 2026-10-29: pin 2.2.2** (npm `latest` that day). Installed in isolation at `~/opencode-v2-probe/prefix-2.2.2` (the 2.2.0 prefix is kept). gentle-ai's review proof was on 2.0.19; OpenChamber needs at least 2.0.15.
+- [V] Re-verified on 2.2.2: the host fixture (`broker/tests/v2-host.test.ts`, 7 of 7); the `retry` hook with `switchModel`; the `subagent` before/after hooks and the child `context` rewrite; the password scrub (a control variable inherited, the password variables not); a tool with no rule runs silently while an `ask` rule rejects non-interactively; the `debug agents` shape (`id, name, mode, hidden, permissions[{action,resource,effect}]`). No difference from 2.2.0 was found.
+- [U] Not re-run on 2.2.2: the nono profile checks (they do not depend on the V2 binary), the verifier's section 9 against a full config, and anything that needs a TTY. All facts below were first observed on 2.2.0.
 
 ## Built-in tool ids and input shapes
 | Tool | V2 id | Input |
