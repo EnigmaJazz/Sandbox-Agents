@@ -18,6 +18,18 @@ BOOTSTRAP_WORKSPACE="/home/james/ai-workspace/workflow_optimisation"
 CWD_CANON="$(realpath -m "$PWD")"
 CONTROL_CANON="$(realpath -m "$CONTROL_DIR")"
 BOOTSTRAP_CANON="$(realpath -m "$BOOTSTRAP_WORKSPACE")"
+# The control directory (including one given with --control-dir) must itself be a safe place: never inside a project
+# root, and never a git checkout. Otherwise naming a project as the control dir would skip the start-directory refusals.
+for root in "${PROJECT_ROOTS[@]}"; do
+  ROOT_CANON="$(realpath -m "$root")"
+  case "$CONTROL_CANON" in "$ROOT_CANON"|"$ROOT_CANON"/*)
+    echo "refusing: the control dir is inside a project root: $CONTROL_DIR" >&2
+    exit 3 ;;
+  esac
+done
+if [[ -e "$CONTROL_CANON/.git" ]]; then
+  echo "refusing: the control dir is a git checkout: $CONTROL_DIR" >&2; exit 3
+fi
 if [[ "$CWD_CANON" == "$CONTROL_CANON" || "$CWD_CANON" == "$BOOTSTRAP_CANON" ]]; then
   : # allowed: control dir or approved bootstrap workspace
 else

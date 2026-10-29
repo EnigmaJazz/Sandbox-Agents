@@ -53,7 +53,7 @@ install_file() {
   fi
   mkdir -p "$(dirname "$dest")" "$STATE_DIR"
   if [[ -f "$dest" ]]; then
-    cp -p "$dest" "$dest.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+    cp -p "$dest" "$dest.bak-$(date -u +%Y%m%dT%H%M%S.%NZ)-$$"
     log "backed up $dest"
   fi
   install -m "$mode" "$src" "$dest"
@@ -61,12 +61,22 @@ install_file() {
   log "installed $dest"
 }
 
+# Plan every install first, validate all of it, and only then write: a bad source or destination must not leave a
+# partial install behind.
+PLAN=()
 for pair in "${V2_PLUGIN_FILES[@]}"; do
-  install_file "${pair%%|*}" "$V2_PLUGINS_DIR/${pair##*|}" 0644
+  PLAN+=("${pair%%|*}|$V2_PLUGINS_DIR/${pair##*|}")
 done
-install_file "$V2_NONO_PROFILE_SRC" "$V2_NONO_PROFILE_DEST" 0644
+PLAN+=("$V2_NONO_PROFILE_SRC|$V2_NONO_PROFILE_DEST")
 for fragment in "${V2_FRAGMENT_FILES[@]}"; do
-  install_file "$fragment" "$V2_FRAGMENT_DIR/$(basename "$fragment")" 0644
+  PLAN+=("$fragment|$V2_FRAGMENT_DIR/$(basename "$fragment")")
+done
+for entry in "${PLAN[@]}"; do
+  [[ -f "$REPO_ROOT/${entry%%|*}" ]] || { log "error: missing source ${entry%%|*}" >&2; exit 1; }
+  reject_symlink_path "${entry##*|}" || exit 1
+done
+for entry in "${PLAN[@]}"; do
+  install_file "${entry%%|*}" "${entry##*|}" 0644
 done
 
 if [[ ! -d "$V2_XDG_CONFIG_HOME/opencode/node_modules/zod" ]]; then

@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -56,6 +56,15 @@ describe("V2 nono profile", () => {
     expect(v2.filesystem.read).toContain(configRoot);
   });
 
+  test("grants no write access to any project's .git directory (V2 never writes there; hooks planted there would run on the host)", () => {
+    const writable = [...v2.filesystem.allow, ...(v2.filesystem.allow_file ?? [])];
+    expect(writable.filter((p: string) => /(^|\/)\.git(\/|$)/.test(p))).toEqual([]);
+    // positive control: the V1 profile does grant them, so this check can fail
+    expect([...V1_PROFILE.filesystem.allow].filter((p: string) => /(^|\/)\.git(\/|$)/.test(p)).length).toBeGreaterThan(0);
+    // reading them stays possible through the project-root read grants
+    expect(v2.filesystem.read).toContain("$HOME/agent-sandbox-integration");
+  });
+
   test("no writable grant covers the V2 root itself or any of its parents", () => {
     const v2root = "$HOME/.local/share/opencode-v2";
     const writable = [...v2.filesystem.allow, ...(v2.filesystem.allow_file ?? [])];
@@ -89,7 +98,8 @@ describe("V2 nono profile", () => {
     expect(v2.workdir).toEqual(V1_PROFILE.workdir);
   });
 
-  test("is accepted by `nono profile validate` (positive control: a broken profile is rejected)", () => {
+  const maybeNono = Bun.which("nono") ? test : test.skip; // skipped visibly when nono is not installed
+  maybeNono("is accepted by `nono profile validate` (positive control: a broken profile is rejected)", () => {
     const good = run(["nono", "profile", "validate", V2_PROFILE_PATH]);
     expect(good.code).toBe(0);
     const bad = join(scratch, "bad.json");
@@ -146,11 +156,47 @@ describe("start-secure-opencode-v2", () => {
   const launch = (s: ReturnType<typeof setup>, extra: string[] = []) =>
     run(["bash", LAUNCHER, ...extra], { cwd: s.cwd, env: { HOME: s.home, NONO_BIN: s.fakeNono } });
 
-  test("refuses to start from a project directory (exit 3), before touching anything else", () => {
-    const s = setup("refuse-project");
-    const r = run(["bash", LAUNCHER], { cwd: ROOT, env: { HOME: s.home, NONO_BIN: s.fakeNono } });
+  test("refuses to start from a git checkout (exit 3), before touching anything else", () => {
+    const s = setup("refuse-git");
+    const checkout = join(s.home, "some-checkout");
+    mkdirSync(join(checkout, ".git"), { recursive: true });
+    const r = run(["bash", LAUNCHER], { cwd: checkout, env: { HOME: s.home, NONO_BIN: s.fakeNono } });
     expect(r.code).toBe(3);
     expect(existsSync(s.log)).toBe(false);
+  });
+
+  test("refuses to start from inside a configured project root (exit 3)", () => {
+    const s = setup("refuse-root");
+    const project = join(s.home, "projects/app");
+    mkdirSync(project, { recursive: true });
+    const r = run(["bash", LAUNCHER], { cwd: project, env: { HOME: s.home, NONO_BIN: s.fakeNono, V2_EXTRA_PROJECT_ROOTS: join(s.home, "projects") } });
+    expect(r.code).toBe(3);
+    expect(existsSync(s.log)).toBe(false);
+  });
+
+  test("--control-dir cannot be used to smuggle a project directory past the refusals (exit 3)", () => {
+    const s = setup("control-dir-project");
+    const project = join(s.home, "projects/app");
+    mkdirSync(project, { recursive: true });
+    const r = run(["bash", LAUNCHER, "--control-dir", project], { cwd: project, env: { HOME: s.home, NONO_BIN: s.fakeNono, V2_EXTRA_PROJECT_ROOTS: join(s.home, "projects") } });
+    expect(r.code).toBe(3);
+    expect(existsSync(s.log)).toBe(false);
+  });
+
+  test("--control-dir cannot name a git checkout either (exit 3)", () => {
+    const s = setup("control-dir-git");
+    const checkout = join(s.home, "checkout");
+    mkdirSync(join(checkout, ".git"), { recursive: true });
+    const r = run(["bash", LAUNCHER, "--control-dir", checkout], { cwd: checkout, env: { HOME: s.home, NONO_BIN: s.fakeNono } });
+    expect(r.code).toBe(3);
+  });
+
+  test("--control-dir with a safe directory is accepted (positive control)", () => {
+    const s = setup("control-dir-ok");
+    const control = join(s.home, "elsewhere-control");
+    mkdirSync(control, { recursive: true });
+    const r = run(["bash", LAUNCHER, "--control-dir", control], { cwd: control, env: { HOME: s.home, NONO_BIN: s.fakeNono } });
+    expect(r.code).toBe(0);
   });
 
   test("refuses when the V2 binary is missing (exit 4)", () => {
@@ -250,6 +296,31 @@ describe("install-user-files-v2 and rollback-v2", () => {
     expect(again.code).toBe(0);
     expect(readdirSync(V2_PLUGINS(home)).some((f) => f.startsWith("00-routing-guard.ts.bak"))).toBe(true);
     expect(readFileSync(guard, "utf8")).toContain("routing guard");
+  });
+
+  test("two applies in the same second keep both backups", () => {
+    const home = join(scratch, "inst-bak2");
+    mkdirSync(home);
+    run(["bash", INSTALL, "--apply"], { env: env(home) });
+    const guard = join(V2_PLUGINS(home), "00-routing-guard.ts");
+    writeFileSync(guard, "// first edit\n");
+    run(["bash", INSTALL, "--apply"], { env: env(home) });
+    writeFileSync(guard, "// second edit\n");
+    run(["bash", INSTALL, "--apply"], { env: env(home) });
+    const backups = readdirSync(V2_PLUGINS(home)).filter((f) => f.startsWith("00-routing-guard.ts.bak"));
+    expect(backups).toHaveLength(2);
+    expect(new Set(backups.map((f) => readFileSync(join(V2_PLUGINS(home), f), "utf8"))).size).toBe(2);
+  });
+
+  test("a destination that cannot be written is refused before ANY file is installed (no partial install)", () => {
+    const home = join(scratch, "inst-partial");
+    mkdirSync(join(home, "elsewhere"), { recursive: true });
+    mkdirSync(V2_PLUGINS(home), { recursive: true });
+    symlinkSync(join(home, "elsewhere"), join(V2_PLUGINS(home), "lib")); // a late destination sits behind a symlink
+    const r = run(["bash", INSTALL, "--apply"], { env: env(home) });
+    expect(r.code).not.toBe(0);
+    expect(existsSync(join(V2_PLUGINS(home), "00-routing-guard.ts"))).toBe(false);
+    expect(readdirSync(join(home, "elsewhere"))).toEqual([]);
   });
 
   test("rollback removes only files that still match the repo copy", () => {
