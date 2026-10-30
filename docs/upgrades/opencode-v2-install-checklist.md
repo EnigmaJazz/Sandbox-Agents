@@ -36,8 +36,10 @@ OPENCODE_V2_HOST_TEST=1 OPENCODE_V2_BIN=$HOME/opencode-v2-probe/prefix-2.2.2/nod
 ```bash
 mkdir -p ~/.local/share/opencode-v2/prefix
 npm install --prefix ~/.local/share/opencode-v2/prefix --no-audit --no-fund @opencode/cli@2.2.2
-~/.local/share/opencode-v2/prefix/node_modules/.bin/opencode2 --version      # expect 2.2.2
+~/.local/share/opencode-v2/prefix/node_modules/.bin/opencode2 --version      # expect "opencode v2.2.2"
+ls -l ~/.local/share/opencode-v2/prefix/node_modules/@opencode/cli-linux-x64/bin/opencode   # expect about 248 MB (248486064 bytes)
 ```
+**Let the install finish (about 2 minutes) and do not interrupt it.** The platform binaries are about 250 MB each; an interrupted extraction leaves truncated files that crash with `Bus error`, and re-running `npm install` over them fails in the vendor postinstall ("Failed to install OpenCode") because it verifies the binary with `--version`. This happened once on 2026-10-29. If it does: `rm -r ~/.local/share/opencode-v2/prefix` and install again from scratch. If a future npm blocks the postinstall, `npm install-scripts approve @opencode/cli` is the documented fix.
 Never run `opencode upgrade --major` or the curl installer: both replace V1.
 - [ ] Create the server password (0600, never printed): `umask 077; head -c 24 /dev/urandom | base64 > ~/.local/share/opencode-v2/server-password`
 - [ ] Make `zod` resolvable from the V2 config root: `mkdir -p ~/.local/share/opencode-v2/config/opencode && npm install --prefix ~/.local/share/opencode-v2/config/opencode zod`
