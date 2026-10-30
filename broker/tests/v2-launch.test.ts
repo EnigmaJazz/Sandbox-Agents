@@ -129,7 +129,7 @@ describe("start-secure-opencode-v2", () => {
   const LAUNCHER = join(ROOT, "scripts/start-secure-opencode-v2");
 
   /** A throwaway HOME with a fake V2 binary, a password file and a fake nono that records what it is given. */
-  function setup(name: string, options: { passwordMode?: number; noPassword?: boolean; noBinary?: boolean } = {}) {
+  function setup(name: string, options: { passwordMode?: number; noPassword?: boolean; noBinary?: boolean; noServerHome?: boolean } = {}) {
     const home = join(scratch, name);
     const v2root = join(home, ".local/share/opencode-v2");
     const binDir = join(v2root, "prefix/node_modules/.bin");
@@ -142,6 +142,13 @@ describe("start-secure-opencode-v2", () => {
     if (!options.noPassword) {
       writeFileSync(join(v2root, "server-password"), `${SECRET}\n`);
       chmodSync(join(v2root, "server-password"), options.passwordMode ?? 0o600);
+    }
+    if (!options.noServerHome) {
+      // The server runs with HOME=<config root>/home, which holds only the Systematic overlay (the plugin reads
+      // $HOME/.config/opencode and the V2 profile does not grant the V1 tree). The launcher refuses to start without it.
+      const overlayDir = join(v2root, "config/home/.config/opencode");
+      mkdirSync(overlayDir, { recursive: true });
+      writeFileSync(join(overlayDir, "systematic.jsonc"), "{}\n");
     }
     const log = join(home, "nono.log");
     const fakeNono = join(home, "nono");
@@ -244,6 +251,25 @@ describe("start-secure-opencode-v2", () => {
     }
     expect(args).toContain("OPENCODE_DISABLE_CLAUDE_CODE=1");
     expect(args).toMatch(/ env [A-Z_]+=/);
+  });
+
+  test("runs the server with its own HOME and the routing guard's state root inside the V2 data root", () => {
+    const s = setup("server-home");
+    expect(launch(s).code).toBe(0);
+    const args = readFileSync(s.log, "utf8").split("\n")[0]!;
+    const v2 = join(s.home, ".local/share/opencode-v2");
+    expect(args).toContain(`HOME=${join(v2, "config/home")}`);
+    expect(args).toContain(`SYSTEMATIC_ROUTING_GUARD_STATE_ROOT=${join(v2, "data")}`);
+    // They belong to the server inside the sandbox wrapper; nono keeps the caller's HOME.
+    expect(readFileSync(s.log, "utf8").split("\n").filter((line) => line.startsWith("HOME="))).toEqual([`HOME=${s.home}`]);
+  });
+
+  test("refuses to start without the server home's Systematic overlay (exit 4) instead of running against the wrong HOME", () => {
+    const s = setup("no-server-home", { noServerHome: true });
+    const r = launch(s);
+    expect(r.code).toBe(4);
+    expect(r.err).toContain("systematic.jsonc");
+    expect(existsSync(s.log)).toBe(false); // nono was never started
   });
 
   test("never prints the password", () => {
