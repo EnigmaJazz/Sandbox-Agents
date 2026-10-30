@@ -49,7 +49,7 @@ There is no `list` tool. A tool id missing from the broker's `TOOL_CLASSIFICATIO
 
 ## `~/.claude` and `~/.agents`
 - [V] `~/.claude/skills` and `~/.agents/skills` are read as skill sources. `OPENCODE_DISABLE_CLAUDE_CODE=1` (or `..._SKILLS=1`) hides the `~/.claude` skills; **nothing hides `~/.agents`**. Not read: `CLAUDE.md` files, `~/.agents/AGENTS.md`; `~/.claude/agents` markdown agents were not picked up.
-- [V] Under nono (Landlock) a deny on both directories works: `~/.claude`, `~/.agents` are unreadable to the process (profile `nono/profile/opencode-v2-secure.json`). Landlock cannot make a subdirectory read-only inside a writable grant and refuses a deny overlap.
+- [V] Under nono (Landlock) a deny on both directories works: `~/.claude`, `~/.agents` are unreadable to the process (profile `nono/profile/opencode-v2-secure.json`). Landlock cannot make a subdirectory read-only inside a writable grant and refuses a deny overlap. nono also keeps its own state under `$XDG_STATE_HOME/nono` and refuses to start if the profile grants a directory above it ("overlaps protected nono state root"), so the V2 XDG variables must reach only the server inside the sandbox (`nono run -- env XDG_...=... opencode2 serve`), never nono itself (found on the first real start, 2026-10-30).
 
 ## Sessions and the broker
 - [V] V2 session ids are `ses_` plus 26 alphanumerics (30 characters), for example `ses_e7685f69affe4QgQ1ES5hVBiGl`. They pass the broker's `SESSION_ID_RE` (`/^[A-Za-z0-9_-]{1,64}$/`); regression test `broker/tests/v2-session-ids.test.ts`. Workstream V1 (broker) is therefore a no-op.

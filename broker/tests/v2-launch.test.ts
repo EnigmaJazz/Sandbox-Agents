@@ -234,10 +234,16 @@ describe("start-secure-opencode-v2", () => {
     expect(args).toContain("prefix/node_modules/.bin/opencode2");
     expect(args).not.toContain(SECRET);
     expect(log).toContain(`OPENCODE_SERVER_PASSWORD=${SECRET}`);
+    // The V2 roots reach only the server, as an `env` wrapper INSIDE the sandbox. nono itself must not see them: it keeps
+    // its own state under $XDG_STATE_HOME/nono, which would then sit inside the profile's writable V2 state grant, and
+    // nono refuses to start ("overlaps protected nono state root"). Found on the first real start, 2026-10-30.
+    const v2 = join(s.home, ".local/share/opencode-v2");
     for (const [key, dir] of [["XDG_CONFIG_HOME", "config"], ["XDG_DATA_HOME", "data"], ["XDG_STATE_HOME", "state"], ["XDG_CACHE_HOME", "cache"]]) {
-      expect(log).toContain(`${key}=${join(s.home, ".local/share/opencode-v2", dir!)}`);
+      expect(args).toContain(`${key}=${join(v2, dir!)}`);
+      expect(log.split("\n").filter((line) => line.startsWith(`${key}=`))).toEqual([]); // not in nono's own environment
     }
-    expect(log).toContain("OPENCODE_DISABLE_CLAUDE_CODE=1");
+    expect(args).toContain("OPENCODE_DISABLE_CLAUDE_CODE=1");
+    expect(args).toMatch(/ env [A-Z_]+=/);
   });
 
   test("never prints the password", () => {

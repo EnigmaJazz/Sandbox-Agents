@@ -74,13 +74,16 @@ echo "starting secured opencode V2 at ${V2_HOSTNAME}:${V2_PORT} (profile: ${V2_N
 echo "control dir: $CONTROL_DIR"
 echo "v2 root: $V2_ROOT (cwd: $PWD)"
 
-# Isolated roots for V2; OPENCODE_DISABLE_CLAUDE_CODE hides ~/.claude skills (the nono profile denies ~/.claude and
-# ~/.agents at the OS level, which is the control that also covers ~/.agents). The password travels in the
-# environment only: exported here, inherited by nono and the server. OpenCode V2 2.2.0 removes OPENCODE_SERVER_PASSWORD
-# and OPENCODE_PASSWORD from the environment of its shell tool and of MCP servers it starts, while other variables are
-# inherited (opencode-v2-probe FINDINGS-3.md); in-process plugins can still read it, so install only reviewed plugins.
+# OpenCode V2 gets its own XDG roots, but ONLY inside the sandbox, as an `env` wrapper around the server. They must not be
+# exported to nono itself: nono keeps its state under $XDG_STATE_HOME/nono, which would then sit inside the profile's
+# writable V2 state grant, and nono refuses to start ("overlaps protected nono state root"). OPENCODE_DISABLE_CLAUDE_CODE
+# hides ~/.claude skills (the nono profile denies ~/.claude and ~/.agents at the OS level, which is the control that also
+# covers ~/.agents). The password travels in the environment only: exported here, inherited by nono and the server.
+# OpenCode V2 2.2.0/2.2.2 removes OPENCODE_SERVER_PASSWORD and OPENCODE_PASSWORD from the environment of its shell tool and
+# of MCP servers it starts, while other variables are inherited (opencode-v2-probe FINDINGS-3.md); in-process plugins can
+# still read it, so install only reviewed plugins.
 export OPENCODE_SERVER_PASSWORD
-export XDG_CONFIG_HOME="$V2_XDG_CONFIG_HOME" XDG_DATA_HOME="$V2_XDG_DATA_HOME" XDG_STATE_HOME="$V2_XDG_STATE_HOME" XDG_CACHE_HOME="$V2_XDG_CACHE_HOME"
-export OPENCODE_DISABLE_CLAUDE_CODE=1 OPENCODE_DISABLE_AUTOUPDATE=1
-export npm_config_cache="$V2_XDG_CACHE_HOME/npm-cache"
-exec "$NONO_BIN" run --profile "$PROFILE_FILE" -- "$V2_BIN" serve --hostname "$V2_HOSTNAME" --port "$V2_PORT"
+exec "$NONO_BIN" run --profile "$PROFILE_FILE" -- env \
+  XDG_CONFIG_HOME="$V2_XDG_CONFIG_HOME" XDG_DATA_HOME="$V2_XDG_DATA_HOME" XDG_STATE_HOME="$V2_XDG_STATE_HOME" XDG_CACHE_HOME="$V2_XDG_CACHE_HOME" \
+  OPENCODE_DISABLE_CLAUDE_CODE=1 OPENCODE_DISABLE_AUTOUPDATE=1 npm_config_cache="$V2_XDG_CACHE_HOME/npm-cache" \
+  "$V2_BIN" serve --hostname "$V2_HOSTNAME" --port "$V2_PORT"
