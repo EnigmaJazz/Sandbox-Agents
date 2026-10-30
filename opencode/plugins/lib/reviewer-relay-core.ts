@@ -132,7 +132,7 @@ export const TRANSPORT_ENV_KEYS: readonly string[] = [
 /** Refusal envelope the Task-boundary prompt/output carries instead of content. */
 export const REFUSAL_ENVELOPE_CODE = "opencode_reviewer_relay_refused";
 
-const TRANSPORT_FRAME_KEYS: readonly string[] = ["schema", "operation", "nonce", "prompt", "output", "error"];
+const TRANSPORT_FRAME_KEYS: readonly string[] = ["schema", "operation", "nonce", "prompt", "output", "error", "cause"];
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 
 // ---------------------------------------------------------------------------
@@ -432,6 +432,11 @@ export interface TransportDeclaration {
    * binary, which on V2 holds only `opencode.exe`, so `opencode --version` would fall through to the V1 binary on PATH.
    */
   runtimeDirectory?: string;
+  /**
+   * HOME for the child. The V2 server runs with an overlay HOME, but the provider keeps review authority under the real
+   * home's `.gentle-ai`, so with the overlay it cannot find the lineage and refuses with binding_mismatch.
+   */
+  home?: string;
 }
 
 /** Construct the allowlist-only child environment. HOME is required. */
@@ -443,6 +448,10 @@ export function buildTransportEnv(
   for (const key of TRANSPORT_ENV_KEYS) {
     const value = source[key];
     if (typeof value === "string" && value.length > 0) env[key] = value;
+  }
+  if (declaration.home !== undefined) {
+    if (!declaration.home.startsWith("/")) throw environmentRefused("the transport HOME must be an absolute path");
+    env.HOME = declaration.home;
   }
   if (env.HOME === undefined) {
     throw environmentRefused("the constructed transport environment requires HOME");
@@ -478,6 +487,7 @@ export interface TransportFrame {
   prompt?: string;
   output?: string;
   error?: string;
+  cause?: string;
 }
 
 /**
@@ -507,7 +517,7 @@ export function decodeTransportFrame(line: string): TransportFrame {
   if (typeof frame.operation !== "string" || frame.operation.length === 0) {
     throw frameMalformed("transport frame has no operation");
   }
-  for (const key of ["nonce", "prompt", "output", "error"]) {
+  for (const key of ["nonce", "prompt", "output", "error", "cause"]) {
     if (frame[key] !== undefined && typeof frame[key] !== "string") {
       throw frameMalformed(`transport frame field '${key}' is not a string`);
     }
@@ -787,6 +797,8 @@ export interface RelayStartOptions {
   agent?: string;
   /** Directory the provider resolves `opencode` from; V2 only (see TransportDeclaration). */
   runtimeDirectory?: string;
+  /** HOME for the provider child; V2 only (see TransportDeclaration). */
+  home?: string;
   spawn?: TransportSpawn;
   realpath?: (path: string) => string;
   deadlineMs?: number;
@@ -824,6 +836,7 @@ export function startRelay(options: RelayStartOptions): Relay {
   const env = buildTransportEnv(options.env ?? process.env, {
     ...(options.relayContract !== undefined ? { relayContract: options.relayContract } : {}),
     ...(options.runtimeDirectory !== undefined ? { runtimeDirectory: options.runtimeDirectory } : {}),
+    ...(options.home !== undefined ? { home: options.home } : {}),
   });
 
   let buffered: Buffer = Buffer.alloc(0);
@@ -929,15 +942,19 @@ export function startRelay(options: RelayStartOptions): Relay {
         continue;
       }
       if (frame.operation === TRANSPORT_OPERATIONS.refused) {
-        // The provider names a bounded snake_case reason; anything else is not echoed.
-        const reason = typeof frame.error === "string" && /^[a-z_]{1,48}$/.test(frame.error) ? frame.error : "unspecified";
-        fail(frameRefused(`the provider refused the relay: ${reason}`));
-        return;
+        // The provider names a bounded snake_case reason (and optionally a cause); anything else is not echoed. The
+        // provider explains itself on stderr right after this frame, so the failure is settled when the child closes.
+        const bounded = (value: unknown): string | undefined =>
+          typeof value === "string" && /^[a-z_]{1,64}$/.test(value) ? value : undefined;
+        providerRefusal = `${bounded(frame.error) ?? "unspecified"}${bounded(frame.cause) ? ` (cause: ${bounded(frame.cause)})` : ""}`;
+        continue;
       }
       fail(frameRefused(`unexpected transport operation '${frame.operation}'`));
       return;
     }
   }
+
+  let providerRefusal: string | null = null;
 
   function onStderr(chunk: Buffer): void {
     if (closed || resultSeen) return;
@@ -974,6 +991,12 @@ export function startRelay(options: RelayStartOptions): Relay {
       return;
     }
     const stderrText = Buffer.concat(stderrChunks).toString("utf8").trim();
+    if (providerRefusal !== null) {
+      // One printable line of the provider's own explanation, bounded; it carries no candidate content.
+      const detail = /^Error: ([\x20-\x7e]{1,240})/m.exec(stderrText)?.[1];
+      fail(frameRefused(`the provider refused the relay: ${providerRefusal}${detail ? `: ${detail}` : ""}`));
+      return;
+    }
     const partial = buffered.length > 0 ? "partial frame at transport EOF; " : "";
     const status = code ?? signal ?? "signal";
     fail(childExited(`${partial}transport exited before completion (${status})${stderrText ? `: ${stderrText}` : ""}`));
@@ -1244,6 +1267,7 @@ export interface ReviewerRelayConfig {
   /** Relay contract the V2 host declares to the provider; absent on V1. */
   relayContract?: string;
   runtimeDirectory?: string;
+  home?: string;
   rootCache?: Map<string, string>;
   registry?: RelayRegistry;
   deadlineMs?: number;
@@ -1338,6 +1362,7 @@ export function createReviewerRelayHooks(config: ReviewerRelayConfig): ReviewerR
       ...(config.env ? { env: config.env } : {}),
       ...(config.relayContract !== undefined ? { relayContract: config.relayContract } : {}),
       ...(config.runtimeDirectory !== undefined ? { runtimeDirectory: config.runtimeDirectory } : {}),
+      ...(config.home !== undefined ? { home: config.home } : {}),
       realpath,
       ...(config.deadlineMs !== undefined ? { deadlineMs: config.deadlineMs } : {}),
       ...(config.stdoutFrameLimitBytes !== undefined

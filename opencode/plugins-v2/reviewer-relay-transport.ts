@@ -57,6 +57,8 @@ export default {
       directory: ctx.location.directory,
       relayContract: V2_RELAY_CONTRACT,
       // The launcher exports the directory holding the V2 `opencode`; the running binary's own directory has only opencode.exe.
+      // The server's HOME is an overlay; the provider keeps review authority under the caller's real home.
+      ...(process.env.OPENCODE_V2_RELAY_HOME ? { home: process.env.OPENCODE_V2_RELAY_HOME } : {}),
       ...(process.env.OPENCODE_V2_RUNTIME_BIN_DIR ? { runtimeDirectory: process.env.OPENCODE_V2_RUNTIME_BIN_DIR } : {}),
       worktree: ctx.location.directory,
       // The boot workspace is the process cwd, which is stable for the process lifetime.

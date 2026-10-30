@@ -877,19 +877,31 @@ describe("reviewer relay spawn discipline", () => {
     );
   });
 
+  test("the V2 child gets the caller's real HOME (the provider keeps authority there); relative ones are refused", () => {
+    const env = buildTransportEnv({ ...ENV, HOME: "/overlay/home", PATH: "/usr/bin" }, { home: "/home/real" });
+    expect(env.HOME).toBe("/home/real");
+    expect(buildTransportEnv({ ...ENV, HOME: "/overlay/home", PATH: "/usr/bin" }).HOME).toBe("/overlay/home");
+    expect(() => buildTransportEnv({ ...ENV, PATH: "/usr/bin" }, { home: "home" })).toThrow("reviewer_relay_environment_refused");
+  });
+
   test("a provider refused frame surfaces its bounded reason instead of an unexpected-operation error", async () => {
     const recorder = recordingSpawn();
     const relay = startRelay({ cwd: canonicalRepo, prompt: BINDING_PROMPT, spawn: recorder.spawn, realpath: realpathSync, env: ENV });
     const prompt = relay.prompt.catch((cause) => cause);
-    recorder.child().emitStdout('{"schema":"gentle-ai.provider-transport/v1","operation":"refused","error":"capability_unavailable"}\n');
+    recorder.child().emitStdout('{"schema":"gentle-ai.provider-transport/v1","operation":"refused","error":"capability_unavailable","cause":"role_capture_failed"}\n');
+    recorder.child().emitStderr("Error: opencode_review_transport_binding_invalid: Task prompt has no provider-issued review binding\n");
+    recorder.child().emitClose(1);
     const refusal = (await prompt) as { code?: string; message?: string };
     expect(refusal.code).toBe("reviewer_relay_frame_refused");
     expect(String(refusal.message)).toContain("capability_unavailable");
+    expect(String(refusal.message)).toContain("role_capture_failed");
+    expect(String(refusal.message)).toContain("opencode_review_transport_binding_invalid");
 
     const odd = recordingSpawn();
     const relay2 = startRelay({ cwd: canonicalRepo, prompt: BINDING_PROMPT, spawn: odd.spawn, realpath: realpathSync, env: ENV });
     const prompt2 = relay2.prompt.catch((cause) => cause);
     odd.child().emitStdout('{"schema":"gentle-ai.provider-transport/v1","operation":"refused","error":"/home/x; rm -rf"}\n');
+    odd.child().emitClose(1);
     expect(String(((await prompt2) as { message?: string }).message)).toContain("unspecified");
   });
 
@@ -913,8 +925,10 @@ describe("reviewer relay spawn discipline", () => {
     expect(v2).toContain('V2_RELAY_CONTRACT = "gentle-ai.opencode-relay/v2-staged"');
     expect(v2).toContain("relayContract: V2_RELAY_CONTRACT");
     expect(v2).toContain("OPENCODE_V2_RUNTIME_BIN_DIR");
+    expect(v2).toContain("OPENCODE_V2_RELAY_HOME");
     expect(v1).not.toContain("relayContract");
     expect(v1).not.toContain("runtimeDirectory");
+    expect(v1).not.toContain("OPENCODE_V2_RELAY_HOME");
   });
 
   test("refuses a relative, symlinked, or control-bearing cwd before spawning", async () => {

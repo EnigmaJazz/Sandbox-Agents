@@ -282,6 +282,7 @@ describe("start-secure-opencode-v2", () => {
     const s = setup("runtime-bin-dir");
     expect(launch(s).code).toBe(0);
     const args = readFileSync(s.log, "utf8").split("\n")[0]!;
+    expect(args).toContain(`OPENCODE_V2_RELAY_HOME=${s.home}`); // the caller's real home, not the overlay HOME
     expect(args).toMatch(/OPENCODE_V2_RUNTIME_BIN_DIR=\S+\/node_modules\/\.bin( |$)/);
   });
 
