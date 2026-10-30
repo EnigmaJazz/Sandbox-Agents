@@ -278,6 +278,13 @@ describe("start-secure-opencode-v2", () => {
     expect(readFileSync(s.log, "utf8").split("\n").filter((line) => line.startsWith("SQLITE_TMPDIR="))).toEqual([]); // wrapper only, not nono's own environment
   });
 
+  test("tells the relay plugin which directory holds the V2 opencode (the binary's own directory has only opencode.exe)", () => {
+    const s = setup("runtime-bin-dir");
+    expect(launch(s).code).toBe(0);
+    const args = readFileSync(s.log, "utf8").split("\n")[0]!;
+    expect(args).toMatch(/OPENCODE_V2_RUNTIME_BIN_DIR=\S+\/node_modules\/\.bin( |$)/);
+  });
+
   test("refuses to start without the server home's Systematic overlay (exit 4) instead of running against the wrong HOME", () => {
     const s = setup("no-server-home", { noServerHome: true });
     const r = launch(s);

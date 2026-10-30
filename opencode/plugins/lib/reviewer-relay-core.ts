@@ -54,6 +54,7 @@ export const TRANSPORT_OPERATIONS = {
   prompt: "prompt",
   complete: "complete",
   result: "result",
+  refused: "refused",
 } as const;
 
 /** The dedicated reviewer names this relay may handle. */
@@ -422,10 +423,21 @@ function hostRuntimeDirectory(): string {
  */
 export const RELAY_CONTRACT_ENV = "GENTLE_AI_OPENCODE_RELAY_CONTRACT";
 
-/** Construct the allowlist-only child environment. HOME is required. `relayContract` is set by the V2 entry only. */
+/** What a V2 host adds to the child environment; V1 passes none of it. */
+export interface TransportDeclaration {
+  /** Relay contract declared to the provider. */
+  relayContract?: string;
+  /**
+   * Directory whose `opencode` the provider's eligibility probe must resolve. Defaults to the directory of the running
+   * binary, which on V2 holds only `opencode.exe`, so `opencode --version` would fall through to the V1 binary on PATH.
+   */
+  runtimeDirectory?: string;
+}
+
+/** Construct the allowlist-only child environment. HOME is required. */
 export function buildTransportEnv(
   source: Record<string, string | undefined>,
-  relayContract?: string,
+  declaration: TransportDeclaration = {},
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of TRANSPORT_ENV_KEYS) {
@@ -442,7 +454,8 @@ export function buildTransportEnv(
   // inherited entries in order, de-duplicating each prepended directory. PATH
   // is not credential-shaped: it is the one non-secret addition to the
   // allowlist.
-  const runtimeDirectory = hostRuntimeDirectory();
+  const runtimeDirectory = declaration.runtimeDirectory ?? hostRuntimeDirectory();
+  if (!runtimeDirectory.startsWith("/")) throw environmentRefused("the runtime directory must be an absolute path");
   const gitDirectory = hostGitDirectory();
   const prepended =
     gitDirectory === undefined || gitDirectory === runtimeDirectory
@@ -450,7 +463,7 @@ export function buildTransportEnv(
       : [runtimeDirectory, gitDirectory];
   const segments = env.PATH === undefined ? [] : env.PATH.split(":");
   env.PATH = [...prepended, ...segments.filter((segment) => !prepended.includes(segment))].join(":");
-  if (relayContract !== undefined) env[RELAY_CONTRACT_ENV] = relayContract;
+  if (declaration.relayContract !== undefined) env[RELAY_CONTRACT_ENV] = declaration.relayContract;
   return env;
 }
 
@@ -766,6 +779,8 @@ export interface RelayStartOptions {
   env?: Record<string, string | undefined>;
   /** Relay contract the V2 host declares to the provider; absent on V1. */
   relayContract?: string;
+  /** Directory the provider resolves `opencode` from; V2 only (see TransportDeclaration). */
+  runtimeDirectory?: string;
   spawn?: TransportSpawn;
   realpath?: (path: string) => string;
   deadlineMs?: number;
@@ -800,7 +815,10 @@ export function startRelay(options: RelayStartOptions): Relay {
   if (options.signal?.aborted === true) {
     throw abortedRefusal("review relay was aborted before it started");
   }
-  const env = buildTransportEnv(options.env ?? process.env, options.relayContract);
+  const env = buildTransportEnv(options.env ?? process.env, {
+    ...(options.relayContract !== undefined ? { relayContract: options.relayContract } : {}),
+    ...(options.runtimeDirectory !== undefined ? { runtimeDirectory: options.runtimeDirectory } : {}),
+  });
 
   let buffered: Buffer = Buffer.alloc(0);
   let bufferedBytes = 0;
@@ -903,6 +921,12 @@ export function startRelay(options: RelayStartOptions): Relay {
         resultSeen = true;
         admittedResult = frame.output;
         continue;
+      }
+      if (frame.operation === TRANSPORT_OPERATIONS.refused) {
+        // The provider names a bounded snake_case reason; anything else is not echoed.
+        const reason = typeof frame.error === "string" && /^[a-z_]{1,48}$/.test(frame.error) ? frame.error : "unspecified";
+        fail(frameRefused(`the provider refused the relay: ${reason}`));
+        return;
       }
       fail(frameRefused(`unexpected transport operation '${frame.operation}'`));
       return;
@@ -1213,6 +1237,7 @@ export interface ReviewerRelayConfig {
   env?: Record<string, string | undefined>;
   /** Relay contract the V2 host declares to the provider; absent on V1. */
   relayContract?: string;
+  runtimeDirectory?: string;
   rootCache?: Map<string, string>;
   registry?: RelayRegistry;
   deadlineMs?: number;
@@ -1305,6 +1330,7 @@ export function createReviewerRelayHooks(config: ReviewerRelayConfig): ReviewerR
       ...(spawnFn ? { spawn: spawnFn } : {}),
       ...(config.env ? { env: config.env } : {}),
       ...(config.relayContract !== undefined ? { relayContract: config.relayContract } : {}),
+      ...(config.runtimeDirectory !== undefined ? { runtimeDirectory: config.runtimeDirectory } : {}),
       realpath,
       ...(config.deadlineMs !== undefined ? { deadlineMs: config.deadlineMs } : {}),
       ...(config.stdoutFrameLimitBytes !== undefined

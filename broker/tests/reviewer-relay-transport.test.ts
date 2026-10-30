@@ -849,7 +849,7 @@ describe("reviewer relay spawn discipline", () => {
     // V1 (1.x) is admitted only WITHOUT a declaration, so an inherited value must not reach the child.
     const inherited = { ...ENV, PATH: "/usr/bin", [RELAY_CONTRACT_ENV]: "inherited" };
     expect(buildTransportEnv(inherited)[RELAY_CONTRACT_ENV]).toBeUndefined();
-    expect(buildTransportEnv(inherited, "gentle-ai.opencode-relay/v2-staged")[RELAY_CONTRACT_ENV]).toBe(
+    expect(buildTransportEnv(inherited, { relayContract: "gentle-ai.opencode-relay/v2-staged" })[RELAY_CONTRACT_ENV]).toBe(
       "gentle-ai.opencode-relay/v2-staged",
     );
 
@@ -869,12 +869,38 @@ describe("reviewer relay spawn discipline", () => {
     expect(Object.keys(plain.specs[0]!.env)).not.toContain(RELAY_CONTRACT_ENV);
   });
 
+  test("a V2 runtime directory leads PATH so the provider probe resolves the V2 opencode; relative ones are refused", () => {
+    const env = buildTransportEnv({ ...ENV, PATH: "/usr/bin" }, { runtimeDirectory: "/opt/v2/.bin" });
+    expect(env.PATH!.split(":")[0]).toBe("/opt/v2/.bin");
+    expect(() => buildTransportEnv({ ...ENV, PATH: "/usr/bin" }, { runtimeDirectory: "bin" })).toThrow(
+      "reviewer_relay_environment_refused",
+    );
+  });
+
+  test("a provider refused frame surfaces its bounded reason instead of an unexpected-operation error", async () => {
+    const recorder = recordingSpawn();
+    const relay = startRelay({ cwd: canonicalRepo, prompt: BINDING_PROMPT, spawn: recorder.spawn, realpath: realpathSync, env: ENV });
+    const prompt = relay.prompt.catch((cause) => cause);
+    recorder.child().emitStdout('{"schema":"gentle-ai.provider-transport/v1","operation":"refused","error":"capability_unavailable"}\n');
+    const refusal = (await prompt) as { code?: string; message?: string };
+    expect(refusal.code).toBe("reviewer_relay_frame_refused");
+    expect(String(refusal.message)).toContain("capability_unavailable");
+
+    const odd = recordingSpawn();
+    const relay2 = startRelay({ cwd: canonicalRepo, prompt: BINDING_PROMPT, spawn: odd.spawn, realpath: realpathSync, env: ENV });
+    const prompt2 = relay2.prompt.catch((cause) => cause);
+    odd.child().emitStdout('{"schema":"gentle-ai.provider-transport/v1","operation":"refused","error":"/home/x; rm -rf"}\n');
+    expect(String(((await prompt2) as { message?: string }).message)).toContain("unspecified");
+  });
+
   test("only the V2 entry declares the contract; the V1 entry does not", () => {
     const v2 = readFileSync(new URL("../../opencode/plugins-v2/reviewer-relay-transport.ts", import.meta.url), "utf8");
     const v1 = readFileSync(new URL("../../opencode/plugins/reviewer-relay-transport.ts", import.meta.url), "utf8");
     expect(v2).toContain('V2_RELAY_CONTRACT = "gentle-ai.opencode-relay/v2-staged"');
     expect(v2).toContain("relayContract: V2_RELAY_CONTRACT");
+    expect(v2).toContain("OPENCODE_V2_RUNTIME_BIN_DIR");
     expect(v1).not.toContain("relayContract");
+    expect(v1).not.toContain("runtimeDirectory");
   });
 
   test("refuses a relative, symlinked, or control-bearing cwd before spawning", async () => {
