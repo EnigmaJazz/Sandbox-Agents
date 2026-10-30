@@ -472,6 +472,9 @@ export interface ReviewStartPayload {
   target?: string;
   projection?: ReviewProjection;
   focus?: ReviewFocus;
+  /** Comma-separated subset of the four lenses; replaces `focus`, and requires `lensesReason`. */
+  lenses?: string;
+  lensesReason?: string;
   untrackedScope?: "exclude" | "select";
   expectedUntrackedInventory?: string;
   intendedUntracked?: string[];
@@ -617,6 +620,8 @@ export interface ReviewStatusPayload {
   baseRef?: string;
   committedOnly?: boolean;
   intendedUntrackedSelection?: string;
+  lenses?: string;
+  lensesReason?: string;
 }
 
 /** Read-only per-lens reviewer context; the broker returns a plain-text block. */

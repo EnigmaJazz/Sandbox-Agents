@@ -130,6 +130,8 @@ export interface ReviewStatusArgvInput {
   baseRef?: string;
   committedOnly?: boolean;
   intendedUntrackedSelection?: string;
+  lenses?: string;
+  lensesReason?: string;
 }
 
 export interface ReviewLensContextArgvInput {
@@ -374,6 +376,8 @@ export function buildReviewStatusArgv(input: ReviewStatusArgvInput): string[] {
     "baseRef",
     "committedOnly",
     "intendedUntrackedSelection",
+    "lenses",
+    "lensesReason",
   ]);
   assertBinary(input.binary);
   assertProjectRootInput(input.projectRoot);
@@ -417,8 +421,34 @@ export function buildReviewStatusArgv(input: ReviewStatusArgvInput): string[] {
       input.intendedUntrackedSelection,
     );
   }
+  assertReviewLensSelection(input.lenses, input.lensesReason, undefined);
+  if (input.lenses !== undefined) argv.push("--lenses", input.lenses, "--lenses-reason", input.lensesReason as string);
   argv.push("--next-transition");
   return argv;
+}
+
+/** The four review lenses a START may select. */
+const REVIEW_LENSES = ["risk", "resilience", "readability", "reliability"] as const;
+
+/**
+ * Validate a lens selection: `lenses` is a comma-separated, duplicate-free subset of the four lenses, `lensesReason` is one
+ * short line and is required with it (and refused without it), and a selection replaces `focus`, so the two never mix.
+ */
+function assertReviewLensSelection(lenses: unknown, lensesReason: unknown, focus: unknown): void {
+  if (lenses === undefined) {
+    if (lensesReason !== undefined) throw new ValidationError("lensesReason requires lenses");
+    return;
+  }
+  if (typeof lenses !== "string" || lenses.length === 0) throw new ValidationError("lenses must be a non-empty string");
+  const parts = lenses.split(",");
+  if (parts.length > REVIEW_LENSES.length || new Set(parts).size !== parts.length || !parts.every((p) => (REVIEW_LENSES as readonly string[]).includes(p))) {
+    throw new ValidationError(`lenses must be a comma-separated, duplicate-free subset of: ${REVIEW_LENSES.join(", ")}`);
+  }
+  if (focus !== undefined) throw new ValidationError("lenses replaces focus; pass only one of them");
+  if (typeof lensesReason !== "string" || lensesReason.trim().length === 0) throw new ValidationError("lensesReason is required with lenses");
+  assertMaxBytes(lensesReason, 512, "lensesReason");
+  assertNoControlChars(lensesReason, "lensesReason");
+  if (lensesReason.startsWith("-")) throw new ValidationError("lensesReason must not start with '-'");
 }
 
 /**
@@ -677,6 +707,8 @@ export class SddRuntimeExecutor {
     baseRef?: unknown;
     committedOnly?: unknown;
     intendedUntrackedSelection?: unknown;
+    lenses?: unknown;
+    lensesReason?: unknown;
   }): Promise<SddRuntimeResult> {
     const projectRoot = this.resolveProjectRoot(payload.projectDir);
     const result = await this.run(
@@ -701,6 +733,8 @@ export class SddRuntimeExecutor {
                 payload.intendedUntrackedSelection as string,
             }
           : {}),
+        ...(payload.lenses !== undefined ? { lenses: payload.lenses as string } : {}),
+        ...(payload.lensesReason !== undefined ? { lensesReason: payload.lensesReason as string } : {}),
       }),
       projectRoot,
     );
@@ -930,6 +964,8 @@ type ReviewFieldKind =
   | "agent"
   | "token"
   | "focus"
+  | "lenses"
+  | "lensesReason"
   | "baseRef"
   | "sha256"
   | "order"
@@ -972,6 +1008,8 @@ const REVIEW_COMMANDS: Record<string, ReviewCommandSpec> = {
       { key: "target", flag: "--target", kind: "token" },
       { key: "projection", flag: "--projection", kind: "enum", values: ["workspace", "staged"] },
       { key: "focus", flag: "--focus", kind: "enum", values: ["risk", "resilience", "readability", "reliability"] },
+      { key: "lenses", flag: "--lenses", kind: "lenses" },
+      { key: "lensesReason", flag: "--lenses-reason", kind: "lensesReason" },
       { key: REVIEW_UNTRACKED_KEY, kind: "untracked" },
       { key: "baseRef", flag: "--base-ref", kind: "baseRef" },
       { key: "committedOnly", flag: "--committed-only", kind: "boolean" },
@@ -1140,6 +1178,11 @@ function applyReviewField(argv: string[], field: ReviewFlagSpec, value: unknown)
       assertReviewToken(value, field.key, REVIEW_FOCUS_MAX_BYTES);
       argv.push(field.flag!, value as string);
       return;
+    case "lenses":
+    case "lensesReason":
+      // Validated together in buildReviewArgv (they depend on each other and on focus); emitted verbatim here.
+      argv.push(field.flag!, value as string);
+      return;
     case "baseRef":
       assertReviewBaseRef(value);
       argv.push(field.flag!, value as string);
@@ -1254,6 +1297,7 @@ function buildReviewArgv(operation: string, input: Record<string, unknown>): str
   assertRecord(input, `${operation} input`);
   assertExactKeys(input, allowedKeys);
   assertBinary(input.binary);
+  if (operation === "reviewStart") assertReviewLensSelection(input.lenses, input.lensesReason, input.focus);
   const argv = [input.binary as string, ...spec.command];
   if (spec.needsRoot) {
     assertProjectRootInput(input.projectRoot);

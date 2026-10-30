@@ -190,6 +190,9 @@ export const reviewTokenArg = z.string().min(1).max(4096);
 export const reviewShaArg = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 export const reviewProjectionArg = z.enum(["workspace", "staged"]);
 export const reviewFocusArg = z.enum(["risk", "resilience", "readability", "reliability"]);
+/** A comma-separated lens selection (replaces `focus`); the broker also refuses duplicates and a missing reason. */
+export const reviewLensesArg = z.string().regex(/^(risk|resilience|readability|reliability)(,(risk|resilience|readability|reliability)){0,3}$/);
+export const reviewLensesReasonArg = z.string().min(1).max(512);
 export const reviewConsentArg = z.enum(["relay", "granted", "declined"]);
 export const reviewLocaleArg = z.enum(["en", "es"]);
 export const reviewGateArg = z.enum(["post-apply", "pre-commit", "pre-push", "pre-pr", "release"]);

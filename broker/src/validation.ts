@@ -956,6 +956,8 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
     "baseRef",
     "committedOnly",
     "intendedUntrackedSelection",
+    "lenses",
+    "lensesReason",
   ],
   reviewLensContext: [
     "projectDir",
@@ -985,7 +987,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   // tool, so `hostToolAccess` deliberately does not classify it.
   bindSessionAgent: ["agent"],
   reviewStart: [
-    "projectDir", "agent", "contract", "target", "projection", "focus",
+    "projectDir", "agent", "contract", "target", "projection", "focus", "lenses", "lensesReason",
     "untrackedScope", "expectedUntrackedInventory", "intendedUntracked",
     "baseRef", "committedOnly", "workspaceOverlay", "lineage", "consent",
     "locale", "policy", "trace",

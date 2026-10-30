@@ -18,6 +18,8 @@ import {
   reviewProjectionArg,
   reviewPipelineEnvelopeArg,
   reviewBaseRefArg,
+  reviewLensesArg,
+  reviewLensesReasonArg,
 } from "./tool-runtime.ts";
 
 export const reviewReadToolSpecs = {
@@ -82,6 +84,8 @@ export const reviewReadToolSpecs = {
       baseRef: reviewBaseRefArg.optional(),
       committedOnly: z.boolean().optional(),
       intendedUntrackedSelection: z.string().min(1).max(65536).optional(),
+      lenses: reviewLensesArg.optional(),
+      lensesReason: reviewLensesReasonArg.optional(),
     },
     execute: async (args, ctx) => {
       const c = await client();
@@ -100,6 +104,8 @@ export const reviewReadToolSpecs = {
         ...(args.intendedUntrackedSelection !== undefined
           ? { intendedUntrackedSelection: args.intendedUntrackedSelection }
           : {}),
+        ...(args.lenses !== undefined ? { lenses: args.lenses } : {}),
+        ...(args.lensesReason !== undefined ? { lensesReason: args.lensesReason } : {}),
       }, ctx.agent);
       return JSON.stringify(result, null, 2);
     },

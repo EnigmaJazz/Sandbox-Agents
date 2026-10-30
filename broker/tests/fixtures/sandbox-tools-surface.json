@@ -171,7 +171,9 @@
         "projection",
         "baseRef",
         "committedOnly",
-        "intendedUntrackedSelection"
+        "intendedUntrackedSelection",
+        "lenses",
+        "lensesReason"
       ],
       "execute": "function",
       "asks": 0
@@ -359,6 +361,8 @@
         "target",
         "projection",
         "focus",
+        "lenses",
+        "lensesReason",
         "untrackedScope",
         "expectedUntrackedInventory",
         "intendedUntracked",

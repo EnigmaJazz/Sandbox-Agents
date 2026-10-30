@@ -444,6 +444,7 @@ export interface ReviewStartAskArgs {
   target?: string;
   projection?: string;
   focus?: string;
+  lenses?: string;
   untrackedScope?: string;
   intendedUntracked?: string[];
   baseRef?: string;
@@ -466,7 +467,7 @@ export function buildReviewStartAsk(args: ReviewStartAskArgs = {}): HostToolAsk 
   return buildHostToolAsk({
     permission: "host_review_start",
     operation: "reviewStart",
-    summary: `Start a review lifecycle${args.focus ? ` (focus ${args.focus})` : ""}${args.projection ? ` [${args.projection}]` : ""}`,
+    summary: `Start a review lifecycle${args.focus ? ` (focus ${args.focus})` : ""}${args.lenses ? ` (lenses ${args.lenses})` : ""}${args.projection ? ` [${args.projection}]` : ""}`,
     details: reviewAskDetails({
       projection: args.projection,
       focus: args.focus,

@@ -138,6 +138,8 @@ export function buildReviewStatusOp(ctx: SddOpContext) {
       lineage: optionalString(payload, "lineage"),
       repositoryContext: optionalString(payload, "repositoryContext"),
       intendedUntrackedSelection: optionalString(payload, "intendedUntrackedSelection"),
+      lenses: optionalString(payload, "lenses"),
+      lensesReason: optionalString(payload, "lensesReason"),
       ...reviewOptional(payload, ["baseRef", "committedOnly"]),
       ...(payload.projection !== undefined
         ? { projection: payload.projection as "workspace" | "staged" }
@@ -287,6 +289,8 @@ export function buildReviewStartOp(ctx: SddOpContext) {
         "target",
         "projection",
         "focus",
+        "lenses",
+        "lensesReason",
         "untrackedScope",
         "expectedUntrackedInventory",
         "intendedUntracked",
