@@ -6,7 +6,8 @@
  * script; the script prints the restart commands but performs no service
  * restarts itself.
  *
- * Updates THREE locations idempotently (dedupe by path; skip when present):
+ * Updates THREE locations idempotently (dedupe by path; skip when present). Every nono profile grant (read, allow_file,
+ * .atl, .codegraph, .git) is written to BOTH profiles, opencode-secure.json (V1) and opencode-v2-secure.json (V2):
  *   1. nono/profile/opencode-secure.json         -> filesystem.read entry
  *      plus a filesystem.allow_file entry granting each project's parent-dir
  *      .auto-update-history.json (the auto-update history grant; the file is
@@ -168,19 +169,23 @@ interface Profile {
   filesystem?: { read?: string[]; allow_file?: string[]; allow?: string[] };
 }
 
-function updateProfile(path: string): LocationStatus | string {
+export function updateProfile(
+  path: string,
+  profilePath: string = PROFILE_PATH,
+  dryRun: boolean = DRY_RUN,
+): LocationStatus | string {
   let profile: Profile;
   try {
-    profile = JSON.parse(readFileSync(PROFILE_PATH, "utf8")) as Profile;
+    profile = JSON.parse(readFileSync(profilePath, "utf8")) as Profile;
   } catch {
     return "skipped (profile is not valid JSON)";
   }
   const read = profile.filesystem?.read;
   if (!Array.isArray(read)) return "skipped (profile has no filesystem.read)";
   if (read.includes(path)) return "already registered";
-  if (!DRY_RUN) {
+  if (!dryRun) {
     read.push(path);
-    atomicWrite(PROFILE_PATH, JSON.stringify(profile, null, 2) + "\n");
+    atomicWrite(profilePath, JSON.stringify(profile, null, 2) + "\n");
   }
   return "added";
 }
@@ -195,10 +200,14 @@ function updateProfile(path: string): LocationStatus | string {
  *  does not exist yet cannot bind, so the auto-update plugin's first write
  *  would still fail with EACCES. The history file is therefore also created
  *  (seed content {"entries":[]}) when absent, except in --dry-run. */
-function updateAutoUpdateGrant(path: string): LocationStatus | string {
+export function updateAutoUpdateGrant(
+  path: string,
+  profilePath: string = PROFILE_PATH,
+  dryRun: boolean = DRY_RUN,
+): LocationStatus | string {
   let profile: Profile;
   try {
-    profile = JSON.parse(readFileSync(PROFILE_PATH, "utf8")) as Profile;
+    profile = JSON.parse(readFileSync(profilePath, "utf8")) as Profile;
   } catch {
     return "skipped (profile is not valid JSON)";
   }
@@ -211,20 +220,20 @@ function updateAutoUpdateGrant(path: string): LocationStatus | string {
   const allowFile = filesystem.allow_file;
   let grantStatus: string;
   if (!Array.isArray(allowFile)) {
-    if (DRY_RUN) {
+    if (dryRun) {
       grantStatus = `would add ${historyFile}`;
     } else {
       filesystem.allow_file = [historyFile];
-      atomicWrite(PROFILE_PATH, JSON.stringify(profile, null, 2) + "\n");
+      atomicWrite(profilePath, JSON.stringify(profile, null, 2) + "\n");
       grantStatus = "added";
     }
   } else if (allowFile.includes(historyFile)) {
     grantStatus = "skipped";
-  } else if (DRY_RUN) {
+  } else if (dryRun) {
     grantStatus = `would add ${historyFile}`;
   } else {
     allowFile.push(historyFile);
-    atomicWrite(PROFILE_PATH, JSON.stringify(profile, null, 2) + "\n");
+    atomicWrite(profilePath, JSON.stringify(profile, null, 2) + "\n");
     grantStatus = "added";
   }
   // nono file grants are inode-bound at sandbox start: a grant for a file
@@ -233,7 +242,7 @@ function updateAutoUpdateGrant(path: string): LocationStatus | string {
   if (existsSync(historyFile)) {
     return `${grantStatus}; exists`;
   }
-  if (DRY_RUN) {
+  if (dryRun) {
     return `${grantStatus}; would create ${historyFile}`;
   }
   mkdirSync(dirname(historyFile), { recursive: true });
@@ -714,11 +723,11 @@ if (import.meta.main) {
       origin: gitPlan.origin,
       ghRemote: gitPlan.ghRemote,
       warnings,
-      profile: updateProfile(path),
-      autoUpdate: updateAutoUpdateGrant(path),
-      skillRegistry: updateSkillRegistryGrant(path),
+      profile: `${updateProfile(path)}; V2: ${updateProfile(path, V2_PROFILE_PATH)}`,
+      autoUpdate: `${updateAutoUpdateGrant(path)}; V2: ${updateAutoUpdateGrant(path, V2_PROFILE_PATH)}`,
+      skillRegistry: `${updateSkillRegistryGrant(path)}; V2: ${updateSkillRegistryGrant(path, V2_PROFILE_PATH)}`,
       projectGit: `${projectGitGrant.status}; V2: ${projectGitGrantV2.status}`,
-      codegraph: updateCodegraphGrant(path),
+      codegraph: `${updateCodegraphGrant(path)}; V2: ${updateCodegraphGrant(path, V2_PROFILE_PATH)}`,
       brokerEnv: updateBrokerEnv(path, id),
       launcher: updateLauncher(path),
     });

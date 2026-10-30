@@ -18,7 +18,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  updateAutoUpdateGrant,
   updateCodegraphGrant,
+  updateProfile,
   updateProjectGitGrant,
   updateSkillRegistryGrant,
 } from "../../scripts/register-project.ts";
@@ -164,9 +166,26 @@ describe("existing .atl grant path (unchanged)", () => {
 });
 
 describe("registration also grants .git in the V2 profile", () => {
+  test("read and auto-update grants honour the profile path they are given (so V2 can be written)", () => {
+    const other = join(root, "other-project");
+    expect(updateProfile(other, profilePath, false)).toBe("added");
+    expect(updateProfile(other, profilePath, false)).toBe("already registered");
+    expect(readProfile().filesystem?.read).toContain(other);
+    const history = join(root, ".auto-update-history.json");
+    expect(updateAutoUpdateGrant(project, profilePath, false)).toContain("added");
+    expect(readProfile().filesystem?.allow_file).toContain(history);
+    expect(readFileSync(history, "utf8")).toBe('{"entries":[]}\n');
+    // a second profile does not re-seed the existing history file
+    writeFileSync(history, '{"entries":[1]}\n');
+    expect(updateAutoUpdateGrant(project, profilePath, false)).toContain("skipped");
+    expect(readFileSync(history, "utf8")).toBe('{"entries":[1]}\n');
+  });
+
   test("the registration flow writes the V2 profile as well as V1 (review transport needs the temp dir under .git)", () => {
     const source = readFileSync(join(import.meta.dir, "../../scripts/register-project.ts"), "utf8");
     expect(source).toContain('"opencode-v2-secure.json"');
-    expect(source).toContain("updateProjectGitGrant(path, V2_PROFILE_PATH)");
+    for (const call of ["updateProfile", "updateAutoUpdateGrant", "updateSkillRegistryGrant", "updateCodegraphGrant", "updateProjectGitGrant"]) {
+      expect(source).toContain(`${call}(path, V2_PROFILE_PATH)`);
+    }
   });
 });
