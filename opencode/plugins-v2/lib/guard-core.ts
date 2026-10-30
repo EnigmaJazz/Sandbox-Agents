@@ -48,6 +48,15 @@ export interface GuardDeps {
 
 const V2_TO_INVENTORY: Readonly<Record<string, string>> = { shell: "bash", subagent: "task" };
 
+/**
+ * Every answer the broker gives a session that has no bound agent starts with this. An answer like that says nothing about the
+ * session once it is bound, so the guard never caches it. broker/tests/v2-routing-guard.test.ts checks the broker's real
+ * admission function against this prefix, so a reworded reason fails a test instead of silently bringing the stale-cache bug back.
+ */
+export const UNBOUND_REASON_PREFIX = "UNBOUND_SESSION_";
+
+const oneLine = (value: unknown): string => String(value instanceof Error ? value.message : value).replace(/[\r\n]+/g, " ");
+
 export function toBrokerToolName(tool: string): string {
   return V2_TO_INVENTORY[tool] ?? tool;
 }
@@ -98,17 +107,33 @@ export function createRoutingGuard(deps: GuardDeps) {
 
   const boundAgents = new Map<string, string>();
 
-  /** Tell the broker who the host says this session is. A failure leaves the session unbound, so admission refuses (fail closed). */
-  async function ensureBound(broker: GuardBroker, sessionID: string, agent: string | undefined): Promise<void> {
+  /**
+   * Tell the broker who the host says this session is. Returns the cause when a first binding fails (the session stays unbound,
+   * so admission refuses mutations: fail closed). When the session is already bound to another agent and the re-binding fails,
+   * the call is refused outright: the broker still holds the old identity and a cached decision belongs to it.
+   *
+   * The allow-list handed to hostSessionBinding is the host-supplied agent itself, exactly as the sandbox-tools adapter does:
+   * V2 agents bind as themselves and authorization is the broker's role matrix (an unknown agent binds and is then denied
+   * there). What the helper checks here is only that the session id and agent are well formed.
+   */
+  async function ensureBound(broker: GuardBroker, sessionID: string, agent: string | undefined, tool: string): Promise<string | undefined> {
     const binding = hostSessionBinding({ sessionID, agent }, [agent ?? ""]);
-    if (!binding || boundAgents.get(binding.sessionID) === binding.agent) return;
+    const current = binding ? boundAgents.get(binding.sessionID) : undefined;
+    if (!binding || current === binding.agent) return undefined;
     try {
       await broker.request(BIND_SESSION_AGENT_OPERATION, binding.sessionID, { agent: binding.agent }, undefined);
-    } catch {
-      return;
+    } catch (error) {
+      if (current !== undefined) {
+        throw new Error(
+          `Tool "${tool}" is refused: the session could not be re-bound to "${binding.agent}" (${oneLine(error)}), ` +
+            `and it is not decided under the previous identity "${current}".`,
+        );
+      }
+      return oneLine(error);
     }
     boundAgents.set(binding.sessionID, binding.agent);
     clearAdmissionCache(binding.sessionID); // decisions made for another identity (or for none) no longer apply
+    return undefined;
   }
 
   const clearAdmissionCache = (sessionID: string) => {
@@ -142,7 +167,7 @@ export function createRoutingGuard(deps: GuardDeps) {
     }
     const admission = { classification: reply.classification, decision: reply.decision, reason: reply.reason };
     // An answer given to an unbound session says nothing about the session once it is bound, so it is never remembered.
-    if (!admission.reason.startsWith("UNBOUND_SESSION_")) admissionCache.set(key, admission);
+    if (!admission.reason.startsWith(UNBOUND_REASON_PREFIX)) admissionCache.set(key, admission);
     return admission;
   }
 
@@ -173,12 +198,13 @@ export function createRoutingGuard(deps: GuardDeps) {
       }
 
       const broker = await deps.broker();
-      await ensureBound(broker, sessionID, event.agent);
+      const bindFailure = await ensureBound(broker, sessionID, event.agent, tool);
       const admission = await admit(broker, sessionID, tool);
       if (admission.decision === "deny" || admission.classification === "unclassified") {
         const reason = admission.reason.replace(/[\r\n]+/g, " ");
+        const hint = bindFailure && admission.reason.startsWith(UNBOUND_REASON_PREFIX) ? `; the session binding also failed: ${bindFailure}` : "";
         throw new Error(
-          `Tool "${tool}" is denied by broker admission (${reason}). Legitimate tools are classified in TOOL_CLASSIFICATION_INVENTORY (broker/src/role-policy.ts); sandbox tools are not affected.`,
+          `Tool "${tool}" is denied by broker admission (${reason}${hint}). Legitimate tools are classified in TOOL_CLASSIFICATION_INVENTORY (broker/src/role-policy.ts); sandbox tools are not affected.`,
         );
       }
     },

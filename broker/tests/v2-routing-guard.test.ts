@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   SYSTEM_RULE,
+  UNBOUND_REASON_PREFIX,
   createRoutingGuard,
   toBrokerToolName,
   type GuardBroker,
 } from "../../opencode/plugins-v2/lib/guard-core.ts";
+import { TOOL_CLASSIFICATION_INVENTORY } from "../src/role-policy.ts";
+import { buildToolAdmissionOp } from "../src/service.ts";
 
 const SESSION = "ses_guard1";
 const ROOTS = ["/home/james/reference"];
@@ -311,6 +314,58 @@ describe("session identity (V1 bound it on every turn; V2 has no such hook)", ()
     await guard.before(withAgent("sandbox_read", "general"));
     await guard.before(withAgent("sandbox_apply_preview", "general"));
     expect(ops(b.calls)).toEqual([]);
+  });
+});
+
+describe("when binding fails (native review findings R1-bind-failure-stale-cache, R3-001, R3-003)", () => {
+  test("a failed re-bind to a new agent refuses the call and never decides under the previous identity or a cached allow", async () => {
+    const b = bindingBroker();
+    const guard = createRoutingGuard({ broker: async () => b.broker });
+    await guard.before(withAgent("host_git_commit", "gentle-orchestrator")); // bound, and the allow is now cached
+    const admissionsBefore = ops(b.calls).filter((o) => o === "toolAdmission").length;
+    b.behaviour.bindFails = true;
+    const error = await guard.before(withAgent("host_git_commit", "general")).catch((e) => e as Error);
+    expect(String((error as Error).message)).toMatch(/could not be re-bound to "general".*"gentle-orchestrator"/);
+    expect(String((error as Error).message)).toContain("broker refused the binding"); // the cause is visible
+    expect(ops(b.calls).filter((o) => o === "toolAdmission")).toHaveLength(admissionsBefore); // nothing was decided or replayed
+    b.behaviour.bindFails = false;
+    await guard.before(withAgent("host_git_commit", "general")); // and it recovers once the broker accepts the binding
+    expect(b.bound.get(SESSION)).toBe("general");
+  });
+
+  test("when the first binding fails the refusal says the binding failed, with the cause on one line", async () => {
+    const b = bindingBroker();
+    b.behaviour.bindFails = true;
+    const error = await createRoutingGuard({ broker: async () => b.broker }).before(withAgent("host_git_commit", "gentle-orchestrator")).catch((e) => e as Error);
+    expect(String((error as Error).message)).toMatch(/UNBOUND_SESSION_MUTATION_DENIED; the session binding also failed: broker refused the binding\)/);
+    expect(String((error as Error).message)).not.toContain("\n");
+  });
+
+  test("a binding that fails once and then succeeds is retried, remembered and not repeated", async () => {
+    const b = bindingBroker();
+    const guard = createRoutingGuard({ broker: async () => b.broker });
+    b.behaviour.bindFails = true;
+    await expect(guard.before(withAgent("host_git_commit", "gentle-orchestrator"))).rejects.toThrow(/UNBOUND_SESSION_MUTATION_DENIED/);
+    b.behaviour.bindFails = false;
+    await guard.before(withAgent("host_git_commit", "gentle-orchestrator"));
+    await guard.before(withAgent("host_git_commit", "gentle-orchestrator"));
+    expect(b.calls.filter((c) => c.operation === "bindSessionAgent")).toHaveLength(2); // the failed try and the successful one
+    expect(b.bound.get(SESSION)).toBe("gentle-orchestrator");
+  });
+});
+
+describe("coupling to the broker's unbound answers (native review finding R3-002)", () => {
+  test("every reason the real broker gives an unbound session starts with the prefix the guard refuses to cache", async () => {
+    const admission = buildToolAdmissionOp({ store: { get: () => undefined }, config: { readOnlyAgents: [] } } as never);
+    const reasons = new Map<string, string>();
+    for (const tool of Object.keys(TOOL_CLASSIFICATION_INVENTORY)) {
+      const answer = (await admission({ version: 1, id: "r", operation: "toolAdmission", sessionID: "s", payload: { tool } } as never)) as { reason: string };
+      reasons.set(tool, answer.reason);
+    }
+    expect(reasons.size).toBeGreaterThan(20); // positive control: the loop really visited the inventory
+    const unprefixed = [...reasons].filter(([, reason]) => !reason.startsWith(UNBOUND_REASON_PREFIX));
+    expect(unprefixed).toEqual([]);
+    expect(new Set(reasons.values()).size).toBeGreaterThanOrEqual(2); // at least the mutation and the read-only reason
   });
 });
 
