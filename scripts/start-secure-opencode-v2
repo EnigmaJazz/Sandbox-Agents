@@ -82,8 +82,16 @@ echo "v2 root: $V2_ROOT (cwd: $PWD)"
 # OpenCode V2 2.2.0/2.2.2 removes OPENCODE_SERVER_PASSWORD and OPENCODE_PASSWORD from the environment of its shell tool and
 # of MCP servers it starts, while other variables are inherited (opencode-v2-probe FINDINGS-3.md); in-process plugins can
 # still read it, so install only reviewed plugins.
+# The Systematic plugin reads its user config from $HOME/.config/opencode regardless of XDG_CONFIG_HOME, and the V2 profile does
+# not grant the V1 tree, so the server runs with a HOME inside the (read-only) V2 config root that holds only that overlay.
+# scripts/derive-v2-config.py writes it; refuse to start without it rather than run Systematic against the wrong HOME.
+V2_SERVER_HOME="$V2_XDG_CONFIG_HOME/home"
+[[ -f "$V2_SERVER_HOME/.config/opencode/systematic.jsonc" ]] || { echo "V2 server home missing its systematic.jsonc; re-run scripts/derive-v2-config.py --apply" >&2; exit 4; }
 export OPENCODE_SERVER_PASSWORD
+# The routing guard builds its log, workflow-key and kill-switch paths from this root. Unset, it uses $HOME, i.e. the V1
+# tree, which the V2 profile does not grant (EACCES); the V2 data grant is writable.
 exec "$NONO_BIN" run --profile "$PROFILE_FILE" -- env \
   XDG_CONFIG_HOME="$V2_XDG_CONFIG_HOME" XDG_DATA_HOME="$V2_XDG_DATA_HOME" XDG_STATE_HOME="$V2_XDG_STATE_HOME" XDG_CACHE_HOME="$V2_XDG_CACHE_HOME" \
+  HOME="$V2_SERVER_HOME" SYSTEMATIC_ROUTING_GUARD_STATE_ROOT="$V2_XDG_DATA_HOME" \
   OPENCODE_DISABLE_CLAUDE_CODE=1 OPENCODE_DISABLE_AUTOUPDATE=1 npm_config_cache="$V2_XDG_CACHE_HOME/npm-cache" \
   "$V2_BIN" serve --hostname "$V2_HOSTNAME" --port "$V2_PORT"
