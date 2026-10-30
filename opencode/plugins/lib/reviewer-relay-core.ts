@@ -416,8 +416,17 @@ function hostRuntimeDirectory(): string {
   return dirname(process.execPath);
 }
 
-/** Construct the allowlist-only child environment. HOME is required. */
-export function buildTransportEnv(source: Record<string, string | undefined>): Record<string, string> {
+/**
+ * Env var through which a V2 host declares the managed relay contract. The provider admits a 2.x OpenCode runtime
+ * only with it, and a 1.x runtime only without it, so V1 never passes it.
+ */
+export const RELAY_CONTRACT_ENV = "GENTLE_AI_OPENCODE_RELAY_CONTRACT";
+
+/** Construct the allowlist-only child environment. HOME is required. `relayContract` is set by the V2 entry only. */
+export function buildTransportEnv(
+  source: Record<string, string | undefined>,
+  relayContract?: string,
+): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of TRANSPORT_ENV_KEYS) {
     const value = source[key];
@@ -441,6 +450,7 @@ export function buildTransportEnv(source: Record<string, string | undefined>): R
       : [runtimeDirectory, gitDirectory];
   const segments = env.PATH === undefined ? [] : env.PATH.split(":");
   env.PATH = [...prepended, ...segments.filter((segment) => !prepended.includes(segment))].join(":");
+  if (relayContract !== undefined) env[RELAY_CONTRACT_ENV] = relayContract;
   return env;
 }
 
@@ -754,6 +764,8 @@ export interface RelayStartOptions {
   prompt: string;
   taskClass?: RelayTaskClass;
   env?: Record<string, string | undefined>;
+  /** Relay contract the V2 host declares to the provider; absent on V1. */
+  relayContract?: string;
   spawn?: TransportSpawn;
   realpath?: (path: string) => string;
   deadlineMs?: number;
@@ -788,7 +800,7 @@ export function startRelay(options: RelayStartOptions): Relay {
   if (options.signal?.aborted === true) {
     throw abortedRefusal("review relay was aborted before it started");
   }
-  const env = buildTransportEnv(options.env ?? process.env);
+  const env = buildTransportEnv(options.env ?? process.env, options.relayContract);
 
   let buffered: Buffer = Buffer.alloc(0);
   let bufferedBytes = 0;
@@ -1199,6 +1211,8 @@ export interface ReviewerRelayConfig {
   spawn?: TransportSpawn;
   realpath?: (path: string) => string;
   env?: Record<string, string | undefined>;
+  /** Relay contract the V2 host declares to the provider; absent on V1. */
+  relayContract?: string;
   rootCache?: Map<string, string>;
   registry?: RelayRegistry;
   deadlineMs?: number;
@@ -1290,6 +1304,7 @@ export function createReviewerRelayHooks(config: ReviewerRelayConfig): ReviewerR
       taskClass,
       ...(spawnFn ? { spawn: spawnFn } : {}),
       ...(config.env ? { env: config.env } : {}),
+      ...(config.relayContract !== undefined ? { relayContract: config.relayContract } : {}),
       realpath,
       ...(config.deadlineMs !== undefined ? { deadlineMs: config.deadlineMs } : {}),
       ...(config.stdoutFrameLimitBytes !== undefined

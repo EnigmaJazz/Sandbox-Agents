@@ -16,6 +16,9 @@ import { brokerSocketPath, createBrokerClient, type BrokerClient } from "../plug
 import { createReviewerRelayHooks, type SessionLookupClient } from "../plugins/lib/reviewer-relay-core.ts";
 import { createRelayV2Handlers } from "./lib/relay-v2.ts";
 
+/** The provider admits a 2.x OpenCode runtime only under this declaration (gentle-ai 4 managed V2 relay). */
+export const V2_RELAY_CONTRACT = "gentle-ai.opencode-relay/v2-staged";
+
 let brokerClientPromise: Promise<BrokerClient> | null = null;
 
 /** Lazy, fail-closed broker client. Never connected at module load. */
@@ -52,6 +55,7 @@ export default {
     const core = createReviewerRelayHooks({
       client,
       directory: ctx.location.directory,
+      relayContract: V2_RELAY_CONTRACT,
       worktree: ctx.location.directory,
       // The boot workspace is the process cwd, which is stable for the process lifetime.
       serverRoot: process.cwd(),

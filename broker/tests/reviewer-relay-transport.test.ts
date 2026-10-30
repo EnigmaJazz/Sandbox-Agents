@@ -36,6 +36,7 @@ import {
   buildCompleteFrame,
   buildStartFrame,
   buildTransportEnv,
+  RELAY_CONTRACT_ENV,
   createNodeTransportSpawn,
   createReviewerRelayHooks,
   createSessionRootResolver,
@@ -842,6 +843,38 @@ describe("reviewer relay spawn discipline", () => {
     expect(spawnedSegments[0]).toBe(RUNTIME_DIRECTORY);
     expect(spawnedSegments).toContain(HOST_GIT_DIRECTORY);
     expect(Object.keys(spawnedEnv)).not.toContain("OPENAI_API_KEY");
+  });
+
+  test("the relay contract is declared only when the host passes one (V2), never inherited", () => {
+    // V1 (1.x) is admitted only WITHOUT a declaration, so an inherited value must not reach the child.
+    const inherited = { ...ENV, PATH: "/usr/bin", [RELAY_CONTRACT_ENV]: "inherited" };
+    expect(buildTransportEnv(inherited)[RELAY_CONTRACT_ENV]).toBeUndefined();
+    expect(buildTransportEnv(inherited, "gentle-ai.opencode-relay/v2-staged")[RELAY_CONTRACT_ENV]).toBe(
+      "gentle-ai.opencode-relay/v2-staged",
+    );
+
+    const declared = recordingSpawn();
+    startRelay({
+      cwd: canonicalRepo,
+      prompt: BINDING_PROMPT,
+      spawn: declared.spawn,
+      realpath: realpathSync,
+      env: { ...ENV, PATH: "/usr/bin" },
+      relayContract: "gentle-ai.opencode-relay/v2-staged",
+    });
+    expect(declared.specs[0]!.env[RELAY_CONTRACT_ENV]).toBe("gentle-ai.opencode-relay/v2-staged");
+
+    const plain = recordingSpawn();
+    startRelay({ cwd: canonicalRepo, prompt: BINDING_PROMPT, spawn: plain.spawn, realpath: realpathSync, env: { ...ENV, PATH: "/usr/bin" } });
+    expect(Object.keys(plain.specs[0]!.env)).not.toContain(RELAY_CONTRACT_ENV);
+  });
+
+  test("only the V2 entry declares the contract; the V1 entry does not", () => {
+    const v2 = readFileSync(new URL("../../opencode/plugins-v2/reviewer-relay-transport.ts", import.meta.url), "utf8");
+    const v1 = readFileSync(new URL("../../opencode/plugins/reviewer-relay-transport.ts", import.meta.url), "utf8");
+    expect(v2).toContain('V2_RELAY_CONTRACT = "gentle-ai.opencode-relay/v2-staged"');
+    expect(v2).toContain("relayContract: V2_RELAY_CONTRACT");
+    expect(v1).not.toContain("relayContract");
   });
 
   test("refuses a relative, symlinked, or control-bearing cwd before spawning", async () => {
