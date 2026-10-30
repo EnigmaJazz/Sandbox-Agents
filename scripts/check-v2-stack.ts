@@ -81,6 +81,8 @@ async function main(): Promise<number> {
     const err = r.stderr.toString();
     if (/rejected the password|requires a password/.test(err)) { console.error("FAIL the server rejected the password (is it the one the service started with?)"); return 2; }
     if (Date.now() > deadline) { console.error(`FAIL no answer from ${server} within ${wait}s: ${err.split("\n")[0]}`); return 2; }
+    const reason = /did not finish activating/.test(err) ? "plugins are still installing/activating" : err.split("\n").find((l) => l.trim()) ?? "no answer yet";
+    console.error(`waiting for ${server} (${Math.round((deadline - Date.now()) / 1000)}s left): ${reason}`);
     await Bun.sleep(3000);
   }
   const agents = JSON.parse(agentsText.slice(agentsText.indexOf("["))) as AgentInfo[];
