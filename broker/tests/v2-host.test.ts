@@ -203,6 +203,17 @@ suite("V2 host fixture (real OpenCode V2, installed plugins, fake broker)", () =
     expect(r.toolResults.join("\n")).toContain("denied by broker admission");
   });
 
+  test("the guard binds the session to the host-supplied agent before it asks the broker to admit a non-sandbox tool", async () => {
+    const r = await runV2({ script: [{ tool_call: { name: "execute", arguments: { code: "1 + 1" } } }, { text: "done" }] });
+    expect(r.exitCode).toBe(0);
+    const bind = used(r.calls, "bindSessionAgent");
+    const admission = used(r.calls, "toolAdmission").find((call) => call.payload.tool === "execute");
+    expect(bind.length).toBeGreaterThan(0);
+    expect(bind[0]!.payload).toEqual({ agent: "build" });
+    expect(admission).toBeDefined();
+    expect(r.calls.indexOf(bind[0]!)).toBeLessThan(r.calls.indexOf(admission!)); // before this fix the session reached admission unbound
+  });
+
   test("host reads run before activation and are redirected once a worker is active", async () => {
     const script: Step[] = [{ tool_call: { name: "glob", arguments: { pattern: "*.txt" } } }, { text: "done" }];
     const before = await runV2({ script, worker: "HOST_READ_ONLY" });

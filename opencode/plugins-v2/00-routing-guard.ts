@@ -38,7 +38,7 @@ function broker(): Promise<BrokerClient> {
 
 interface V2Context {
   tool: {
-    hook(name: "execute.before", fn: (event: { tool: string; sessionID: string; input?: unknown }) => Promise<void>): Promise<unknown>;
+    hook(name: "execute.before", fn: (event: { tool: string; sessionID: string; input?: unknown; agent?: string }) => Promise<void>): Promise<unknown>;
   };
   session: {
     hook(name: "context", fn: (event: { system: unknown[] }) => void): Promise<unknown>;

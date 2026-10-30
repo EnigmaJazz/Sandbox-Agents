@@ -196,6 +196,124 @@ describe("tool admission", () => {
   });
 });
 
+/** A broker that behaves like the real one for identity: until a session is bound to an agent, mutation classes are refused. */
+function bindingBroker() {
+  const calls: Array<{ operation: string; sessionID: string; payload?: unknown }> = [];
+  const bound = new Map<string, string>();
+  const behaviour = { bindFails: false };
+  const broker: GuardBroker = {
+    request: async (operation, sessionID, payload) => {
+      calls.push({ operation, sessionID, payload });
+      if (operation === "bindSessionAgent") {
+        if (behaviour.bindFails) throw new Error("broker refused the binding");
+        bound.set(sessionID, (payload as { agent: string }).agent);
+        return { ok: true };
+      }
+      if (operation === "toolAdmission") {
+        const tool = (payload as { tool: string }).tool;
+        const isBound = bound.has(sessionID);
+        return {
+          schema: "opencode-sandbox.tool-admission/v1",
+          tool,
+          classification: "HOST_APPROVED_MUTATION",
+          decision: isBound ? "allow" : "deny",
+          reason: isBound ? `bound as ${bound.get(sessionID)}` : "UNBOUND_SESSION_MUTATION_DENIED",
+        };
+      }
+      throw new Error(`unexpected ${operation}`);
+    },
+  };
+  return { broker, calls, bound, behaviour };
+}
+const withAgent = (tool: string, agent?: string, sessionID = SESSION) => ({ tool, sessionID, input: {}, ...(agent === undefined ? {} : { agent }) });
+const ops = (calls: Array<{ operation: string }>) => calls.map((c) => c.operation);
+
+describe("session identity (V1 bound it on every turn; V2 has no such hook)", () => {
+  test("binds the session with the host-supplied agent before asking admission, then admits", async () => {
+    const b = bindingBroker();
+    await createRoutingGuard({ broker: async () => b.broker }).before(withAgent("host_git_commit", "gentle-orchestrator"));
+    expect(ops(b.calls)).toEqual(["bindSessionAgent", "toolAdmission"]);
+    expect(b.calls[0]!.payload).toEqual({ agent: "gentle-orchestrator" });
+    expect(b.bound.get(SESSION)).toBe("gentle-orchestrator");
+  });
+
+  test("positive control: with no agent from the host the broker is not told anyone and the mutation is refused", async () => {
+    const b = bindingBroker();
+    await expect(createRoutingGuard({ broker: async () => b.broker }).before(withAgent("host_git_commit"))).rejects.toThrow(/UNBOUND_SESSION_MUTATION_DENIED/);
+    expect(ops(b.calls)).toEqual(["toolAdmission"]);
+  });
+
+  test("a refusal for an unbound session is not remembered: the same session is admitted once the host supplies its agent", async () => {
+    const b = bindingBroker();
+    const guard = createRoutingGuard({ broker: async () => b.broker });
+    await expect(guard.before(withAgent("host_git_commit"))).rejects.toThrow(/UNBOUND_SESSION_MUTATION_DENIED/);
+    await guard.before(withAgent("host_git_commit", "gentle-orchestrator")); // before the fix this replayed the cached refusal
+    expect(ops(b.calls).filter((o) => o === "toolAdmission")).toHaveLength(2);
+  });
+
+  test("an unbound answer is asked again every time (it is never cached)", async () => {
+    const b = bindingBroker();
+    const guard = createRoutingGuard({ broker: async () => b.broker });
+    await guard.before(withAgent("host_git_commit")).catch(() => {});
+    await guard.before(withAgent("host_git_commit")).catch(() => {});
+    expect(ops(b.calls)).toEqual(["toolAdmission", "toolAdmission"]);
+  });
+
+  test("binds once per session and agent, and still caches a bound decision", async () => {
+    const b = bindingBroker();
+    const guard = createRoutingGuard({ broker: async () => b.broker });
+    await guard.before(withAgent("host_git_commit", "gentle-orchestrator"));
+    await guard.before(withAgent("host_git_commit", "gentle-orchestrator"));
+    await guard.before(withAgent("host_review_assess", "gentle-orchestrator"));
+    expect(ops(b.calls).filter((o) => o === "bindSessionAgent")).toHaveLength(1);
+    expect(ops(b.calls).filter((o) => o === "toolAdmission")).toHaveLength(2); // one per distinct tool
+  });
+
+  test("a different agent on the same session rebinds and drops the decisions made for the old one", async () => {
+    const b = bindingBroker();
+    const guard = createRoutingGuard({ broker: async () => b.broker });
+    await guard.before(withAgent("host_git_commit", "gentle-orchestrator"));
+    await guard.before(withAgent("host_git_commit", "general"));
+    expect(ops(b.calls)).toEqual(["bindSessionAgent", "toolAdmission", "bindSessionAgent", "toolAdmission"]);
+    expect(b.bound.get(SESSION)).toBe("general");
+  });
+
+  test("a binding the broker refuses does not open anything: admission still decides", async () => {
+    const b = bindingBroker();
+    b.behaviour.bindFails = true;
+    await expect(createRoutingGuard({ broker: async () => b.broker }).before(withAgent("host_git_commit", "gentle-orchestrator"))).rejects.toThrow(/UNBOUND_SESSION_MUTATION_DENIED/);
+  });
+
+  test("sessions are bound independently", async () => {
+    const b = bindingBroker();
+    const guard = createRoutingGuard({ broker: async () => b.broker });
+    await guard.before(withAgent("host_git_commit", "gentle-orchestrator", "ses_a"));
+    await expect(guard.before(withAgent("host_git_commit", undefined, "ses_b"))).rejects.toThrow(/UNBOUND/);
+  });
+
+  for (const [label, agent] of [["empty", ""], ["too long", "x".repeat(129)]] as const) {
+    test(`a malformed agent (${label}) is never sent to the broker as an identity`, async () => {
+      const b = bindingBroker();
+      await createRoutingGuard({ broker: async () => b.broker }).before(withAgent("host_git_commit", agent)).catch(() => {});
+      expect(ops(b.calls)).not.toContain("bindSessionAgent");
+    });
+  }
+
+  test("a malformed session id is never bound", async () => {
+    const b = bindingBroker();
+    await createRoutingGuard({ broker: async () => b.broker }).before(withAgent("host_git_commit", "gentle-orchestrator", "bad id!")).catch(() => {});
+    expect(ops(b.calls)).not.toContain("bindSessionAgent");
+  });
+
+  test("sandbox tools and host reads do not trigger a binding call", async () => {
+    const b = bindingBroker();
+    const guard = createRoutingGuard({ broker: async () => b.broker });
+    await guard.before(withAgent("sandbox_read", "general"));
+    await guard.before(withAgent("sandbox_apply_preview", "general"));
+    expect(ops(b.calls)).toEqual([]);
+  });
+});
+
 describe("system rule", () => {
   test("states the routing contract in V2 terms", () => {
     expect(SYSTEM_RULE).toContain("Sandbox routing rule");

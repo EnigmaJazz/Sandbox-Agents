@@ -17,10 +17,17 @@
  *  - input keys: read takes `path` (V1: filePath); grep takes `pattern` and `path`; glob takes `pattern`.
  *  - external-root matching resolves `..` first. V1 compared the raw string, so `<root>/../project` passed.
  *  - the denial reason is flattened with /[\r\n]+/ (V1's regex literal matched a backslash and the letters r and n).
+ *  - session identity: V1 bound each session to its agent in a chat.params hook on every turn. V2 has no such hook and its
+ *    plugin tools bind a session only inside their own execute, which runs AFTER this guard. A session that had not yet run a
+ *    plugin tool therefore reached the broker unbound, was refused (UNBOUND_SESSION_MUTATION_DENIED), and the guard cached the
+ *    refusal for the rest of the session. The guard now binds the session with the host-supplied agent before asking for
+ *    admission, and never caches an answer that depended on the session being unbound. Authorization stays in the broker's
+ *    role matrix: an unknown agent binds and is then denied there.
  *
  * Gate 1: NOT installed. Delivery is manual (S17): the USER reviews this diff and installs the exact bytes by hand.
  */
 import { isAbsolute, resolve, sep } from "node:path";
+import { BIND_SESSION_AGENT_OPERATION, hostSessionBinding } from "../../plugins/lib/session-agent-binding.ts";
 
 export interface GuardBroker {
   request(operation: string, sessionID: string, payload?: unknown, agent?: string): Promise<unknown>;
@@ -30,6 +37,8 @@ export interface GuardEvent {
   tool: string;
   sessionID: string;
   input?: unknown;
+  /** The host supplies the calling agent on every V2 tool call; the model cannot set it. */
+  agent?: string;
 }
 
 export interface GuardDeps {
@@ -87,6 +96,21 @@ export function createRoutingGuard(deps: GuardDeps) {
   const admissionCache = new Map<string, Admission>();
   let rootsCache: string[] | null = null;
 
+  const boundAgents = new Map<string, string>();
+
+  /** Tell the broker who the host says this session is. A failure leaves the session unbound, so admission refuses (fail closed). */
+  async function ensureBound(broker: GuardBroker, sessionID: string, agent: string | undefined): Promise<void> {
+    const binding = hostSessionBinding({ sessionID, agent }, [agent ?? ""]);
+    if (!binding || boundAgents.get(binding.sessionID) === binding.agent) return;
+    try {
+      await broker.request(BIND_SESSION_AGENT_OPERATION, binding.sessionID, { agent: binding.agent }, undefined);
+    } catch {
+      return;
+    }
+    boundAgents.set(binding.sessionID, binding.agent);
+    clearAdmissionCache(binding.sessionID); // decisions made for another identity (or for none) no longer apply
+  }
+
   const clearAdmissionCache = (sessionID: string) => {
     const prefix = `${sessionID}\u0000`;
     for (const key of admissionCache.keys()) if (key.startsWith(prefix)) admissionCache.delete(key);
@@ -117,7 +141,8 @@ export function createRoutingGuard(deps: GuardDeps) {
       throw new Error(`Tool "${tool}" broker admission returned a malformed reply.`);
     }
     const admission = { classification: reply.classification, decision: reply.decision, reason: reply.reason };
-    admissionCache.set(key, admission);
+    // An answer given to an unbound session says nothing about the session once it is bound, so it is never remembered.
+    if (!admission.reason.startsWith("UNBOUND_SESSION_")) admissionCache.set(key, admission);
     return admission;
   }
 
@@ -147,7 +172,9 @@ export function createRoutingGuard(deps: GuardDeps) {
         return;
       }
 
-      const admission = await admit(await deps.broker(), sessionID, tool);
+      const broker = await deps.broker();
+      await ensureBound(broker, sessionID, event.agent);
+      const admission = await admit(broker, sessionID, tool);
       if (admission.decision === "deny" || admission.classification === "unclassified") {
         const reason = admission.reason.replace(/[\r\n]+/g, " ");
         throw new Error(
