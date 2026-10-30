@@ -264,6 +264,20 @@ describe("start-secure-opencode-v2", () => {
     expect(readFileSync(s.log, "utf8").split("\n").filter((line) => line.startsWith("HOME="))).toEqual([`HOME=${s.home}`]);
   });
 
+  test("gives the server a writable SQLite temp directory inside the V2 data root (the sandbox grants no other)", () => {
+    // Found 2026-10-30: the service has no TMPDIR and the profile grants only $TMPDIR, so SQLite had nowhere to create a
+    // temp file. Any query big enough to spill failed with "unable to open database file"; Magic Context treats that as
+    // fatal and refused every turn, which V2 recorded as a user interrupt. SQLITE_TMPDIR scopes the fix to SQLite.
+    const s = setup("sqlite-tmp");
+    expect(launch(s).code).toBe(0);
+    const args = readFileSync(s.log, "utf8").split("\n")[0]!;
+    const tmp = join(s.home, ".local/share/opencode-v2/data/tmp");
+    expect(args).toContain(`SQLITE_TMPDIR=${tmp}`);
+    expect(args).not.toMatch(/(^| )TMPDIR=/); // the general TMPDIR is left alone (only SQLite is redirected)
+    expect(existsSync(tmp)).toBe(true); // the launcher created it, so SQLite finds it
+    expect(readFileSync(s.log, "utf8").split("\n").filter((line) => line.startsWith("SQLITE_TMPDIR="))).toEqual([]); // wrapper only, not nono's own environment
+  });
+
   test("refuses to start without the server home's Systematic overlay (exit 4) instead of running against the wrong HOME", () => {
     const s = setup("no-server-home", { noServerHome: true });
     const r = launch(s);
