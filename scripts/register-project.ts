@@ -52,6 +52,13 @@ const PROFILE_PATH = join(
   "profile",
   "opencode-secure.json",
 );
+const V2_PROFILE_PATH = join(
+  import.meta.dir,
+  "..",
+  "nono",
+  "profile",
+  "opencode-v2-secure.json",
+);
 const LAUNCHER_PATH = join(
   import.meta.dir,
   "..",
@@ -694,6 +701,8 @@ if (import.meta.main) {
       failed = true;
     }
     const projectGitGrant = updateProjectGitGrant(path);
+    // The V2 profile needs the same grant: the review transport writes a temp dir under .git.
+    const projectGitGrantV2 = updateProjectGitGrant(path, V2_PROFILE_PATH);
     const warnings = [...gitPlan.warnings];
     if (projectGitGrant.warning !== null)
       warnings.push(projectGitGrant.warning);
@@ -708,7 +717,7 @@ if (import.meta.main) {
       profile: updateProfile(path),
       autoUpdate: updateAutoUpdateGrant(path),
       skillRegistry: updateSkillRegistryGrant(path),
-      projectGit: projectGitGrant.status,
+      projectGit: `${projectGitGrant.status}; V2: ${projectGitGrantV2.status}`,
       codegraph: updateCodegraphGrant(path),
       brokerEnv: updateBrokerEnv(path, id),
       launcher: updateLauncher(path),

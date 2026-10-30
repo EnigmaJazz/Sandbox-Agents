@@ -56,12 +56,13 @@ describe("V2 nono profile", () => {
     expect(v2.filesystem.read).toContain(configRoot);
   });
 
-  test("grants no write access to any project's .git directory (V2 never writes there; hooks planted there would run on the host)", () => {
-    const writable = [...v2.filesystem.allow, ...(v2.filesystem.allow_file ?? [])];
-    expect(writable.filter((p: string) => /(^|\/)\.git(\/|$)/.test(p))).toEqual([]);
-    // positive control: the V1 profile does grant them, so this check can fail
-    expect([...V1_PROFILE.filesystem.allow].filter((p: string) => /(^|\/)\.git(\/|$)/.test(p)).length).toBeGreaterThan(0);
-    // reading them stays possible through the project-root read grants
+  test("grants write access to the same project .git directories as V1 (the review transport writes a frozen-git temp dir there)", () => {
+    // Found 2026-10-30: with .git read-only the provider could not verify the repository context and refused every lens
+    // with binding_mismatch. The grant reopens hook planting by the sandboxed server, accepted for V1 parity.
+    const gitGrants = (profile: any) => [...profile.filesystem.allow].filter((p: string) => /(^|\/)\.git$/.test(p)).sort();
+    expect(gitGrants(V1_PROFILE).length).toBeGreaterThan(0); // positive control: this check can fail
+    expect(gitGrants(v2)).toEqual(gitGrants(V1_PROFILE));
+    expect(gitGrants(v2)).toContain("$HOME/ai-workspace/workflow_optimisation/.git");
     expect(v2.filesystem.read).toContain("$HOME/agent-sandbox-integration");
   });
 

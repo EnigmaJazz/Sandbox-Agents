@@ -162,3 +162,11 @@ describe("existing .atl grant path (unchanged)", () => {
     );
   });
 });
+
+describe("registration also grants .git in the V2 profile", () => {
+  test("the registration flow writes the V2 profile as well as V1 (review transport needs the temp dir under .git)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../scripts/register-project.ts"), "utf8");
+    expect(source).toContain('"opencode-v2-secure.json"');
+    expect(source).toContain("updateProjectGitGrant(path, V2_PROFILE_PATH)");
+  });
+});
