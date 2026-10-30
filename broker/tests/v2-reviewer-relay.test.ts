@@ -178,10 +178,10 @@ describe("child session context", () => {
 });
 
 describe("start frame (V2 provider binding)", () => {
-  test("names the dispatched asi-review agent when the V2 contract is declared", async () => {
+  test("names the provider role (review-*) of the dispatched asi-review agent when the V2 contract is declared", async () => {
     const h = harness({ relayContract: "gentle-ai.opencode-relay/v2-staged" });
     await h.handlers.before(before({ agent: "asi-review-resilience", description: "d", prompt: BINDING_PROMPT }));
-    expect(h.children[0]!.frames[0]).toMatchObject({ operation: "start", agent: "asi-review-resilience" });
+    expect(h.children[0]!.frames[0]).toMatchObject({ operation: "start", agent: "review-resilience" });
   });
 
   test("sends no agent without the contract", async () => {

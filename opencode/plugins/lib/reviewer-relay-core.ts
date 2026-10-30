@@ -638,8 +638,10 @@ export function validateMaterializedPrompt(
 
 /** The binding-only start frame: schema, operation, and the verbatim prompt. */
 export function buildStartFrame(prompt: string, agent?: string): string {
-  // The V2 provider requires the dispatched host agent so it can bind it to the Task role; V1 sends none.
-  const frame = { schema: TRANSPORT_SCHEMA, operation: TRANSPORT_OPERATIONS.start, prompt, ...(agent !== undefined ? { agent } : {}) };
+  // The V2 provider requires the dispatched host agent so it can bind it to the Task role; V1 sends none. It knows only the
+  // plain `review-*` role names, while this host dispatches the `asi-review-*` aliases, so the alias prefix is dropped.
+  const providerAgent = agent?.replace(/^asi-/, "");
+  const frame = { schema: TRANSPORT_SCHEMA, operation: TRANSPORT_OPERATIONS.start, prompt, ...(providerAgent !== undefined ? { agent: providerAgent } : {}) };
   return `${JSON.stringify(frame)}\n`;
 }
 

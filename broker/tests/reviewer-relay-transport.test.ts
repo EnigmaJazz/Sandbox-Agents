@@ -900,7 +900,7 @@ describe("reviewer relay spawn discipline", () => {
       schema: "gentle-ai.provider-transport/v1",
       operation: "start",
       prompt: BINDING_PROMPT,
-      agent: "asi-review-risk",
+      agent: "review-risk",
     });
     const v1 = recordingSpawn();
     startRelay({ cwd: canonicalRepo, prompt: BINDING_PROMPT, spawn: v1.spawn, realpath: realpathSync, env: ENV, agent: "asi-review-risk" });
