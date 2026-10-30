@@ -637,8 +637,10 @@ export function validateMaterializedPrompt(
 }
 
 /** The binding-only start frame: schema, operation, and the verbatim prompt. */
-export function buildStartFrame(prompt: string): string {
-  return `${JSON.stringify({ schema: TRANSPORT_SCHEMA, operation: TRANSPORT_OPERATIONS.start, prompt })}\n`;
+export function buildStartFrame(prompt: string, agent?: string): string {
+  // The V2 provider requires the dispatched host agent so it can bind it to the Task role; V1 sends none.
+  const frame = { schema: TRANSPORT_SCHEMA, operation: TRANSPORT_OPERATIONS.start, prompt, ...(agent !== undefined ? { agent } : {}) };
+  return `${JSON.stringify(frame)}\n`;
 }
 
 /**
@@ -779,6 +781,8 @@ export interface RelayStartOptions {
   env?: Record<string, string | undefined>;
   /** Relay contract the V2 host declares to the provider; absent on V1. */
   relayContract?: string;
+  /** The host agent dispatched for the Task. Sent in the start frame only under a V2 relayContract. */
+  agent?: string;
   /** Directory the provider resolves `opencode` from; V2 only (see TransportDeclaration). */
   runtimeDirectory?: string;
   spawn?: TransportSpawn;
@@ -991,7 +995,7 @@ export function startRelay(options: RelayStartOptions): Relay {
   };
   options.signal?.addEventListener("abort", onAbort, { once: true });
 
-  child.write(buildStartFrame(options.prompt), (cause) => fail(spawnFailed(messageOf(cause))));
+  child.write(buildStartFrame(options.prompt, options.relayContract !== undefined ? options.agent : undefined), (cause) => fail(spawnFailed(messageOf(cause))));
 
   return {
     prompt: promptFrame,
@@ -1322,9 +1326,10 @@ export function createReviewerRelayHooks(config: ReviewerRelayConfig): ReviewerR
     cache: config.rootCache,
   });
 
-  const startRelayFor = (cwd: string, prompt: string, taskClass: RelayTaskClass): Relay =>
+  const startRelayFor = (cwd: string, prompt: string, taskClass: RelayTaskClass, agent?: string): Relay =>
     startRelay({
       cwd,
+      ...(agent !== undefined ? { agent } : {}),
       prompt,
       taskClass,
       ...(spawnFn ? { spawn: spawnFn } : {}),
@@ -1581,7 +1586,7 @@ export function createReviewerRelayHooks(config: ReviewerRelayConfig): ReviewerR
       }
       let relay: Relay;
       try {
-        relay = startRelayFor(root, bindingPrompt, taskClass);
+        relay = startRelayFor(root, bindingPrompt, taskClass, subagentType);
       } catch (cause) {
         const refusal = refusalOr(cause, spawnFailed);
         refuseTaskBoundary(output, key, refusal);

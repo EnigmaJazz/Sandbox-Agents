@@ -50,7 +50,7 @@ class ScriptedChild implements TransportChild {
   }
 }
 
-function harness(options: { resultOutput?: string; sessionDirectory?: string } = {}) {
+function harness(options: { resultOutput?: string; sessionDirectory?: string; relayContract?: string } = {}) {
   const children: ScriptedChild[] = [];
   const spawn: TransportSpawn = (_spec, handlers) => {
     const child = new ScriptedChild(handlers, options.resultOutput ?? '{"admitted":true}');
@@ -63,6 +63,7 @@ function harness(options: { resultOutput?: string; sessionDirectory?: string } =
     client: { session: { get: async () => ({ data: { directory: options.sessionDirectory ?? canonicalRepo } }) } },
     brokerRequest: async () => ({ projects: [{ id: "repo", path: canonicalRepo }] }),
     spawn,
+    ...(options.relayContract ? { relayContract: options.relayContract } : {}),
     realpath: realpathSync,
     env: ENV,
     registry: new Map(),
@@ -173,6 +174,20 @@ describe("child session context", () => {
     await h.handlers.context(event as any);
     expect(event.system).toEqual([{ type: "text", text: TRANSPORT_ISOLATION_SYSTEM }]);
     expect(event.messages[0]!.content[0]!.text).toBe(MATERIALIZED);
+  });
+});
+
+describe("start frame (V2 provider binding)", () => {
+  test("names the dispatched asi-review agent when the V2 contract is declared", async () => {
+    const h = harness({ relayContract: "gentle-ai.opencode-relay/v2-staged" });
+    await h.handlers.before(before({ agent: "asi-review-resilience", description: "d", prompt: BINDING_PROMPT }));
+    expect(h.children[0]!.frames[0]).toMatchObject({ operation: "start", agent: "asi-review-resilience" });
+  });
+
+  test("sends no agent without the contract", async () => {
+    const h = harness();
+    await h.handlers.before(before({ agent: "asi-review-risk", description: "d", prompt: BINDING_PROMPT }));
+    expect(h.children[0]!.frames[0]).not.toHaveProperty("agent");
   });
 });
 

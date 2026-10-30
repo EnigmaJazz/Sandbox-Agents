@@ -893,6 +893,20 @@ describe("reviewer relay spawn discipline", () => {
     expect(String(((await prompt2) as { message?: string }).message)).toContain("unspecified");
   });
 
+  test("the start frame names the dispatched agent under a V2 relay contract and never on V1", () => {
+    const v2 = recordingSpawn();
+    startRelay({ cwd: canonicalRepo, prompt: BINDING_PROMPT, spawn: v2.spawn, realpath: realpathSync, env: ENV, relayContract: "gentle-ai.opencode-relay/v2-staged", agent: "asi-review-risk" });
+    expect(JSON.parse(String(v2.child().written[0]))).toEqual({
+      schema: "gentle-ai.provider-transport/v1",
+      operation: "start",
+      prompt: BINDING_PROMPT,
+      agent: "asi-review-risk",
+    });
+    const v1 = recordingSpawn();
+    startRelay({ cwd: canonicalRepo, prompt: BINDING_PROMPT, spawn: v1.spawn, realpath: realpathSync, env: ENV, agent: "asi-review-risk" });
+    expect(JSON.parse(String(v1.child().written[0]))).not.toHaveProperty("agent");
+  });
+
   test("only the V2 entry declares the contract; the V1 entry does not", () => {
     const v2 = readFileSync(new URL("../../opencode/plugins-v2/reviewer-relay-transport.ts", import.meta.url), "utf8");
     const v1 = readFileSync(new URL("../../opencode/plugins/reviewer-relay-transport.ts", import.meta.url), "utf8");
