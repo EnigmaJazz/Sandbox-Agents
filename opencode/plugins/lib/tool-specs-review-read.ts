@@ -75,7 +75,12 @@ export const reviewReadToolSpecs = {
   host_review_status: defineTool({
     description:
       "Read the review integration status envelope (read-only; no approval). " +
-      "The broker returns the raw envelope unchanged. Returns JSON.",
+      "The broker returns the raw envelope unchanged. Preflight for a committed range: " +
+      "omit lineage; pass agent, baseRef (last reviewed boundary), committedOnly true, " +
+      "lenses (comma list of risk|resilience|readability|reliability) and lensesReason, " +
+      "and intendedUntrackedSelection exactly as the provider returned it. After start, " +
+      "pass lineage and repositoryContext from the previous result. A status call after " +
+      "acknowledgement can fail benignly. Returns JSON.",
     args: {
       agent: reviewAgentArg.optional(),
       lineage: reviewTokenArg.optional(),

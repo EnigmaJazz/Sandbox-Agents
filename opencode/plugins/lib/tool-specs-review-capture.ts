@@ -44,7 +44,12 @@ export const reviewCaptureToolSpecs = {
   host_review_start: defineTool({
     description:
       "Start a review lifecycle run (orchestrator-only mutation; requires human " +
-      "approval). Provider-issued tokens are forwarded verbatim. Returns JSON.",
+      "approval). Provider-issued tokens are forwarded verbatim. Typical committed-range " +
+      "call: pass contract, target, projection and expectedUntrackedInventory exactly as " +
+      "the preflight host_review_status next_transition returned them, untrackedScope " +
+      "\"exclude\", and lenses (comma list of risk|resilience|readability|reliability) " +
+      "with a one-sentence lensesReason. Never look up these values elsewhere; see the " +
+      "native review call card in odd-and-review.md. Returns JSON.",
     args: {
       agent: reviewAgentArg.optional(),
       contract: reviewTokenArg.optional(),

@@ -163,7 +163,7 @@
     },
     {
       "name": "host_review_status",
-      "description": "Read the review integration status envelope (read-only; no approval). The broker returns the raw envelope unchanged. Returns JSON.",
+      "description": "Read the review integration status envelope (read-only; no approval). The broker returns the raw envelope unchanged. Preflight for a committed range: omit lineage; pass agent, baseRef (last reviewed boundary), committedOnly true, lenses (comma list of risk|resilience|readability|reliability) and lensesReason, and intendedUntrackedSelection exactly as the provider returned it. After start, pass lineage and repositoryContext from the previous result. A status call after acknowledgement can fail benignly. Returns JSON.",
       "args": [
         "agent",
         "lineage",
@@ -354,7 +354,7 @@
     },
     {
       "name": "host_review_start",
-      "description": "Start a review lifecycle run (orchestrator-only mutation; requires human approval). Provider-issued tokens are forwarded verbatim. Returns JSON.",
+      "description": "Start a review lifecycle run (orchestrator-only mutation; requires human approval). Provider-issued tokens are forwarded verbatim. Typical committed-range call: pass contract, target, projection and expectedUntrackedInventory exactly as the preflight host_review_status next_transition returned them, untrackedScope \"exclude\", and lenses (comma list of risk|resilience|readability|reliability) with a one-sentence lensesReason. Never look up these values elsewhere; see the native review call card in odd-and-review.md. Returns JSON.",
       "args": [
         "agent",
         "contract",
