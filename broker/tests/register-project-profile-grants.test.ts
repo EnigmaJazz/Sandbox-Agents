@@ -181,6 +181,54 @@ describe("registration also grants .git in the V2 profile", () => {
     expect(readFileSync(history, "utf8")).toBe('{"entries":[1]}\n');
   });
 
+  test("the codegraph and .git grants write the V2 profile they are given and leave V1 untouched", () => {
+    const v2ProfilePath = join(root, "opencode-v2-secure.json");
+    writeFileSync(
+      v2ProfilePath,
+      JSON.stringify(
+        {
+          filesystem: {
+            allow: ["/existing/.atl"],
+            read: [project],
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    mkdirSync(join(project, ".git"));
+
+    const v1Before = readFileSync(profilePath);
+
+    expect(updateCodegraphGrant(project, v2ProfilePath, false)).toBe(
+      "added; created",
+    );
+    const afterCodegraph = JSON.parse(
+      readFileSync(v2ProfilePath, "utf8"),
+    ) as TempProfile;
+    expect(afterCodegraph.filesystem?.allow).toContain(
+      join(project, ".codegraph"),
+    );
+    expect(updateCodegraphGrant(project, v2ProfilePath, false)).toBe(
+      "already registered",
+    );
+
+    const gitGrant = updateProjectGitGrant(project, v2ProfilePath, false);
+    expect(gitGrant.status).toBe("added");
+    expect(gitGrant.warning).toBeNull();
+    const afterGit = JSON.parse(
+      readFileSync(v2ProfilePath, "utf8"),
+    ) as TempProfile;
+    expect(afterGit.filesystem?.allow).toContain(join(project, ".git"));
+    expect(updateProjectGitGrant(project, v2ProfilePath, false).status).toBe(
+      "already registered",
+    );
+
+    // Both V2 calls wrote only the profile path they were given: the V1
+    // profile on disk is byte-identical to the snapshot taken before them.
+    expect(readFileSync(profilePath).equals(v1Before)).toBe(true);
+  });
+
   test("the registration flow writes the V2 profile as well as V1 (review transport needs the temp dir under .git)", () => {
     const source = readFileSync(join(import.meta.dir, "../../scripts/register-project.ts"), "utf8");
     expect(source).toContain('"opencode-v2-secure.json"');
