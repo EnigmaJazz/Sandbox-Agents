@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync, statSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -90,8 +90,10 @@ describe("V2 nono profile", () => {
   });
 
   test("reaches the same hosts and project roots as V1, with the same isolation", () => {
-    expect(v2.network.allow_domain).toEqual(V1_PROFILE.network.allow_domain);
-    const v2Only = ["$HOME/.local/share/opencode-v2/prefix", "$HOME/.local/share/opencode-v2/config"];
+    // V2 adds api.anthropic.com for the Claude Agent provider (verified 2026-10-31: claude.ai is not needed) and read access to the Claude binary tree.
+    expect(v2.network.allow_domain.filter((d: string) => d !== "api.anthropic.com")).toEqual(V1_PROFILE.network.allow_domain);
+    expect(v2.network.allow_domain).toContain("api.anthropic.com");
+    const v2Only = ["$HOME/.local/share/opencode-v2/prefix", "$HOME/.local/share/opencode-v2/config", "$HOME/.local/share/claude"];
     expect(v2.filesystem.read.filter((p: string) => !v2Only.includes(p)).sort()).toEqual(
       V1_PROFILE.filesystem.read.filter((p: string) => p !== "$HOME/.agents/skills").sort(),
     );
@@ -277,6 +279,22 @@ describe("start-secure-opencode-v2", () => {
     expect(args).not.toMatch(/(^| )TMPDIR=/); // the general TMPDIR is left alone (only SQLite is redirected)
     expect(existsSync(tmp)).toBe(true); // the launcher created it, so SQLite finds it
     expect(readFileSync(s.log, "utf8").split("\n").filter((line) => line.startsWith("SQLITE_TMPDIR="))).toEqual([]); // wrapper only, not nono's own environment
+  });
+
+  test("gives the Claude Agent provider its own config folder inside the V2 data root and keeps ~/.claude denied", () => {
+    // Verified 2026-10-31 on a nono-confined scratch server: with CLAUDE_CONFIG_DIR set, the Claude Code binary launched, kept its
+    // state and login in that folder, and answered a prompt. ~/.claude stays denied, so the provider never sees the owner's login.
+    const s = setup("claude-config");
+    expect(launch(s).code).toBe(0);
+    const args = readFileSync(s.log, "utf8").split("\n")[0]!;
+    const dir = join(s.home, ".local/share/opencode-v2/data/claude-config");
+    expect(args).toContain(`CLAUDE_CONFIG_DIR=${dir}`);
+    expect(existsSync(dir)).toBe(true);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    const profile = JSON.parse(readFileSync(V2_PROFILE_PATH, "utf8"));
+    expect(profile.filesystem.deny).toContain("$HOME/.claude");
+    expect(profile.filesystem.allow).not.toContain("$HOME/.claude");
+    expect(profile.filesystem.read).not.toContain("$HOME/.claude");
   });
 
   test("tells the relay plugin which directory holds the V2 opencode (the binary's own directory has only opencode.exe)", () => {

@@ -106,7 +106,8 @@
       "/home/james/agent-sandbox-integration",
       "/home/james/.nanobot/workspace",
       "$HOME/.local/share/opencode-v2/prefix",
-      "$HOME/.local/share/opencode-v2/config"
+      "$HOME/.local/share/opencode-v2/config",
+      "$HOME/.local/share/claude"
     ],
     "deny": [
       "$HOME/.ssh",
@@ -135,7 +136,8 @@
       "registry.npmjs.org",
       "registry.yarnpkg.com",
       "api.githubcopilot.com",
-      "huggingface.co"
+      "huggingface.co",
+      "api.anthropic.com"
     ],
     "open_port": [
       4097,

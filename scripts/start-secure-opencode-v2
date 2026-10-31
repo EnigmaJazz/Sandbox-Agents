@@ -65,8 +65,12 @@ fi
 OPENCODE_SERVER_PASSWORD="$(<"$V2_PASSWORD_FILE")"
 [[ -n "$OPENCODE_SERVER_PASSWORD" ]] || { echo "refusing: V2 server-password file is empty" >&2; exit 6; }
 
-mkdir -p "$CONTROL_DIR" "$V2_XDG_CONFIG_HOME" "$V2_XDG_DATA_HOME" "$V2_XDG_STATE_HOME" "$V2_XDG_CACHE_HOME" "$V2_XDG_DATA_HOME/tmp"
-chmod 700 "$CONTROL_DIR" "$V2_ROOT"
+# The Claude Agent provider runs the Claude Code binary inside the sandbox. Its state and login live in this dedicated folder (inside the
+# writable V2 data grant), never in ~/.claude, which the profile denies. Log in once, outside the sandbox:
+#   env CLAUDE_CONFIG_DIR=<this folder> claude auth login
+V2_CLAUDE_CONFIG_DIR="$V2_XDG_DATA_HOME/claude-config"
+mkdir -p "$CONTROL_DIR" "$V2_XDG_CONFIG_HOME" "$V2_XDG_DATA_HOME" "$V2_XDG_STATE_HOME" "$V2_XDG_CACHE_HOME" "$V2_XDG_DATA_HOME/tmp" "$V2_CLAUDE_CONFIG_DIR"
+chmod 700 "$CONTROL_DIR" "$V2_ROOT" "$V2_CLAUDE_CONFIG_DIR"
 echo "validating nono profile..."
 "$NONO_BIN" profile validate "$PROFILE_FILE" >/dev/null
 "$NONO_BIN" run --dry-run --profile "$PROFILE_FILE" -- true >/dev/null
@@ -96,6 +100,6 @@ export OPENCODE_SERVER_PASSWORD
 # tree, which the V2 profile does not grant (EACCES); the V2 data grant is writable.
 exec "$NONO_BIN" run --profile "$PROFILE_FILE" -- env \
   XDG_CONFIG_HOME="$V2_XDG_CONFIG_HOME" XDG_DATA_HOME="$V2_XDG_DATA_HOME" XDG_STATE_HOME="$V2_XDG_STATE_HOME" XDG_CACHE_HOME="$V2_XDG_CACHE_HOME" \
-  HOME="$V2_SERVER_HOME" SYSTEMATIC_ROUTING_GUARD_STATE_ROOT="$V2_XDG_DATA_HOME" SQLITE_TMPDIR="$V2_XDG_DATA_HOME/tmp" \
+  HOME="$V2_SERVER_HOME" SYSTEMATIC_ROUTING_GUARD_STATE_ROOT="$V2_XDG_DATA_HOME" SQLITE_TMPDIR="$V2_XDG_DATA_HOME/tmp" CLAUDE_CONFIG_DIR="$V2_CLAUDE_CONFIG_DIR" \
   OPENCODE_V2_RELAY_HOME="$HOME" OPENCODE_V2_RUNTIME_BIN_DIR="$(dirname "$V2_BIN")" OPENCODE_DISABLE_CLAUDE_CODE=1 OPENCODE_DISABLE_AUTOUPDATE=1 npm_config_cache="$V2_XDG_CACHE_HOME/npm-cache" \
   "$V2_BIN" serve --hostname "$V2_HOSTNAME" --port "$V2_PORT"
