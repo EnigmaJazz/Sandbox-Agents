@@ -224,7 +224,18 @@ describe("registration also grants .git in the V2 profile", () => {
       "already registered",
     );
 
-    // Both V2 calls wrote only the profile path they were given: the V1
+    expect(updateSkillRegistryGrant(project, v2ProfilePath, false)).toBe(
+      "added; created",
+    );
+    const afterAtl = JSON.parse(
+      readFileSync(v2ProfilePath, "utf8"),
+    ) as TempProfile;
+    expect(afterAtl.filesystem?.allow).toContain(join(project, ".atl"));
+    expect(updateSkillRegistryGrant(project, v2ProfilePath, false)).toBe(
+      "already registered",
+    );
+
+    // All three V2 calls wrote only the profile path they were given: the V1
     // profile on disk is byte-identical to the snapshot taken before them.
     expect(readFileSync(profilePath).equals(v1Before)).toBe(true);
   });
