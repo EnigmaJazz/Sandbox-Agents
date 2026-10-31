@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+#
+# start-openchamber-v2 — attach OpenChamber 2 to the EXISTING secured OpenCode V2 server (docs/upgrades/opencode-v2.md).
+# OpenChamber must never silently launch a second, unmanaged OpenCode server.
+#
+# NOT INSTALLED — delivery is manual (S17). The V1 launcher (scripts/start-openchamber) is untouched.
+#
+# Behaviour:
+#   1. Requires an OpenChamber 2.x install in its own prefix ($V2_ROOT/openchamber), never the V1-era global one.
+#   2. Requires the V2 server password file (mode 0600). The password is passed to OpenChamber through the environment
+#      only: it is never printed and never on a command line.
+#   3. Verifies exactly one process listens on the V2 port and that it was started under nono (parent chain).
+#   4. Starts OpenChamber in skip-start mode so it attaches to that server instead of spawning its own.
+#
+# Overrides (tests only): OPENCHAMBER_V2_BIN, SS_BIN, PS_BIN.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/secure-launcher-v2.conf
+source "$SCRIPT_DIR/secure-launcher-v2.conf"
+
+OPENCHAMBER_V2_BIN="${OPENCHAMBER_V2_BIN:-$V2_ROOT/openchamber/node_modules/.bin/openchamber}"
+SS_BIN="${SS_BIN:-ss}"
+PS_BIN="${PS_BIN:-ps}"
+V2_PORT_NUMBER="${V2_PORT:?V2_PORT is not set by secure-launcher-v2.conf}"
+
+# --- OpenChamber must be a 2.x install, not the V1-era one -------------------------------------------------------------
+if [[ ! -x "$OPENCHAMBER_V2_BIN" ]]; then
+  echo "missing OpenChamber 2 install: $OPENCHAMBER_V2_BIN" >&2
+  echo "install: npm install --prefix $V2_ROOT/openchamber --save-exact @openchamber/web@2.5.3" >&2
+  exit 4
+fi
+if [[ "$(realpath -m "$OPENCHAMBER_V2_BIN")" == "$(realpath -m "$OPENCHAMBER_BIN")" ]]; then
+  echo "refusing: the V2 launcher must not use the V1 OpenChamber ($OPENCHAMBER_BIN)" >&2
+  exit 4
+fi
+OC_VERSION="$("$OPENCHAMBER_V2_BIN" --version 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+if [[ ! "$OC_VERSION" =~ ^2\.[0-9]+\.[0-9]+ ]]; then
+  echo "refusing: $OPENCHAMBER_V2_BIN reports version '${OC_VERSION:-unknown}', not 2.x" >&2
+  exit 4
+fi
+
+# --- the server password: a protected file, read here, exported only to OpenChamber -----------------------------------
+if [[ ! -f "$V2_PASSWORD_FILE" ]]; then
+  echo "missing V2 server password file: $V2_PASSWORD_FILE" >&2
+  exit 4
+fi
+if [[ "$(stat -c %a "$V2_PASSWORD_FILE")" != "600" ]]; then
+  echo "refusing: $V2_PASSWORD_FILE must be mode 600" >&2
+  exit 4
+fi
+SERVER_PASSWORD="$(head -1 "$V2_PASSWORD_FILE")"
+if [[ -z "$SERVER_PASSWORD" ]]; then
+  echo "refusing: $V2_PASSWORD_FILE is empty" >&2
+  exit 4
+fi
+
+# --- find the secured server (exactly one, started under nono) --------------------------------------------------------
+listener_pids="$("$SS_BIN" -lntp "sport = :$V2_PORT_NUMBER" 2>/dev/null | awk 'NR>1 {print $NF}' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
+mapfile -t pids <<<"$listener_pids"
+
+if [[ ${#pids[@]} -eq 0 || -z "${pids[0]}" ]]; then
+  echo "no OpenCode V2 server found on ${V2_HOSTNAME}:${V2_PORT_NUMBER}" >&2
+  echo "start it first: systemctl --user start secure-opencode-v2.service" >&2
+  exit 5
+fi
+if [[ ${#pids[@]} -gt 1 ]]; then
+  echo "more than one process listening on :${V2_PORT_NUMBER} — refusing" >&2
+  printf '  %s\n' "${pids[@]}" >&2
+  exit 5
+fi
+
+SERVER_PID="${pids[0]}"
+PARENT_PID="$("$PS_BIN" -o ppid= -p "$SERVER_PID" | tr -d ' ')"
+CHAIN_OK=0
+for _ in 1 2 3 4 5 6; do
+  if [[ -z "$PARENT_PID" || "$PARENT_PID" == "0" ]]; then
+    break
+  fi
+  PARENT_CMD="$("$PS_BIN" -o comm= -p "$PARENT_PID" | tr -d ' ' || true)"
+  if [[ "$PARENT_CMD" == *nono* ]]; then
+    CHAIN_OK=1
+    break
+  fi
+  PARENT_PID="$("$PS_BIN" -o ppid= -p "$PARENT_PID" | tr -d ' ' || true)"
+done
+if [[ "$CHAIN_OK" != "1" ]]; then
+  echo "OpenCode V2 server on :${V2_PORT_NUMBER} was NOT started under nono — refusing to attach" >&2
+  exit 5
+fi
+
+echo "attaching OpenChamber $OC_VERSION to the secured OpenCode V2 server pid ${SERVER_PID} (${V2_HOSTNAME}:${V2_PORT_NUMBER})"
+export OPENCODE_SKIP_START=true
+export OPENCODE_HOST="http://${V2_HOSTNAME}:${V2_PORT_NUMBER}"
+export OPENCODE_PORT="$V2_PORT_NUMBER"
+export OPENCODE_SERVER_PASSWORD="$SERVER_PASSWORD"
+exec "$OPENCHAMBER_V2_BIN" "$@"

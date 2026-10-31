@@ -1,0 +1,27 @@
+# Secure OpenChamber 2 web server for the OpenCode V2 stack (user systemd unit template).
+# NOT INSTALLED by any repo script (S17): review, then copy to ~/.config/systemd/user/openchamber-secure-v2.service.
+#
+# It replaces openchamber-secure.service (V1): both serve the same port, so Conflicts= stops whichever is running.
+# Web UI password: the protected env file ~/.config/openchamber/secure.env (chmod 600), key OPENCHAMBER_UI_PASSWORD (shared with V1).
+# The V2 server password is read by the launcher from ~/.local/share/opencode-v2/server-password and never appears here.
+#
+# One-time install of OpenChamber 2 into its own prefix (the V1-era global install stays as the rollback):
+#   npm install --prefix ~/.local/share/opencode-v2/openchamber --save-exact @openchamber/web@2.5.3
+[Unit]
+Description=Secure OpenChamber 2 web server (OpenCode V2)
+PartOf=graphical-session.target
+Requires=secure-opencode-v2.service
+After=secure-opencode-v2.service network-online.target
+Conflicts=openchamber-secure.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+EnvironmentFile=-%h/.config/openchamber/secure.env
+# Docker Open WebUI owns port 3000; Tailscale :8446 proxies to 127.0.0.1:8789.
+ExecStart=%h/agent-sandbox-integration/scripts/start-openchamber-v2 serve --foreground --port 8789
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
