@@ -78,7 +78,9 @@ export const reviewReadToolSpecs = {
       "The broker returns the raw envelope unchanged. Preflight for a committed range: " +
       "omit lineage; pass agent, baseRef (last reviewed boundary), committedOnly true, " +
       "lenses (comma list of risk|resilience|readability|reliability) and lensesReason, " +
-      "and intendedUntrackedSelection exactly as the provider returned it. After start, " +
+      "and intendedUntrackedSelection only if the provider output gives its exact value " +
+      "(if STATUS rejects it, use projection staged and declare untrackedScope exclude " +
+      "at start; do not guess shapes). After start, " +
       "pass lineage and repositoryContext from the previous result. A status call after " +
       "acknowledgement can fail benignly. Returns JSON.",
     args: {
