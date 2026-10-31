@@ -231,6 +231,14 @@ describe("registration also grants .git in the V2 profile", () => {
       readFileSync(v2ProfilePath, "utf8"),
     ) as TempProfile;
     expect(afterAtl.filesystem?.allow).toContain(join(project, ".atl"));
+    // The .atl write merged into the allow list: the earlier grants survive it.
+    expect(afterAtl.filesystem?.allow).toEqual(
+      expect.arrayContaining([
+        "/existing/.atl",
+        join(project, ".codegraph"),
+        join(project, ".git"),
+      ]),
+    );
     expect(updateSkillRegistryGrant(project, v2ProfilePath, false)).toBe(
       "already registered",
     );
