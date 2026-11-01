@@ -4,6 +4,10 @@
 
 `sandbox_edit` must work when it is the first worker-touching operation in a session, and a write into a directory that does not yet exist must succeed.
 
+## Status
+
+**IMPLEMENTED — T1 and T2 committed; T3/T4 (recorded test totals and reviewability receipt) still open.** Reconciled 2026-11-01 against the working tree, not against this file's own Progress note, which had gone stale.
+
 ## Problem and verified journal evidence
 
 Broker journal evidence from 2026-09-30:
@@ -86,8 +90,17 @@ Forecast: approximately 60 authored additions and 15 authored deletions across t
 
 ## Progress
 
-T1–T4 not started.
+- **T1 — done.** `sandbox_edit` now calls `ensureWorker` before its internal read: `opencode/plugins/lib/tool-specs-sandbox.ts:96` ensures, `:98` reads. The read paths themselves are unchanged, so the fail-closed contract remains intact for a read that is genuinely the first operation.
+- **T2 — done.** Committed as `2e531a6` — "fix(broker): create a write target's parent before moving into it", which is the temp-then-`mv` path named in the journal evidence above.
+- **T3 — open as a record.** The tests for both defects are not named in this tracker and no totals were transcribed.
+- **T4 — open.** No reviewability receipt was recorded here.
+
+Observed 2026-11-01 in this session: `sandbox_edit` still reported a successful edit that the worktree did not show. That symptom is *not* covered by T1 or T2 — it is a mutation-visibility defect in a different path — and must not be treated as this tracker regressing.
 
 ## Next step
 
-Implement T1–T4 as one bounded change, then return the reviewability receipt.
+Name and run the tests for both defects, record exact totals and the reviewability receipt under T3/T4, then close this tracker and move it to `odd/tasks/archive/`. Track the mutation-visibility symptom separately.
+
+
+## Revisions
+- r1 2026-11-01T17:54:58Z gentle-orchestrator: Reconcile status: T1/T2 shipped, T3/T4 open
