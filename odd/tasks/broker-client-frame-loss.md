@@ -4,6 +4,10 @@
 
 A broker response that cannot be matched to a pending request must fail that caller promptly instead of being silently discarded, and a large response must arrive intact rather than stalling the caller until its timeout.
 
+## Status
+
+**IMPLEMENTED — T1–T3 committed in `df90b54`; T4 (recorded checks and reviewability receipt) still open.** Reconciled 2026-11-01 against the working tree, not against this file's own Progress note, which had gone stale.
+
 ## Problem — observed evidence
 
 - The broker logged `{"operation":"readFile","result":"ok","durationMs":18.079972}` while the plugin raised `broker request 'readFile' timed out` at the same moment — 30 seconds later, since `readFile` uses the client's 30 s default (`broker-client.ts:93`; it is absent from `OPERATION_TIMEOUT_MS` at `:64-84`). **Observed: the broker completed the read and the client never received the response.**
@@ -73,8 +77,17 @@ Forecast: approximately **200 authored changed lines** (additions plus deletions
 
 ## Progress
 
-T1–T4 not started.
+- **T1 — done.** A frame that fails to parse no longer vanishes silently: the framer logs a bounded "discarded malformed response frame" diagnostic (`broker-client.ts:228`) and attempts recovery of the id where it can (`:224`).
+- **T2 — done.** An unmatched id is diagnosable rather than a silent no-op, and the drop path reports whether the discarded frame was its own (`:321`).
+- **T3 — done.** The framer now accumulates raw bytes in a `Buffer` (`:152`, `:209`) and concatenates before decoding, so a multibyte character split across chunks survives.
+- **T4 — open.** The suite result for `df90b54` was never transcribed into this tracker, and no reviewability receipt is recorded here. Re-run `bun --cwd broker test` and record exact totals before closing.
+
+Commit evidence: `df90b54` — "fix(broker-client): fail a caller whose response frame cannot be matched".
 
 ## Next step
 
-Implement T1–T4 as one bounded change, then return the reviewability receipt.
+Run `bun --cwd broker test` and the build check, record the exact totals and the reviewability receipt under T4, then close this tracker and move it to `odd/tasks/archive/`.
+
+
+## Revisions
+- r1 2026-11-01T17:52:17Z gentle-orchestrator: Reconcile status: T1-T3 shipped in df90b54, T4 open
