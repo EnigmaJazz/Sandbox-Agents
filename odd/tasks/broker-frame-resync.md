@@ -4,16 +4,20 @@
 
 One response that never completes must not break a session: the client must resynchronise its framing after a timeout, a short or failed write must be visible rather than swallowed, and the next occurrence must name its own cause.
 
+## Status
+
+**IMPLEMENTED — T1–T3 committed in `7be0d07`; T4 (recorded checks and reviewability receipt) still open.** Reconciled 2026-11-01 against the working tree, not against this file's own Progress note, which had gone stale.
+
 ## Problem — observed evidence
 
 - After the previous change (`df90b54`, which made the client's silent drop paths fail loudly), the user reports that a large-file `readFile` still times out, and that once a large file has timed out in a session, smaller files also start failing.
 - This poisoning is the signature of a line framer retaining a partial frame: the large response never completes, so the caller waits out its 30 s timeout; retained bytes are then prepended to every later response, and the next newline terminates a corrupted composite, so smaller reads fail too.
 - The previous fix was necessary but insufficient: it made *unparseable* frames visible, but a frame that never *completes* produces no parse failure, so nothing was caught and the caller still timed out.
-- Broker-side operation evidence is healthy (`readFile ok` in 18 ms), and `respond` writes `JSON.stringify(resp) + "\\n"` in one call, which is structurally correct framing. The cause of the incomplete frame is **not established**.
+- Broker-side operation evidence is healthy (`readFile ok` in 18 ms), and `respond` writes `JSON.stringify(resp) + "\n"` in one call, which is structurally correct framing. The cause of the incomplete frame is **not established**.
 
 ## Not established
 
-Why the large frame never completes is unknown. A partial write, a capped write, and a lost tail are all consistent with the evidence. Do not assert any of them as the cause. Bun does not buffer writes internally: in-memory Bun 1.3.14 abstract-Unix-socket tests delivered only 219 KB of 300 KB and 600 KB writes, matching the kernel send-buffer ceiling and demonstrating transport truncation. The queued-write/drain fix is owned by `odd/tasks/socket-write-drain.md`. The residual-`rx` diagnostic exists to distinguish a large residual (frame truncated in transit / send-side evidence) from an empty or tiny residual (nothing arrived / response was never written); neither observation alone should be overstated as proof of the underlying cause.
+Why the large frame never completes is unknown. A partial write, a capped write, and a lost tail are all consistent with the evidence. Do not assert any of them as the cause. Bun does not buffer writes internally: in-memory Bun 1.3.14 abstract-Unix-socket tests delivered only 219 KB of 300 KB and 600 KB writes, matching the kernel send-buffer ceiling and demonstrating transport truncation. The queued-write/drain fix is owned by `odd/tasks/archive/socket-write-drain.md`. The residual-`rx` diagnostic exists to distinguish a large residual (frame truncated in transit / send-side evidence) from an empty or tiny residual (nothing arrived / response was never written); neither observation alone should be overstated as proof of the underlying cause.
 
 ## Scope
 
@@ -64,7 +68,12 @@ Forecast: approximately **250 authored changed lines** (additions plus deletions
 
 ## Progress
 
-T1–T4 not started.
+- **T1 — done.** `opencode/plugins/lib/broker-client.ts` accumulates into a retained `Buffer` (`:152`, `:209`, `:213`) and clears it on timeout (`:266`, `:273`, `:323`), so a later response on the same client parses.
+- **T2 — done.** The malformed/unmatched path now logs a bounded diagnostic (`:224`, `:228`) instead of dropping the frame silently, and reports `discarded: own` (`:321`).
+- **T3 — done.** The timeout path records the retained residual rather than only resetting it.
+- **T4 — open.** The suite result for `7be0d07` was never transcribed into this tracker, and no reviewability receipt is recorded here. Re-run `bun --cwd broker test` and record exact totals before closing.
+
+Commit evidence: `7be0d07` — "fix(broker): resync the client framer after a timeout and surface short writes"; `f72a188` — "docs(odd): record the broker frame resync task record".
 
 ## Route and trigger evidence
 
@@ -74,4 +83,8 @@ T1–T4 not started.
 
 ## Next step
 
-Implement T1–T4 as one bounded change, then return the reviewability receipt.
+Run `bun --cwd broker test` and the build check, record the exact totals and the reviewability receipt under T4, then close this tracker and move it to `odd/tasks/archive/`.
+
+
+## Revisions
+- r1 2026-11-01T17:52:06Z gentle-orchestrator: Reconcile status: T1-T3 shipped in 7be0d07, T4 open
