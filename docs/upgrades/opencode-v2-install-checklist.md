@@ -1,7 +1,9 @@
 # OpenCode V2 install checklist (owner steps, S17)
 
-Everything below is YOURS to do: the V2 files are S17 paths, so you read the exact bytes and install them. Nothing here has been
-installed. Target version **2.2.2** (decided 2026-10-29). V1 (port 4096, `~/.opencode`, `~/.config/opencode`) is never touched by any step.
+**Status: the cutover is complete (owner-attested, before 2026-11-01).** This page is retained as the completed cutover record and as the reproducible fresh-install procedure; it is no longer a list of pending work. Boxes ticked for the first time on 2026-11-01 say `owner-attested`; every other tick is an earlier pre-cutover record. Nothing is ticked for which neither the repository nor the owner attestation provides support. Target version **2.2.2** (decided 2026-10-29). V1 (port 4096, `~/.opencode`, `~/.config/opencode`) is retained for rollback and is not the working build.
+
+The V2 files are S17 paths: the owner reads the exact bytes and installs them. Ongoing plugin and config updates after cutover are described in `docs/upgrades/opencode-v2-maintenance.md` (being written; it becomes the ongoing-update reference once it lands).
+
 Branch: `refactor/p0-shared-tool-table`. Review base: `2d6e222` (the commit before the V2 work). Facts and evidence:
 `docs/opencode-v2-discovery.md`; per-workstream notes: `docs/upgrades/opencode-v2.md`.
 
@@ -18,7 +20,7 @@ git diff --stat 2d6e222..HEAD -- nono opencode/plugins-v2 scripts
 git diff 2d6e222..HEAD -- nono opencode/plugins-v2 scripts      # the exact bytes you are installing
 ```
 Read in this order, and stop at anything you do not understand:
-1. `nono/profile/opencode-v2-secure.json`: the confinement. Check: port 4097; `$HOME/.claude` and `$HOME/.agents` denied; no V1 root granted; no `.git` write grant; the V2 `config` root is `read` only (so the agent cannot rewrite its own guard).
+1. `nono/profile/opencode-v2-secure.json`: the confinement. Check: port 4097; `$HOME/.claude` and `$HOME/.agents` denied; no V1 root granted; the V2 `config` root is `read` only (so the agent cannot rewrite its own guard). **Correction 2026-11-01:** the profile DOES grant project `.git` write, as a documented trade-off — the profile header (`nono/profile/opencode-v2-secure.json:5`) records that the gentle-ai review transport writes its frozen-git temp dir inside `.git` and that without it every lens refuses with `binding_mismatch`; `broker/src/gitguard.ts:4` states the same premise for the host-side guard. The compensating control is that the guard neutralizes or refuses execution-bearing repository-local git config at `spawnArgv`.
 2. `scripts/secure-launcher-v2.conf` and `scripts/start-secure-opencode-v2`: the password comes from a 0600 file into the environment only; refusal rules; V1 binary refused.
 3. `opencode/plugins-v2/00-routing-guard.ts` and `lib/guard-core.ts`: what is allowed or denied on every tool call.
 4. `opencode/plugins-v2/sandbox-tools.ts` and `lib/v2-adapter.ts`: the sandbox tools and the approval mapping (`ctx.permission.assert`).
@@ -41,8 +43,8 @@ ls -l ~/.local/share/opencode-v2/prefix/node_modules/@opencode/cli-linux-x64/bin
 ```
 **Let the install finish (about 2 minutes) and do not interrupt it.** The platform binaries are about 250 MB each; an interrupted extraction leaves truncated files that crash with `Bus error`, and re-running `npm install` over them fails in the vendor postinstall ("Failed to install OpenCode") because it verifies the binary with `--version`. This happened once on 2026-10-29. If it does: `rm -r ~/.local/share/opencode-v2/prefix` and install again from scratch. If a future npm blocks the postinstall, `npm install-scripts approve @opencode/cli` is the documented fix.
 Never run `opencode upgrade --major` or the curl installer: both replace V1.
-- [ ] Create the server password (0600, never printed): `umask 077; head -c 24 /dev/urandom | base64 > ~/.local/share/opencode-v2/server-password`
-- [ ] Make `zod` resolvable from the V2 config root: `mkdir -p ~/.local/share/opencode-v2/config/opencode && npm install --prefix ~/.local/share/opencode-v2/config/opencode zod`
+- [x] Create the server password (0600, never printed): `umask 077; head -c 24 /dev/urandom | base64 > ~/.local/share/opencode-v2/server-password` — owner-attested.
+- [x] Make `zod` resolvable from the V2 config root: `mkdir -p ~/.local/share/opencode-v2/config/opencode && npm install --prefix ~/.local/share/opencode-v2/config/opencode zod` — owner-attested.
 
 ## 4. Install the files (dry-run first)
 ```bash
@@ -62,28 +64,30 @@ python3 scripts/derive-v2-config.py --source global-config --sandbox-repo ~/agen
   --target ~/.local/share/opencode-v2/config/opencode --apply    # writes; backs up differing files; never deletes
 ```
 It writes `opencode.json` (plugin list as V2 `plugins` with `~x.y.z` ranges; the auto-update fork and `opencode-usage-total` dropped), `cli.json`, `AGENTS.md`, `systematic.jsonc`, `rate-limit-fallback.json`, `prompts/`, `skills/`, the repo's dual-mode `plugins/`, and a copy of the rate-limit fork under `vendor/`. Permissions are carried over from V1 unchanged.
-- [ ] Read the `note:` and `WARNING:` lines it prints. Decided: `opencode-usage-total` is retired on V2; the three live-only prompts are now in `global-config/prompts/`; the vision bridge is in `global-config/mcp/vision-bridge/` and runs from the V2 root with V2-owned auth and log paths. One warning remains: `gentle-orchestrator` has `host_review_start: allow` (V2 will not prompt for it).
-- [ ] The vision bridge reads its OpenAI token from the V2 data root (`~/.local/share/opencode-v2/data/opencode/auth.json`), not from V1's `auth.json` (the V2 profile does not grant the V1 data directory, deliberately). Log V2 into OpenAI once after the first start, or the bridge has no OpenAI leg.
+- [x] Read the `note:` and `WARNING:` lines it prints. Decided: `opencode-usage-total` is retired on V2; the three live-only prompts are now in `global-config/prompts/`; the vision bridge is in `global-config/mcp/vision-bridge/` and runs from the V2 root with V2-owned auth and log paths. One warning remains: `gentle-orchestrator` has `host_review_start: allow` (V2 will not prompt for it).
+- [ ] The vision bridge reads its OpenAI token from the V2 data root (`~/.local/share/opencode-v2/data/opencode/auth.json`), not from V1's `auth.json` (the V2 profile does not grant the V1 data directory, deliberately). Log V2 into OpenAI once after the first start, or the bridge has no OpenAI leg. **Owner to confirm** whether this login has been done on the V2 data root; the repository cannot show it.
 - [ ] The three sandbox fragments staged in step 4 are NOT merged by this script. The V1 policy already denies the sandbox and host tools globally and grants them per agent, which is stricter than the fragments; the fragments are the fallback reference. Do not merge them on top without comparing.
-- [ ] Check the running server (after step 7's start): one command, read-only, prints PASS or FAIL per check and never prints the password:
+- [x] Check the running server (after step 7's start): one command, read-only, prints PASS or FAIL per check and never prints the password:
 ```bash
 cd ~/agent-sandbox-integration && bun scripts/check-v2-stack.ts
 ```
-  It reads `~/.local/share/opencode-v2/server-password`, asks the server at `http://127.0.0.1:4097` for its agents (`debug agents`) and plugins (`plugin list`), and checks: the orchestrator cannot use host `shell` or `edit`; secret reads are denied; the six `asi-review-*` relay agents exist as hidden subagents; all ten plugins are loaded (aft-opencode, astra-sol-upgrade, opencode-magic-context, rate-limit-fallback-mapped, systematic, systematic-routing-guard, workflow-health-check, sandbox-tools, routing-guard, reviewer-relay-transport) and none failed. Exit code 0 only if everything passes. The first run after a start waits up to two minutes while the packages install; options: `--wait SECONDS`, `--server URL`. A fresh install resolves each `~` range to the newest patch, so versions can be ahead of the reviewed pins (magic-context came up as 0.49.30); that is expected.
+  It reads `~/.local/share/opencode-v2/server-password`, asks the server at `http://127.0.0.1:4097` for its agents (`debug agents`) and plugins (`plugin list`), and checks: the orchestrator cannot use host `shell` or `edit`; secret reads are denied; the six `asi-review-*` relay agents exist as hidden subagents; all ten plugins are loaded (aft-opencode, astra-sol-upgrade, opencode-magic-context, rate-limit-fallback-mapped, systematic, systematic-routing-guard, workflow-health-check, sandbox-tools, routing-guard, reviewer-relay-transport) and none failed. Exit code 0 only if everything passes. The first run after a start waits up to two minutes while the packages install; options: `--wait SECONDS`, `--server URL`. A fresh install resolves each `~` range to the newest patch, so versions can be ahead of the reviewed pins (magic-context came up as 0.49.30); that is expected. It checks tool IDs, agents and plugin names, **not file hashes**, so byte-level deployment verification is still open (tracked in `docs/TODO.md`, Tier 2).
 
 ## 6. Install the unit (S17: `systemd-user/` is a protected path)
 ```bash
 cp ~/agent-sandbox-integration/docs/secure-opencode-v2.service.template ~/.config/systemd/user/secure-opencode-v2.service
-systemctl --user daemon-reload          # do NOT enable yet; it Conflicts= with secure-opencode.service (V1)
+systemctl --user daemon-reload          # do NOT enable both units: it Conflicts= with secure-opencode.service (V1)
 ```
 The guarded update job templates are `~/ai-workspace/workflow_optimisation/docs/systemd/v2-plugin-autoupdate.{service,timer}.template`: install them only after step 7 works.
 
-## 7. First V2 start (this is the cutover rehearsal; V1 must be stopped, they conflict)
+## 7. First V2 start (this was the cutover step; V1 must be stopped, they conflict)
 ```bash
 systemctl --user stop secure-opencode.service        # V1 off (rollback: start it again)
 systemctl --user start secure-opencode-v2.service
 journalctl --user -u secure-opencode-v2.service -n 50
 ```
+Status: steps 3–7 were performed by the owner before 2026-11-01 (owner-attested). The manual gates below are the user-owned acceptance list in `docs/manual-verification.md`; this page does not certify them, and which gates have been signed off is an owner record.
+
 Then run the manual gates on V2 (the list in `docs/upgrades/opencode-v2.md`, "Cutover" step 2): host read routing and mutation blocking, lazy worker activation, `sandbox_edit`, `sandbox_apply` approval with the full preview, a `host_git_commit` approval, native review end to end (needs the broker and `gentle-ai` v4), Code Mode cannot bypass approval, no `~/.claude` content visible.
 After the first TUI start: confirm `cli.json` has no V1-only plugins, run `herdr integration status`.
 
