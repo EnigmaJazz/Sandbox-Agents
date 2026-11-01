@@ -17,43 +17,37 @@ OpenChamber environment, per the specification in `SYSTEM_PROMPT.md`.
   git snapshot/result boundary (§17–§20: synthetic baseline under
   `refs/opencode-sandbox/baseline/<sessionID>`, results under
   `.../result/<sessionID>`), structured read-only host API (§8).
-- **OpenCode plugins** (`opencode/plugins/`): explicit `sandbox_*` tools with
-  lazy activation (§11–§12) + routing guard that fails closed after
-  activation (§13) + permission fragment (§14).
-- **nono** (`nono/`): child profile `opencode-secure` sandboxing the host
-  OpenCode process (control dir RW, project roots RO, §15).
-- **Launchers + unit** (`scripts/`, `systemd-user/`): secured
-  `opencode serve` on 127.0.0.1:4096, OpenChamber attach (§23), broker
-  systemd user unit (§24), idempotent installer + rollback.
+- **OpenCode plugins** (`opencode/plugins-v2/`): V2 adapters and guard for the
+  working OpenCode V2 stack; shared host-neutral plugin logic remains under
+  `opencode/plugins/lib/`. V1 sources under `opencode/plugins/` are retained
+  for rollback.
+- **nono** (`nono/`): V2 profile `opencode-v2-secure` confines the working
+  OpenCode server; the V1 `opencode-secure` profile is retained for rollback.
+- **Launchers + units** (`scripts/`, `docs/`): V2 server on 127.0.0.1:4097,
+  V2 systemd template, installer and rollback; the V1 server on port 4096 is
+  retained only for rollback.
 - **CLI** (`cli/sandboxctl`): doctor/list/status/metrics/diff/keep/discard/
   stop/cleanup; apply requires interactive confirmation (§25).
 - **Tests**: `broker/tests` (offline unit tests incl. the §28 attack table),
   `tests/integration|security|acceptance` (gated suites, skipped by default).
 
-## Gate status (§27)
+## Deployment status
 
-| Gate | Title | Status |
-|---|---|---|
-| 0 | Discovery complete | ✅ done (docs/discovery-report.md) |
-| 1 | Code generated, nothing installed | **current — ready for user review** |
-| 2 | nono profile generated and validated | pending |
-| 3 | Microsandbox manually verified | pending |
-| 4 | Broker passes unit/security tests | pending |
-| 5 | Throwaway-project lazy sandbox test | pending |
-| 6 | Git result round-trip | pending |
-| 7 | OpenAI OAuth/subagent isolation | pending |
-| 8 | Parallel worker isolation | pending |
-| 9 | OpenChamber integration | pending |
-| 10 | Adversarial security acceptance | pending |
-
-Agents do not self-certify gates (docs/manual-verification.md).
+The OpenCode V2 cutover is complete (owner-attested, before 2026-11-01):
+V2 2.2.2 is the working build, served on 127.0.0.1:4097 by
+`secure-opencode-v2.service` under the `opencode-v2-secure` nono profile.
+V1 1.18.33 on port 4096 is retained only for rollback. See
+[`docs/upgrades/opencode-v2.md`](docs/upgrades/opencode-v2.md) for repository
+status and [`docs/manual-verification.md`](docs/manual-verification.md) for
+user-owned manual gates. Agents do not self-certify gates.
 
 ## Quick start (verification only)
 
 ```sh
-cd broker && bun test        # 87 unit tests, no msb/nono/opencode needed
+cd broker && bun test        # offline unit suite; no msb/nono/opencode needed
 bun build --target=bun src/main.ts --outdir /tmp/build-check
-nono profile validate nono/profile/opencode-secure.json
+cd ..
+nono profile validate nono/profile/opencode-secure.json  # retained V1 rollback profile
 nono run --dry-run --profile nono/profile/opencode-secure.json -- true
 ```
 
@@ -63,7 +57,7 @@ nono run --dry-run --profile nono/profile/opencode-secure.json -- true
 AGENTS.md  README.md  SECURITY.md  .gitignore
 broker/    broker/src   broker/tests      # broker + unit tests
 cli/                                       # sandboxctl
-opencode/  plugins/  tools/  prompts/  config-fragments/
+opencode/  plugins/  plugins-v2/  tools/  prompts/  config-fragments/
 nono/      profile/
 systemd-user/
 scripts/                                   # launchers, installer, rollback

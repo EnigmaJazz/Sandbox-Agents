@@ -1,16 +1,18 @@
 # Manual verification — Gates 0–10
 
-Status: **Gate 1 done (code generated, nothing installed); Gates 0 done,
-2–10 pending.** Per SYSTEM_PROMPT.md §27, each gate stops for the USER to
-perform/review the checklist. Agents must never self-certify a manual gate.
+Status: the OpenCode V2 cutover is complete (owner-attested, before
+2026-11-01). Manual gate sign-off remains user-owned; do not infer completion
+from this document. The V2 gates to perform or review are listed in
+[`docs/upgrades/opencode-v2.md`](upgrades/opencode-v2.md), **Cutover, step 2**.
+Per SYSTEM_PROMPT.md §27, agents must never self-certify a manual gate.
 
 ## Gate 0 — Discovery ✅ (completed)
 
-`docs/discovery-report.md` (2026-08-15): opencode 1.18.18, nono 0.73.0,
+Historical discovery snapshot `docs/discovery-report.md` (2026-08-15): opencode 1.18.18, nono 0.73.0,
 msb 0.6.9, OpenChamber 1.18.4, host 16 CPU / 29 GiB RAM, KVM OK, ports,
 profiles, plugin API verified. **No changes were made during discovery.**
 
-## Gate 1 — Code generated, nothing installed (THIS gate)
+## Gate 1 — Initial repository review (historical checklist)
 
 Verify:
 
@@ -26,7 +28,7 @@ Checklist:
 - [x] No files created outside this repository
 - [x] No sudo/install/service/systemd/config changes performed
 - [x] No credentials or tokens anywhere in the repo
-- [ x] `bun test` passes (87 unit tests at Gate 1)
+- [ x] `bun test` record from the initial repository review
 - [x] nono profile validates: `nono profile validate nono/profile/opencode-secure.json`
 - [x] nono dry-run shows the intended capability table:
       `nono run --dry-run --profile nono/profile/opencode-secure.json -- true`

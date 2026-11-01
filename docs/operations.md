@@ -1,7 +1,40 @@
 # Operations — broker, logging, metrics, troubleshooting
 
-Status: **Gate 1** — none of this is live yet. These procedures apply once
-the broker runs as the user systemd service (Gate 4+).
+Status: the OpenCode V2 cutover is complete (owner-attested, before
+2026-11-01): V2 2.2.2 is the working build at 127.0.0.1:4097, served by
+`secure-opencode-v2.service` under `opencode-v2-secure` (owner-attested; see
+`docs/upgrades/opencode-v2.md`). The repository sources for the launcher,
+installer, rollback, health check and service template are verified below.
+Whether the separate broker unit is installed is not asserted here.
+
+## OpenCode V2 service
+
+The unit template is `docs/secure-opencode-v2.service.template`; its
+`ExecStart` runs `scripts/start-secure-opencode-v2`. The installer and rollback
+scripts are `scripts/install-user-files-v2` and `scripts/rollback-v2`.
+
+```sh
+systemctl --user status secure-opencode-v2.service
+journalctl --user -u secure-opencode-v2.service -n 50
+bun scripts/check-v2-stack.ts
+```
+
+`check-v2-stack.ts` is read-only. Its supported options are `--server URL`,
+`--opencode PATH`, `--password-file FILE` and `--wait SECONDS`; defaults and
+behavior are documented in the script header. For rollback, stop V2 and start
+the retained V1 unit, then preview the V2 file removal before applying it:
+
+```sh
+systemctl --user stop secure-opencode-v2.service
+systemctl --user start secure-opencode.service
+bash scripts/rollback-v2 --dry-run
+bash scripts/rollback-v2 --apply
+```
+
+`rollback-v2` removes only files that still match the repository copy; it does
+not remove V2 data, config or the password file. The installer's default mode
+is dry-run; `bash scripts/install-user-files-v2 --apply` writes the reviewed V2
+files. The scripts and accepted flags are defined in their source.
 
 ## Running the broker
 
@@ -9,7 +42,7 @@ the broker runs as the user systemd service (Gate 4+).
 # foreground (development)
 cd broker && bun src/main.ts
 
-# as a user service (after Gate 4 review; scripts/install-user-files copies the unit)
+# as a user service (when installed; scripts/install-user-files copies the unit)
 systemctl --user daemon-reload
 systemctl --user enable --now sandbox-broker
 systemctl --user status sandbox-broker

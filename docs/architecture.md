@@ -1,8 +1,11 @@
 # Architecture — Agentic Sandbox Integration
 
-Status: **Gate 1 (code generated, nothing installed)** — see
-`docs/manual-verification.md` for gate status. This document describes the
-intended system per SYSTEM_PROMPT.md §6–§20.
+Status: **OpenCode V2 cutover complete (owner-attested, before 2026-11-01).**
+The working build is V2 2.2.2 on 127.0.0.1:4097 under
+`secure-opencode-v2.service` and the `opencode-v2-secure` nono profile
+(owner-attested; also recorded in `docs/upgrades/opencode-v2.md`). V1 1.18.33
+on port 4096 is retained only for rollback (same source). Manual gate
+sign-off remains user-owned; see `docs/manual-verification.md`.
 
 ## Components
 
@@ -12,11 +15,11 @@ intended system per SYSTEM_PROMPT.md §6–§20.
               ┌────────────┴────────────┐
               │                         │
            nono                    sandbox broker (Bun, Unix socket)
-           (opencode-secure             │
+           (opencode-v2-secure          │
             profile)                    ├── msb worker A  (project X)
               │                         ├── msb worker B  (project Y)
-          OpenCode serve                └── msb worker C
-          (127.0.0.1:4096)                     │
+          OpenCode V2 serve             └── msb worker C
+          (127.0.0.1:4097)                     │
               │                                └─ git baseline B → edits → result C
       ┌───────┼──────────┐                     (refs/opencode-sandbox/baseline|result)
       │       │          │
@@ -28,13 +31,15 @@ intended system per SYSTEM_PROMPT.md §6–§20.
 | Component | Where | Responsibility | Spec |
 |---|---|---|---|
 | `broker/` (Bun TS) | `~/.local/state/opencode-sandbox` state; socket `$XDG_RUNTIME_DIR/opencode-sandbox-broker.sock` (0600) | Trusted policy: session state machine, resource budget, worker lifecycle, git snapshot/result boundary, structured host reads | §6–§10, §17–§22, §26 |
-| `opencode/plugins/sandbox-tools.ts` | OpenCode plugin dir (Gate 2+) | Stage A `sandbox_*` tools; lazy activation | §11–§12 |
-| `opencode/plugins/routing-guard.ts` | OpenCode plugin dir (Gate 2+) | Read routing after activation (S5); blocks host mutation tools; system-prompt rule injection | §13–§14 |
-| `opencode/config-fragments/sandbox-permissions.jsonc` | merged manually | Permission deny/allow map; secret-read denies | §14 |
-| `nono/profile/opencode-secure.json` | `~/.config/nono/profiles/` (Gate 2+) | Sandbox the host OpenCode process: control dir RW, project roots RO | §15 |
-| `scripts/start-secure-opencode` | run by user | `nono run --profile opencode-secure -- opencode serve --hostname 127.0.0.1 --port 4096` | §15, §23 |
-| `scripts/start-openchamber` | run by user | Attach OpenChamber to the existing secured server (never a second server) | §23 |
-| `systemd-user/sandbox-broker.service` | user unit (Gate 4+) | Keep the broker alive; restart on failure | §24 |
+| `opencode/plugins-v2/` | V2 plugin sources; installed under the V2 config root by `scripts/install-user-files-v2` | V2 sandbox tools and routing guard | §11–§14 |
+| `opencode/plugins/lib/` | Shared host-neutral plugin logic | Tool specs and broker client shared by the V1 and V2 adapters | §11–§14 |
+| `nono/profile/opencode-v2-secure.json` | V2 profile source; installed under `~/.config/nono/profiles/` | Constrains the working OpenCode V2 server | §15 |
+| `scripts/start-secure-opencode-v2` | V2 launcher, used by the service template | Starts V2 on 127.0.0.1:4097 under the V2 profile | §15, §23 |
+| `docs/secure-opencode-v2.service.template` | User-reviewed V2 unit template | Runs the V2 launcher as a user service | §24 |
+| `scripts/install-user-files-v2` / `scripts/rollback-v2` | V2 install and rollback pair | Installs reviewed V2 files or removes unchanged repo copies | §27 |
+| `scripts/start-secure-opencode` and `nono/profile/opencode-secure.json` | V1 rollback sources | Retained for rollback; V1 serves port 4096 | §15, §23 |
+| `scripts/start-openchamber-v2` | V2 launcher, if OpenChamber 2 is attached | Attaches OpenChamber to the existing V2 server, not a second server | §23 |
+| `systemd-user/sandbox-broker.service` | Broker user-unit source | Keep the broker alive; restart on failure. Installed state is not asserted here. | §24 |
 | `cli/sandboxctl` | user | Broker inspection/ops; apply requires interactive confirmation | §25 |
 
 ## Data flow (per OpenCode session)

@@ -57,17 +57,20 @@ Requests, claims and responses are write-once files published by exclusive hard 
 relaying a stored advisor response (`advisor-relay.ts`), never free-form input. Plan and contract:
 `docs/advisor/`.
 
-**OpenCode plugins (`opencode/plugins/`)**: `sandbox-tools.ts` registers the `sandbox_*` and `host_*`
-tools and talks to the broker through `lib/broker-client.ts` (also used by `cli/sandboxctl`);
-`routing-guard.ts` fails closed after a session activates; `reviewer-relay-transport.ts` carries
-native review lenses. The repository copy is the source; the user installs it with
-`scripts/install-user-files`, so a committed plugin change is not live until then, and a broker
-change is not live until the user restarts the broker.
+**OpenCode plugins**: the working OpenCode V2 stack uses sources in
+`opencode/plugins-v2/` plus shared logic in `opencode/plugins/lib/`. The user-managed
+V2 installation and rollback pair is `scripts/install-user-files-v2` and
+`scripts/rollback-v2`; the V2 service template is
+`docs/secure-opencode-v2.service.template`. V1 sources in `opencode/plugins/`
+and the `scripts/install-user-files` / `scripts/rollback` pair are retained only
+for rollback. A broker change still requires a broker restart to become live.
 
 ## Things that bite
 
-- Every plugin file must be listed in both `scripts/install-user-files` and `scripts/rollback`;
-  `installer-parity.test.ts` fails otherwise.
+- **V1 parity rule:** every V1 plugin file must be listed in both
+  `scripts/install-user-files` and `scripts/rollback`; `installer-parity.test.ts`
+  enforces this rule. Do not apply this V1 inventory rule to the separate V2
+  installer, whose file list is in `scripts/secure-launcher-v2.conf`.
 - `sandbox-edit-tool-activation.test.ts` module-mocks `lib/broker-client.ts`, and Bun module mocks
   leak across test files. A test that needs the real client imports it with a query suffix (see
   `broker-client-receive.test.ts`) or uses a raw socket; don't add another mock of that module.

@@ -13,7 +13,7 @@ The invariants below are the contract; the threat model
 ## S7 — Sensitive host paths are always protected (SSH, GPG, AWS, Kube, gcloud, OpenCode auth, .env)
 ## S8 — OAuth never enters workers
 ## S9 — Provider credentials stay outside workers
-## S10 — Generic host shell is unavailable (v1)
+## S10 — Generic host shell is unavailable (V1)
 ## S11 — Workers cannot request host access (no mounts/devices/privileged/arbitrary images)
 ## S12 — Worker network is deny-by-default (final config)
 ## S13 — Session isolation: sessionID → one worker
@@ -33,8 +33,10 @@ The invariants below are the contract; the threat model
 
 ## Scope notes
 
-- Gate 1 status: code + configuration templates only — nothing is installed
-  (`docs/manual-verification.md`).
+- OpenCode deployment status: the V2 cutover is complete (owner-attested,
+  before 2026-11-01); the repository's current cutover record is
+  `docs/upgrades/opencode-v2.md`. Manual security-gate sign-off remains
+  user-owned (`docs/manual-verification.md`).
 - The broker socket is user-only (0600 in `$XDG_RUNTIME_DIR`); the threat
   model assumes a same-UID trust boundary between broker and OpenCode.
 - `auth.json` must remain process-accessible for OAuth (§16); model-facing
