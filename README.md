@@ -49,6 +49,8 @@ bun build --target=bun src/main.ts --outdir /tmp/build-check
 cd ..
 nono profile validate nono/profile/opencode-secure.json  # retained V1 rollback profile
 nono run --dry-run --profile nono/profile/opencode-secure.json -- true
+nono profile validate nono/profile/opencode-v2-secure.json  # V2 profile source
+bun scripts/check-v2-stack.ts
 ```
 
 ## Layout

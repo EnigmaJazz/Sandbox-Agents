@@ -50,7 +50,15 @@ The review command follows the repository's existing V2 review procedure
    The script validates its complete source/destination plan before writing. Existing differing destinations are backed up, and applied files are journalled (`scripts/install-user-files-v2:41-62,64-80`).
 
 4. If a fragment changed, compare and merge the staged copy into the V2 `opencode.json` by hand. The installer stages fragments; it never edits `opencode.json` or performs the merge (`scripts/install-user-files-v2:8-10,67-73,82-86`).
-5. Restart V2 and verify the running service:
+5. Before restarting, validate the installed V2 profile:
+
+   ```fish
+   nono profile validate ~/.config/nono/profiles/opencode-v2-secure.json
+   ```
+
+   If validation fails, stop; restore the previous installed profile from the installer's timestamped `.bak-*` backup and do not restart. The installer backs up differing destinations before replacing them (`scripts/install-user-files-v2:54-59`).
+
+6. Restart V2 and verify the running service:
 
    ```fish
    systemctl --user restart secure-opencode-v2.service
@@ -65,7 +73,7 @@ The review command follows the repository's existing V2 review procedure
    `--server URL`, `--opencode PATH`, `--password-file FILE`, and `--wait SECONDS`
    (`scripts/check-v2-stack.ts:3-11,62-74`).
 
-6. Record the runtime and resolved package versions in the table below. V2's config uses `~x.y.z` package ranges, so a fresh resolution may be newer than the reviewed patch pin (`docs/upgrades/opencode-v2-install-checklist.md:66,74`).
+7. Record the runtime and resolved package versions in the table below. V2's config uses `~x.y.z` package ranges, so a fresh resolution may be newer than the reviewed patch pin (`docs/upgrades/opencode-v2-install-checklist.md:66,74`).
 
 Do not use V1's `scripts/install-user-files`, `scripts/rollback`, `secure-opencode.service`, or port 4096 for V2 maintenance; V1 is retained only for rollback (`docs/upgrades/opencode-v2.md:11,34-38`).
 
@@ -75,7 +83,7 @@ Do not use V1's `scripts/install-user-files`, `scripts/rollback`, `secure-openco
 |---|---|---|---|
 | Plugin entry or shared library | Edit `opencode/plugins-v2/` or the V2-used shared modules under `opencode/plugins/lib/`. The allowlist in `V2_PLUGIN_FILES` is the definitive set copied by the installer (`scripts/secure-launcher-v2.conf:42-66`). Add a new file to that list when it must be installed. | Copies only listed sources to `~/.local/share/opencode-v2/config/opencode/plugins/`; it does not discover arbitrary new files (`scripts/secure-launcher-v2.conf:45-66`; `scripts/install-user-files-v2:67-80`). | Dry-run should list the intended destination; after install and restart, the health check verifies expected plugin names are loaded, not the installed bytes (`scripts/install-user-files-v2:46-52`; `scripts/check-v2-stack.ts:24-27,56-59`).
 | Config fragment | Edit one of `sandbox-permissions.jsonc`, `role-agents.jsonc`, or `reviewer-relay-agents.jsonc` under `opencode/plugins-v2/config-fragments/`; the list is in the V2 config (`scripts/secure-launcher-v2.conf:67-73`). | Stages listed fragments under `~/.local/share/opencode-v2/fragments/`. It does not merge them into V2 `opencode.json`; merge by hand after comparing with the current config (`scripts/install-user-files-v2:8-10,67-73,85`). | Review the staged fragment against the V2 config, restart, then run the health check for expected agents/plugin names. This is not a full permission-parity check (`scripts/check-v2-stack.ts:39-59`).
-| Nono profile | Edit `nono/profile/opencode-v2-secure.json`. | Installs it to `~/.config/nono/profiles/opencode-v2-secure.json` (`scripts/secure-launcher-v2.conf:74-75`; `scripts/install-user-files-v2:67-80`). | Owner validates the profile before relying on it. The current source has invalid JSON: a comma is missing between `"api.anthropic.com"` and `"platform.claude.com"` at lines 140-141. Fix this before profile validation (`nono/profile/opencode-v2-secure.json:140-141`). The health check does not parse or validate the profile.
+| Nono profile | Edit `nono/profile/opencode-v2-secure.json`. | Installs it to `~/.config/nono/profiles/opencode-v2-secure.json` (`scripts/secure-launcher-v2.conf:74-75`; `scripts/install-user-files-v2:67-80`). | Validate the installed profile before relying on it; see Known gaps for the current source issue. The health check does not parse or validate the profile.
 | Service unit | Edit `docs/secure-opencode-v2.service.template`; it is manually installed, not part of the V2 file installer (`docs/secure-opencode-v2.service.template:1-6`; `scripts/secure-launcher-v2.conf:42-75`). | No automated install, reload, or restart. Owner reviews/copies the template to `~/.config/systemd/user/secure-opencode-v2.service` and reloads systemd; these are the documented cutover steps (`docs/upgrades/opencode-v2-install-checklist.md:76-80`). | Owner inspects the installed unit and service status/logs; then restart and run the health check (`docs/upgrades/opencode-v2-install-checklist.md:76-87`; `docs/operations.md:16-24`).
 | OpenCode runtime | Update the pinned `@opencode/cli` version using the separate V2 prefix, not the V1 install. The checklist documents the install form and version probe (`docs/upgrades/opencode-v2-install-checklist.md:37-44`). | `install-user-files-v2` does not install or upgrade the runtime; its plan contains only plugin files, the profile, and fragments (`scripts/install-user-files-v2:64-80`; `scripts/secure-launcher-v2.conf:42-75`). | Use the version probe after installation, restart the V2 unit, and run the health check (`docs/upgrades/opencode-v2-install-checklist.md:39-42,70-74`). Re-check compatibility against the exact target runtime before owner installation.
 
