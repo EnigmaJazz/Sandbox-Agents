@@ -3,6 +3,9 @@
 ## Objective
 Plan-writing, gate-verdict and task-tick host tools so that binding review gates are enforced by broker-validated tools rather than by prompts, on top of the multi-agent v2 design in `docs/handovers/2026-10-19-multi-agent-v2-host-tools.md`.
 
+## Status
+**T1–T6 implemented; T7 is partially done (the protection flag is enabled in the installed environment, live refusal proof outstanding); T8 is the owner's.** Reconciled 2026-11-01 against commits and the live tool surface. The previous task list marked T5 and T6 "NOT STARTED" after both had shipped, and T1 "not established" after it was demonstrably working.
+
 ## Problem
 The multi-agent v2 design adds a planner that gates work twice and a light PM, but every `host_*` tool today is ask-gated and none can write a plan, record a verdict or tick a task. A gate that lives only in a prompt can be certified by the model that is being gated. Separately, an apply worker's result can currently overwrite or discard the planner's reasoning in `odd/tasks/**` inside an otherwise legitimate diff.
 
@@ -21,13 +24,13 @@ Out: native 4R review changes; the ce:review contract revision; Magic Context mi
 7. Session identity binding records who the host says a session is; authorization stays in the role matrix, so an unknown identity binds and is then denied.
 
 ## Tasks
-- **T1** `host_plan_write` broker operation, plugin tool and tests. Status: no matching commit subject appears in the recorded top-ten log; the worktree has no tracked modifications, so current implementation status is not established by these facts.
-- **T2** Planner/PM roles, `host_plan_write` classification and inventory-parity test. Status: commit `3c17309` records roles and classification; completion of the inventory-parity test is not established by the recorded Git summary.
+- **T1** `host_plan_write` broker operation, plugin tool and tests. Status: **done.** The operation exists and is live: this document was written through `host_plan_write`, which returned a revision and committed the change (`b35f04c`, `296707f`, `62dc5c0`). No individual commit subject is claimed here because the reconciling evidence is a successful live call.
+- **T2** Planner/PM roles, `host_plan_write` classification and inventory-parity test. Status: roles and classification committed as `3c17309`. The inventory-parity test's own result is not recorded in this tracker.
 - **T3** Bind every host-resolved session identity. Status: committed as `a8b2b13`.
-- **T4** `host_gate_verdict` broker operation and plugin tool, append-only gate log and `readLatestGateVerdict`. Status: committed as `b4d2500`.
-- **T5** `host_task_mark` with an injected tier assessor in `OpContext`. Status: NOT STARTED.
-- **T6** Plan-root apply protection behind a config flag. Status: NOT STARTED. Must be written as its own work unit capped at 400 authored changed lines.
-- **T7** Coordinated flip: workflow text plus protection enablement. Status: NOT STARTED. Must be written as a separate work unit capped at 400 authored changed lines.
+- **T4** `host_gate_verdict` broker operation and plugin tool, append-only gate log and `readLatestGateVerdict`. Status: committed as `b4d2500`; the tool is present in the live orchestrator surface.
+- **T5** `host_task_mark` with an injected tier assessor in `OpContext`. Status: **done** — `7299ada` ("add the taskMark operation with broker-derived tier and gate rule") and `4cda0ef` ("expose host_task_mark for PM ticks").
+- **T6** Plan-root apply protection behind a config flag. Status: **done** — `875f409` ("add opt-in apply protection for the plan roots"), `0471f4c` ("refuse plan-root paths at worker mutation and at result install"), `b368c8d` (separate plan-root naming from S7/S17 in apply refusals).
+- **T7** Coordinated flip: workflow text plus protection enablement. Status: **partially done.** The flag is enabled in the installed environment (`systemd-user/broker.env:49`, `BROKER_PLAN_ROOT_PROTECTION=1`, loaded through `EnvironmentFile=` in `systemd-user/sandbox-broker.service:38`), and the refusal is observable in code (`broker/src/service.ts:965`, `:971`, `:2046`). Outstanding: the recorded proof that a live mutation and a live result install are both refused. Tracked in `odd/tasks/t7-flip-draft.md` steps 2–5.
 - **T8** Threat-model entry for the no-ask decision. Status: OWNER.
 
 ## Acceptance criteria
@@ -46,30 +49,18 @@ Out: native 4R review changes; the ce:review contract revision; Magic Context mi
 These units were built through delegated sandbox writers, each exported and installed through `host_sandbox_result_install`, with the owner committing. Process gap found on 2026-10-23: no ODD tracker existed for the feature, pre-code advice was attempted once and cancelled and never retried, and no post-code advisory review ran for T1 to T4. This tracker is the correction. T5 onward must carry pre-code advice and a post-code check.
 
 ## Progress
-Step 0 command output:
 
-`git log --oneline -10`
+Reconciliation on 2026-11-01 replaced the stale task statuses above. Commit evidence for T5 and T6, from the branch reflog:
+
 ```text
-4179ee0 opencode-sandbox baseline for ses_e96ffb4deffeM0pFA5NTQs7GwX
-b4d2500 feat(broker,plugins): add host_gate_verdict with an append-only gate log
-a8b2b13 feat(plugins): bind every host-resolved session identity and let the role matrix decide
-3c17309 feat(broker): add planner and pm roles and classify host_plan_write
-9f3ff0b docs(contracts): add the multi-agent v2 workflow and tool prompt
-6dae9c5 docs(contracts): add the live-derived ce:review parameters and evidence
-9f8c125 feat(broker): guide callers through a correction_required closure and its terminal stop
-d779896 feat(broker): flag an unreachable correction_required lineage with the sanctioned workaround
-b47924e docs(todo): record the correction_required diagnosis and the install divergence
-3a2e734 fix(broker,scripts): keep the published artifact on an invalid summary and pin the installed helper bytes
+7299ada feat(broker): add the taskMark operation with broker-derived tier and gate rule
+4cda0ef feat(broker,plugins): expose host_task_mark for PM ticks
+875f409 feat(broker): add opt-in apply protection for the plan roots
+0471f4c feat(broker): refuse plan-root paths at worker mutation and at result install
+b368c8d fix(broker): name plan-root protection separately from S7/S17 in apply refusals
 ```
 
-`git status --short`
-```text
-?? ses_e96ffb4deffeM0pFA5NTQs7GwX.bundle
-```
-
-`bun --cwd broker test --reporter=dot` — 1272 pass / 0 fail.
-
-Unit status evidence: T1 has no matching commit subject in the top-ten log and no tracked worktree changes; status is not established. T2 has commit `3c17309`; T3 has commit `a8b2b13`; T4 has commit `b4d2500`. For T2 to T4, the available Git commands identify Git commits, not separate `host_sandbox_result_install` result-commit IDs. The only uncommitted path reported is the untracked bundle above, not unit source.
+Live evidence for T1 and T4, observed 2026-11-01 in this session: `host_plan_write` wrote four tracker documents and returned committed revisions each time; `host_gate_verdict` and `host_task_mark` are present in the orchestrator tool surface.
 
 ## Native review history and boundary decision
 
@@ -90,4 +81,8 @@ The native review lineage history for the multi-agent v2 tool surface starts fro
 - A concurrent writer with access to the project tree could swap the destination parent for a symlink between the final path check and `renameSync`; plan-root apply protection is intended to remove this attacker precondition, while closing the race requires directory-fd `renameat` support that Node does not expose.
 
 ## Next step
-T5 (`host_task_mark`) with the injected assessor, preceded by the post-code advisor pass over T1 to T4.
+T7: record the live refusal proof for both a worker mutation under `odd/tasks/**` and a result install touching it, per `odd/tasks/t7-flip-draft.md` steps 2–5. Then T8 (owner) and close.
+
+
+## Revisions
+- r1 2026-11-01T17:55:14Z gentle-orchestrator: Reconcile: T1-T6 shipped, T7 partial, T8 owner
