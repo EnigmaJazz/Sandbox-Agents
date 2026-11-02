@@ -219,6 +219,31 @@ copy, or restores the prior files.
    validation is the enforcement point.
 6. **nono Linux Landlock**: no deny-within-allow — profile must stay narrow;
    a too-broad grant at Gate 2 review weakens S7 at the process layer.
+7. **Accepted residual — Orca dispatch ownership (`host_orca_report`, S4).**
+   The S4 gate proves liveness, not ownership. The caller supplies `terminal`,
+   `taskId` and `dispatchId` (plugin `tool-specs-host-ops.ts:267-269`, forwarded
+   at `:281`); the broker validates their form (`service.ts:3420-3423`), runs
+   the read-only `orca orchestration worker-show --dispatch <ctx_…> --json`
+   probe (`service.ts:3426`), and compares its reply with those same
+   caller-supplied values (`service.ts:3438`; `orca.ts:214-284`). A caller
+   holding another live worker's tuple can therefore pass the probe and send
+   `worker_done`, `heartbeat` or `ask` as that worker.
+   This is accepted because the exposure was not introduced by probe realignment:
+   before it, the probe never matched the real `orchestration check` reply, so
+   every send was refused; the gate failed safe by being vacuous. Realignment
+   makes an existing design limit reachable. Binding the tuple to the calling
+   session needs a broker-side session-to-dispatch record, which does not exist
+   because dispatch is external Orca state; that is a new capability, not a
+   correction to this unit. Exploitation requires holding the ids: `term_` plus
+   a 36-character UUID, `task_` plus 12 hex characters, and `ctx_` plus 12 hex
+   characters.
+   Acceptance rests on the testable assumption that **one sandboxed worker
+   cannot learn another live worker's dispatch tuple**. If ids appear in shared
+   logs, transcripts, the broker journal, or another session's context, this
+   becomes a live impersonation path and the decision must be revisited. A
+   narrower TOCTOU also remains: probe and send are separate spawns, so a
+   dispatch that settles or is revoked between them is still sent; this is
+   inherent to preflight and accepted on the same basis.
 
 ## §29 adversarial checklist (review guide for the reviewer agent)
 
