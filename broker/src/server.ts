@@ -82,6 +82,7 @@ import {
   buildExecOp,
   buildGrepOp,
   buildGhIssueCreateOp,
+  buildOrcaReportOp,
   buildGitCommitOp,
   buildGitClearCommitIntentOp,
   buildGitPushOp,
@@ -989,6 +990,8 @@ export class BrokerServer {
         return buildCopyInOp(this.ctx)(req);
       case "registerProject":
         return buildRegisterProjectOp(this.ctx)(req);
+      case "orcaReport":
+        return buildOrcaReportOp(this.ctx)(req);
       case "advisorAsk":
         return buildAdvisorAskOp(this.ctx)(req);
       case "advisorGet":

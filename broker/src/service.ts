@@ -41,6 +41,10 @@ import {
   assertExpectedResultCommit,
   assertExternalCopyTarget,
   assertGrepQuery,
+  assertOrcaDispatchId,
+  assertOrcaTaskId,
+  assertOrcaTerminal,
+  assertOrcaType,
   assertPayloadKeys,
   assertPositiveInt,
   assertRegisterableProjectPath,
@@ -83,6 +87,18 @@ import {
   planSandboxResultInstall,
   readSandboxResult,
 } from "./sandbox-result.ts";
+import {
+  assertOrcaAvailable,
+  buildOrcaDispatchProbeArgv,
+  buildOrcaReportArgv,
+  ORCA_ASK_SPAWN_TIMEOUT_MS,
+  ORCA_BINARY,
+  ORCA_PROBE_MAX_OUTPUT_BYTES,
+  ORCA_PROBE_TIMEOUT_MS,
+  ORCA_SEND_MAX_OUTPUT_BYTES,
+  ORCA_SEND_TIMEOUT_MS,
+  parseOrcaDispatchProbe,
+} from "./orca.ts";
 import {
   assertCopyOutReviewLimit,
   countCopyLines,
@@ -3361,6 +3377,95 @@ export function buildGhIssueCreateOp(ctx: OpContext): OpHandler {
       stdout: result.stdout,
       stderr: result.stderr,
       status: result.status,
+    };
+  };
+}
+
+/**
+ * Orca report bridge (S1–S5): a sandboxed worker has no shell, so the broker
+ * runs one FIXED Orca CLI with a FIXED argv on its behalf.
+ *
+ * Impact is low and the message types are allowlisted, so this operation asks
+ * for no per-call human approval: authorization goes through the shared host
+ * dispatch path (an open read-access host tool, never a mutation) and the
+ * caller can reach nobody but the terminal handle it already holds. The fixed
+ * binary and argv are the boundary, and the read-only probe in ./orca.ts
+ * refuses a dispatch that is not live for that handle, so one sandboxed
+ * session cannot report for another worker.
+ */
+export function buildOrcaReportOp(
+  ctx: OpContext,
+  overrides: { binary?: string; spawn?: SpawnFn } = {},
+): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as {
+      terminal?: unknown;
+      taskId?: unknown;
+      dispatchId?: unknown;
+      type?: unknown;
+      subject?: unknown;
+      body?: unknown;
+      outcome?: unknown;
+      options?: unknown;
+      phase?: unknown;
+    };
+    authorizeHostDispatch(ctx, "orcaReport", req.sessionID, req.agent);
+    const binary = overrides.binary ?? ORCA_BINARY;
+    const spawn = overrides.spawn ?? ctx.git.spawn;
+    assertOrcaAvailable(binary);
+    const terminal = payload.terminal;
+    const taskId = payload.taskId;
+    const dispatchId = payload.dispatchId;
+    const type = payload.type;
+    assertOrcaTerminal(terminal);
+    assertOrcaTaskId(taskId);
+    assertOrcaDispatchId(dispatchId);
+    assertOrcaType(type);
+    // S4: prove the dispatch is live for THIS terminal before sending. A probe
+    // that cannot be made refuses the report; it never falls through.
+    const probe = await spawn(buildOrcaDispatchProbeArgv(binary, dispatchId), {
+      timeoutMs: ORCA_PROBE_TIMEOUT_MS,
+      maxOutputBytes: ORCA_PROBE_MAX_OUTPUT_BYTES,
+    });
+    if (probe.timedOut) {
+      throw new StateError("orcaReport refused: the dispatch liveness probe timed out");
+    }
+    if (probe.status !== 0) {
+      throw new StateError(
+        `orcaReport refused: the dispatch liveness probe failed (status ${probe.status}): ${capAndRedact(probe.stderr, 1024).trim()}`,
+      );
+    }
+    const probeState = parseOrcaDispatchProbe(probe.stdout, { terminal, taskId, dispatchId });
+    // S1/S2/S3: fixed argv, allowlisted type, validated fields — all decided here.
+    const argv = buildOrcaReportArgv(binary, {
+      terminal,
+      taskId,
+      dispatchId,
+      type,
+      subject: payload.subject,
+      body: payload.body,
+      outcome: payload.outcome,
+      options: payload.options,
+      phase: payload.phase,
+    });
+    const timeoutMs = type === "ask" ? ORCA_ASK_SPAWN_TIMEOUT_MS : ORCA_SEND_TIMEOUT_MS;
+    const result = await spawn(argv, { timeoutMs, maxOutputBytes: ORCA_SEND_MAX_OUTPUT_BYTES });
+    const stdout = capAndRedactWithFlag(result.stdout, 16 * 1024);
+    const stderr = capAndRedactWithFlag(result.stderr, 16 * 1024);
+    const delivered = result.status === 0 && !result.timedOut;
+    return {
+      type,
+      terminal,
+      taskId,
+      dispatchId,
+      dispatchState: probeState.status,
+      delivered,
+      ...(type === "ask" ? { answered: delivered } : {}),
+      status: result.status,
+      timedOut: result.timedOut,
+      stdout: stdout.text,
+      stderr: stderr.text,
+      ...(stdout.truncated || stderr.truncated ? { outputTruncated: true } : {}),
     };
   };
 }

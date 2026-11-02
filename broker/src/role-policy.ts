@@ -201,6 +201,8 @@ export const TOOL_CLASSIFICATION_INVENTORY: Readonly<Record<string, Capability>>
   advisorRespond: "CONSULT", evidenceKeep: "CONSULT",
   task: "DELIBERATE", question: "CONSULT", skill: "CONSULT", systematic_skill: "CONSULT",
   todowrite: "CONSULT",
+  // Orca report bridge: a message to the coordinator, the same class as task/question.
+  host_orca_report: "CONSULT", orcaReport: "CONSULT",
   list_mcp_resources: "CONSULT",
   read_mcp_resource: "CONSULT",
   ctx_search: "CONSULT", ctx_expand: "CONSULT", ctx_reduce: "CONSULT", ctx_memory: "CONSULT", ctx_note: "CONSULT",
