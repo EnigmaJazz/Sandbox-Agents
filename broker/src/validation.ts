@@ -800,6 +800,128 @@ export function assertGhBody(value: unknown): asserts value is string {
 }
 
 // ---------------------------------------------------------------------------
+// Orca report bridge (S3: every field is validated broker-side)
+// ---------------------------------------------------------------------------
+
+/** `term_` plus a 36-character [0-9a-f-] handle. */
+export const ORCA_TERMINAL_RE = /^term_[0-9a-f-]{36}$/;
+/** `task_` plus 12 lowercase hex characters. */
+export const ORCA_TASK_ID_RE = /^task_[0-9a-f]{12}$/;
+/** `ctx_` plus 12 lowercase hex characters. */
+export const ORCA_DISPATCH_ID_RE = /^ctx_[0-9a-f]{12}$/;
+/** The only report types a sandboxed worker may send (S2). */
+export const ORCA_REPORT_TYPES = ["worker_done", "ask", "heartbeat"] as const;
+export type OrcaReportType = (typeof ORCA_REPORT_TYPES)[number];
+/** The only outcomes a worker_done may claim (S3). */
+export const ORCA_OUTCOMES = ["succeeded", "failed", "blocked"] as const;
+export type OrcaOutcome = (typeof ORCA_OUTCOMES)[number];
+export const ORCA_SUBJECT_MAX_CHARS = 120;
+export const ORCA_BODY_MAX_BYTES = 4096;
+export const ORCA_PHASE_MAX_CHARS = 40;
+export const ORCA_ASK_OPTIONS_MAX = 8;
+export const ORCA_ASK_OPTION_MAX_CHARS = 120;
+const ORCA_PHASE_RE = /^[A-Za-z0-9][A-Za-z0-9 _-]*$/;
+
+export function assertOrcaTerminal(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !ORCA_TERMINAL_RE.test(value)) {
+    throw new ValidationError(`invalid Orca terminal handle: must match ${String(ORCA_TERMINAL_RE)}`);
+  }
+}
+
+export function assertOrcaTaskId(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !ORCA_TASK_ID_RE.test(value)) {
+    throw new ValidationError(`invalid Orca task id: must match ${String(ORCA_TASK_ID_RE)}`);
+  }
+}
+
+export function assertOrcaDispatchId(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !ORCA_DISPATCH_ID_RE.test(value)) {
+    throw new ValidationError(`invalid Orca dispatch id: must match ${String(ORCA_DISPATCH_ID_RE)}`);
+  }
+}
+
+export function assertOrcaType(value: unknown): asserts value is OrcaReportType {
+  if (typeof value !== "string" || !(ORCA_REPORT_TYPES as readonly string[]).includes(value)) {
+    throw new ValidationError(`invalid Orca report type: must be one of ${ORCA_REPORT_TYPES.join(", ")}`);
+  }
+}
+
+export function assertOrcaOutcome(value: unknown): asserts value is OrcaOutcome {
+  if (typeof value !== "string" || !(ORCA_OUTCOMES as readonly string[]).includes(value)) {
+    throw new ValidationError(`invalid Orca report outcome: must be one of ${ORCA_OUTCOMES.join(", ")}`);
+  }
+}
+
+/** A subject is one bounded line that can never become a CLI flag. */
+export function assertOrcaSubject(value: unknown): asserts value is string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ValidationError("Orca report subject is required");
+  }
+  if (value.length > ORCA_SUBJECT_MAX_CHARS) {
+    throw new ValidationError(`Orca report subject exceeds ${ORCA_SUBJECT_MAX_CHARS} characters`);
+  }
+  assertNoControlChars(value, "Orca report subject");
+  if (value.startsWith("-")) {
+    throw new ValidationError("Orca report subject must not start with '-'");
+  }
+}
+
+/** A body is one line of at most 4096 UTF-8 bytes that can never become a CLI flag. */
+export function assertOrcaBody(value: unknown): asserts value is string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ValidationError("Orca report body is required");
+  }
+  assertMaxBytes(value, ORCA_BODY_MAX_BYTES, "Orca report body");
+  assertNoControlChars(value, "Orca report body");
+  if (value.startsWith("-")) {
+    throw new ValidationError("Orca report body must not start with '-'");
+  }
+}
+
+export function assertOrcaPhase(value: unknown): asserts value is string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ValidationError("Orca heartbeat phase is required");
+  }
+  if (value.length > ORCA_PHASE_MAX_CHARS || !ORCA_PHASE_RE.test(value)) {
+    throw new ValidationError(
+      `invalid Orca heartbeat phase: 1..${ORCA_PHASE_MAX_CHARS} characters of letters, digits, space, '_' or '-', starting with a letter or digit`,
+    );
+  }
+}
+
+/**
+ * An absent options list is valid (a free-text question). Every option is one
+ * bounded label, and none may contain the comma the broker joins with.
+ */
+export function assertOrcaOptions(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new ValidationError("Orca ask options must be an array of strings");
+  }
+  if (value.length > ORCA_ASK_OPTIONS_MAX) {
+    throw new ValidationError(`Orca ask options exceed ${ORCA_ASK_OPTIONS_MAX} entries`);
+  }
+  const options: string[] = [];
+  for (const option of value) {
+    if (typeof option !== "string" || option.length === 0) {
+      throw new ValidationError("every Orca ask option must be a non-empty string");
+    }
+    if (option.length > ORCA_ASK_OPTION_MAX_CHARS) {
+      throw new ValidationError(`an Orca ask option exceeds ${ORCA_ASK_OPTION_MAX_CHARS} characters`);
+    }
+    assertNoControlChars(option, "Orca ask option");
+    if (option.includes(",")) {
+      throw new ValidationError("an Orca ask option must not contain ','");
+    }
+    if (option.startsWith("-")) {
+      throw new ValidationError("an Orca ask option must not start with '-'");
+    }
+    options.push(option);
+  }
+  return options;
+}
+
+// ---------------------------------------------------------------------------
 // Host tool authorization (per-tool read/mutation policy)
 // ---------------------------------------------------------------------------
 
@@ -820,6 +942,7 @@ export const HOST_READ_OPERATIONS: readonly string[] = [
   "advisorGet",
   "advisorList",
   "toolAdmission",
+  "orcaReport",
 ];
 
 /** Host mutation names; HOST_MUTATION_IDENTITY_OPERATIONS grants each identity its explicit subset. */
@@ -1057,6 +1180,10 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   copyIn: ["hostSource", "workerPath", "confirm"],
   policy: [],
   registerProject: ["path", "dryRun", "createRemote", "makePublic"],
+
+  // Orca report bridge: fixed binary/argv; a field the message type cannot carry
+  // is refused by broker/src/orca.ts, never dropped.
+  orcaReport: ["terminal", "taskId", "dispatchId", "type", "subject", "body", "outcome", "options", "phase"],
   // External advisors (advisor-records.ts). No field may carry an acknowledgement token.
   advisorAsk: [
     "projectDir", "kind", "binding", "snapshot", "host", "selection", "group", "parentId",

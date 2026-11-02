@@ -137,7 +137,8 @@
       "registry.yarnpkg.com",
       "api.githubcopilot.com",
       "huggingface.co",
-      "api.anthropic.com"
+      "api.anthropic.com",
+      "platform.claude.com"
     ],
     "open_port": [
       4097,

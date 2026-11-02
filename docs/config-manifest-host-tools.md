@@ -358,6 +358,49 @@ broker-side (e.g. `ensureWorker` refuses orchestrator,
 | `sandbox_copy_in` | host mutation | **MISSING from fragment** | orchestrator-denied only + `ctx.ask` | `sandbox-tools.ts:438,447,454-459` |
 | `sandbox_discard` | mutation (worker-local) | allow | orchestrator-denied only | `sandbox-tools.ts:464,470` |
 
+### 5f. Orca report bridge (`host_orca_report`)
+
+Added after the tables above; the counts stated at the top of section 5 predate
+it (the current table registers 43 tools: 13 `sandbox_*` and 30 host tools).
+
+A sandboxed worker has no shell, so it cannot run the Orca orchestration CLI to
+report back to the coordinator that dispatched it. `host_orca_report` is the one
+narrow path: the **broker** runs a fixed absolute binary with a fixed argv.
+
+| Aspect | Value |
+|---|---|
+| Tool | `host_orca_report` (`opencode/plugins/lib/tool-specs-host-ops.ts`, shared by the V1 and V2 adapters) |
+| Broker operation | `orcaReport`: `buildOrcaReportOp` in `broker/src/service.ts`, argv and probe in `broker/src/orca.ts` |
+| Binary | `/home/james/.config/orca/linux-orca-cli-shim/orca` (`ORCA_BINARY`); the caller cannot name a program, path, environment or working directory |
+| Message types | `worker_done`, `ask`, `heartbeat` |
+| Recipient | only the validated terminal handle the caller supplies — there is no recipient field |
+| Approval | none (fragment `allow`, no `ctx.ask`): allowlisted types, fixed argv, no recipient choice, and a live-dispatch probe |
+| Access class | `HOST_READ_OPERATIONS` (`read`): open to every bound identity, never prompts |
+| Admission class | `CONSULT` (`TOOL_CLASSIFICATION_INVENTORY`), the same class as `task`/`question`: allowed for general/researcher/worker/advisor/planner/pm and denied for the isolated evaluation roles (solver, challenger, judge, fresh_eyes) |
+| Payload | `terminal`, `taskId`, `dispatchId`, `type`, plus per type: `subject`+`body`+`outcome` (worker_done), `body`+optional `options` (ask), `subject`+`phase` (heartbeat) |
+
+Validation (fail closed with `ValidationError`): terminal
+`^term_[0-9a-f-]{36}$`, taskId `^task_[0-9a-f]{12}$`, dispatchId
+`^ctx_[0-9a-f]{12}$`, outcome in `succeeded|failed|blocked`, subject at most 120
+characters, body at most 4096 bytes, no control characters, and no value may
+start with `-`. A field the type's argv cannot carry is refused, never dropped.
+
+Liveness (S4): before every send the broker runs
+`orca orchestration worker-show --dispatch <dispatchId> --json` (read-only: it
+reads the dispatch, its worker and its terminal and mutates nothing) and accepts
+the dispatch only when the reply — `{ ok: true, result: { dispatch, worker,
+terminal, … } }` — carries a `result.dispatch` whose `id` is that dispatch id,
+whose `taskId` is the caller's task id, whose `assigneeHandle` is the caller's
+terminal handle, whose `status` is exactly `dispatched`, and whose
+`completedAt`, `terminationReason` and `capabilityRevokedAt` are all present and
+null. Anything else is refused: a probe that cannot be made, a reply that is not
+JSON or not a JSON object, `ok` not true, a missing `result`/`result.dispatch`,
+a different dispatch/task/assignee, any other status, or a settlement field that
+is non-null or missing. The accepted shape is verified against the installed CLI
+and parsed by `parseOrcaDispatchProbe` in `broker/src/orca.ts`, so a CLI that
+answers differently makes every report refuse with a named reason rather than
+send unchecked.
+
 ### Discrepancies (explicitly flagged)
 
 1. **In code, missing from the permission fragment:** `sandbox_copy_in` and

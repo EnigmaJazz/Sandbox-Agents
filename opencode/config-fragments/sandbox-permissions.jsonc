@@ -69,6 +69,8 @@
     "host_disk_usage": "allow",
     "host_network_listeners": "allow",
     "host_process_list": "allow",
+    // Orca report bridge: fixed binary/argv, broker-validated fields, no approval (low impact).
+    "host_orca_report": "allow",
     "host_docker_list": "allow",
     "host_docker_logs": "allow",
     // Dormant since gentle-ai 4 (docs/upgrades/gentle-ai-4.md); rollback: restore host_sdd_status/host_sdd_continue/host_sdd_task_result to "allow" and host_sdd_attempt_grant/host_sdd_archive_compose to "ask".

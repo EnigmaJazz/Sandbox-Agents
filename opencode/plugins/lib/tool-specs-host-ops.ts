@@ -251,4 +251,35 @@ export const hostOpsToolSpecs = {
       return JSON.stringify(result, null, 2);
     },
   }),
+
+  host_orca_report: defineTool({
+    description:
+      "Report back to the Orca coordinator that dispatched this worker (no human approval; " +
+      "low impact). One fixed Orca CLI runs with a fixed argv: only worker_done, ask and " +
+      "heartbeat are allowed, the recipient is the terminal handle you supply, and no other " +
+      "flag can be passed. The broker validates every field (terminal ^term_[0-9a-f-]{36}$, " +
+      "taskId ^task_[0-9a-f]{12}$, dispatchId ^ctx_[0-9a-f]{12}$, outcome " +
+      "succeeded|failed|blocked, subject <= 120 chars, body <= 4096 bytes, no control " +
+      "characters) and refuses unless the dispatch is live for that terminal handle. " +
+      "worker_done needs subject, body and outcome; ask needs body (the question) and optional " +
+      "options; heartbeat needs subject and phase. Returns JSON.",
+    args: {
+      terminal: z.string().regex(/^term_[0-9a-f-]{36}$/),
+      taskId: z.string().regex(/^task_[0-9a-f]{12}$/),
+      dispatchId: z.string().regex(/^ctx_[0-9a-f]{12}$/),
+      type: z.enum(["worker_done", "ask", "heartbeat"]),
+      subject: z.string().min(1).max(120).optional(),
+      body: z.string().min(1).max(4096).optional(),
+      outcome: z.enum(["succeeded", "failed", "blocked"]).optional(),
+      options: z.array(z.string().min(1).max(120)).max(8).optional(),
+      phase: z.string().min(1).max(40).optional(),
+    },
+    execute: async (args, ctx) => {
+      // Fixed binary/argv and a live-dispatch probe are broker-side; the caller
+      // cannot choose the recipient or add a flag, so no approval is requested.
+      const c = await client();
+      const result = await c.request("orcaReport", ctx.sessionID, { ...args }, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
 };

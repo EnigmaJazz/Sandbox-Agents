@@ -353,6 +353,23 @@
       "asks": 1
     },
     {
+      "name": "host_orca_report",
+      "description": "Report back to the Orca coordinator that dispatched this worker (no human approval; low impact). One fixed Orca CLI runs with a fixed argv: only worker_done, ask and heartbeat are allowed, the recipient is the terminal handle you supply, and no other flag can be passed. The broker validates every field (terminal ^term_[0-9a-f-]{36}$, taskId ^task_[0-9a-f]{12}$, dispatchId ^ctx_[0-9a-f]{12}$, outcome succeeded|failed|blocked, subject <= 120 chars, body <= 4096 bytes, no control characters) and refuses unless the dispatch is live for that terminal handle. worker_done needs subject, body and outcome; ask needs body (the question) and optional options; heartbeat needs subject and phase. Returns JSON.",
+      "args": [
+        "terminal",
+        "taskId",
+        "dispatchId",
+        "type",
+        "subject",
+        "body",
+        "outcome",
+        "options",
+        "phase"
+      ],
+      "execute": "function",
+      "asks": 0
+    },
+    {
       "name": "host_review_start",
       "description": "Start a review lifecycle run (orchestrator-only mutation; requires human approval). Provider-issued tokens are forwarded verbatim. Typical committed-range call: pass contract, target, projection and expectedUntrackedInventory exactly as the preflight host_review_status next_transition returned them, untrackedScope \"exclude\", and lenses (comma list of risk|resilience|readability|reliability) with a one-sentence lensesReason. Never look up these values elsewhere; see the native review call card in odd-and-review.md. Returns JSON.",
       "args": [

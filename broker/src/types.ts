@@ -112,6 +112,9 @@ export type Operation =
   | "policy"
   | "toolAdmission"
   | "registerProject"
+
+  // Orca report bridge: fixed binary + fixed argv, broker-validated fields (S1–S6).
+  | "orcaReport"
   // External advisors (advisor-records.ts): evidence records, never authority.
   | "resultDiff"
   | "advisorAsk"
@@ -199,6 +202,7 @@ export const SANDBOX_GUARD_CLASS = {
   policy: "exempt-from-sandbox-guard",
   toolAdmission: "exempt-from-sandbox-guard",
   registerProject: "exempt-from-sandbox-guard",
+  orcaReport: "exempt-from-sandbox-guard",
   resultDiff: "exempt-from-sandbox-guard",
   advisorAsk: "exempt-from-sandbox-guard",
   advisorGet: "exempt-from-sandbox-guard",
@@ -282,6 +286,7 @@ export const OPERATIONS: readonly Operation[] = [
   "policy",
   "toolAdmission",
   "registerProject",
+  "orcaReport",
   "resultDiff",
   "advisorAsk",
   "advisorGet",
@@ -741,6 +746,19 @@ export interface RegisterProjectPayload {
   dryRun?: boolean;
   createRemote?: boolean;
   makePublic?: boolean;
+}
+
+/** Orca report bridge: fixed binary, fixed argv, broker-validated fields (S1–S6). */
+export interface OrcaReportPayload {
+  terminal: string;
+  taskId: string;
+  dispatchId: string;
+  type: "worker_done" | "ask" | "heartbeat";
+  subject?: string;
+  body?: string;
+  outcome?: "succeeded" | "failed" | "blocked";
+  options?: string[];
+  phase?: string;
 }
 
 // ---------------------------------------------------------------------------
