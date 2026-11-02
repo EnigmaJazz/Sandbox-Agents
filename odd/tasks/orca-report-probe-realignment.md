@@ -5,8 +5,9 @@ Make the `host_orca_report` S4 liveness probe accept the reply the installed Orc
 actually returns, so a live dispatch is reportable again.
 
 ## Status
-**DONE — installed in the host worktree and verified. Not committed (owner's step).**
-No broker restart, no `install-user-files-v2`, no secure-opencode-v2 restart was performed.
+**IMPLEMENTED, INSTALLED AND COMMITTED. One advisory review outstanding.**
+The change is one work unit committed across three commits — `9e5e88f`, `007a806`, `f98dd15`, all with the subject `feat(broker): add orca report bridge` (owner-attested, 2026-11-02: "It is one change"). Code verified present at HEAD: `broker/src/orca.ts:63-64`.
+No broker restart, no `install-user-files-v2`, no secure-opencode-v2 restart was performed, so the running broker still executes the previously built code and the live `worker-show` path is exercised only after a restart.
 
 ## Problem
 `buildOrcaDispatchProbeArgv` ran `orca orchestration check --terminal <handle> --json`. The real
@@ -41,7 +42,7 @@ and classification, the send argv); `nono/profile/opencode-v2-secure.json`;
 
 ## Tasks
 - **T1** Probe argv is `[binary, "orchestration", "worker-show", "--dispatch", <dispatchId>, "--json"]`.
-  Done, verified host-side (`broker/src/orca.ts:63-64`).
+  Done, verified host-side and at HEAD (`broker/src/orca.ts:63-64`).
 - **T2** `parseOrcaDispatchProbe` reads `result.dispatch` and requires `ok === true`, plain
   `result`/`result.dispatch` objects, exact `id`/`taskId`/`assigneeHandle`, `status` exactly
   `dispatched`, and the three settlement fields present and `null`; every other reply refuses with
@@ -79,7 +80,7 @@ and classification, the send argv); `nono/profile/opencode-v2-secure.json`;
   `nono/profile/opencode-v2-secure.json`). Pass count is baseline + the 13 added tests; the skip
   count is unchanged at 9. `orca-report.test.ts` contributes 41 passing tests with no skips.
 - Host structural readback after install: `broker/src/orca.ts:59-64` carries the `worker-show`
-  argv and its new docstring.
+  argv and its new docstring; re-verified 2026-11-02.
 
 ## Install
 `host_sandbox_result_install` for `ses_e67302547ffeuGV7HZJXG4emng`
@@ -99,16 +100,19 @@ unavailable on this host). Two writer sessions produced equivalent results; the 
 installed one.
 
 ## Progress
-Installed and green. Nothing committed by the orchestrator: `host_git_commit` needs an applied
-result and refuses S17 paths, so the owner commits.
+- 2026-11-01 — implemented, installed, green host suite (see Checks).
+- 2026-11-02 — commit state reconciled: the change is one work unit in three commits (`9e5e88f`, `007a806`, `f98dd15`), owner-attested. The tracker's earlier "not committed (owner's step)" was stale. The three identical subjects suggest a retried commit; the tree carries the change either way (`broker/src/orca.ts:64`).
+
+## Review state
+- **Native review: not due.** Assessment at HEAD, base `aee56e0`, committed-only, untracked excluded: medium risk (`executable_change` at `broker/src/orca.ts`), 63 paths / 5,564 changed lines, `review_due: false` with reason `under_budget`. The slice accumulates; no authority has been issued and none is owed yet.
+- **Post-code advisory review: outstanding.** This unit is an authorization-relevant gate, so it owes the advisory pass independently of native review. Not yet recorded here.
 
 ## Next step
-Post-code advisory review of the committed candidate (an authorization gate), then the owner's
-work-unit commit. No broker restart is included: the running broker still executes the previously
-built code, so the live `worker-show` path is exercised only after the owner restarts it.
+Run the post-code advisory review of the committed candidate. Then the owner restarts the broker and confirms a live `worker_done` report end to end; until that restart the running broker still executes the old `check` probe.
 
 
 ## Revisions
 - r1 2026-11-01T20:23:25Z gentle-orchestrator: Create the tracker for the orcaReport liveness-probe realignment
 - r2 2026-11-01T20:40:20Z gentle-orchestrator: Record implementation done, verified in sandbox, install blocked on untracked targets
 - r3 2026-11-01T21:18:44Z gentle-orchestrator: Record successful install and the green host suite
+- r4 2026-11-02T22:24:45Z gentle-orchestrator: Record the commit state and the outstanding advisory review
