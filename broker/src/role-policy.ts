@@ -425,6 +425,8 @@ const ROLE_CAPABILITY_MATRIX: Readonly<Record<Role, Readonly<Record<Capability, 
     CONSULT: false,
     DELIBERATE: true,
   },
+  // For planner and pm, HOST_READ_STRUCTURED is unreachable: decide() returns at the AFT branch first.
+  // Their AFT reads are admitted by the pre-check in service.ts buildToolAdmissionOp.
   planner: {
     READ_PROJECT: true,
     RESEARCH_EXTERNAL: true,

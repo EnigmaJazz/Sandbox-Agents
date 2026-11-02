@@ -119,7 +119,7 @@ import {
   shouldRemoveSessionArtifacts,
 } from "./artifacts.ts";
 import { PolicyError, checkAdmission, type Admission } from "./policy.ts";
-import { classifyOperation, decide, isRole, normalizeRoleKey } from "./role-policy.ts";
+import { classifyAft, classifyOperation, decide, isRole, normalizeRoleKey } from "./role-policy.ts";
 import {
   PendingQueue,
   QueuedTimedOutError,
@@ -2549,8 +2549,22 @@ export function buildToolAdmissionOp(ctx: OpContext): OpHandler {
       }
       return { schema, tool: payload.tool, classification: capability, decision: "allow", reason: "UNBOUND_SESSION_READ_ONLY_CLASS" };
     }
+    const role = normalizeRoleKey(record.agent);
+    if (
+      classifyAft(payload.tool as string) === "HOST_READ_STRUCTURED" &&
+      (role === "planner" || role === "pm") &&
+      record.state === "HOST_READ_ONLY"
+    ) {
+      return {
+        schema,
+        tool: payload.tool,
+        classification: capability,
+        decision: "allow",
+        reason: "PRE_ACTIVATION_PLANNER_PM_AFT_READ_ALLOWED",
+      };
+    }
     const result = decide({
-      role: normalizeRoleKey(record.agent),
+      role,
       capability,
       sessionState: record.state,
       authoritativeLocation: record.projectID ?? "",

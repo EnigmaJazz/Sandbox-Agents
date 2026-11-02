@@ -101,6 +101,95 @@ test("planner and PM identities can request approved host plan writes", async ()
   }
 });
 
+test("planner and pm receive pre-activation AFT read access only", async () => {
+  const aftReads = ["aft_outline", "aft_zoom", "aft_search", "aft_callgraph", "aft_inspect"];
+  for (const agent of ["planner", "pm"]) {
+    const admission = buildToolAdmissionOp({
+      store: { get: () => ({ agent, state: "HOST_READ_ONLY", projectID: "repo" }) },
+      config: { readOnlyAgents: [] },
+    } as never);
+    for (const tool of aftReads) {
+      await expect(admission({
+        version: 1, id: `req-${agent}-${tool}`, operation: "toolAdmission", sessionID: `${agent}-session`,
+        payload: { tool },
+      } as never)).resolves.toMatchObject({
+        classification: "HOST_READ_STRUCTURED",
+        decision: "allow",
+        reason: "PRE_ACTIVATION_PLANNER_PM_AFT_READ_ALLOWED",
+      });
+    }
+    for (const tool of ["metrics", "listWorkers", "reviewAssess", "sddStatus", "host_review_assess"]) {
+      await expect(admission({
+        version: 1, id: `req-${agent}-${tool}`, operation: "toolAdmission", sessionID: `${agent}-session`,
+        payload: { tool },
+      } as never)).resolves.toMatchObject({ decision: "deny" });
+    }
+  }
+  const planner = buildToolAdmissionOp({
+    store: { get: () => ({ agent: "planner", state: "HOST_READ_ONLY", projectID: "repo" }) },
+    config: { readOnlyAgents: [] },
+  } as never);
+  await expect(planner({
+    version: 1, id: "req-planner-aft-safety", operation: "toolAdmission", sessionID: "planner-session",
+    payload: { tool: "aft_safety" },
+  } as never)).resolves.toMatchObject({
+    classification: "HOST_ADMIN_STRUCTURED", decision: "deny", reason: "HOST_ADMIN_DENIED",
+  });
+  await expect(planner({
+    version: 1, id: "req-planner-ast-grep-replace", operation: "toolAdmission", sessionID: "planner-session",
+    payload: { tool: "ast_grep_replace" },
+  } as never)).resolves.toMatchObject({
+    classification: "HOST_ADMIN_STRUCTURED", decision: "deny", reason: "HOST_ADMIN_DENIED",
+  });
+});
+
+test("pm-odd receives pre-activation AFT read access through its canonical PM role", async () => {
+  const admission = buildToolAdmissionOp({
+    store: { get: () => ({ agent: "pm-odd", state: "HOST_READ_ONLY", projectID: "repo" }) },
+    config: { readOnlyAgents: [] },
+  } as never);
+  await expect(admission({
+    version: 1, id: "req-pm-odd-aft-outline", operation: "toolAdmission", sessionID: "pm-odd-session",
+    payload: { tool: "aft_outline" },
+  } as never)).resolves.toMatchObject({
+    classification: "HOST_READ_STRUCTURED",
+    decision: "allow",
+    reason: "PRE_ACTIVATION_PLANNER_PM_AFT_READ_ALLOWED",
+  });
+});
+
+test("planner and pm AFT read access ends after activation", async () => {
+  const aftReads = ["aft_outline", "aft_zoom", "aft_search", "aft_callgraph", "aft_inspect"];
+  for (const agent of ["planner", "pm"]) {
+    const admission = buildToolAdmissionOp({
+      store: { get: () => ({ agent, state: "SANDBOX_ACTIVE", projectID: "repo" }) },
+      config: { readOnlyAgents: [] },
+    } as never);
+    for (const tool of aftReads) {
+      await expect(admission({
+        version: 1, id: `req-${agent}-${tool}`, operation: "toolAdmission", sessionID: `${agent}-session`,
+        payload: { tool },
+      } as never)).resolves.toMatchObject({ classification: "HOST_READ_STRUCTURED", decision: "deny" });
+    }
+  }
+});
+
+test("other bound roles remain denied pre-activation AFT reads", async () => {
+  const aftReads = ["aft_outline", "aft_zoom", "aft_search", "aft_callgraph", "aft_inspect"];
+  for (const agent of ["worker", "advisor", "judge", "fresh_eyes"]) {
+    const admission = buildToolAdmissionOp({
+      store: { get: () => ({ agent, state: "HOST_READ_ONLY", projectID: "repo" }) },
+      config: { readOnlyAgents: [] },
+    } as never);
+    for (const tool of aftReads) {
+      await expect(admission({
+        version: 1, id: `req-${agent}-${tool}`, operation: "toolAdmission", sessionID: `${agent}-session`,
+        payload: { tool },
+      } as never)).resolves.toMatchObject({ classification: "HOST_READ_STRUCTURED", decision: "deny" });
+    }
+  }
+});
+
 test("host test execution is denied to planners and unbound sessions", async () => {
   const planner = buildToolAdmissionOp({
     store: { get: () => ({ agent: "planner", state: "HOST_READ_ONLY", projectID: "repo" }) },
