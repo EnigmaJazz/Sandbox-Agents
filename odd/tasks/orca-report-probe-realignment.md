@@ -5,8 +5,8 @@ Make the `host_orca_report` S4 liveness probe accept the reply the installed Orc
 actually returns, so a live dispatch is reportable again.
 
 ## Status
-**IMPLEMENTED, INSTALLED AND COMMITTED. One advisory review outstanding.**
-The change is one work unit committed across three commits — `9e5e88f`, `007a806`, `f98dd15`, all with the subject `feat(broker): add orca report bridge` (owner-attested, 2026-11-02: "It is one change"). Code verified present at HEAD: `broker/src/orca.ts:63-64`.
+**IMPLEMENTED, INSTALLED, COMMITTED, ADVISORY-REVIEWED. One accepted residual; one live check outstanding.**
+The change is one work unit committed across three commits — `9e5e88f`, `007a806`, `f98dd15`, all with the subject `feat(broker): add orca report bridge` (owner-attested, 2026-11-02). Code verified present at HEAD: `broker/src/orca.ts:63-64`.
 No broker restart, no `install-user-files-v2`, no secure-opencode-v2 restart was performed, so the running broker still executes the previously built code and the live `worker-show` path is exercised only after a restart.
 
 ## Problem
@@ -101,14 +101,25 @@ installed one.
 
 ## Progress
 - 2026-11-01 — implemented, installed, green host suite (see Checks).
-- 2026-11-02 — commit state reconciled: the change is one work unit in three commits (`9e5e88f`, `007a806`, `f98dd15`), owner-attested. The tracker's earlier "not committed (owner's step)" was stale. The three identical subjects suggest a retried commit; the tree carries the change either way (`broker/src/orca.ts:64`).
+- 2026-11-02 — commit state reconciled: the change is one work unit in three commits (`9e5e88f`, `007a806`, `f98dd15`), owner-attested. The tracker's earlier "not committed (owner's step)" was stale.
+- 2026-11-02 — post-code advisory review run, two independent advisors (security and correctness), neither seeing the other's answer.
+  - **Correctness: no findings.** All 12 parser branches and both service-level refusals (timeout, non-zero exit) are test-covered; no branch decides accept/refuse untested; well-formed-wrong replies land on named `StateError`s rather than incidental `TypeError`s because `isRecord` guards every property read; no dead `check`-era remnants remain in `broker/src/orca.ts`; `docs/config-manifest-host-tools.md` §5f matches the implemented predicate field for field; the timeout message is textually distinct from parse refusals.
+  - **Security: one CRITICAL, accepted as a residual** (see below). All other security properties checked out: fixed-binary and fixed-argv hold, the caller controls only the validated dispatch id, probe failures are fail-closed with named reasons, and the parser no longer guesses at reply shapes.
 
-## Review state
-- **Native review: not due.** Assessment at HEAD, base `aee56e0`, committed-only, untracked excluded: medium risk (`executable_change` at `broker/src/orca.ts`), 63 paths / 5,564 changed lines, `review_due: false` with reason `under_budget`. The slice accumulates; no authority has been issued and none is owed yet.
-- **Post-code advisory review: outstanding.** This unit is an authorization-relevant gate, so it owes the advisory pass independently of native review. Not yet recorded here.
+## Accepted residual risk — `host_orca_report` proves liveness, not ownership
+**Owner decision 2026-11-02: accepted and documented, no code change.**
+
+The S4 gate answers "is this dispatch live", not "is this dispatch the caller's". The caller supplies `terminal`, `taskId` and `dispatchId` (`opencode/plugins/lib/tool-specs-host-ops.ts:267-269`, forwarded at `:281`), the broker validates their form (`broker/src/service.ts:3420-3423`), probes with that dispatch id (`:3426`), and compares the reply against those same caller-supplied values (`:3438`). A caller holding another worker's live tuple would therefore pass the probe and send as that worker.
+
+Why it is accepted rather than fixed:
+- The exposure is not created by this change, only made reachable: before the realignment the probe never matched, so every send was refused and the gate was vacuous in the safe direction.
+- Binding ownership needs a broker-side session-to-dispatch record that does not exist; the Orca dispatch is external state. That is a new capability, not a correction to this unit.
+- Exploitation requires the ids themselves: `term_` plus a 36-character UUID, `task_` plus 12 hex, `ctx_` plus 12 hex.
+
+**Assumption this acceptance rests on, and it is testable:** that one sandboxed worker cannot learn another live worker's dispatch tuple. If that assumption ever fails — for example ids appearing in shared logs, transcripts, or another session's context — this residual becomes a live impersonation path and must be reopened. Recorded in `docs/threat-model.md`.
 
 ## Next step
-Run the post-code advisory review of the committed candidate. Then the owner restarts the broker and confirms a live `worker_done` report end to end; until that restart the running broker still executes the old `check` probe.
+The owner restarts the broker and confirms one live `worker_done` report end to end; until that restart the running broker still executes the old `check` probe. Then archive this tracker.
 
 
 ## Revisions
@@ -116,3 +127,4 @@ Run the post-code advisory review of the committed candidate. Then the owner res
 - r2 2026-11-01T20:40:20Z gentle-orchestrator: Record implementation done, verified in sandbox, install blocked on untracked targets
 - r3 2026-11-01T21:18:44Z gentle-orchestrator: Record successful install and the green host suite
 - r4 2026-11-02T22:24:45Z gentle-orchestrator: Record the commit state and the outstanding advisory review
+- r5 2026-11-02T22:30:17Z gentle-orchestrator: Record the advisory outcome and the accepted impersonation residual
