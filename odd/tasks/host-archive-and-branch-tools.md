@@ -93,3 +93,4 @@ Record Gate 2 against the fourth correction using the raw advisor text preserved
 ## Gates
 - A PASS 2026-11-04T10:49:44Z planner ref=Gate1 U1/A: plan r2 commit 37126522fad90914139c47de268266b3fc250e6d; raw pre-advice ses_e59d6df63ffefVSSWDU312fsQy; code evidence ses_e59e0db49ffe0pgljjH1TaT0uY
 - A ESCALATE 2026-11-04T14:53:16Z planner ref=Gate2: service.ts:2647,2673-2680 drops timedOut; 4983-4995 bypasses timeout handling. Raw recheck ses_e58fbd90cffeel25WUqhhQ0Jq6. Third correction requires human authorization.
+- A PASS 2026-11-04T23:22:06Z planner ref=Gate2 U1/A pre-commit a5afb7e1; raw advice items 1-4 tracker:52-75; service.ts:2678,4884-4891,4991-5057; plan-archive.test.ts:255-291; runner tracker:48; scope 14 paths only.
