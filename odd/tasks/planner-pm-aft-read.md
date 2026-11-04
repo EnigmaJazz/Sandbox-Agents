@@ -1,67 +1,72 @@
 # ODD task — planner-pm-aft-read
 
+## Status
+**IMPLEMENTED, ADVISORY-REVIEWED, COMMITTED, LIVE.** Committed as `0ac79d5` (three files: `broker/src/service.ts`, `broker/src/role-policy.ts`, `broker/tests/tool-admission.test.ts`). The broker was restarted 2026-11-04, so the admission change is executing.
+
+Not yet observed: a real `planner` or `pm` session actually admitted for an AFT read. That is the last piece of evidence this unit owes.
+
 ## Objective
 Give the `planner` and `pm` roles the same pre-activation AFT read access that `researcher` and `general` already have, without widening any other structured host read.
 
-## Problem — verified in source
-All five AFT read tools classify as `HOST_READ_STRUCTURED` (`broker/src/role-policy.ts:212-213`: `aft_outline`, `aft_zoom`, `aft_search`, `aft_callgraph`, `aft_inspect`).
+## Problem — verified in source before the change
+All five AFT read tools classify as `HOST_READ_STRUCTURED` (`broker/src/role-policy.ts:212-213`). `decide()` denied that whole capability for every role except `researcher` and `general` at `:500-509`, returning before the role matrix was consulted at `:511`. The matrix entries `planner: { HOST_READ_STRUCTURED: true }` (`:435` before the change) and the `pm` equivalent were therefore unreachable — the matrix implied access the planner did not have.
 
-`decide()` short-circuits that whole capability before the role matrix is consulted (`broker/src/role-policy.ts:500-509`):
+Why explore subagents were unaffected: an agent binds only if it is in `readOnlyAgents` or normalizes to a role (`broker/src/service.ts:251`); an unbound session is allowed `HOST_READ_STRUCTURED` while in `HOST_READ_ONLY` (`:2547-2550`). `planner` and `pm` are roles, so they bind and hit the denial.
+
+## Implementation
+`broker/src/service.ts:2553-2565`, a pre-check inside `buildToolAdmissionOp` before `decide()`:
 
 ```ts
-if (capability === "HOST_READ_STRUCTURED") {
-  if (role === "researcher" || role === "general") { …pre-activation allow… }
-  return { decision: "deny", reasonCode: "ROLE_DENIED_FOR_AFT_READ" };
+if (
+  classifyAft(payload.tool as string) === "HOST_READ_STRUCTURED" &&
+  (role === "planner" || role === "pm") &&
+  record.state === "HOST_READ_ONLY"
+) {
+  return { …, decision: "allow", reason: "PRE_ACTIVATION_PLANNER_PM_AFT_READ_ALLOWED" };
 }
 ```
 
-The role matrix is only read at `:511`. So `planner: { HOST_READ_STRUCTURED: true }` (`:435`) and the same entry for `pm` (`:448`) are **unreachable**. Reading the matrix suggests both roles already have the capability; they do not.
+Narrow by construction: AFT tools only (`classifyAft` discriminates on the tool name against the inventory), the two roles only after `normalizeRoleKey` (so `pm-odd` and `pm-systematic` normalize to `pm`), `HOST_READ_ONLY` only, and a distinct reason code so an audit can tell which rule admitted the call. Everything else falls through unchanged.
 
-How explore agents get AFT today, for contrast: an agent is bindable only if it is in `readOnlyAgents` or normalizes to a role (`broker/src/service.ts:251`). A subagent with a name that is neither stays unbound, and an unbound session is allowed `HOST_READ_STRUCTURED` while in `HOST_READ_ONLY` (`broker/src/service.ts:2547-2550`, `UNBOUND_SESSION_READ_ONLY_CLASS`). Named explore agents therefore work through the unbound path, not the matrix. `planner` and `pm` are roles, so they bind, and then hit the denial.
-
-## Scope
-In: `broker/src/role-policy.ts` (or a narrow pre-check in `broker/src/service.ts` `buildToolAdmissionOp`), and the matching tests.
-
-Out: the `HOST_READ_STRUCTURED` denial for every other role; `HOST_ADMIN_STRUCTURED`; the role matrix itself except where a test asserts the reachability fix; any change to agent naming, binding, or `readOnlyAgents`.
+`broker/src/role-policy.ts:428-429` now carries a comment above the `planner` matrix entry stating that `HOST_READ_STRUCTURED` is unreachable there and that the pre-check is what admits AFT reads — closing the trap that misled a reader before.
 
 ## Decisions
-1. **Scope is planner and pm** (owner, 2026-11-02).
-2. **Pre-activation only**, matching `researcher` and `general`. After a worker is active, reads must go through the sandbox so the host tree cannot be inspected around the confinement. Neither role activates a worker, so this costs them nothing.
-3. **Grant only AFT operations**, not the whole `HOST_READ_STRUCTURED` class. The existing branch denies the entire class for non-`researcher`/`general` roles, which also blocks `metrics`, `listWorkers`, `reviewAssess`, `sddStatus` and the host reads for planner and pm. That is a separate, broader question; this unit does not decide it. Use `classifyAft` (`:229-233`) as the discriminator so the grant is exactly the five AFT read tools plus nothing else.
-4. Preferred implementation, because `decide()` receives no operation name: a narrow pre-check in `buildToolAdmissionOp` before `decide` — if the tool is an AFT read, the bound role normalizes to `planner` or `pm`, and the session state is `HOST_READ_ONLY`, allow with a named reason code. A writer may instead thread the operation into `AuthorizationContext` if that is cleaner, but must not widen any other capability in the process.
-5. A new reason code is required rather than reusing `PRE_ACTIVATION_AFT_READ_ALLOWED`, so an audit can tell which rule admitted the call.
-
-## Constraints
-- `broker/src/**` is S17: the writer works in the sandbox, the result installs through the reviewed host path, the owner commits.
-- Fail closed. Any unrecognized role, capability, state or tool name keeps the existing denial.
-- Do not change `AFF`/AFT classification itself, and do not reclassify `aft_safety` or `aft_import` (they are `HOST_ADMIN_STRUCTURED` and stay denied for every role, `:490-492`).
-
-## Stable task IDs
-- **T1** — the admission change for `planner` and `pm` AFT reads, pre-activation only, with a distinct reason code.
-- **T2** — tests: planner allowed, pm allowed, pre-activation; the same two roles denied after activation; `worker`/`advisor`/`judge`/`fresh_eyes` still denied; a non-AFT `HOST_READ_STRUCTURED` operation still denied for planner and pm; `aft_safety`/`aft_import` still denied.
-- **T3** — checks and the reviewability receipt.
+1. Scope is `planner` and `pm` (owner, 2026-11-02).
+2. Pre-activation only, matching `researcher`/`general`; after activation reads must go through the sandbox.
+3. AFT operations only, not the whole `HOST_READ_STRUCTURED` class. The broader denial of `metrics`, `listWorkers`, `reviewAssess`, `sddStatus` and the `host_*` reads for these roles is a separate question, not decided here.
 
 ## Acceptance criteria
-- A `planner` session in `HOST_READ_ONLY` is allowed `aft_outline`, `aft_zoom`, `aft_search`, `aft_callgraph`, `aft_inspect`.
-- A `pm` session in `HOST_READ_ONLY` is allowed the same five.
-- Both are denied the same five once the session is not `HOST_READ_ONLY`.
-- `planner` and `pm` remain denied every non-AFT `HOST_READ_STRUCTURED` operation (unchanged by this unit).
-- Every other role's behaviour is unchanged, test-pinned.
-- The suite is green apart from the known `tests/v2-launch.test.ts:94` failure recorded in the project constraints.
+- `planner` and `pm` in `HOST_READ_ONLY` are allowed `aft_outline`, `aft_zoom`, `aft_search`, `aft_callgraph`, `aft_inspect`. Met by test.
+- Both are denied those five once the session is not `HOST_READ_ONLY`. Met by test.
+- Both remain denied every non-AFT `HOST_READ_STRUCTURED` operation. Met by test.
+- `aft_safety`, `aft_import`, `ast_grep_replace` remain denied. Met by test.
+- Every other role's behaviour unchanged. Met by test.
+- **Live**: a real planner session receives the allow. Not yet observed.
 
 ## Checks
-- `bun --cwd broker test` — record exact totals.
-- From `broker`: `bun build --target=bun src/main.ts`.
-- Test-first: the new cases must fail before the change and pass after; record both observations.
+- RED before implementation: `planner and pm receive pre-activation AFT read access only` failed with `ROLE_DENIED_FOR_AFT_READ`.
+- GREEN after: focused 16 pass. With the pre-check temporarily reverted during the correction pass, 15 pass / 2 fail (canonical `pm` and the new `pm-odd` case); `service.ts` restored byte-identically at `sha256:064a3d24771f1cc351908847a5d7fa31c0d99d7d5899656f80a65768fc86caee`.
+- Focused after the correction: 17 pass / 0 fail, 282 assertions.
+- `bun --cwd broker test`: 1,596 pass / 10 skip / 1 fail, 6,808 assertions. The failure is the known `tests/v2-launch.test.ts:94` host-list mismatch (owner-side `platform.claude.com` in `nono/profile/opencode-v2-secure.json`), untouched.
+- From `broker`: `bun build --target=bun src/main.ts` completed without error.
+
+## Advisory review (2026-11-02, before the commit)
+Two independent advisors, neither seeing the other's answer.
+
+- **Security: no findings.** Verified the grant is exactly the five AFT reads for exactly those roles in exactly `HOST_READ_ONLY`; that authorization reads `record.agent`, not a request claim; that the admin AFT tools cannot satisfy the equality check; that plan writes do not move the session state; and that the read-only-orchestrator and `SECURITY_MUTATION` denials are not bypassed.
+- **Security WARNING (pre-existing, not introduced):** `broker/src/server.ts:705-713` logs operation, result, agent, session and duration for successful requests but not the admission tool, decision or reason. Admission allows and denies both appear as successful `toolAdmission` requests. The new reason code is distinguishable in the response, not in the broker audit trail.
+- **Correctness: two WARNINGs**, both the misleading matrix entries at `role-policy.ts:435` and `:448`, plus two SUGGESTIONs — no test for the `pm-odd` alias path, and none pinning `ast_grep_replace` as denied for these roles.
+- **Resolution:** all three non-advisory gaps closed before the commit — an alias test, the two admin-denial assertions, and the matrix comment. The logging limitation is recorded here and not fixed in this unit.
 
 ## Route and trigger evidence
-- Route: authorized change, ODD, delegated. Writer: `general` (orchestrator dispatch, sandbox writer).
+- Route: authorized change, ODD, delegated. Writer: `general` (orchestrator dispatch, sandbox worker).
 - Task class: small feature with authorization effect — not a Tiny fix, because it changes an admission decision.
-- Advisory review owed after the change: this is an authorization gate.
+- S17: `broker/src/**` was written in the sandbox, installed through the reviewed host path, and committed by the owner (`0ac79d5`).
 
 ## Next step
-Dispatch the writer with T1–T3, test-first.
+Observe one real planner or pm session admitted for an AFT read with reason `PRE_ACTIVATION_PLANNER_PM_AFT_READ_ALLOWED`, then archive this tracker. If that observation cannot be produced, record why and archive on the test evidence with that gap named.
 
 
 ## Revisions
 - r1 2026-11-02T22:53:04Z gentle-orchestrator: Create tracker for planner/pm AFT read admission
+- r2 2026-11-04T09:16:54Z gentle-orchestrator: Record commit 0ac79d5, the advisory outcome and the live-state gap
