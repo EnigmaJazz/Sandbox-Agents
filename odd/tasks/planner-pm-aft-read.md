@@ -26,9 +26,9 @@ if (
 }
 ```
 
-Narrow by construction: AFT tools only (`classifyAft` discriminates on the tool name against the inventory), the two roles only after `normalizeRoleKey` (so `pm-odd` and `pm-systematic` normalize to `pm`), `HOST_READ_ONLY` only, and a distinct reason code so an audit can tell which rule admitted the call. Everything else falls through unchanged.
+Narrow by construction: AFT tools only, the two roles only after `normalizeRoleKey` (so `pm-odd` and `pm-systematic` normalize to `pm`), `HOST_READ_ONLY` only, and a distinct reason code so an audit can tell which rule admitted the call. Everything else falls through unchanged.
 
-`broker/src/role-policy.ts:428-429` now carries a comment above the `planner` matrix entry stating that `HOST_READ_STRUCTURED` is unreachable there and that the pre-check is what admits AFT reads — closing the trap that misled a reader before.
+`broker/src/role-policy.ts:428-429` now carries a comment above the `planner` matrix entry stating that `HOST_READ_STRUCTURED` is unreachable there and that the pre-check is what admits AFT reads.
 
 ## Decisions
 1. Scope is `planner` and `pm` (owner, 2026-11-02).
@@ -54,9 +54,9 @@ Narrow by construction: AFT tools only (`classifyAft` discriminates on the tool 
 Two independent advisors, neither seeing the other's answer.
 
 - **Security: no findings.** Verified the grant is exactly the five AFT reads for exactly those roles in exactly `HOST_READ_ONLY`; that authorization reads `record.agent`, not a request claim; that the admin AFT tools cannot satisfy the equality check; that plan writes do not move the session state; and that the read-only-orchestrator and `SECURITY_MUTATION` denials are not bypassed.
-- **Security WARNING (pre-existing, not introduced):** `broker/src/server.ts:705-713` logs operation, result, agent, session and duration for successful requests but not the admission tool, decision or reason. Admission allows and denies both appear as successful `toolAdmission` requests. The new reason code is distinguishable in the response, not in the broker audit trail.
+- **Security WARNING (pre-existing, not introduced):** `broker/src/server.ts:705-713` logs operation, result, agent, session and duration for successful requests but not the admission tool, decision or reason, so admission allows and denies both look like successful `toolAdmission` requests. The reason code is distinguishable in the response, not in the broker audit trail.
 - **Correctness: two WARNINGs**, both the misleading matrix entries at `role-policy.ts:435` and `:448`, plus two SUGGESTIONs — no test for the `pm-odd` alias path, and none pinning `ast_grep_replace` as denied for these roles.
-- **Resolution:** all three non-advisory gaps closed before the commit — an alias test, the two admin-denial assertions, and the matrix comment. The logging limitation is recorded here and not fixed in this unit.
+- **Resolution:** all three non-advisory gaps closed before the commit. The logging limitation is recorded here and not fixed in this unit.
 
 ## Route and trigger evidence
 - Route: authorized change, ODD, delegated. Writer: `general` (orchestrator dispatch, sandbox worker).
@@ -70,3 +70,4 @@ Observe one real planner or pm session admitted for an AFT read with reason `PRE
 ## Revisions
 - r1 2026-11-02T22:53:04Z gentle-orchestrator: Create tracker for planner/pm AFT read admission
 - r2 2026-11-04T09:16:54Z gentle-orchestrator: Record commit 0ac79d5, the advisory outcome and the live-state gap
+- r3 2026-11-04T09:29:13Z gentle-orchestrator: No change to evidence; hold for the live planner observation
