@@ -143,3 +143,6 @@ Record technical Gate 1 for A/U1 on this revision. No code, tests or installatio
 ## Revisions
 - r1 2026-11-04T09:58:46Z gentle-orchestrator: Create tracker for the archive and branch host tools
 - r2 2026-11-04T10:49:21Z planner: Finalize U1/A with owner decisions, PM suggestions, and raw security/specification advice
+
+## Gates
+- A PASS 2026-11-04T10:49:44Z planner ref=Gate1 U1/A: plan r2 commit 37126522fad90914139c47de268266b3fc250e6d; raw pre-advice ses_e59d6df63ffefVSSWDU312fsQy; code evidence ses_e59e0db49ffe0pgljjH1TaT0uY
