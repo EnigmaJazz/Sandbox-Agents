@@ -3,6 +3,22 @@
 Status: **proposed, design only. No code until the user approves this plan and the
 threat-model update in P0.** Task record to create when P0 starts: `odd/tasks/staging-chains.md`.
 
+## Update 2026-11-05: D24 scope and P0 spike result
+
+Owner decision D24 (multi-tier orchestration spec, OPEN-18) narrows the build to: "P0-P2, a
+reduced P4 (reject, STALE, re-run from the tip, no merge-tree replay), P6 kept, P5 only if
+unattended multi-stage work needs it, P3 deferred". The Phases table below is the 2026-10-12
+version; where it differs (P3, P4 replay and conflict hand-back, P5), this note wins. P6 keeps
+its acceptance tests and the user's sign-off. The P5 need, or its omission, is recorded in
+`odd/tasks/staging-chains.md`.
+
+P0 spike (gentle-ai 4.3.1, preflight commands only; `start`, `capture` and `acknowledge` were
+not run): native review works only when the stage commit is checked out as HEAD of a repository
+that can resolve it, for example a `git clone --shared` made on the host side, with `--base-ref`
+set to the stage's baseline. It does not work on a bare ref (`assess` reports "no pending
+changes"). Where the review runs, and the after-apply fallback below, stay an owner decision
+(OPEN-1).
+
 ## Goal
 
 Agents keep working on a project without waiting for the user. Each finished piece of work is

@@ -329,3 +329,32 @@ groups grant package-manager caches read-only: `~/.bun` through
 first cache write, and OpenCode logs nothing. Plugin and package installs belong
 to the non-secure OpenCode instance, which shares `~/.cache/opencode`; the secure
 instance consumes that cache only.
+
+## Staged work chains and gate verdicts (PROPOSED - for owner review)
+
+Status: **PROPOSED - for owner review.** Not in force until the user reviews and installs it
+(S17 path). Written in P0 of `docs/staging/plan.md` (scope D24); the gate-verdict part comes from
+decision D22 of the multi-tier orchestration spec. Nothing above this section changes.
+
+**New assets**: chain and stage records and their refs (`refs/opencode-sandbox/chain/**`); the
+stage baseline; the owner's approve, reject and apply decisions; the recorded gate verdict; and,
+once review-before-apply is chosen (OPEN-1), a host-side shared review clone.
+
+**Trust boundaries**: stage content is worker output and therefore untrusted, including as input
+to the stage-review agent and to Jev. Baselines, diffs and verdicts come from broker records, never
+from the worker or the review agent. The review agent has no write or decision capability.
+
+| Abuse case | Mitigation |
+|---|---|
+| Stage-baseline forgery: a worker supplies a false parent | The broker derives the baseline; the worker cannot name it. |
+| Approval forgery: an agent approves or applies its own stage | A stage never applies without the owner's approval. Decisions come only from the stage-review role, never from a session with a worker in the chain, behind an `ask` prompt bound to the result commit. |
+| Persuasion by the review agent: a wrong or manipulated summary | The approval prompt shows the broker's real diff, not the agent's summary. |
+| Stale or reordered apply: stage n without n-1, or after the host moved | Stages apply in order only, reusing the existing divergence check (S16). A rejection marks dependent stages `STALE`; they are re-run from the current tip, with no merge-tree replay. |
+| S17 content in a stage | Protected paths (S17) stay rejected at apply; S17 stages are excluded from the stage-review path and keep the manual review. |
+| Chain growth as a denial of service | Stage and line limits per lane (broker configuration). |
+| Retention loss: GC removes an unapplied stage's only copy | The artifact GC never removes it (the durability rule in `artifacts.ts`). |
+| Review-consent bypass | Consent for native review is never pre-granted. |
+| Review authority leaks into the host repository | Native review authority lives in the Git common directory. A shared review clone has its own authority store, so none lands in the host repo. The clone is created host-side by the broker, is disposable, and is not a worktree in the project. Unverified: where `review start` writes, and whether the sandbox can read the clone (spike, OPEN-1). |
+| Gate-verdict forgery (D22): a worker or plugin writes a passing verdict | Code records a gate verdict only when Jev shows a clear match to the spec and the deterministic checks agree. A clear fail returns to the Planner; an unsure result, or a payload too large to check, goes to the independent spec-check agent. |
+| Steering Jev through stage content | Jev output is evidence, never approval, everywhere except this one gate verdict. Any stage that names a high-risk item keeps its independent verifier regardless of the Jev result (proposed). |
+| Widened `host_gate_verdict` author (D22 changes who may write it) | The change is isolated in its own commit, keeps the append-only record, and is checked by an independent verifier before the owner installs it. |
