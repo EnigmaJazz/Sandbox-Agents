@@ -30,10 +30,11 @@ Build the staged work chain at the D24 scope (P0-P2, a reduced P4, P6 kept, P5 o
 | T3 | P2: stage-review role and allowlist, global deny of `host_stage_*`, `host_stage_list/show/approve/reject/apply`, in-order apply, `sandboxctl stages` | S78, S80, S81 | pending | Touches `opencode/plugins/**`, `opencode/config-fragments/**` and both installer parity lists. S79 waits for OPEN-1. |
 | T4 | Reduced P4: reject, `STALE`, re-run from the tip | S82, S83, S84, S85 | pending | No merge-tree replay and no conflict hand-back. Needs adversarial tests. |
 | T5 | P6: gated acceptance tests in `tests/acceptance/`, manual gate | S88, S89 | pending | The user runs and signs off; no agent self-certifies. |
-| T6 | B2 gate routing: D22 `host_gate_verdict` author change | S94, S95 | pending | Isolated commit (high-risk item 3), then an independent verifier. Contract: `docs/contracts/multi-agent-v2-workflow-prompt.md`. |
+| T6 | B2 gate routing: D22 `host_gate_verdict` author change | S93, S94, S95 | pending | Isolated commit (high-risk item 3), then an independent verifier. Contract: `docs/contracts/multi-agent-v2-workflow-prompt.md`. |
 
-Not scheduled: P3 (S86, deferred), P5 (S87, only on a demonstrated unattended multi-stage need; record the need or its omission here). S93 (Tier 5 has no Engram write) needs profile and permission work that none of these units owns; placement is the owner's call.
+Not scheduled: P3 (S86, deferred), P5 (S87, only on a demonstrated unattended multi-stage need; record the need or its omission here). S93 (Tier 5 has no Engram write) is placed in T6 (owner decision, 2026-11-06).
 
 ## Log
 
 - 2026-11-05: tracker created by the multi-tier-orchestration T6 unit U0 (docs only; no tests apply).
+- 2026-11-06: owner placed S93 in the B2 gate-routing unit (T6).
