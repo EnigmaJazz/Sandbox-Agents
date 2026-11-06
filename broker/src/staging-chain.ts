@@ -28,7 +28,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { buildChangedPathsArgv, buildCheckArgv, checkProtectedPaths, parseNulDelimitedPaths, patchPathFor, resultRef } from "./gitops.ts";
 import { PolicyError } from "./policy.ts";
 import {
@@ -512,16 +512,31 @@ export async function stageApply(ctx: OpContext, by: Decider, p: Record<string, 
   }
 }
 
+/** A regular file (not a symlink) whose every ancestor below the project root is a real directory, resolving inside the root. */
+function isPlainFileInside(root: string, path: string, full: string): boolean {
+  if (!resolve(full).startsWith(root + sep)) return false;
+  const parts = path.split("/");
+  let cur = root;
+  for (const part of parts.slice(0, -1)) {
+    cur = join(cur, part);
+    const st = lstatSync(cur);
+    if (!st.isDirectory() || st.isSymbolicLink()) return false;
+  }
+  return lstatSync(full).isFile();
+}
+
 /**
  * What differs between the host working tree and a stage's pinned result, over
  * the paths the stage changed (read-only: lstat, read and hash; nothing is written).
  * A path the result keeps must hold exactly the result's blob; a path the result
- * deletes must be absent. Symlinks, submodules and anything outside the project
- * root cannot be verified here and count as differences.
+ * deletes must be absent. Symlinks (the file or any ancestor directory), submodules and anything outside the
+ * project root cannot be verified here and count as differences; only content and
+ * the executable bit are compared.
  */
 async function hostDifferences(ctx: OpContext, chain: ChainRecord, stage: StageStatus): Promise<string[]> {
   const projectDir = projectDirFor(ctx, chain.projectID);
   const paths = stage.changedPaths ?? [];
+  if (paths.length === 0) throw new StateError(`stage ${stage.n} changed no paths; there is nothing to verify on the host`);
   const tree = await ctx.git.spawn(["git", "ls-tree", "-r", "-z", "--full-tree", stage.result!, "--", ...paths], {
     env: { GIT_DIR: join(projectDir, ".git"), GIT_LITERAL_PATHSPECS: "1" },
     cwd: projectDir,
@@ -537,7 +552,7 @@ async function hostDifferences(ctx: OpContext, chain: ChainRecord, stage: StageS
   const differences: string[] = [];
   for (const path of paths) {
     const want = expected.get(path);
-    const full = join(projectDir, path);
+    const full = join(root, path);
     let present = true;
     try {
       lstatSync(full);
@@ -554,8 +569,10 @@ async function hostDifferences(ctx: OpContext, chain: ChainRecord, stage: StageS
     }
     if (want.mode === "120000" || want.mode === "160000") {
       differences.push(`${path}: a symlink or submodule cannot be verified; the owner checks it by hand`);
-    } else if (!lstatSync(full).isFile() || !realpathSync(dirname(full)).startsWith(root)) {
+    } else if (!isPlainFileInside(root, path, full)) {
       differences.push(`${path}: not a regular file inside the project`);
+    } else if (want.mode === "100755" !== ((lstatSync(full).mode & 0o111) !== 0)) {
+      differences.push(`${path}: the executable bit differs from the stage's result (${want.mode})`);
     } else {
       const bytes = readFileSync(full);
       const sha = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");

@@ -36,7 +36,9 @@ Implemented at the D24 scope (no merge-tree replay, no conflict hand-back):
   claim whose worker was released or failed; the next attach takes the number as a new attempt.
 - **Reconcile.** `stageReconcile` (`host_stage_reconcile`) records `APPLIED` (marked `reconciled`)
   for an `APPLYING` stage left by a crash, or an `APPROVED` protected stage the owner applied by
-  hand, only after reading the host and finding every changed path equal to the pinned result. It
+  hand, only after reading the host and finding every changed path equal to the pinned result (a
+  regular file with no symlinked ancestor, same bytes and executable bit; a stage with no changed
+  paths is refused). It
   never writes the host; a mismatch records nothing and returns the differences.
 
 ## Goal

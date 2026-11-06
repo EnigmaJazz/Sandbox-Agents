@@ -13,7 +13,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
@@ -123,7 +123,8 @@ function hostFingerprint(repo: string): string {
       if (d.name === ".git") continue;
       const p = join(dir, d.name);
       h.update(p);
-      if (d.isDirectory()) walk(p);
+      if (d.isSymbolicLink()) h.update(readlinkSync(p));
+      else if (d.isDirectory()) walk(p);
       else h.update(readFileSync(p));
     }
   };
@@ -376,6 +377,115 @@ describe("reconcile (carry-forward: stuck APPLYING, hand-applied S17 stages)", (
     rmSync(join(f.repo, "b.txt"));
     writeFileSync(join(f.repo, "b.txt"), "b\n");
     expect((await f.rec("stageReconcile", 1)).state).toBe("APPLIED");
+  });
+
+  /** One APPLYING stage whose commit is built by `build` on a side branch of the fixture repo. */
+  function seededOne(build: (repo: string) => void) {
+    const e = env();
+    const base = git(e.repo, "rev-parse", "HEAD");
+    git(e.repo, "checkout", "-q", "-b", "side");
+    build(e.repo);
+    git(e.repo, "add", "-A");
+    git(e.repo, "commit", "-q", "--allow-empty", "-m", "stage 1");
+    const s1 = git(e.repo, "rev-parse", "HEAD");
+    git(e.repo, "checkout", "-q", "main");
+    const chain = chainCreate(e.ctx, { projectID: "repo", lane: "feature" }).id;
+    git(e.repo, "update-ref", `${REF(chain)}/base`, base);
+    git(e.repo, "update-ref", `${REF(chain)}/stage/1`, s1);
+    e.ctx.store.touch("w1", { projectID: "repo", state: "RESULT_READY", chain: { id: chain, n: 1, baseline: base } });
+    const decisions = join(e.stateDir, "chains", `${chain}.decisions.json`);
+    const approve = () => decide(e, "stageApprove", chain, 1, s1);
+    const crash = () => {
+      const rec = JSON.parse(readFileSync(decisions, "utf8"));
+      rec.events.push({ n: 1, event: "APPLYING", result: s1, at: new Date().toISOString(), by: { sessionID: "rev", agent: REVIEWER } });
+      writeFileSync(decisions, JSON.stringify(rec));
+    };
+    return { ...e, chain, approve, crash, rec: () => decide(e, "stageReconcile", chain, 1, s1) };
+  }
+  /** The refusal leaves the host untouched, records nothing, and the same bytes in a plain place reconcile (positive control). */
+  async function refusedThenOk(f: ReturnType<typeof seededOne>, pattern: RegExp, fix: () => void): Promise<void> {
+    const before = hostFingerprint(f.repo);
+    const out = await f.rec();
+    expect(out).toMatchObject({ state: "APPLYING", reconciled: false });
+    expect(out.differences.join("\n")).toMatch(pattern);
+    expect(hostFingerprint(f.repo)).toBe(before);
+    const history = ((await show(f, f.chain, 1)).history ?? []).map((x: any) => x.event);
+    expect(history).toEqual(["APPROVED", "APPLYING"]);
+    fix();
+    expect(await f.rec()).toMatchObject({ state: "APPLIED", reconciled: true });
+  }
+
+  test("a symlinked ancestor directory is a difference, even to a sibling that shares the project path prefix", async () => {
+    const f = seededOne((repo) => {
+      mkdirSync(join(repo, "lnk"));
+      writeFileSync(join(repo, "lnk/f.txt"), "f\n");
+    });
+    await f.approve();
+    f.crash();
+    const evil = `${f.repo}-evil`;
+    mkdirSync(evil);
+    writeFileSync(join(evil, "f.txt"), "f\n"); // identical bytes, outside the project
+    symlinkSync(evil, join(f.repo, "lnk"));
+    await refusedThenOk(f, /lnk\/f\.txt: not a regular file inside the project/, () => {
+      rmSync(join(f.repo, "lnk"));
+      mkdirSync(join(f.repo, "lnk"));
+      writeFileSync(join(f.repo, "lnk/f.txt"), "f\n");
+    });
+  });
+
+  test("a symlinked ancestor directory that points inside the project is a difference", async () => {
+    const f = seededOne((repo) => {
+      mkdirSync(join(repo, "lnk"));
+      writeFileSync(join(repo, "lnk/f.txt"), "f\n");
+    });
+    await f.approve();
+    f.crash();
+    mkdirSync(join(f.repo, "real"));
+    writeFileSync(join(f.repo, "real/f.txt"), "f\n");
+    symlinkSync("real", join(f.repo, "lnk"));
+    await refusedThenOk(f, /lnk\/f\.txt: not a regular file inside the project/, () => {
+      rmSync(join(f.repo, "lnk"));
+      mkdirSync(join(f.repo, "lnk"));
+      writeFileSync(join(f.repo, "lnk/f.txt"), "f\n");
+    });
+  });
+
+  test("the file itself being a symlink to identical bytes is a difference", async () => {
+    const f = seededOne((repo) => writeFileSync(join(repo, "f.txt"), "f\n"));
+    await f.approve();
+    f.crash();
+    writeFileSync(join(f.repo, "real.txt"), "f\n");
+    symlinkSync("real.txt", join(f.repo, "f.txt"));
+    await refusedThenOk(f, /f\.txt: not a regular file inside the project/, () => {
+      rmSync(join(f.repo, "f.txt"));
+      writeFileSync(join(f.repo, "f.txt"), "f\n");
+    });
+  });
+
+  test("the executable bit is compared: a 755 stage file against a 644 host file is a difference, a match reconciles", async () => {
+    const f = seededOne((repo) => {
+      writeFileSync(join(repo, "n.sh"), "echo\n");
+      chmodSync(join(repo, "n.sh"), 0o755);
+      writeFileSync(join(repo, "m.txt"), "m\n");
+    });
+    await f.approve();
+    f.crash();
+    writeFileSync(join(f.repo, "n.sh"), "echo\n");
+    chmodSync(join(f.repo, "n.sh"), 0o644);
+    writeFileSync(join(f.repo, "m.txt"), "m\n");
+    chmodSync(join(f.repo, "m.txt"), 0o755); // +x where the stage has a plain file
+    await refusedThenOk(f, /m\.txt: the executable bit differs[^]*n\.sh: the executable bit differs/, () => {
+      chmodSync(join(f.repo, "n.sh"), 0o755);
+      chmodSync(join(f.repo, "m.txt"), 0o644);
+    });
+  });
+
+  test("a stage that changed no paths is refused, not reconciled vacuously", async () => {
+    const f = seededOne(() => undefined);
+    await f.approve();
+    f.crash();
+    await refusedLeavesHost(f, () => f.rec(), /changed no paths/);
+    expect(((await show(f, f.chain, 1)).history ?? []).map((x: any) => x.event)).toEqual(["APPROVED", "APPLYING"]);
   });
 
   test("an APPROVED protected (S17) stage the owner applied by hand is reconciled; an unapplied one is not", async () => {
