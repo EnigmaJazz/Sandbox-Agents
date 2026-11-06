@@ -51,7 +51,7 @@ import {
   type ArtifactRemoval,
 } from "./artifacts.ts";
 import type { LogEntry } from "./logging.ts";
-import { releaseWorker, runPrepare, type OpContext } from "./service.ts";
+import { isFinishing, releaseWorker, runPrepare, withFinishGuard, type OpContext } from "./service.ts";
 import { isTerminalState } from "./state.ts";
 import type { SessionRecord } from "./types.ts";
 
@@ -316,8 +316,12 @@ export function startReaper(ctx: OpContext, opts: ReaperOptions): ReaperHandle {
     opts.onLog,
     opts.onDrop,
   );
+  // A tick never starts while the previous sweep (which can wait on test runners) is still running.
+  let sweeping = false;
   const timer = setInterval(() => {
-    void runReaperSweeps(ctx, opts);
+    if (sweeping) return;
+    sweeping = true;
+    void runReaperSweeps(ctx, opts).finally(() => { sweeping = false; });
   }, opts.intervalMs);
   if (typeof (timer as { unref?: () => void }).unref === "function") {
     (timer as { unref: () => void }).unref();
@@ -381,6 +385,7 @@ export async function sweepIdle(
       if (ctx.queue?.find(record.sessionID)) continue;
       if (record.state === "APPLY_PENDING") continue;
       if ((ctx.activeLocks?.get(record.sessionID) ?? 0) > 0) continue;
+      if (isFinishing(ctx, record.sessionID)) continue;
       // No worker -> nothing to release (includes sessions parked in the pool
       // queue: they never transitioned past HOST_READ_ONLY). DESTROYED/FAILED
       // workers were already released.
@@ -456,7 +461,18 @@ export type PrepareResult = (ctx: OpContext, sessionID: string) => Promise<strin
  * If the export throws, this throws before any release: the worker is kept so
  * the edits survive for a later attempt.
  */
-async function finishOrReleaseActive(
+function finishOrReleaseActive(
+  ctx: OpContext,
+  record: SessionRecord,
+  cleanDetail: string,
+  prepare: PrepareResult,
+): Promise<ReaperLogEntry> {
+  // One finish per session: the export can block for the evidence runners, and a second sweep must not
+  // release the worker (or export again) under them.
+  return withFinishGuard(ctx, record.sessionID, () => finishOrReleaseActiveGuarded(ctx, record, cleanDetail, prepare));
+}
+
+async function finishOrReleaseActiveGuarded(
   ctx: OpContext,
   record: SessionRecord,
   cleanDetail: string,
@@ -545,6 +561,7 @@ export async function sweepUnfinished(
       if (ctx.queue?.find(record.sessionID)) continue;
       if (record.state === "APPLY_PENDING") continue;
       if ((ctx.activeLocks?.get(record.sessionID) ?? 0) > 0) continue;
+      if (isFinishing(ctx, record.sessionID)) continue;
       if (record.state !== "SANDBOX_ACTIVE") continue;
       if (!record.workerName) continue;
       if (record.workerState !== "ACTIVE") continue;
@@ -589,6 +606,7 @@ export async function reapOnDisconnect(
   if (!record) return false;
   if (ctx.queue?.find(sessionID)) return false;
   if ((ctx.activeLocks?.get(sessionID) ?? 0) > 0) return false;
+  if (isFinishing(ctx, sessionID)) return false;
   if (record.state !== "SANDBOX_ACTIVE") return false;
   if (record.resultRef) return false;
   if (!record.workerName) return false;

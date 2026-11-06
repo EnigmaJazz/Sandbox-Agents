@@ -365,6 +365,7 @@ export interface RegisterProjectAskArgs {
   dryRun?: boolean;
   createRemote?: boolean;
   makePublic?: boolean;
+  worktreeRoot?: boolean;
 }
 
 /** Approval metadata for `host_register_project` (path + yes/no flag summary). */
@@ -375,11 +376,12 @@ export function buildRegisterProjectAsk(args: RegisterProjectAskArgs): HostToolA
     dryRun: args.dryRun ? "yes" : "no",
     createRemote: args.createRemote ? "yes" : "no",
     makePublic: args.makePublic ? "yes" : "no",
+    worktreeRoot: args.worktreeRoot ? "yes" : "no",
   };
   return buildHostToolAsk({
     permission: "host_register_project",
     operation: "registerProject",
-    summary: `Register project ${args.path} (dryRun=${details.dryRun}, createRemote=${details.createRemote}, makePublic=${details.makePublic})`,
+    summary: `Register project ${args.path} (dryRun=${details.dryRun}, createRemote=${details.createRemote}, makePublic=${details.makePublic}, worktreeRoot=${details.worktreeRoot})`,
     details,
   });
 }

@@ -178,6 +178,14 @@ export const TOOL_CLASSIFICATION_INVENTORY: Readonly<Record<string, Capability>>
   host_sdd_status: "HOST_READ_STRUCTURED", host_sdd_continue: "HOST_READ_STRUCTURED",
   host_sdd_task_result: "HOST_READ_STRUCTURED", host_sdd_archive_compose: "HOST_APPROVED_MUTATION",
   host_sdd_attempt_grant: "HOST_APPROVED_MUTATION",
+  // Staging chains: the review tools are structured reads; the chain operations change state.
+  host_stage_list: "HOST_READ_STRUCTURED", host_stage_show: "HOST_READ_STRUCTURED",
+  chainCreate: "MUTATE_PROJECT", chainAttach: "MUTATE_PROJECT", chainStatus: "HOST_READ_STRUCTURED",
+  stageList: "HOST_READ_STRUCTURED", stageShow: "HOST_READ_STRUCTURED",
+  // The owner's decisions are classed HOST_ADMIN_STRUCTURED so every identity but the stage-review role (decideStageReview, by tool name) is denied.
+  // D22: classed HOST_ADMIN_STRUCTURED so every identity but the gate router (decideGateRouter, by tool name) is denied.
+  host_gate_verdict_auto: "HOST_ADMIN_STRUCTURED",
+  host_stage_approve: "HOST_ADMIN_STRUCTURED", host_stage_reject: "HOST_ADMIN_STRUCTURED", host_stage_apply: "HOST_ADMIN_STRUCTURED", host_stage_reconcile: "HOST_ADMIN_STRUCTURED",
   sddArchiveCompose: "MUTATE_PROJECT", sddAttemptGrant: "MUTATE_PROJECT", planDocAppend: "MUTATE_PROJECT", planDocWrite: "MUTATE_PROJECT", planArchive: "MUTATE_PROJECT", taskMark: "MUTATE_PROJECT",
   reviewStart: "MUTATE_PROJECT", reviewCaptureResult: "MUTATE_PROJECT", reviewCaptureUnachievable: "MUTATE_PROJECT",
   reviewAcknowledgeApproved: "MUTATE_PROJECT", reviewCaptureCorrectionPlan: "MUTATE_PROJECT", reviewCaptureRefuter: "MUTATE_PROJECT",
@@ -516,6 +524,50 @@ export function decide(ctx: AuthorizationContext): DecisionResult {
   }
 
   return { decision: "allow", reasonCode: "ALLOWED" };
+}
+
+/**
+ * Stage-review role (staging-chain.ts): an identity from the broker `stageReviewAgents`
+ * allowlist. Read-only: structured host reads only, never a mutation, execution or worker.
+ * Fail closed on anything else, including an unknown capability.
+ */
+export function isStageReviewAgent(
+  agent: string | undefined,
+  config: { stageReviewAgents?: readonly string[] },
+): boolean {
+  return agent !== undefined && (config.stageReviewAgents ?? []).includes(agent);
+}
+
+/** The only tools the stage-review role is admitted to: the two stage reads, and the owner's decisions (each behind an `ask` prompt). */
+const STAGE_READ_TOOLS: readonly string[] = ["host_stage_list", "host_stage_show"];
+const STAGE_DECISION_TOOLS: readonly string[] = ["host_stage_approve", "host_stage_reject", "host_stage_apply", "host_stage_reconcile"];
+
+export function decideStageReview(capability: string, tool?: string): DecisionResult {
+  if ((capability === "READ_PROJECT" || capability === "HOST_READ_STRUCTURED") && tool !== undefined && STAGE_READ_TOOLS.includes(tool)) {
+    return { decision: "allow", reasonCode: "STAGE_REVIEW_READ_ONLY_ALLOWED" };
+  }
+  if (capability === "HOST_ADMIN_STRUCTURED" && tool !== undefined && STAGE_DECISION_TOOLS.includes(tool)) {
+    return { decision: "allow", reasonCode: "STAGE_REVIEW_DECISION_ALLOWED" };
+  }
+  return { decision: "deny", reasonCode: "STAGE_REVIEW_READ_ONLY" };
+}
+
+/**
+ * Gate-router role (D22): a trusted non-LLM identity from the broker `gateRouterAgents` allowlist.
+ * It may record a gate verdict through exactly one tool and holds nothing else: no read, no worker.
+ */
+export function isGateRouterAgent(
+  agent: string | undefined,
+  config: { gateRouterAgents?: readonly string[] },
+): boolean {
+  return agent !== undefined && (config.gateRouterAgents ?? []).includes(agent);
+}
+
+export function decideGateRouter(capability: string, tool?: string): DecisionResult {
+  if (capability === "HOST_ADMIN_STRUCTURED" && tool === "host_gate_verdict_auto") {
+    return { decision: "allow", reasonCode: "GATE_ROUTER_VERDICT_ALLOWED" };
+  }
+  return { decision: "deny", reasonCode: "GATE_ROUTER_ONLY_VERDICT" };
 }
 
 /**

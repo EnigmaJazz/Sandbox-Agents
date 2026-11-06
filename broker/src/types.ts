@@ -66,6 +66,8 @@ export type Operation =
   | "taskMark"
   | "testRun"
   | "gateVerdict"
+  // D22: the one operation through which code records a gate verdict (PASS only), gateRouterAgents only.
+  | "gateVerdictAuto"
   // Host sandbox-result read (T1): fixed argv, read-only, no worker (§31).
   | "sandboxResult"
   // Host sandbox-result install (T2): fixed argv, approval-gated host mutation.
@@ -116,6 +118,16 @@ export type Operation =
 
   // Orca report bridge: fixed binary + fixed argv, broker-validated fields (S1–S6).
   | "orcaReport"
+  // Staging chains (staging-chain.ts, P2 read half): chain records and the stage-review reads.
+  | "chainCreate"
+  | "chainStatus"
+  | "chainAttach"
+  | "stageList"
+  | "stageShow"
+  | "stageApprove"
+  | "stageReject"
+  | "stageApply"
+  | "stageReconcile"
   // External advisors (advisor-records.ts): evidence records, never authority.
   | "resultDiff"
   | "advisorAsk"
@@ -166,6 +178,7 @@ export const SANDBOX_GUARD_CLASS = {
   taskMark: "exempt-from-sandbox-guard",
   testRun: "exempt-from-sandbox-guard",
   gateVerdict: "exempt-from-sandbox-guard",
+  gateVerdictAuto: "exempt-from-sandbox-guard",
   sandboxResult: "exempt-from-sandbox-guard",
   sandboxResultInstall: "exempt-from-sandbox-guard",
   bindSessionAgent: "exempt-from-sandbox-guard",
@@ -205,6 +218,15 @@ export const SANDBOX_GUARD_CLASS = {
   toolAdmission: "exempt-from-sandbox-guard",
   registerProject: "exempt-from-sandbox-guard",
   orcaReport: "exempt-from-sandbox-guard",
+  chainCreate: "exempt-from-sandbox-guard",
+  chainStatus: "exempt-from-sandbox-guard",
+  chainAttach: "exempt-from-sandbox-guard",
+  stageList: "exempt-from-sandbox-guard",
+  stageShow: "exempt-from-sandbox-guard",
+  stageApprove: "exempt-from-sandbox-guard",
+  stageReject: "exempt-from-sandbox-guard",
+  stageApply: "exempt-from-sandbox-guard",
+  stageReconcile: "exempt-from-sandbox-guard",
   resultDiff: "exempt-from-sandbox-guard",
   advisorAsk: "exempt-from-sandbox-guard",
   advisorGet: "exempt-from-sandbox-guard",
@@ -251,6 +273,7 @@ export const OPERATIONS: readonly Operation[] = [
   "taskMark",
   "testRun",
   "gateVerdict",
+  "gateVerdictAuto",
   "sandboxResult",
   "sandboxResultInstall",
   "bindSessionAgent",
@@ -290,6 +313,15 @@ export const OPERATIONS: readonly Operation[] = [
   "toolAdmission",
   "registerProject",
   "orcaReport",
+  "chainCreate",
+  "chainStatus",
+  "chainAttach",
+  "stageList",
+  "stageShow",
+  "stageApprove",
+  "stageReject",
+  "stageApply",
+  "stageReconcile",
   "resultDiff",
   "advisorAsk",
   "advisorGet",
@@ -767,6 +799,8 @@ export interface RegisterProjectPayload {
   dryRun?: boolean;
   createRemote?: boolean;
   makePublic?: boolean;
+  /** D36: `path` is `<root>/<project>`; create the project folder and register the root. */
+  worktreeRoot?: boolean;
 }
 
 /** Orca report bridge: fixed binary, fixed argv, broker-validated fields (S1–S6). */
@@ -797,6 +831,8 @@ export interface SessionRecord {
   agent?: string;
   baselineRef?: string;
   resultRef?: string;
+  /** Staging-chain membership (staging-chain.ts); `baseline` is broker-derived, never worker-supplied. `testRunRefs`: ids of the broker's stage-bound testRun logs (D30), a pointer only. */
+  chain?: { id: string; n: number; baseline: string; attempt?: number; testRunRefs?: string[] };
   /** Exact result-ref commit installed into the host worktree. */
   installedCommit?: string;
   /** Host commit intent persisted before git commit; retries if HEAD is unchanged and recovers a proven commit transition. */

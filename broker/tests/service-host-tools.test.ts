@@ -16,7 +16,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildPlanDocAppendOp, computePlanDocAppend } from "../src/service.ts";
 import {
@@ -341,6 +341,78 @@ describe("host project registration handler", () => {
     expect(calls).toEqual([
       ["bun", "scripts/register-project.ts", "--dry-run", "--create-remote", "--public", eligible],
     ]);
+  });
+
+  describe("worktreeRoot (D36)", () => {
+    const root = join(process.cwd(), ".wtroot-probe");
+    const target = join(root, "proj");
+
+    test("spawns the fixed argv with --worktree-root for a not-yet-existing <root>/<project>", async () => {
+      const { calls, spawn } = recordingSpawn({ status: 0, stdout: "registered", stderr: "" });
+      const result = (await buildRegisterProjectOp(makeRegisterCtx(spawn))(
+        request("registerProject", { path: target, worktreeRoot: true, dryRun: true }, ORCHESTRATOR),
+      )) as { ok?: boolean };
+      expect(result.ok).toBe(true);
+      expect(calls).toEqual([["bun", "scripts/register-project.ts", "--dry-run", "--worktree-root", target]]);
+    });
+
+    test.each([
+      ["a project name the broker would not accept", join(root, "Bad Name"), /name must match/],
+      ["a credential directory", join(homedir(), ".ssh", "proj"), /refusing to register a path under/],
+      ["$HOME as the root", join(homedir(), "proj"), /refusing to register the filesystem root or \$HOME/],
+      ["a path under /etc", "/etc/wt/proj", /refusing to register a path under/],
+      ["a relative path", "wt/proj", /absolute/],
+    ])("refuses %s without spawning", async (_label, path, reason) => {
+      const { calls, spawn } = recordingSpawn({ status: 0, stdout: "", stderr: "" });
+      await expect(
+        buildRegisterProjectOp(makeRegisterCtx(spawn))(
+          request("registerProject", { path, worktreeRoot: true }, ORCHESTRATOR),
+        ),
+      ).rejects.toThrow(reason);
+      expect(calls).toEqual([]);
+    });
+
+    test("refuses a root whose parent does not exist, without spawning", async () => {
+      const { calls, spawn } = recordingSpawn({ status: 0, stdout: "", stderr: "" });
+      await expect(
+        buildRegisterProjectOp(makeRegisterCtx(spawn))(
+          request("registerProject", { path: join(process.cwd(), "no-such-parent", "wt", "proj"), worktreeRoot: true }, ORCHESTRATOR),
+        ),
+      ).rejects.toThrow(/parent of the worktree root does not exist/);
+      expect(calls).toEqual([]);
+    });
+
+    test("refuses worktreeRoot combined with createRemote or makePublic, without spawning", async () => {
+      for (const extra of [{ createRemote: true }, { makePublic: true, createRemote: true }]) {
+        const { calls, spawn } = recordingSpawn({ status: 0, stdout: "", stderr: "" });
+        await expect(
+          buildRegisterProjectOp(makeRegisterCtx(spawn))(
+            request("registerProject", { path: target, worktreeRoot: true, ...extra }, ORCHESTRATOR),
+          ),
+        ).rejects.toThrow(/cannot be combined|requires --create-remote|--public requires/);
+        expect(calls).toEqual([]);
+      }
+    });
+
+    test("worktreeRoot must be a boolean", async () => {
+      const { calls, spawn } = recordingSpawn({ status: 0, stdout: "", stderr: "" });
+      await expect(
+        buildRegisterProjectOp(makeRegisterCtx(spawn))(
+          request("registerProject", { path: target, worktreeRoot: "yes" }, ORCHESTRATOR),
+        ),
+      ).rejects.toThrow(ValidationError);
+      expect(calls).toEqual([]);
+    });
+
+    test("without worktreeRoot the existing behaviour is unchanged: a missing directory is still refused", async () => {
+      const { calls, spawn } = recordingSpawn({ status: 0, stdout: "", stderr: "" });
+      await expect(
+        buildRegisterProjectOp(makeRegisterCtx(spawn))(
+          request("registerProject", { path: target }, ORCHESTRATOR),
+        ),
+      ).rejects.toThrow(ValidationError);
+      expect(calls).toEqual([]);
+    });
   });
 
   test("registerProject surfaces a non-zero spawn as a worker error", async () => {

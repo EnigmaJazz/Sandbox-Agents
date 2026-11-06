@@ -38,9 +38,9 @@ const v1 = parseJsonc(resolve(V1_DIR, "sandbox-permissions.jsonc")).permission a
 const v2 = parseJsonc(resolve(V2_DIR, "sandbox-permissions.jsonc")).permission as Record<string, unknown>;
 
 describe("tool table scan (positive control: the checks below are not vacuous)", () => {
-  test("finds the 44 tools and the 20 that ask for approval", () => {
-    expect(tools.size).toBe(44);
-    expect([...tools.values()].filter(Boolean).length).toBe(20);
+  test("finds the 51 tools and the 24 that ask for approval", () => {
+    expect(tools.size).toBe(51);
+    expect([...tools.values()].filter(Boolean).length).toBe(24);
   });
   test("the V1 fragment is known to lack rules for three asking tools", () => {
     const missing = [...tools.keys()].filter((name) => !(name in v1));

@@ -3,6 +3,60 @@
 Status: **proposed, design only. No code until the user approves this plan and the
 threat-model update in P0.** Task record to create when P0 starts: `odd/tasks/staging-chains.md`.
 
+## Update 2026-11-05: D24 scope and P0 spike result
+
+Owner decision D24 (multi-tier orchestration spec, OPEN-18) narrows the build to: "P0-P2, a
+reduced P4 (reject, STALE, re-run from the tip, no merge-tree replay), P6 kept, P5 only if
+unattended multi-stage work needs it, P3 deferred". The Phases table below is the 2026-10-12
+version; where it differs (P3, P4 replay and conflict hand-back, P5), this note wins. P6 keeps
+its acceptance tests and the user's sign-off. The P5 need, or its omission, is recorded in
+`odd/tasks/staging-chains.md`.
+
+P0 spike (gentle-ai 4.3.1, preflight commands only; `start`, `capture` and `acknowledge` were
+not run): native review works only when the stage commit is checked out as HEAD of a repository
+that can resolve it, for example a `git clone --shared` made on the host side, with `--base-ref`
+set to the stage's baseline. It does not work on a bare ref (`assess` reports "no pending
+changes"). Where the review runs, and the after-apply fallback below, stay an owner decision
+(OPEN-1).
+
+## Update 2026-11-06: reject, STALE, rebuild, release and reconcile (unit U3)
+
+Implemented at the D24 scope (no merge-tree replay, no conflict hand-back):
+
+- **Reject then STALE.** `stageReject` records `REJECTED` and, in the same write, `STALE` (with the
+  cause) for every later stage that is not `APPLIED`. A `STALE` or `REJECTED` stage can never be
+  approved, applied or rejected again.
+- **Rebuild from the tip.** The first `REJECTED` or `STALE` stage number is run again as a new
+  attempt, from the previous stage's pinned result (`nextSnapshot` is `{ commit }`, or the worktree
+  for stage 1), only once that previous stage is `APPROVED` or `APPLIED`. The new attempt is pinned
+  create-only at `stage/<n>.<attempt>`; older attempts keep their refs and their history. Approve
+  and apply use the newest attempt's pinned ref, and the B1 binding (approved commit equals applied
+  commit) is per attempt. Nothing of the old attempt's content is carried over.
+- **Release a leaked claim.** Rejecting a `BUILDING` stage with the all-zero result releases a
+  claim whose worker was released or failed; the next attach takes the number as a new attempt.
+- **Reconcile.** `stageReconcile` (`host_stage_reconcile`) records `APPLIED` (marked `reconciled`)
+  for an `APPLYING` stage left by a crash, or an `APPROVED` protected stage the owner applied by
+  hand, only after reading the host and finding every changed path equal to the pinned result (a
+  regular file with no symlinked ancestor, same bytes and executable bit; a stage with no changed
+  paths is refused). It
+  never writes the host; a mismatch records nothing and returns the differences.
+
+## Update 2026-11-06: stage-bound test evidence (unit U4d, owner decision D30)
+
+At stage finish the broker runs its configured test runners (`BROKER_TEST_RUNNERS`) inside the
+worker's sandbox, on the stage content, and writes one broker-owned log per runner bound to the
+project and the pinned result's tree (`tree=` header). The binding is written only when the sandbox
+tree equals the pinned tree before and after the runners; failures are failing logs, infrastructure
+failures write nothing, and registration is never blocked. The ids show as `testRunRefs` on stage
+reads; `gateVerdictAuto` re-validates them, so a clear match can now record a PASS. Nothing runs on
+the host. The binding is a consistency check inside a worker-controlled sandbox, not a trust boundary;
+a green log proves only that the stage passes its own tests. Evidence is refused for a nested git
+repository (gitlink) or `core.fileMode=false`, `core.symlinks=false`, `core.worktree` (any value), `core.bare=true`
+or `core.sparseCheckout=true`, or git-ignored files outside `BROKER_EVIDENCE_IGNORED_ALLOW` (default `node_modules`); tracked `*.bundle` and `.broker-tmp/`, anything
+outside `/work`, `.gitattributes` eol normalisation and symlinks remain visible to the runner but not to
+the tree id. One finish per session runs at a time. `test-runs` keeps the newest 500 logs. Limits (test
+tampering, the items above, finish latency) are in the PROPOSED section of `docs/threat-model.md`. NOT INSTALLED: S17 paths, the owner reviews and installs.
+
 ## Goal
 
 Agents keep working on a project without waiting for the user. Each finished piece of work is
@@ -80,7 +134,7 @@ Only a human-only operation moves a stage to `APPROVED`, `APPLIED` or `REJECTED`
 
 ### Apply rules
 
-- Stages apply strictly in order. Stage n applies only when stage n-1 is `APPLIED`.
+- Stages apply strictly in order. Stage n applies only when stage n-1 is `APPLIED` and stage n's baseline is the pinned result of stage n-1's newest attempt (a stage built on a rejected attempt is refused). `chainAttach` and `stageReject` re-check live decisions and claims after their reads, so an attach that races a reject or another attach is refused, and a stage claimed during a reject is marked `STALE`.
 - Apply reuses today's path: the divergence check compares the host to the stage's baseline,
   which equals the host after the previous stage applied, so a clean in-order apply passes
   naturally. Any host edit made meanwhile shows as divergence and blocks that stage, as today.

@@ -14,8 +14,8 @@ import {
 
 export const hostRegisterToolSpecs = {
   host_register_project: defineTool({
-    description: "Register a new project with the agentic sandbox system (host-side, creates .atl, updates profile/broker/launcher). Path must be absolute.",
-    args: { path: pathArg, dryRun: z.boolean().optional(), createRemote: z.boolean().optional(), makePublic: z.boolean().optional() },
+    description: "Register a new project with the agentic sandbox system (host-side, creates .atl, updates profile/broker/launcher). Path must be absolute. With worktreeRoot=true the path is <root>/<project>: the project folder is created and the ROOT is registered (no git init, .atl or .codegraph), so every worktree under it is covered.",
+    args: { path: pathArg, dryRun: z.boolean().optional(), createRemote: z.boolean().optional(), makePublic: z.boolean().optional(), worktreeRoot: z.boolean().optional() },
     execute: async (args, ctx) => {
       await ctx.ask(
         buildRegisterProjectAsk({
@@ -23,10 +23,11 @@ export const hostRegisterToolSpecs = {
           dryRun: !!args.dryRun,
           createRemote: !!args.createRemote,
           makePublic: !!args.makePublic,
+          worktreeRoot: !!args.worktreeRoot,
         }),
       );
       const c = await client();
-      const result = await c.request("registerProject", ctx.sessionID, { path: args.path, dryRun: !!args.dryRun, createRemote: !!args.createRemote, makePublic: !!args.makePublic }, ctx.agent);
+      const result = await c.request("registerProject", ctx.sessionID, { path: args.path, dryRun: !!args.dryRun, createRemote: !!args.createRemote, makePublic: !!args.makePublic, worktreeRoot: !!args.worktreeRoot }, ctx.agent);
       return JSON.stringify(result, null, 2);
     },
   }),

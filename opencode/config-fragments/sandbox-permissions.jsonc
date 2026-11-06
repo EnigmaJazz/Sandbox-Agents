@@ -71,6 +71,16 @@
     "host_process_list": "allow",
     // Orca report bridge: fixed binary/argv, broker-validated fields, no approval (low impact).
     "host_orca_report": "allow",
+    // Staging chains: denied for every agent; the stage-review agent's own block enables them. The broker also refuses any other identity (stageReviewAgents).
+    "host_stage_list": "deny",
+    "host_stage_show": "deny",
+    // The three owner decisions: denied here; the stage-review agent block enables them as "ask" (a prompt per call). The broker also refuses every other identity.
+    "host_stage_approve": "deny",
+    "host_stage_reject": "deny",
+    "host_stage_apply": "deny",
+    "host_stage_reconcile": "deny",
+    // D22: only the gate-router identity (a non-LLM caller, broker gateRouterAgents) may record a code PASS; denied for every OpenCode agent here.
+    "host_gate_verdict_auto": "deny",
     "host_docker_list": "allow",
     "host_docker_logs": "allow",
     // Dormant since gentle-ai 4 (docs/upgrades/gentle-ai-4.md); rollback: restore host_sdd_status/host_sdd_continue/host_sdd_task_result to "allow" and host_sdd_attempt_grant/host_sdd_archive_compose to "ask".

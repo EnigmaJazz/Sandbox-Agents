@@ -12,7 +12,7 @@
  * - shell metacharacters rejected in argv (defence-in-depth: we spawn without
  *   a shell, but no payload may be safe to pipe through one either).
  */
-import { realpathSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { FORBIDDEN_WORKER_FIELDS, type BrokerResponseEnvelope, OPERATIONS } from "./types.ts";
 
@@ -674,6 +674,56 @@ export function assertRegisterableProjectPath(
   return canonical;
 }
 
+/** Project-folder name rule of worktree-root mode: the same shape as a broker project id. */
+const WORKTREE_PROJECT_NAME_RE = /^[a-z][a-z0-9._-]{0,63}$/;
+
+/**
+ * `host_register_project` target in worktree-root mode (D36): `<root>/<project>`, where `<project>` is a
+ * folder the registration script creates and `<root>` is what gets registered. Neither has to exist yet,
+ * but the parent of the root must (only the root and the project folder are ever created), and the same
+ * bans as {@link assertRegisterableProjectPath} apply to the lexical and the canonical form. Returns the
+ * canonical `<root>/<project>` path, the only value forwarded to the script.
+ */
+export function assertRegisterableWorktreeTarget(
+  value: unknown,
+  home: string = process.env.HOME ?? "",
+): string {
+  if (typeof value !== "string" || value.length === 0 || !isAbsolute(value)) {
+    throw new ValidationError("path must be an absolute string");
+  }
+  assertMaxBytes(value, REGISTER_PROJECT_PATH_MAX_BYTES, "path");
+  assertNoControlChars(value, "path");
+  const project = basename(value);
+  const root = dirname(value);
+  if (!WORKTREE_PROJECT_NAME_RE.test(project)) {
+    throw new ValidationError(`worktree project folder name must match ${WORKTREE_PROJECT_NAME_RE}`);
+  }
+  assertRegistrationRootAllowed(root, home);
+  assertRegistrationRootAllowed(value, home);
+  let canonicalRoot: string;
+  try {
+    const rootExists = existsSync(root);
+    canonicalRoot = rootExists
+      ? realpathSync(root)
+      : join(realpathSync(dirname(root)), basename(root));
+  } catch {
+    throw new ValidationError("the parent of the worktree root does not exist on the host");
+  }
+  if (!isAbsolute(canonicalRoot) || resolve(canonicalRoot) !== canonicalRoot) {
+    throw new ValidationError("worktree root must resolve to a canonical absolute path");
+  }
+  assertRegistrationRootAllowed(canonicalRoot, home);
+  const canonical = join(canonicalRoot, project);
+  assertRegistrationRootAllowed(canonical, home);
+  if (REGISTER_PROJECT_SHELL_UNSAFE_RE.test(canonical)) {
+    throw new ValidationError("path must not contain shell-active characters");
+  }
+  if (existsSync(canonicalRoot) && !statSync(canonicalRoot).isDirectory()) {
+    throw new ValidationError("worktree root is not a directory");
+  }
+  return canonical;
+}
+
 // ---------------------------------------------------------------------------
 // Host git/GH tool canonical validators (fixed argv, §31)
 // ---------------------------------------------------------------------------
@@ -943,7 +993,26 @@ export const HOST_READ_OPERATIONS: readonly string[] = [
   "advisorList",
   "toolAdmission",
   "orcaReport",
+  // Staging chains: stageList/stageShow are further restricted to stageReviewAgents by authorizeHostDispatch.
+  "chainStatus",
+  "stageList",
+  "stageShow",
 ];
+
+/**
+ * The owner's decisions on a stage. Mutations, but deliberately NOT in HOST_MUTATION_OPERATIONS:
+ * no orchestrator identity is granted them; only the stage-review role may call them.
+ */
+export const STAGE_DECISION_OPERATIONS: readonly string[] = ["stageApprove", "stageReject", "stageApply", "stageReconcile"];
+
+/**
+ * D22: operations only a session bound to a `gateRouterAgents` name may call (deny by default).
+ * Deliberately NOT in HOST_MUTATION_OPERATIONS: every orchestrator identity subset is a filter of that list.
+ */
+export const GATE_ROUTER_OPERATIONS: readonly string[] = ["gateVerdictAuto"];
+
+/** Operations only a session bound to a `stageReviewAgents` name may call (deny by default). */
+export const STAGE_REVIEW_OPERATIONS: readonly string[] = ["stageList", "stageShow", ...STAGE_DECISION_OPERATIONS];
 
 /** Host mutation names; HOST_MUTATION_IDENTITY_OPERATIONS grants each identity its explicit subset. */
 export const HOST_MUTATION_OPERATIONS: readonly string[] = [
@@ -973,12 +1042,16 @@ export const HOST_MUTATION_OPERATIONS: readonly string[] = [
   "reviewPersist",
   "sandboxResultInstall",
   "advisorAsk",
+  "chainCreate",
+  "chainAttach",
 ];
 
 export function hostToolAccess(operation: unknown): HostToolAccess {
   if (typeof operation === "string") {
     if ((HOST_READ_OPERATIONS as readonly string[]).includes(operation)) return "read";
     if ((HOST_MUTATION_OPERATIONS as readonly string[]).includes(operation)) return "mutation";
+    if (STAGE_DECISION_OPERATIONS.includes(operation)) return "mutation";
+    if (GATE_ROUTER_OPERATIONS.includes(operation)) return "mutation";
   }
   throw new ValidationError(`unknown host tool operation: ${String(operation)}`);
 }
@@ -1107,6 +1180,8 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   taskMark: ["projectDir", "target", "name", "taskId", "status", "evidenceCommit", "evidenceBaseRef", "gateRef", "note"],
   testRun: ["projectDir", "runner"],
   gateVerdict: ["projectDir", "name", "taskId", "verdict", "refinementPlan", "evidenceRef", "agent"],
+  // D22: no agent, verdict, threshold or deterministic input; the broker derives scope, budget and test status itself.
+  gateVerdictAuto: ["projectDir", "name", "taskId", "checkpoint", "chainID", "n", "expectedCriteria", "criteria", "testRunRefs"],
   // Host-authoritative session→agent binding: the host plugin supplies exactly
   // the host-resolved agent. No other key is accepted; this is never a model
   // tool, so `hostToolAccess` deliberately does not classify it.
@@ -1181,11 +1256,22 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   copyInInfo: ["hostSource", "workerPath"],
   copyIn: ["hostSource", "workerPath", "confirm"],
   policy: [],
-  registerProject: ["path", "dryRun", "createRemote", "makePublic"],
+  registerProject: ["path", "dryRun", "createRemote", "makePublic", "worktreeRoot"],
 
   // Orca report bridge: fixed binary/argv; a field the message type cannot carry
   // is refused by broker/src/orca.ts, never dropped.
   orcaReport: ["terminal", "taskId", "dispatchId", "type", "subject", "body", "outcome", "options", "phase"],
+  // Staging chains (staging-chain.ts); the broker derives every baseline, so no ref or commit is accepted.
+  chainCreate: ["projectDir", "lane"],
+  chainStatus: ["chainID"],
+  chainAttach: ["chainID", "sessionID"],
+  stageList: ["chainID"],
+  stageShow: ["chainID", "n"],
+  // Owner decisions: each names the stage's pinned result commit, so it cannot land on content the owner did not see.
+  stageApprove: ["chainID", "n", "result", "confirmProtected"],
+  stageReject: ["chainID", "n", "result", "note"],
+  stageApply: ["chainID", "n", "result", "confirm"],
+  stageReconcile: ["chainID", "n", "result"],
   // External advisors (advisor-records.ts). No field may carry an acknowledgement token.
   advisorAsk: [
     "projectDir", "kind", "binding", "snapshot", "host", "selection", "group", "parentId",

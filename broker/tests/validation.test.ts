@@ -50,6 +50,7 @@ import {
   assertPlanDocHeading,
   assertPlanDocName,
   assertRegisterableProjectPath,
+  assertRegisterableWorktreeTarget,
   assertPayloadKeys,
   assertProjectRelativePath,
   assertSandboxPath,
@@ -239,6 +240,43 @@ describe("§28 attack table — symlink escape (S6)", () => {
     );
     expect(() => resolveProjectID(join(root, "sub"), [{ id: "p", path: root }])).not.toThrow();
     expect(resolveProjectID(root, [{ id: "p", path: root }])).toBe("p");
+  });
+
+  test("D36: one registered worktree root covers every worktree beneath it, and nothing outside it", () => {
+    const wtRoot = join(root, "worktrees");
+    mkdirSync(join(wtRoot, "proj", "feature-x"), { recursive: true });
+    mkdirSync(join(wtRoot, "other-proj", "fix-y"), { recursive: true });
+    const outside = join(root, "elsewhere");
+    mkdirSync(outside);
+    const projects = [{ id: "worktrees", path: wtRoot }];
+    expect(resolveProjectID(join(wtRoot, "proj", "feature-x"), projects)).toBe("worktrees");
+    expect(resolveProjectID(join(wtRoot, "other-proj", "fix-y"), projects)).toBe("worktrees");
+    // a sibling that only shares the name prefix is not inside the root
+    mkdirSync(join(root, "worktrees-evil"));
+    expect(() => resolveProjectID(join(root, "worktrees-evil"), projects)).toThrow(ValidationError);
+    expect(() => resolveProjectID(outside, projects)).toThrow(ValidationError);
+    // a symlink inside the root that leaves it resolves to its real location and is refused
+    symlinkSync(outside, join(wtRoot, "proj", "escape"));
+    expect(() => resolveProjectID(join(wtRoot, "proj", "escape"), projects)).toThrow(ValidationError);
+  });
+
+  test("D36: assertRegisterableWorktreeTarget returns the canonical <root>/<project> and refuses a root that is a symlink into a banned directory", () => {
+    // /tmp is itself a banned registration root, so the fixture lives under the working directory.
+    const base = mkdtempSync(join(process.cwd(), ".wt-canon-"));
+    try {
+      const home = "/home/tester";
+      const wtRoot = join(base, "wt");
+      mkdirSync(wtRoot);
+      expect(assertRegisterableWorktreeTarget(join(wtRoot, "proj"), home)).toBe(join(realpathSync(wtRoot), "proj"));
+      // the root need not exist yet when its parent does
+      expect(assertRegisterableWorktreeTarget(join(base, "new-root", "proj"), home)).toBe(
+        join(realpathSync(base), "new-root", "proj"),
+      );
+      symlinkSync("/etc", join(base, "etc-link"));
+      expect(() => assertRegisterableWorktreeTarget(join(base, "etc-link", "proj"), home)).toThrow(ValidationError);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -750,6 +788,7 @@ describe("host project-registration validators", () => {
         makePublic: true,
       }),
     ).not.toThrow();
+    expect(() => assertPayloadKeys("registerProject", { path: "/srv/project", worktreeRoot: true })).not.toThrow();
     for (const extra of [{ cwd: "/tmp" }, { argv: ["x"] }, { binary: "x" }, { projectDir: "/repo" }]) {
       expect(() =>
         assertPayloadKeys("registerProject", { path: "/srv/project", ...extra }),

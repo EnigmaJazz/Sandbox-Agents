@@ -30,7 +30,7 @@
  * steps. Credentials are never printed: gh is used only to derive the login
  * and numeric id, and only the login appears in the summary line.
  *
- * Usage: bun scripts/register-project.ts [--dry-run] [--create-remote] [--public] <path> [path...]
+ * Usage: bun scripts/register-project.ts [--dry-run] [--create-remote] [--public] [--worktree-root] <path> [path...]
  */
 
 import { execFileSync } from "node:child_process";
@@ -39,6 +39,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   statSync,
   writeFileSync,
@@ -68,8 +69,9 @@ const LAUNCHER_PATH = join(
 );
 const BROKER_ENV_PATH = join(HOME, ".config", "opencode-sandbox", "broker.env");
 
-const FLAGS = new Set(["--dry-run", "--create-remote", "--public"]);
+const FLAGS = new Set(["--dry-run", "--create-remote", "--public", "--worktree-root"]);
 const DRY_RUN = process.argv.includes("--dry-run");
+const WORKTREE_ROOT = process.argv.includes("--worktree-root");
 const CREATE_REMOTE = process.argv.includes("--create-remote");
 const PUBLIC_REPO = process.argv.includes("--public");
 const TARGETS = [
@@ -81,7 +83,7 @@ const PROJECT_ID_RE = /^[a-z][a-z0-9._-]{0,63}$/;
 
 type LocationStatus = "added" | "already registered" | "skipped";
 
-type GitStatus = "ok" | "init" | "failed" | "would init";
+type GitStatus = "ok" | "init" | "failed" | "would init" | "n/a (worktree root)";
 type IdentityStatus =
   | "existing"
   | "skipped"
@@ -111,21 +113,19 @@ function isUnder(path: string, root: string): boolean {
   return path === root || path.startsWith(root + "/");
 }
 
-function validateProject(path: string): string | null {
-  if (!isAbsolute(path)) return `not an absolute path: ${path}`;
-  if (!existsSync(path)) return `does not exist: ${path}`;
-  if (!statSync(path).isDirectory()) return `not a directory: ${path}`;
-  if (path === "/" || path === HOME) {
+/** Why `path` may not be registered (filesystem root, $HOME itself, credential or system roots), or null. */
+function bannedReason(path: string, home: string): string | null {
+  if (path === "/" || path === home) {
     return `refusing to register the filesystem root or $HOME itself: ${path}`;
   }
   const banned = [
-    join(HOME, ".ssh"),
-    join(HOME, ".config"),
-    join(HOME, ".local"),
-    join(HOME, ".cache"),
-    join(HOME, ".gnupg"),
-    join(HOME, ".aws"),
-    join(HOME, ".kube"),
+    join(home, ".ssh"),
+    join(home, ".config"),
+    join(home, ".local"),
+    join(home, ".cache"),
+    join(home, ".gnupg"),
+    join(home, ".aws"),
+    join(home, ".kube"),
     "/etc",
     "/usr",
     "/var",
@@ -136,10 +136,60 @@ function validateProject(path: string): string | null {
       return `refusing to register a path under ${root}: ${path}`;
     }
   }
+  return null;
+}
+
+function validateProject(path: string): string | null {
+  if (!isAbsolute(path)) return `not an absolute path: ${path}`;
+  if (!existsSync(path)) return `does not exist: ${path}`;
+  if (!statSync(path).isDirectory()) return `not a directory: ${path}`;
   // /mnt is not in the banned list, so any existing directory there is
   // accepted (e.g. /mnt/ai_storage/kinver-hub/proxy). A directory without a
   // .git is fine too: git init runs during registration.
-  return null;
+  return bannedReason(path, HOME);
+}
+
+// --- worktree-root mode (D36) -------------------------------------------------
+
+export interface WorktreeTarget {
+  root: string;
+  project: string;
+}
+
+/** Split `<root>/<project>` into the root that is registered and the project folder that is created.
+ *  The project name follows the broker's project-id rule; the root obeys the same bans as any project. */
+export function planWorktreeTarget(
+  target: string,
+  home: string = HOME,
+): WorktreeTarget | { error: string } {
+  if (!isAbsolute(target)) return { error: `not an absolute path: ${target}` };
+  const project = basename(target);
+  const root = dirname(target);
+  if (!PROJECT_ID_RE.test(project)) {
+    return { error: `project folder name must match ${PROJECT_ID_RE}: ${project}` };
+  }
+  const banned = bannedReason(root, home) ?? bannedReason(target, home);
+  if (banned !== null) return { error: banned };
+  return { root, project };
+}
+
+/** Create `<root>/<project>`; never creates anything inside the root besides the project folder. */
+export function ensureWorktreeProjectDir(
+  plan: WorktreeTarget,
+  dryRun: boolean,
+): "created" | "exists" | "would create" {
+  const dir = join(plan.root, plan.project);
+  if (existsSync(dir)) {
+    const canonicalRoot = realpathSync(plan.root);
+    const canonicalDir = realpathSync(dir);
+    if (!isUnder(canonicalDir, canonicalRoot) || canonicalDir === canonicalRoot) {
+      throw new Error(`${dir} resolves outside the worktree root (symlink): ${canonicalDir}`);
+    }
+    return "exists";
+  }
+  if (dryRun) return "would create";
+  mkdirSync(dir, { recursive: true });
+  return "created";
 }
 
 function deriveProjectId(path: string, used: Set<string>): string {
@@ -676,7 +726,7 @@ function setupGit(
 if (import.meta.main) {
   if (TARGETS.length === 0) {
     console.error(
-      "usage: bun scripts/register-project.ts [--dry-run] [--create-remote] [--public] <path> [path...]",
+      "usage: bun scripts/register-project.ts [--dry-run] [--create-remote] [--public] [--worktree-root] <path> [path...]",
     );
     process.exit(2);
   }
@@ -690,8 +740,37 @@ if (import.meta.main) {
   const reports: Report[] = [];
   let failed = false;
 
-  for (const path of TARGETS) {
-    const invalid = validateProject(path);
+  const registeredRoots = new Set<string>();
+  for (const target of TARGETS) {
+    let path = target;
+    if (WORKTREE_ROOT) {
+      // D36: create <root>/<project>/ and register the ROOT once. No git init, .atl, .codegraph or remote.
+      const plan = planWorktreeTarget(target);
+      if ("error" in plan) {
+        console.error(`error: ${plan.error}`);
+        failed = true;
+        continue;
+      }
+      // The parent of the root must already exist; only the root and the project folder are created.
+      if (!existsSync(dirname(plan.root))) {
+        console.error(`error: the parent of the worktree root does not exist: ${dirname(plan.root)}`);
+        failed = true;
+        continue;
+      }
+      let created: string;
+      try {
+        created = ensureWorktreeProjectDir(plan, DRY_RUN);
+      } catch (e) {
+        console.error(`error: ${(e as Error).message}`);
+        failed = true;
+        continue;
+      }
+      console.log(`\nworktree folder ${join(plan.root, plan.project)}: ${created}`);
+      if (registeredRoots.has(plan.root)) continue;
+      registeredRoots.add(plan.root);
+      path = plan.root;
+    }
+    const invalid = DRY_RUN && WORKTREE_ROOT && !existsSync(path) ? null : validateProject(path);
     if (invalid !== null) {
       console.error(`error: ${invalid}`);
       failed = true;
@@ -704,6 +783,25 @@ if (import.meta.main) {
       existingEntry !== undefined
         ? existingEntry.id
         : deriveProjectId(path, usedIds);
+    if (WORKTREE_ROOT) {
+      reports.push({
+        path,
+        id,
+        git: "n/a (worktree root)",
+        identity: "skipped",
+        origin: "none",
+        ghRemote: "skipped",
+        warnings: [],
+        profile: `${updateProfile(path)}; V2: ${updateProfile(path, V2_PROFILE_PATH)}`,
+        autoUpdate: "skipped (worktree root)",
+        skillRegistry: "skipped (worktree root)",
+        projectGit: "skipped (worktree root)",
+        codegraph: "skipped (worktree root)",
+        brokerEnv: updateBrokerEnv(path, id),
+        launcher: updateLauncher(path),
+      });
+      continue;
+    }
     const gitPlan = setupGit(path, CREATE_REMOTE, PUBLIC_REPO);
     if (gitPlan.ghError !== null) {
       console.error(`error: ${path}: ${gitPlan.ghError}`);
@@ -754,7 +852,7 @@ if (import.meta.main) {
 
   console.log("\nNext steps:");
   console.log(
-    "  systemctl --user daemon-reload && systemctl --user restart sandbox-broker.service secure-opencode.service",
+    "  systemctl --user daemon-reload && systemctl --user restart sandbox-broker.service secure-opencode.service secure-opencode-v2.service",
   );
   console.log(
     "  Note: openchamber-secure.service needs no restart for project registration.",

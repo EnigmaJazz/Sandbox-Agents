@@ -344,6 +344,8 @@ failure restores the source and its index entries; a failed move-back reports
 manifest, the tool row is a manual delivery: it is NOT INSTALLED until the user merges and
 restarts.
 
+`host_register_project` takes an optional `worktreeRoot` boolean (spec D36, `workflow_optimisation` multi-tier). With it, `path` must be `<root>/<project>`: the script creates the project folder (and the root, if its parent exists) and registers the ROOT once (read grant in both nono profiles, `BROKER_PROJECTS`, launcher root). It runs no `git init` and creates no `.atl` or `.codegraph`, and it cannot be combined with `createRemote` or `makePublic`. The project name must match `^[a-z][a-z0-9._-]{0,63}$`; the root obeys the same bans as any project, checked on the lexical and the canonical path (`validation.ts` `assertRegisterableWorktreeTarget`). The broker resolves every worktree under the registered root to that one project (`resolveProjectID`).
+
 ### 5e. Side table — `sandbox_*` family (same plugin)
 
 These are not host tools but are registered by the same plugin and complete the
@@ -412,6 +414,68 @@ is non-null or missing. The accepted shape is verified against the installed CLI
 and parsed by `parseOrcaDispatchProbe` in `broker/src/orca.ts`, so a CLI that
 answers differently makes every report refuse with a named reason rather than
 send unchecked.
+
+### 5g. Staging chains, read half (`host_stage_list`, `host_stage_show`)
+
+Added with phase P2 of `docs/staging/plan.md` (the table now registers 45 tools: 13
+`sandbox_*` and 32 host tools). NOT INSTALLED: S17 paths the owner reviews and installs.
+The approve, reject and apply tools are a later unit.
+
+| Aspect | Value |
+|---|---|
+| Tools | `host_stage_list` (`chainID`), `host_stage_show` (`chainID`, `n`) in `opencode/plugins/lib/tool-specs-host-ops.ts` |
+| Broker operations | `stageList`, `stageShow` (and `chainCreate`, `chainStatus`, `chainAttach`, which have no tool yet), built in `broker/src/staging-chain.ts` |
+| Fragment | `deny` in both permission fragments: the stage-review agent's own block must enable them (agent definition and workflow_optimisation task-deny override come later) |
+| Broker gate | `stageList`/`stageShow` are refused unless the broker-bound session agent is in `stageReviewAgents` (`BROKER_STAGE_REVIEW_AGENTS`, default `stage-review`; names are trimmed and deduplicated on read, and the broker refuses to start if a name repeats, is not a plain agent name, or overlaps `readOnlyAgents`, a plan writer, a known role or an orchestrator identity); `STAGE_REVIEW_ONLY` |
+| Role | tool admission allows exactly `host_stage_list` and `host_stage_show` (as reads) and the four stage decision tools (as admin), and denies every other tool, whatever its class; every worker operation and `ensureWorker` are refused (`STAGE_REVIEW_NO_WORKER`); it is not in `readOnlyAgents`, so it holds no host mutation |
+| Access class | `stageList`, `stageShow`, `chainStatus` are `HOST_READ_OPERATIONS` (`chainStatus` is additionally refused unless the caller may `chainCreate`, so the stage-review role, workers and unbound sessions cannot read chain internals); `chainCreate`, `chainAttach` are `HOST_MUTATION_OPERATIONS` (orchestrator identities) |
+| Data | read from `refs/opencode-sandbox/chain/<id>/stage/<n>`, never the session result ref; no approval prompt |
+| Payload and view | `chainID`, `lane` and `sessionID` must be strings (an array or object that stringifies to a valid id is refused). `changedPaths` are worker-authored, so the reviewer's view escapes backslashes, control, zero-width and bidi characters (`\\`, `\uXXXX`), cuts each name to 300 characters (at a whole code point) and lists at most 200, reporting `changedPathsOmitted`; the broker's own checks use the full list. `stageApprove` and `stageApply` refuse a stage whose view was cut (over 200 paths or a name over 300 characters): reject it and rebuild it smaller |
+
+### 5h. Staging chains, decision half (`host_stage_approve`, `host_stage_reject`, `host_stage_apply`)
+
+Added with phase P2 (unit U2b) of `docs/staging/plan.md` (the table now registers 48 tools; 23
+`ctx.ask` call sites). NOT INSTALLED: S17 paths the owner reviews and installs.
+
+| Aspect | Value |
+|---|---|
+| Tools | `host_stage_approve` (`chainID`, `n`, `result`, `confirmProtected?`), `host_stage_reject` (`chainID`, `n`, `result`, `note`), `host_stage_apply` (`chainID`, `n`, `result`; the tool sends `confirm: "APPLY"`); each calls `ctx.ask` with the broker's own `stageShow` view of the stage before the broker operation |
+| Broker operations | `stageApprove`, `stageReject`, `stageApply` in `broker/src/staging-chain.ts`; accepted only from a session bound to `stageReviewAgents`, never from a session that owns a stage of the chain (`STAGE_DECISION_NOT_WORKER`) |
+| Fragment | `deny` in both permission fragments, like `host_stage_list/show`: the stage-review agent block (a later unit) enables the three as `ask`. Until then no agent can call them; the broker refuses every other identity regardless |
+| Access class | `STAGE_DECISION_OPERATIONS` (host mutation, in no orchestrator identity's subset); tool admission class `HOST_ADMIN_STRUCTURED`, admitted to the stage-review role by tool name only |
+| Binding | every decision names the stage's pinned result commit (`result`); a mismatch is refused |
+| Record | append-only `<stateDir>/chains/<id>.decisions.json` (`APPROVED`, `REJECTED` + revision note, `APPLYING`, `APPLIED`, `APPLY_REFUSED`), each with the deciding session and agent and a timestamp; `stageList`/`stageShow` report the state and `history` |
+| Apply | strictly in order (stage n's baseline must be stage n-1's newest pinned result); only `APPROVED`; source is the pinned stage commit, never the session result ref; checks: baseline divergence (S16), plan-root paths, symlink/submodule, complete preview, `git apply --check`, then `git apply` (working tree only). A stage touching S17 paths can be approved with `confirmProtected: true` (per stage, never batched) but is never applied through this path (`applyResult`'s rule, `AGENTS.md`): apply refuses it as `APPLY_REFUSED` and the owner applies it by hand; consequently stages after it cannot apply either (open item for U3). Every refusal before `git apply` is recorded as `APPLY_REFUSED` and leaves the host unchanged; an interrupted apply stays `APPLYING` and blocks further applies until the owner reconciles it |
+| Not here | merge-tree replay, "approve through stage k" (see 5i for `STALE`, rebuild and reconcile) |
+
+### 5i. Staging chains, rework and reconcile (`host_stage_reconcile`; `host_stage_reject` extended)
+
+Added with unit U3 of `docs/staging/plan.md` (the table now registers 49 tools; 24 `ctx.ask` call
+sites). NOT INSTALLED: S17 paths the owner reviews and installs.
+
+| Aspect | Value |
+|---|---|
+| Tool | `host_stage_reconcile` (`chainID`, `n`, `result`); calls `ctx.ask` first; `deny` in both permission fragments like the other decision tools; admitted to the stage-review role by tool name only (`HOST_ADMIN_STRUCTURED`) |
+| Broker operation | `stageReconcile` (`STAGE_DECISION_OPERATIONS`, payload `chainID`, `n`, `result`). Valid for an `APPLYING` stage (crash) or an `APPROVED` protected (S17) stage the owner applied by hand; every earlier stage must be `APPLIED`; the approval must name the pinned result. It only reads the host: when every path the stage changed equals the pinned result (deleted paths absent; symlinks, a symlinked ancestor directory, submodules, non-regular files and paths outside the project root count as differences; only content and the executable bit are verified, not other metadata or extended attributes; a stage that changed no paths is refused) it records `APPLIED` with `reconciled: true`; otherwise it records nothing and returns `differences` |
+| Reject | `stageReject` now also records `STALE` (cause `stage <n> was rejected`) for every later stage not yet `APPLIED`, in the same write, and returns `stale: [n...]`. A `STALE` or `REJECTED` stage can never be approved, applied or rejected again |
+| Release | rejecting a `BUILDING` stage with the all-zero `result` (40 zeros) releases the claim of a worker that was released or failed; recorded as `REJECTED` |
+| Rebuild | `chainStatus.nextSnapshot` after a rejection is `{ commit: <previous stage's pinned result> }` (or `{ worktree: true }` for stage 1), offered only when that previous stage is `APPROVED` or `APPLIED`. The worker bound with `chainAttach` is a new attempt for the first `REJECTED`/`STALE` stage number. Attempt 1 keeps `stage/<n>`; attempt a > 1 is pinned create-only at `stage/<n>.<a>`; older refs are never moved. Stage status and events carry `attempt` only from attempt 2 |
+
+### 5j. Gate verdict recorded by code (`host_gate_verdict_auto`, decision D22)
+
+Added with unit U4b of the multi-tier orchestration spec (the tool table now registers 50 tools; still 24
+`ctx.ask` call sites, because the caller is a non-LLM identity). NOT INSTALLED: S17 paths the owner reviews and installs.
+
+| Aspect | Value |
+|---|---|
+| Tool | `host_gate_verdict_auto` (`name`, `taskId`, `checkpoint`, `chainID`, `n`, `expectedCriteria`, `criteria[{id, p?}]`, `testRunRefs`); no `ctx.ask`; `deny` in both permission fragments |
+| Broker operation | `gateVerdictAuto` (`GATE_ROUTER_OPERATIONS`; in no `HOST_MUTATION_IDENTITY_OPERATIONS` subset); accepted only from a session bound to a `gateRouterAgents` name (config, default empty; `BROKER_GATE_ROUTER_AGENTS`). The router holds no other operation, no worker and no sandbox operation |
+| Access class | tool admission classes `HOST_ADMIN_STRUCTURED`, admitted to the gate router by tool name only (`decideGateRouter`); every other identity, and an unbound session, is denied |
+| Existing tool | `host_gate_verdict` (PLANNER only, append-only) is unchanged |
+| Derived by the broker | touched paths (stage baseline..result), `## Allowed edit surfaces` of the plan document, diff-line budget (`maxApplyDiffLines`), test exit status only from a broker-written log whose header binds it to the project and the stage result's tree and that is not older than the pinned result; the plan `## Tasks` section must list `taskId`; `## Allowed edit surfaces` bullets inside fenced code are ignored; the stage is re-checked under the plan-document lock before the append; anything missing fails closed |
+| Test evidence (D30) | written by the broker at stage finish, not by `testRun`: each configured runner (`BROKER_TEST_RUNNERS`, broker config only) is run inside the worker sandbox in `/work/<cwd>` (argv vector, runner timeout, per-stream output cap, env `CI`/`NO_COLOR`), and bound to the stage only if the sandbox tree equals the pinned result's tree before and after; non-zero exit, timeout, signal or output over the cap is a failing log, an infrastructure failure writes none; the ids appear as `testRunRefs` on `stageShow`/`stageList`/`chainStatus` (a pointer; the gate re-validates). `argv[0]` must exist inside the worker image. Host `testRun` logs carry no binding and are never gate evidence. No log is written when git-ignored files exist in `/work` outside `BROKER_EVIDENCE_IGNORED_ALLOW` (JSON array of literal repo-relative paths, default `["node_modules"]`), or when the hashed tree contains a gitlink (mode 160000, a nested repository) or the worker repository sets `core.fileMode=false`, `core.symlinks=false`, `core.worktree` (any value), `core.bare=true` or `core.sparseCheckout=true`. Residual, not detected: a nested git repository (the tree records only a gitlink, mode 160000, while the runner sees the repository's tracked and untracked files); tracked `*.bundle` files and `.broker-tmp/` (excluded from `add -A`, so the index version is kept while the file the runner reads can differ); anything outside `/work`; file mode when the worker sets `core.fileMode=false` (the tree says 100644, the runner sees an executable); `.gitattributes` text/eol normalisation; and symlinks (the tree records the link, the runner follows it). The hash is computed inside a worker-controlled sandbox, so it is a consistency check and not a trust boundary (a live process can swap the index file or set `core.worktree`); a green log proves only that the stage passes its own tests under those conditions. One finish per session at a time (an overlapping `prepareResult`/`keepResult` is refused; the reaper skips a session being finished and never overlaps its own sweeps). `destroyWorker` is refused during a finish; a finish that never settles loses the guard after the runners' timeouts plus 5 minutes; `<stateDir>/test-runs` keeps the newest 500 logs |
+| Supplied by the router | the per-criterion probabilities from Jev (unverifiable by the broker: the router identity is their trust root), the expected criterion ids, the stage and log references |
+| Record | one line on the `## Gates` log of `odd/tasks/<name>.md`, author = the bound router identity, `ref=d22-auto:<checkpoint>:<chain>.<n>:sha256:<digest>`; only a first `PASS`; replay-idempotent; refused after a PLANNER `REFINE`/`ESCALATE` or any existing `PASS` |
 
 ### Discrepancies (explicitly flagged)
 

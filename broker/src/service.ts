@@ -28,6 +28,9 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { BrokerConfig, TestRunnerConfig } from "./config.ts";
 import { RESULT_EXCLUDE_PATHS } from "./diff-spec.ts";
+import { collectStageTestEvidence, registerChainStage, stageShow } from "./staging-chain.ts";
+import { runDeterministicChecks, type GateCheck } from "./gate-checks.ts";
+import { CHECKPOINTS, routeGate } from "./gate-route.ts";
 import { gitSubcommand } from "./gitguard.ts";
 import type { SessionStore } from "./state.ts";
 import type { MsbAdapter } from "./msb.ts";
@@ -48,9 +51,12 @@ import {
   assertPayloadKeys,
   assertPositiveInt,
   assertRegisterableProjectPath,
+  assertRegisterableWorktreeTarget,
   assertRefComponent,
   assertSandboxPath,
   HostToolPolicy,
+  GATE_ROUTER_OPERATIONS,
+  STAGE_REVIEW_OPERATIONS,
   resolveProjectID,
   ValidationError,
   type HostToolAccess,
@@ -83,7 +89,9 @@ import {
   buildResultCommitArgv,
   buildResultDeleteArgv,
   buildResultPatchArgv,
+  buildNumstatArgv,
   buildResultRestoreArgv,
+  parseNumstat,
   planSandboxResultInstall,
   readSandboxResult,
 } from "./sandbox-result.ts";
@@ -119,7 +127,7 @@ import {
   shouldRemoveSessionArtifacts,
 } from "./artifacts.ts";
 import { PolicyError, checkAdmission, type Admission } from "./policy.ts";
-import { classifyAft, classifyOperation, decide, isRole, normalizeRoleKey } from "./role-policy.ts";
+import { classifyAft, classifyOperation, decide, decideGateRouter, decideStageReview, isGateRouterAgent, isRole, isStageReviewAgent, normalizeRoleKey } from "./role-policy.ts";
 import {
   PendingQueue,
   QueuedTimedOutError,
@@ -131,6 +139,8 @@ import {
   fsyncSync,
   lstatSync,
   openSync,
+  readSync,
+  readdirSync,
   unlinkSync,
 } from "node:fs";
 import { dirname } from "node:path";
@@ -200,7 +210,7 @@ function payloadOf(req: BrokerRequestEnvelope): Payload {
 export type HostDispatchCategory = "orchestrator" | "plan-writer";
 
 export function authorizeHostDispatch(
-  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> },
+  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> & Partial<Pick<BrokerConfig, "stageReviewAgents" | "gateRouterAgents">> },
   operation: string,
   sessionID: string,
   _reqAgent?: string,
@@ -209,7 +219,27 @@ export function authorizeHostDispatch(
   const policy = new HostToolPolicy(ctx.config.readOnlyAgents);
   const existing = ctx.store.get(sessionID);
   const trusted = existing?.agent;
+  // D22: the gate router holds exactly one operation and nothing else (broker-derived identity, never the envelope claim).
+  if (GATE_ROUTER_OPERATIONS.includes(operation)) {
+    if (!isGateRouterAgent(trusted, ctx.config)) {
+      throw new PolicyError(`host mutation tool "${operation}" is gate-router-only (GATE_ROUTER_ONLY)`);
+    }
+    return policy.access(operation);
+  }
+  if (isGateRouterAgent(trusted, ctx.config)) {
+    throw new PolicyError(`the gate-router identity may call only gateVerdictAuto, not "${operation}" (GATE_ROUTER_ONLY)`);
+  }
+  // Stage queries are open to the stage-review role only (broker-derived identity, never the envelope claim).
+  if (STAGE_REVIEW_OPERATIONS.includes(operation) && !isStageReviewAgent(trusted, ctx.config)) {
+    throw new PolicyError(`host read tool "${operation}" is stage-review-only (STAGE_REVIEW_ONLY)`);
+  }
   const access = policy.access(operation);
+  // The stage-review role is not an orchestrator identity: the gate above is its whole authorization.
+  if (STAGE_REVIEW_OPERATIONS.includes(operation)) return access;
+  // chainStatus is a read that exposes chain internals (stage refs, session ids): only an identity that may create a chain sees it.
+  if (operation === "chainStatus" && !policy.decide("chainCreate", trusted).allowed) {
+    throw new PolicyError(`host read tool "${operation}" is orchestrator-only (CHAIN_STATUS_ORCHESTRATOR_ONLY)`);
+  }
   if (category === "plan-writer") {
     const isPlanRole = trusted && ["planner", "pm"].includes(normalizeRoleKey(trusted));
     if (operation === "taskMark" && normalizeRoleKey(trusted ?? "") !== "pm") {
@@ -238,7 +268,7 @@ export function authorizeHostDispatch(
  * roles. Binding records the host-resolved identity; authorization is separate.
  */
 function assertBindableAgent(
-  config: Pick<BrokerConfig, "readOnlyAgents">,
+  config: Pick<BrokerConfig, "readOnlyAgents"> & Partial<Pick<BrokerConfig, "stageReviewAgents" | "gateRouterAgents">>,
   agent: unknown,
 ): string {
   if (typeof agent !== "string" || agent.length === 0) {
@@ -248,7 +278,7 @@ function assertBindableAgent(
     throw new ValidationError("bindSessionAgent agent exceeds 128 bytes");
   }
   const allow = config.readOnlyAgents;
-  if (!allow.includes(agent) && !isRole(normalizeRoleKey(agent))) {
+  if (!allow.includes(agent) && !isStageReviewAgent(agent, config) && !isGateRouterAgent(agent, config) && !isRole(normalizeRoleKey(agent))) {
     throw new PolicyError(
       `session agent binding refused: "${agent}" is neither a host-authoritative identity nor a known role`,
     );
@@ -271,7 +301,7 @@ function assertBindableAgent(
  * overwritten, and each operation category checks its own authority.
  */
 export function bindSessionAgent(
-  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> },
+  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> & Partial<Pick<BrokerConfig, "stageReviewAgents" | "gateRouterAgents">> },
   sessionID: string,
   payload: unknown,
 ): SessionRecord {
@@ -341,11 +371,26 @@ function recordOr404(store: SessionStore, sessionID: string): SessionRecord {
 // ensureWorker — lazy creation (§4, §11, §13) + pool queue (Feature 2)
 // ---------------------------------------------------------------------------
 
+/** The stage-review role never holds a worker: refuse on the bound identity or the envelope claim, before any side effect. */
+export function refuseStageReviewWorker(
+  config: { stageReviewAgents?: readonly string[]; gateRouterAgents?: readonly string[] },
+  boundAgent: string | undefined,
+  claimedAgent: string | undefined,
+): void {
+  if (isGateRouterAgent(boundAgent, config) || isGateRouterAgent(claimedAgent, config)) {
+    throw new PolicyError("gate-router agent is not allowed to create a worker or use a sandbox operation (GATE_ROUTER_NO_WORKER)");
+  }
+  if (isStageReviewAgent(boundAgent, config) || isStageReviewAgent(claimedAgent, config)) {
+    throw new PolicyError("stage-review agent is not allowed to create a worker or use a sandbox operation (STAGE_REVIEW_NO_WORKER)");
+  }
+}
+
 export function buildEnsureWorkerOp(ctx: OpContext): (req: BrokerRequestEnvelope, sendProgress?: (position: number) => void) => Promise<unknown> {
   return async (req, sendProgress) => {
     // Orchestrator read-only: refuse before any touch/admission side effect (R2).
     const existing = ctx.store.get(req.sessionID);
     const trusted = existing?.agent ?? req.agent;
+    refuseStageReviewWorker(ctx.config, existing?.agent, req.agent);
     const readOnly = ctx.config.readOnlyAgents;
     if (trusted && readOnly.includes(trusted)) {
       throw new PolicyError(
@@ -441,6 +486,7 @@ async function createWorkerForSession(
   // Orchestrator read-only: fail closed even for queued creations
   const existing2 = ctx.store.get(sessionID);
   const trusted2 = existing2?.agent ?? req.agent;
+  refuseStageReviewWorker(ctx.config, existing2?.agent, req.agent);
   const ro2 = ctx.config.readOnlyAgents;
   if (trusted2 && ro2.includes(trusted2)) {
     throw new PolicyError(
@@ -719,7 +765,7 @@ async function runQueuedCreation(
   }
 }
 
-function projectDirFor(ctx: OpContext, projectID: string): string {
+export function projectDirFor(ctx: OpContext, projectID: string): string {
   const project = ctx.config.projects.find((p) => p.id === projectID);
   if (!project) throw new StateError(`project ${projectID} not in allowlist`);
   return project.path;
@@ -977,7 +1023,7 @@ async function gcSessionArtifacts(
 // Worker file/exec ops — all argv vectors, all validation-gated (§28)
 // ---------------------------------------------------------------------------
 
-function planRootPatterns(config: OpContext["config"]): string[] {
+export function planRootPatterns(config: OpContext["config"]): string[] {
   return config.planRootProtection ? ["odd/tasks/**", "odd/mini/**"] : [];
 }
 
@@ -1595,7 +1641,7 @@ export interface ApplyPreviewFiles {
  * reader never observes a partial artifact. 0600 file (umask-independent via
  * chmod) mirroring the patches/<sessionID>.patch precedent.
  */
-function writeFileAtomic(target: string, content: string): void {
+export function writeFileAtomic(target: string, content: string): void {
   const tmp = join(dirname(target), `.${basename(target)}.${randomUUID()}.tmp`);
   try {
     writeFileSync(tmp, content, { mode: 0o600 });
@@ -1634,7 +1680,7 @@ export function writeApplyPreviewFiles(
  * Only a write/verify failure — the condition that actually makes approval
  * blind — refuses; the diff's size is never a reason to refuse.
  */
-function ensureCompleteApplyPreview(
+export function ensureCompleteApplyPreview(
   stateDir: string,
   sessionID: string,
   completeDiff: string,
@@ -1830,6 +1876,53 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
 // Result boundary (§15, §18-§20)
 // ---------------------------------------------------------------------------
 
+/**
+ * Sessions whose result is being finished right now. Keyed on the store so that the `{ ...ctx }` copies
+ * the server and the tests make all see one set. A finish blocks for the evidence runners' timeouts, and
+ * the reaper's skip checks (idle age, no resultRef) stay true for all of it: without this, a second sweep
+ * runs the finish again, or releases the worker under a running runner.
+ */
+const finishing = new WeakMap<object, Map<string, symbol>>();
+
+/** True while a finish (prepareResult, keepResult, idle auto-finish, disconnect reap) of this session is in flight. */
+export function isFinishing(ctx: OpContext, sessionID: string): boolean {
+  return finishing.get(ctx.store)?.has(sessionID) === true;
+}
+
+/**
+ * Run one finish of a session exclusively. A finish already in flight is refused (never queued behind: the
+ * caller re-reads the session afterwards), so the evidence runners can never run twice at once. The check and
+ * the claim have no await between them, and the claim is released in `finally`, so a throw cannot leak it.
+ * It is separate from the server's per-session operation lock on purpose: the reaper does not take that
+ * lock, and a finish inside the lock must not wait for it again.
+ *
+ * A finish whose promise never settles (the adapter kills a runner at its timeout, so this means the exec
+ * call itself hung) loses the guard at a deadline: the configured runners' timeouts plus a grace period. The
+ * claim is an identity token, so that finish settling late cannot release a newer claim.
+ */
+export async function withFinishGuard<T>(ctx: OpContext, sessionID: string, fn: () => Promise<T>): Promise<T> {
+  let claims = finishing.get(ctx.store);
+  if (!claims) finishing.set(ctx.store, (claims = new Map()));
+  if (claims.has(sessionID)) throw new StateError("a result export is already in flight for this session; retry after it finishes");
+  const claim = Symbol(sessionID);
+  claims.set(sessionID, claim);
+  const config = (ctx.config ?? {}) as { testRunners?: { timeoutMs: number }[]; finishGuardGraceMs?: number };
+  const deadlineMs = (config.testRunners ?? []).reduce((total, runner) => total + runner.timeoutMs, 0) + (config.finishGuardGraceMs ?? 300_000);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new StateError("the result export exceeded its deadline; the guard was released")), deadlineMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (claims.get(sessionID) === claim) claims.delete(sessionID);
+  }
+}
+
 export function buildPrepareResultOp(ctx: OpContext): OpHandler {
   return async (req) => {
     payloadOf(req);
@@ -1839,16 +1932,18 @@ export function buildPrepareResultOp(ctx: OpContext): OpHandler {
     }
     // Always re-export: runPrepare commits only new changes, so a retained
     // result after a failed apply is refreshed, not frozen (Gate 6 finding).
-    const ref = await runPrepare(ctx, req.sessionID);
-    if (record.state === "SANDBOX_ACTIVE") {
-      record = ctx.store.transition(
-        req.sessionID,
-        "SANDBOX_ACTIVE",
-        "RESULT_READY",
-        { resultRef: ref },
-      );
-    }
-    return { resultRef: ref, state: record.state, imported: true };
+    return withFinishGuard(ctx, req.sessionID, async () => {
+      const ref = await runPrepare(ctx, req.sessionID);
+      if (record.state === "SANDBOX_ACTIVE") {
+        record = ctx.store.transition(
+          req.sessionID,
+          "SANDBOX_ACTIVE",
+          "RESULT_READY",
+          { resultRef: ref },
+        );
+      }
+      return { resultRef: ref, state: record.state, imported: true };
+    });
   };
 }
 
@@ -1995,6 +2090,9 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
   // transport bundle + temp index are redundant. Best effort: a GC failure
   // must never fail an already-successful import.
   await gcSessionArtifacts(ctx, sessionID, "prepareResult", { durable: true });
+  await registerChainStage(ctx, record, ref);
+  // D30: test evidence for the gate. Never blocks or alters the registration above (it swallows its own errors).
+  await collectStageTestEvidence(ctx, record, ref);
   return ref;
 }
 
@@ -2174,7 +2272,7 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
 }
 
 /** S16: compare current host tree with the baseline tree. */
-async function hostDivergence(
+export async function hostDivergence(
   ctx: OpContext,
   sessionID: string,
   projectID: string,
@@ -2301,7 +2399,7 @@ async function buildRetainedDiff(
   };
 }
 
-async function rawChangesBetween(
+export async function rawChangesBetween(
   ctx: OpContext,
   projectID: string,
   baselineRefName: string,
@@ -2346,15 +2444,10 @@ export function buildKeepResultOp(ctx: OpContext): OpHandler {
     let record = recordOr404(ctx.store, req.sessionID);
     if (record.state === "SANDBOX_ACTIVE") {
       // §20 KEEP: prepare the result first, then retire the transient worker.
-      const ref = await runPrepare(ctx, req.sessionID);
-      record = ctx.store.transition(
-        req.sessionID,
-        "SANDBOX_ACTIVE",
-        "RESULT_READY",
-        {
-          resultRef: ref,
-        },
-      );
+      record = await withFinishGuard(ctx, req.sessionID, async () => {
+        const ref = await runPrepare(ctx, req.sessionID);
+        return ctx.store.transition(req.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", { resultRef: ref });
+      });
     }
     if (record.state !== "RESULT_READY" && record.state !== "APPLIED") {
       throw new StateError(`cannot keep result from state ${record.state}`);
@@ -2435,6 +2528,8 @@ export function buildDestroyWorkerOp(ctx: OpContext): OpHandler {
   return async (req) => {
     payloadOf(req);
     const record = recordOr404(ctx.store, req.sessionID);
+    // The runners run in this worker: never remove it under them.
+    if (isFinishing(ctx, req.sessionID)) throw new StateError("a result export is already in flight for this session; retry after it finishes");
     if (!record.workerName) {
       return { destroyed: true, worker: null };
     }
@@ -2549,6 +2644,14 @@ export function buildToolAdmissionOp(ctx: OpContext): OpHandler {
       }
       return { schema, tool: payload.tool, classification: capability, decision: "allow", reason: "UNBOUND_SESSION_READ_ONLY_CLASS" };
     }
+    if (isGateRouterAgent(record.agent, ctx.config)) {
+      const router = decideGateRouter(capability, payload.tool as string);
+      return { schema, tool: payload.tool, classification: capability, decision: router.decision, reason: router.reasonCode };
+    }
+    if (isStageReviewAgent(record.agent, ctx.config)) {
+      const stage = decideStageReview(capability, payload.tool as string);
+      return { schema, tool: payload.tool, classification: capability, decision: stage.decision, reason: stage.reasonCode };
+    }
     const role = normalizeRoleKey(record.agent);
     if (
       classifyAft(payload.tool as string) === "HOST_READ_STRUCTURED" &&
@@ -2617,7 +2720,7 @@ export function buildPolicyOp(ctx: OpContext): OpHandler {
  * Resolve an approved project directory to its canonical root with realpath
  * equality (the same BROKER_PROJECTS boundary the SDD runtime uses).
  */
-function resolveCanonicalProjectRoot(
+export function resolveCanonicalProjectRoot(
   ctx: OpContext,
   projectDir: unknown,
 ): { projectID: string; projectRoot: string } {
@@ -3641,11 +3744,18 @@ export function buildRegisterProjectOp(ctx: OpContext): OpHandler {
       dryRun?: unknown;
       createRemote?: unknown;
       makePublic?: unknown;
+      worktreeRoot?: unknown;
     };
     authorizeHostDispatch(ctx, "registerProject", req.sessionID, req.agent);
+    if (payload.worktreeRoot !== undefined && typeof payload.worktreeRoot !== "boolean") {
+      throw new ValidationError("worktreeRoot must be a boolean");
+    }
+    const worktreeRoot = payload.worktreeRoot === true;
     // Forward the canonical resolved path: the registration script writes this
     // exact value into the sourced launcher conf, never the caller's alias.
-    const target = assertRegisterableProjectPath(payload.path);
+    const target = worktreeRoot
+      ? assertRegisterableWorktreeTarget(payload.path)
+      : assertRegisterableProjectPath(payload.path);
     if (payload.dryRun !== undefined && typeof payload.dryRun !== "boolean") {
       throw new ValidationError("dryRun must be a boolean");
     }
@@ -3658,11 +3768,15 @@ export function buildRegisterProjectOp(ctx: OpContext): OpHandler {
     if (payload.makePublic === true && payload.createRemote !== true) {
       throw new ValidationError("--public requires --create-remote");
     }
+    if (worktreeRoot && (payload.createRemote === true || payload.makePublic === true)) {
+      throw new ValidationError("worktreeRoot cannot be combined with createRemote or makePublic");
+    }
     const repoRoot = resolve(join(import.meta.dir, "../.."));
     const argv: string[] = ["bun", "scripts/register-project.ts"];
     if (payload.dryRun === true) argv.push("--dry-run");
     if (payload.createRemote === true) argv.push("--create-remote");
     if (payload.makePublic === true) argv.push("--public");
+    if (worktreeRoot) argv.push("--worktree-root");
     argv.push(target);
     const result = await ctx.git.spawn(argv, {
       cwd: repoRoot,
@@ -4118,6 +4232,60 @@ export function testRunProvenance(
   }
 }
 
+export interface TestRunLogInput {
+  runner: string;
+  exitCode: number | null;
+  signal: string | null;
+  timedOut: boolean;
+  truncated: boolean;
+  /** Present only on stage-bound evidence (staging-chain.ts): the project and the stage result's tree, written after the flags. */
+  binding?: { project: string; tree: string };
+  stdout: Buffer;
+  stderr: Buffer;
+}
+
+/**
+ * Write one broker-owned testRun log under <stateDir>/test-runs (0700 directory, 0600 file, temp + rename,
+ * never inside the project) and return its path. The header is the one `readTestRunLog` parses: the flags,
+ * the optional binding, then a literal backslash-n. Throws when it cannot write.
+ */
+export function writeTestRunLog(stateDir: string, projectRoot: string, run: TestRunLogInput): string {
+  const directory = join(stateDir, "test-runs");
+  if (isWithin(projectRoot, directory)) throw new Error("test-run artifact directory is inside the project");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const path = join(directory, `${randomUUID()}.log`);
+  const temporary = `${path}.tmp`;
+  const binding = run.binding ? ` project=${run.binding.project} tree=${run.binding.tree}` : "";
+  writeFileSync(temporary, Buffer.concat([
+    Buffer.from(`runner=${run.runner} exitCode=${String(run.exitCode)} signal=${String(run.signal)} timedOut=${run.timedOut} truncated=${run.truncated}${binding}\\nstdout\\n`),
+    run.stdout,
+    Buffer.from("\\nstderr\\n"),
+    run.stderr,
+    ...(run.truncated ? [Buffer.from("\\n[output truncated at configured combined cap]\\n")] : []),
+  ]), { mode: 0o600, flag: "wx" });
+  renameSync(temporary, path);
+  return path;
+}
+
+/** Newest test-run logs kept; evidence is re-validated on read, so a pruned log is simply missing evidence. */
+export const TEST_RUN_LOG_KEEP = 500;
+
+/** Delete all but the newest `keep` test-run logs (by mtime). Only `<uuid>.log` files are touched; errors are ignored. */
+export function pruneTestRunLogs(stateDir: string, keep: number = TEST_RUN_LOG_KEEP): void {
+  try {
+    const directory = join(stateDir, "test-runs");
+    const logs = readdirSync(directory)
+      .filter((name) => /^[0-9a-f-]{36}\.log$/.test(name))
+      .map((name) => ({ name, mtime: lstatSync(join(directory, name)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime || (a.name < b.name ? 1 : -1));
+    for (const old of logs.slice(Math.max(0, keep))) {
+      try { unlinkSync(join(directory, old.name)); } catch { /* best effort */ }
+    }
+  } catch {
+    // A missing or unreadable directory means nothing to prune.
+  }
+}
+
 export function buildTestRunOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const trustedAgent = ctx.store.get(req.sessionID)?.agent;
@@ -4173,20 +4341,15 @@ export function buildTestRunOp(ctx: OpContext): OpHandler {
       const stderrTail = result.stderr.subarray(-8192).toString("utf8");
       let logArtifact: string | null = null;
       try {
-        const directory = join(ctx.config.stateDir, "test-runs");
-        if (isWithin(projectRoot, directory)) throw new Error("test-run artifact directory is inside the project");
-        mkdirSync(directory, { recursive: true, mode: 0o700 });
-        const path = join(directory, `${randomUUID()}.log`);
-        const temporary = `${path}.tmp`;
-        writeFileSync(temporary, Buffer.concat([
-          Buffer.from(`runner=${runner.id} exitCode=${String(result.exitCode)} signal=${String(result.signal)} timedOut=${result.timedOut} truncated=${result.truncated}\\nstdout\\n`),
-          result.stdout,
-          Buffer.from("\\nstderr\\n"),
-          result.stderr,
-          ...(result.truncated ? [Buffer.from("\\n[output truncated at configured combined cap]\\n")] : []),
-        ]), { mode: 0o600, flag: "wx" });
-        renameSync(temporary, path);
-        logArtifact = path;
+        logArtifact = writeTestRunLog(ctx.config.stateDir, projectRoot, {
+          runner: runner.id,
+          exitCode: result.exitCode,
+          signal: result.signal,
+          timedOut: result.timedOut,
+          truncated: result.truncated,
+          stdout: result.stdout,
+          stderr: result.stderr,
+        });
       } catch {
         // Artifact storage is best-effort; never write test output into the project.
       }
@@ -4643,6 +4806,229 @@ export function buildGateVerdictOp(ctx: OpContext): OpHandler {
       return { gates, ...commit };
     });
     return { name: payload.name, taskId: payload.taskId, verdict: payload.verdict, path: relative, verdictHash: gateVerdictHash(line), ...result };
+  };
+}
+
+// ---------------------------------------------------------------------------
+// D22 gateVerdictAuto: code records a PASS for a clear match, and nothing else.
+// The identity (gateRouterAgents) is the trust root for the Jev probabilities: the Jev call lives
+// outside the broker, which has no network and no API key. The broker re-derives scope, budget and
+// test status itself; anything it cannot derive is MISSING and can never route to RECORD_PASS.
+// ---------------------------------------------------------------------------
+
+const GATE_CRITERION_ID_RE = /^[A-Za-z][A-Za-z0-9._-]{0,31}$/;
+const GATE_CHAIN_ID_RE = /^c[0-9a-f]{12}$/;
+const GATE_AUTO_MAX_ITEMS = 64;
+const GATE_AUTO_MAX_TEST_REFS = 8;
+const TEST_RUN_LOG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/**
+ * The header writeTestRunLog writes; its flags are followed by a literal backslash-n. The optional
+ * ` project=<id> tree=<sha>` binding is written ONLY for stage-bound evidence (staging-chain.ts,
+ * collectStageTestEvidence: runners run in the worker sandbox on the stage content); a host `testRun`
+ * log carries none, so it is never evidence for an unapplied stage and the tests check ignores it.
+ */
+const TEST_RUN_LOG_HEADER_RE = /^runner=(\S+) exitCode=(-?\d+|null) signal=\S+ timedOut=(true|false) truncated=(?:true|false)(?: project=(\S+) tree=([0-9a-f]{40}|[0-9a-f]{64}))?\\nstdout/;
+
+interface TestRunLog { command: string; exitCode: number; project?: string; tree?: string; mtimeSeconds: number }
+
+/** A broker-written testRun log: the runner id and its exit status (-1 when it timed out or had no exit code), plus its optional binding. */
+function readTestRunLog(stateDir: string, id: string): TestRunLog | undefined {
+  const path = join(stateDir, "test-runs", `${id}.log`);
+  try {
+    const entry = lstatSync(path);
+    if (!entry.isFile()) return undefined;
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const buffer = Buffer.alloc(512);
+      const read = readSync(fd, buffer, 0, buffer.length, 0);
+      const match = TEST_RUN_LOG_HEADER_RE.exec(buffer.subarray(0, read).toString("utf8"));
+      if (!match) return undefined;
+      return {
+        command: match[1]!,
+        exitCode: match[3] === "true" || match[2] === "null" ? -1 : Number(match[2]),
+        ...(match[4] === undefined ? {} : { project: match[4], tree: match[5]! }),
+        mtimeSeconds: Math.floor(entry.mtimeMs / 1000),
+      };
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+/** Non-fenced lines of a level-2 plan section; undefined when the section is absent. */
+function planDocSectionLines(document: string, heading: string): string[] | undefined {
+  const headings = scanPlanDocHeadings(document);
+  const found = headings.find((entry) => entry.level === 2 && entry.text === heading);
+  if (!found) return undefined;
+  const next = headings.find((entry) => entry.index > found.index && entry.level <= 2);
+  const out: string[] = [];
+  let fence: { character: string; length: number } | undefined;
+  for (const raw of document.split("\n").slice(found.index + 1, next?.index)) {
+    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    if (fence) {
+      if (new RegExp(`^[ \\t]{0,3}${fence.character}{${fence.length},}[ \\t]*$`).test(line)) fence = undefined;
+      continue;
+    }
+    const opening = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+    if (opening) { fence = { character: opening[1]![0]!, length: opening[1]!.length }; continue; }
+    out.push(line);
+  }
+  return out;
+}
+
+/** Bullet entries of a level-2 plan section (fenced code is not scope); undefined when the section is absent. */
+function planDocSectionBullets(document: string, heading: string): string[] | undefined {
+  return planDocSectionLines(document, heading)
+    ?.map((line) => /^- `?([^`\s]+)`?\s*$/.exec(line)?.[1])
+    .filter((entry): entry is string => entry !== undefined);
+}
+
+export function buildGateVerdictAutoOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    authorizeHostDispatch(ctx, "gateVerdictAuto", req.sessionID, req.agent);
+    const boundIdentity = ctx.store.get(req.sessionID)!.agent as string;
+    assertPayloadKeys("gateVerdictAuto", req.payload);
+    const payload = payloadOf(req) as Record<string, unknown>;
+    assertPlanDocWriteName(payload.name);
+    const name = payload.name;
+    if (typeof payload.taskId !== "string" || !GATE_TASK_ID_RE.test(payload.taskId)) {
+      throw new ValidationError("GATE_VERDICT_TASK_ID_INVALID: taskId must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
+    }
+    const taskId = payload.taskId;
+    if (typeof payload.checkpoint !== "string" || !(CHECKPOINTS as readonly string[]).includes(payload.checkpoint)) {
+      throw new ValidationError("GATE_AUTO_CHECKPOINT_INVALID: checkpoint must be plan-vs-spec or implementation-vs-spec");
+    }
+    const checkpoint = payload.checkpoint as (typeof CHECKPOINTS)[number];
+    if (typeof payload.chainID !== "string" || !GATE_CHAIN_ID_RE.test(payload.chainID)) {
+      throw new ValidationError("GATE_AUTO_CHAIN_INVALID: chainID must be a chain id");
+    }
+    if (typeof payload.n !== "number" || !Number.isInteger(payload.n) || payload.n < 1) {
+      throw new ValidationError("GATE_AUTO_STAGE_INVALID: n must be a positive integer");
+    }
+    const strings = (value: unknown, what: string, pattern: RegExp, max: number): string[] => {
+      if (!Array.isArray(value) || value.length > max || value.some((entry) => typeof entry !== "string" || !pattern.test(entry))) {
+        throw new ValidationError(`GATE_AUTO_PAYLOAD_INVALID: ${what} must be an array of at most ${max} valid entries`);
+      }
+      return value as string[];
+    };
+    const expectedCriteria = strings(payload.expectedCriteria, "expectedCriteria", GATE_CRITERION_ID_RE, GATE_AUTO_MAX_ITEMS);
+    if (expectedCriteria.length === 0) throw new ValidationError("GATE_AUTO_PAYLOAD_INVALID: expectedCriteria must not be empty");
+    const testRunRefs = strings(payload.testRunRefs, "testRunRefs", TEST_RUN_LOG_ID_RE, GATE_AUTO_MAX_TEST_REFS);
+    if (!Array.isArray(payload.criteria) || payload.criteria.length > GATE_AUTO_MAX_ITEMS) {
+      throw new ValidationError("GATE_AUTO_PAYLOAD_INVALID: criteria must be an array of at most 64 entries");
+    }
+    // An absent p is "unsure" (routes to the spec check); a present p must be a finite probability.
+    const criteria = (payload.criteria as unknown[]).map((entry): { id: string; p?: number } => {
+      const item = entry as Record<string, unknown> | null;
+      if (typeof item !== "object" || item === null || Array.isArray(item) || Object.keys(item).some((key) => key !== "id" && key !== "p")) {
+        throw new ValidationError("GATE_AUTO_PAYLOAD_INVALID: every criterion is exactly { id, p? }");
+      }
+      if (typeof item.id !== "string" || !GATE_CRITERION_ID_RE.test(item.id)) throw new ValidationError("GATE_AUTO_PAYLOAD_INVALID: criterion id is invalid");
+      if (item.p === undefined) return { id: item.id };
+      if (typeof item.p !== "number" || !Number.isFinite(item.p) || item.p < 0 || item.p > 1) {
+        throw new ValidationError(`GATE_AUTO_PROBABILITY_INVALID: p of ${item.id} must be a finite number in [0, 1]`);
+      }
+      return { id: item.id, p: item.p };
+    });
+
+    const { projectID, projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const relative = `odd/tasks/${name}.md`;
+    assertPlanDocCommitPath(relative);
+    const destination = resolve(projectRoot, relative);
+    if (!isWithin(projectRoot, destination)) throw new ValidationError("GATE_VERDICT_PATH_ESCAPE: destination escapes project root");
+    const rejected = checkProtectedPaths([relative], [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles]);
+    if (rejected.length > 0) throw new ValidationError(`GATE_VERDICT_PROTECTED_PATH: ${rejected.join(", ")}`);
+
+    // Broker-held evidence: the pinned stage (baseline..result), never a caller-named diff.
+    const { chain, stage } = await stageShow(ctx, payload.chainID, payload.n);
+    if (chain.projectID !== projectID) throw new ValidationError("GATE_AUTO_STAGE_PROJECT: the chain belongs to another project");
+    if ((stage.state !== "READY" && stage.state !== "APPROVED") || !stage.result || !stage.changedPaths) {
+      throw new ValidationError(`GATE_AUTO_STAGE_STATE: stage ${payload.n} is ${stage.state}; only a READY or APPROVED stage with a result can be gated`);
+    }
+    const stageResult = stage.result;
+    const stagePaths = stage.changedPaths;
+    const numstatRun = await runHostStep(ctx, buildNumstatArgv(stage.baseline, stageResult), projectRoot);
+    let numstat: ReturnType<typeof parseNumstat> | undefined;
+    if (numstatRun.status === 0 && !numstatRun.stdoutTruncated) {
+      try { numstat = parseNumstat(numstatRun.stdout); } catch { numstat = undefined; }
+    }
+    // The line counts must describe exactly the stage's changed paths, or they are unusable.
+    if (numstat && numstat.map((entry) => entry.path).sort().join("\0") !== [...stagePaths].sort().join("\0")) numstat = undefined;
+    // Test status is read from the broker's own testRun logs, and only a log whose header binds it to THIS
+    // project and the stage result's tree, and that is newer than the pinned result, counts as evidence
+    // for the staged content. Anything else is dropped, so the tests check is missing (fail closed).
+    const treeRun = await runHostStep(ctx, ["git", "rev-parse", "--verify", `${stageResult}^{tree}`], projectRoot);
+    const timeRun = await runHostStep(ctx, ["git", "show", "-s", "--format=%ct", stageResult], projectRoot);
+    const stageTree = treeRun.status === 0 ? treeRun.stdout.trim() : undefined;
+    const stageSeconds = timeRun.status === 0 && /^\d+$/.test(timeRun.stdout.trim()) ? Number(timeRun.stdout.trim()) : undefined;
+    const testResults = testRunRefs
+      .map((id) => readTestRunLog(ctx.config.stateDir, id))
+      .filter((entry): entry is TestRunLog =>
+        entry !== undefined && stageTree !== undefined && stageSeconds !== undefined &&
+        entry.project === projectID && entry.tree === stageTree && entry.mtimeSeconds >= stageSeconds);
+
+    return withPlanDocLock(destination, async () => {
+      const documentStat = lstatIfExists(destination);
+      if (documentStat === undefined || !documentStat.isFile()) throw new ValidationError("GATE_VERDICT_DOCUMENT_MISSING: plan document must already exist as a regular file");
+      const current = readFileSync(destination, "utf8");
+      const gates = scanPlanDocHeadings(current).find((entry) => entry.level === 2 && entry.text === "Gates");
+      const specText = gates ? current.slice(0, gates.offset) : current;
+      for (const id of expectedCriteria) {
+        if (!new RegExp(`(?:^|[^A-Za-z0-9._-])${id.replace(/\./g, "\\.")}(?![A-Za-z0-9._-])`).test(specText)) {
+          throw new ValidationError(`GATE_AUTO_CRITERION_UNKNOWN: ${id} does not appear in the plan document`);
+        }
+      }
+      const planTasks = (planDocSectionLines(current, "Tasks") ?? []).join("\n");
+      if (!new RegExp(`(?:^|[^A-Za-z0-9._-])${taskId.replace(/\./g, "\\.")}(?![A-Za-z0-9._-])`).test(planTasks)) {
+        throw new ValidationError(`GATE_AUTO_TASK_UNKNOWN: ${taskId} is not in the plan's Tasks section`);
+      }
+      // plan-vs-spec is checked against the plan alone (D29): only its Allowed edit surfaces are derivable.
+      const deterministic = runDeterministicChecks({
+        checkpoint,
+        maxApplyDiffLines: ctx.config.resource.maxApplyDiffLines,
+        allowedPaths: planDocSectionBullets(current, "Allowed edit surfaces"),
+        protectedPatterns: [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles],
+        ...(checkpoint === "implementation-vs-spec" && stagePaths.length > 0
+          ? { touchedPaths: stagePaths, testResults, requiredCommands: ctx.config.testRunners.map((runner) => runner.id), numstat }
+          : {}),
+      });
+      const route = routeGate({ checkpoint, deterministic, expectedCriteria, criteria });
+      const summary = { route, recorded: false, taskId, checkpoint, checks: deterministic.checks as GateCheck[] };
+      if (route !== "RECORD_PASS") return summary;
+
+      const canonical = JSON.stringify({
+        taskId, checkpoint, chainID: payload.chainID, n: payload.n, baseline: stage.baseline, result: stageResult,
+        expected: [...expectedCriteria].sort(),
+        criteria: criteria.map((entry) => [entry.id, entry.p]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+        checks: deterministic.checks.map((entry) => [entry.check, entry.passed, entry.detail]),
+      });
+      const ref = `d22-auto:${checkpoint}:${payload.chainID}.${payload.n}:sha256:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
+      const latest = readLatestGateVerdict(current, taskId);
+      if (latest) {
+        if (latest.verdict !== "PASS") {
+          throw new PolicyError(`GATE_AUTO_SUPERSEDE_REFUSED: the latest verdict for ${taskId} is a Planner ${latest.verdict}; code may only record a first PASS`);
+        }
+        const author = latest.line.split(" ")[4];
+        if (latest.line.includes(` ref=${ref} :: `) && author !== undefined && ctx.config.gateRouterAgents.includes(author)) {
+          return { ...summary, replayed: true, verdict: "PASS", path: relative, verdictHash: gateVerdictHash(latest.line) };
+        }
+        throw new PolicyError(`GATE_AUTO_PASS_EXISTS: ${taskId} already has a PASS; code never adds a second or conflicting one`);
+      }
+      // The stage may have been rejected or replaced since it was read: re-check it under the lock, immediately before the append.
+      const again = (await stageShow(ctx, payload.chainID as string, payload.n as number)).stage;
+      if ((again.state !== "READY" && again.state !== "APPROVED") || again.result !== stageResult) {
+        throw new ValidationError(`GATE_AUTO_STAGE_STATE: stage ${payload.n} changed to ${again.state} before the verdict was recorded`);
+      }
+      const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+      const probabilities = [...criteria].sort((a, b) => a.id.localeCompare(b.id)).map((entry) => `${entry.id}=${entry.p}`).join(",");
+      const line = `- ${taskId} PASS ${timestamp} ${boundIdentity} ref=${ref} :: code-recorded under D22; p=${probabilities}; ` +
+        `checks=${deterministic.checks.map((entry) => `${entry.check}:pass`).join(",")}; stage=${stageResult.slice(0, 12)}`;
+      const appended = await appendGateVerdictAtomically(projectRoot, destination, line);
+      const commit = await commitPlanDocRevision(ctx, projectRoot, relative, `docs(odd): ${name} gate ${taskId} PASS (code-recorded, D22)`);
+      return { ...summary, recorded: true, verdict: "PASS", name, path: relative, verdictHash: gateVerdictHash(line), gates: appended, ...commit };
+    });
   };
 }
 

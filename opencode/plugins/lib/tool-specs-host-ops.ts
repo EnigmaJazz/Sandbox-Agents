@@ -16,6 +16,37 @@ import {
   currentProjectDirectory,
 } from "./tool-runtime.ts";
 
+const stageIdArgs = {
+  chainID: z.string().regex(/^c[0-9a-f]{12}$/),
+  n: z.number().int().min(1).max(99),
+  result: z.string().regex(/^[0-9a-f]{40}$/),
+};
+
+/** The approval prompt for a stage decision: names the stage, the exact commit and the broker's own view of it (never the agent's summary). */
+async function stageDecisionAsk(
+  ctx: { sessionID: string; agent?: string },
+  permission: "host_stage_approve" | "host_stage_reject" | "host_stage_apply" | "host_stage_reconcile",
+  args: { chainID: string; n: number; result: string },
+  extra: Record<string, unknown> = {},
+) {
+  const c = await client();
+  const { stage } = (await c.request("stageShow", ctx.sessionID, { chainID: args.chainID, n: args.n }, ctx.agent)) as {
+    stage: { changedPaths?: string[]; touchesProtected?: boolean };
+  };
+  return {
+    permission,
+    patterns: ["*"],
+    always: [],
+    metadata: {
+      summary: `${permission.replace("host_stage_", "")} stage ${args.n} of chain ${args.chainID} at commit ${args.result}${stage.touchesProtected ? " (touches protected S17 paths)" : ""}`,
+      ...args,
+      changedPaths: stage.changedPaths ?? [],
+      touchesProtected: stage.touchesProtected === true,
+      ...extra,
+    },
+  };
+}
+
 export const hostOpsToolSpecs = {
   host_git_commit: defineTool({
     description:
@@ -249,6 +280,34 @@ export const hostOpsToolSpecs = {
     },
   }),
 
+  host_gate_verdict_auto: defineTool({
+    description:
+      "Record a PASS gate verdict from code (decision D22; gate-router identity only, never an LLM agent). " +
+      "The caller supplies only the per-criterion probabilities its classifier returned: the broker re-derives scope, " +
+      "diff budget and test status from the pinned stage and its own test-run logs, routes the result, and appends a PASS " +
+      "to the append-only gate log only for a clear match. It never records REFINE or ESCALATE and never supersedes a Planner " +
+      "verdict; otherwise it returns the routing label (RETURN_TO_PLANNER or SPEC_CHECK) and records nothing. Returns JSON.",
+    args: {
+      name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+      taskId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
+      checkpoint: z.enum(["plan-vs-spec", "implementation-vs-spec"]),
+      chainID: z.string().regex(/^c[0-9a-f]{12}$/),
+      n: z.number().int().min(1).max(99),
+      expectedCriteria: z.array(z.string().regex(/^[A-Za-z][A-Za-z0-9._-]{0,31}$/)).min(1).max(64),
+      criteria: z.array(z.object({ id: z.string().regex(/^[A-Za-z][A-Za-z0-9._-]{0,31}$/), p: z.number().min(0).max(1).optional() })).max(64),
+      testRunRefs: z.array(z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)).max(8),
+    },
+    execute: async (args, ctx) => {
+      // No ctx.ask: the caller is a non-LLM router identity; the broker authorizes by bound identity and the gate log is append-only.
+      const c = await client();
+      const result = await c.request("gateVerdictAuto", ctx.sessionID, {
+        projectDir: currentProjectDirectory(ctx.directory),
+        ...args,
+      }, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
+
   host_plan_append: defineTool({
     description:
       "Append approved content to an allowlisted plan document (orchestrator-only mutation; " +
@@ -305,6 +364,94 @@ export const hostOpsToolSpecs = {
       // cannot choose the recipient or add a flag, so no approval is requested.
       const c = await client();
       const result = await c.request("orcaReport", ctx.sessionID, { ...args }, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
+
+  host_stage_list: defineTool({
+    description:
+      "List the stages of one staging chain (stage-review agent only; read-only, no approval). " +
+      "Each stage reports its number, state (BUILDING or READY), baseline, result commit, " +
+      "changed paths and whether it touches a protected (S17) path. The broker reads the " +
+      "pinned stage refs, never a session result ref. Returns JSON.",
+    args: { chainID: z.string().regex(/^c[0-9a-f]{12}$/) },
+    execute: async (args, ctx) => {
+      const c = await client();
+      const result = await c.request("stageList", ctx.sessionID, { chainID: args.chainID }, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
+
+  host_stage_show: defineTool({
+    description:
+      "Show one stage of a staging chain (stage-review agent only; read-only, no approval): " +
+      "the chain header plus the stage's state, baseline, result commit, changed paths and " +
+      "protected-path (S17) flag, from the pinned stage ref. Returns JSON.",
+    args: {
+      chainID: z.string().regex(/^c[0-9a-f]{12}$/),
+      n: z.number().int().min(1).max(99),
+    },
+    execute: async (args, ctx) => {
+      const c = await client();
+      const result = await c.request("stageShow", ctx.sessionID, { chainID: args.chainID, n: args.n }, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
+
+  host_stage_approve: defineTool({
+    description:
+      "Approve one READY stage of a staging chain (stage-review agent only; owner decision, requires human approval). " +
+      "Name the stage's result commit from host_stage_show; the broker refuses if it no longer matches. " +
+      "A stage touching protected (S17) paths needs confirmProtected: true, per stage. Approving applies nothing. Returns JSON.",
+    args: { ...stageIdArgs, confirmProtected: z.boolean().optional() },
+    execute: async (args, ctx) => {
+      await ctx.ask(await stageDecisionAsk(ctx, "host_stage_approve", args));
+      const c = await client();
+      const result = await c.request("stageApprove", ctx.sessionID, args, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
+
+  host_stage_reject: defineTool({
+    description:
+      "Reject one READY or APPROVED stage of a staging chain with a revision note (stage-review agent only; owner decision, " +
+      "requires human approval). Records REJECTED and the note, and marks every later stage that is not APPLIED as STALE; " +
+      "nothing is applied or replayed. The stages are then re-run from the last approved tip as new attempts. " +
+      "A BUILDING stage whose worker was released or failed is released by naming the all-zero result commit. Returns JSON.",
+    args: { ...stageIdArgs, note: z.string().min(1).max(4000) },
+    execute: async (args, ctx) => {
+      await ctx.ask(await stageDecisionAsk(ctx, "host_stage_reject", args, { note: args.note }));
+      const c = await client();
+      const result = await c.request("stageReject", ctx.sessionID, args, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
+
+  host_stage_apply: defineTool({
+    description:
+      "Apply one APPROVED stage to the host working tree (stage-review agent only; owner decision, requires human approval). " +
+      "Stages apply strictly in order, from the pinned stage commit, after the divergence and symlink checks. A stage touching " +
+      "protected (S17) paths is refused: the owner applies it by hand. Working tree only: no commit, no index change. Returns JSON.",
+    args: stageIdArgs,
+    execute: async (args, ctx) => {
+      await ctx.ask(await stageDecisionAsk(ctx, "host_stage_apply", args));
+      const c = await client();
+      const result = await c.request("stageApply", ctx.sessionID, { ...args, confirm: "APPLY" }, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
+
+  host_stage_reconcile: defineTool({
+    description:
+      "Record APPLIED for an APPLYING stage left by a crash, or for an APPROVED protected (S17) stage the owner applied by hand " +
+      "(stage-review agent only; owner decision, requires human approval). The broker only reads the host: it records APPLIED " +
+      "when every path the stage changed equals the stage's pinned result and every earlier stage is APPLIED; otherwise it records " +
+      "nothing and returns the differences. Returns JSON.",
+    args: stageIdArgs,
+    execute: async (args, ctx) => {
+      await ctx.ask(await stageDecisionAsk(ctx, "host_stage_reconcile", args));
+      const c = await client();
+      const result = await c.request("stageReconcile", ctx.sessionID, args, ctx.agent);
       return JSON.stringify(result, null, 2);
     },
   }),

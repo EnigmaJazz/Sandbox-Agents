@@ -61,11 +61,13 @@ import {
   refuseAdvisorSessionOnMain,
   type AdvisorBinding,
 } from "./advisor-socket.ts";
-import { ValidationError } from "./validation.ts";
+import { HOST_MUTATION_IDENTITY_OPERATIONS, ValidationError } from "./validation.ts";
+import { isRole, normalizeRoleKey } from "./role-policy.ts";
 import { PolicyError } from "./policy.ts";
 import { PendingQueue, QueuedTimedOutError } from "./queue.ts";
 import { reapOnDisconnect, startReaper, toReaperLogEntry, type ReaperHandle } from "./reaper.ts";
 import { drainQueue } from "./service.ts";
+import { buildChainAttachOp, buildChainCreateOp, buildChainStatusOp, buildStageApplyOp, buildStageApproveOp, buildStageListOp, buildStageReconcileOp, buildStageRejectOp, buildStageShowOp } from "./staging-chain.ts";
 import { SANDBOX_OPERATIONS } from "./types.ts";
 import {
   buildApplyOp,
@@ -83,6 +85,7 @@ import {
   buildGrepOp,
   buildGhIssueCreateOp,
   buildOrcaReportOp,
+  refuseStageReviewWorker,
   buildGitCommitOp,
   buildGitClearCommitIntentOp,
   buildGitPushOp,
@@ -97,6 +100,7 @@ import {
   buildPlanDocAppendOp,
   buildPlanDocWriteOp,
   buildPlanArchiveOp,
+  buildGateVerdictAutoOp,
   buildGateVerdictOp,
   buildTaskMarkOp,
   buildReviewMaterializeOp,
@@ -388,11 +392,16 @@ export class BrokerServer {
   private listener: { stop(): void } | null = null;
   private reaper: ReaperHandle | null = null;
 
+  private readonly config: BrokerConfig;
+
   constructor(
-    private readonly config: BrokerConfig,
+    rawConfig: BrokerConfig,
     logger?: Logger,
     private readonly options: { framerFailureDrainTimeoutMs?: number } = {},
   ) {
+    // A hand-built config that predates gateRouterAgents starts with the gate router denied (deny by default), not a crash.
+    const config: BrokerConfig = rawConfig.gateRouterAgents === undefined ? { ...rawConfig, gateRouterAgents: [] } : rawConfig;
+    this.config = config;
     if (typeof config.failLoudUnexpectedErrors !== "boolean") {
       throw new TypeError("BrokerConfig.failLoudUnexpectedErrors must be a boolean");
     }
@@ -402,6 +411,44 @@ export class BrokerServer {
     ) {
       throw new TypeError(
         "BrokerConfig.readOnlyAgents must be an array of non-empty agent names",
+      );
+    }
+    // The stage-review role holds the owner's stage decisions: it is disjoint from every other authority, so no other grant rides on its name.
+    const planAuthors = [...(config.planWriterAgents ?? []), ...(config.planMiniWriterAgents ?? [])];
+    if (
+      !Array.isArray(config.stageReviewAgents) ||
+      new Set(config.stageReviewAgents).size !== config.stageReviewAgents.length ||
+      config.stageReviewAgents.some(
+        (agent) =>
+          typeof agent !== "string" ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(agent) ||
+          config.readOnlyAgents.includes(agent) ||
+          planAuthors.includes(agent) ||
+          isRole(normalizeRoleKey(agent)) ||
+          Object.hasOwn(HOST_MUTATION_IDENTITY_OPERATIONS, agent),
+      )
+    ) {
+      throw new TypeError(
+        "BrokerConfig.stageReviewAgents must be an array of unique plain agent names disjoint from readOnlyAgents, plan writers, roles and orchestrator identities",
+      );
+    }
+    // D22: the gate router is deny-by-default and disjoint from every other authority, so no other grant rides on its name.
+    if (
+      !Array.isArray(config.gateRouterAgents) ||
+      new Set(config.gateRouterAgents).size !== config.gateRouterAgents.length ||
+      config.gateRouterAgents.some(
+        (agent) =>
+          typeof agent !== "string" ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(agent) ||
+          config.readOnlyAgents.includes(agent) ||
+          config.stageReviewAgents.includes(agent) ||
+          planAuthors.includes(agent) ||
+          isRole(normalizeRoleKey(agent)) ||
+          Object.hasOwn(HOST_MUTATION_IDENTITY_OPERATIONS, agent),
+      )
+    ) {
+      throw new TypeError(
+        "BrokerConfig.gateRouterAgents must be an array of unique plain agent names disjoint from readOnlyAgents, stageReviewAgents, plan writers, roles and orchestrator identities",
       );
     }
     this.logger =
@@ -860,6 +907,7 @@ export class BrokerServer {
           `orchestrator agent "${agent}" is not allowed to use sandbox operation "${op}" (orchestrator-readonly)`,
         );
       }
+      refuseStageReviewWorker(this.ctx.config, agent, undefined);
     }
     switch (op) {
       case "ensureWorker":
@@ -953,6 +1001,8 @@ export class BrokerServer {
         return buildTestRunOp(this.ctx)(req);
       case "gateVerdict":
         return buildGateVerdictOp(this.ctx)(req);
+      case "gateVerdictAuto":
+        return buildGateVerdictAutoOp(this.ctx)(req);
       case "bindSessionAgent":
         return buildBindSessionAgentOp(this.ctx)(req);
       case "reviewStart":
@@ -995,6 +1045,24 @@ export class BrokerServer {
         return buildRegisterProjectOp(this.ctx)(req);
       case "orcaReport":
         return buildOrcaReportOp(this.ctx)(req);
+      case "chainCreate":
+        return buildChainCreateOp(this.ctx)(req);
+      case "chainStatus":
+        return buildChainStatusOp(this.ctx)(req);
+      case "chainAttach":
+        return buildChainAttachOp(this.ctx)(req);
+      case "stageList":
+        return buildStageListOp(this.ctx)(req);
+      case "stageShow":
+        return buildStageShowOp(this.ctx)(req);
+      case "stageApprove":
+        return buildStageApproveOp(this.ctx)(req);
+      case "stageReject":
+        return buildStageRejectOp(this.ctx)(req);
+      case "stageApply":
+        return buildStageApplyOp(this.ctx)(req);
+      case "stageReconcile":
+        return buildStageReconcileOp(this.ctx)(req);
       case "advisorAsk":
         return buildAdvisorAskOp(this.ctx)(req);
       case "advisorGet":

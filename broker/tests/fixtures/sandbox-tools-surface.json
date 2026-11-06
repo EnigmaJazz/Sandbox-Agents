@@ -353,6 +353,22 @@
       "asks": 0
     },
     {
+      "name": "host_gate_verdict_auto",
+      "description": "Record a PASS gate verdict from code (decision D22; gate-router identity only, never an LLM agent). The caller supplies only the per-criterion probabilities its classifier returned: the broker re-derives scope, diff budget and test status from the pinned stage and its own test-run logs, routes the result, and appends a PASS to the append-only gate log only for a clear match. It never records REFINE or ESCALATE and never supersedes a Planner verdict; otherwise it returns the routing label (RETURN_TO_PLANNER or SPEC_CHECK) and records nothing. Returns JSON.",
+      "args": [
+        "name",
+        "taskId",
+        "checkpoint",
+        "chainID",
+        "n",
+        "expectedCriteria",
+        "criteria",
+        "testRunRefs"
+      ],
+      "execute": "function",
+      "asks": 0
+    },
+    {
       "name": "host_plan_append",
       "description": "Append approved content to an allowlisted plan document (orchestrator-only mutation; requires human approval). doc is an enum: todo -> docs/TODO.md, plan -> docs/PLAN.md. The broker preserves existing bytes, creates the document when absent, and writes atomically; optional heading inserts before the next heading of equal or higher level. Returns JSON.",
       "args": [
@@ -379,6 +395,71 @@
       ],
       "execute": "function",
       "asks": 0
+    },
+    {
+      "name": "host_stage_list",
+      "description": "List the stages of one staging chain (stage-review agent only; read-only, no approval). Each stage reports its number, state (BUILDING or READY), baseline, result commit, changed paths and whether it touches a protected (S17) path. The broker reads the pinned stage refs, never a session result ref. Returns JSON.",
+      "args": [
+        "chainID"
+      ],
+      "execute": "function",
+      "asks": 0
+    },
+    {
+      "name": "host_stage_show",
+      "description": "Show one stage of a staging chain (stage-review agent only; read-only, no approval): the chain header plus the stage's state, baseline, result commit, changed paths and protected-path (S17) flag, from the pinned stage ref. Returns JSON.",
+      "args": [
+        "chainID",
+        "n"
+      ],
+      "execute": "function",
+      "asks": 0
+    },
+    {
+      "name": "host_stage_approve",
+      "description": "Approve one READY stage of a staging chain (stage-review agent only; owner decision, requires human approval). Name the stage's result commit from host_stage_show; the broker refuses if it no longer matches. A stage touching protected (S17) paths needs confirmProtected: true, per stage. Approving applies nothing. Returns JSON.",
+      "args": [
+        "chainID",
+        "n",
+        "result",
+        "confirmProtected"
+      ],
+      "execute": "function",
+      "asks": 1
+    },
+    {
+      "name": "host_stage_reject",
+      "description": "Reject one READY or APPROVED stage of a staging chain with a revision note (stage-review agent only; owner decision, requires human approval). Records REJECTED and the note, and marks every later stage that is not APPLIED as STALE; nothing is applied or replayed. The stages are then re-run from the last approved tip as new attempts. A BUILDING stage whose worker was released or failed is released by naming the all-zero result commit. Returns JSON.",
+      "args": [
+        "chainID",
+        "n",
+        "result",
+        "note"
+      ],
+      "execute": "function",
+      "asks": 1
+    },
+    {
+      "name": "host_stage_apply",
+      "description": "Apply one APPROVED stage to the host working tree (stage-review agent only; owner decision, requires human approval). Stages apply strictly in order, from the pinned stage commit, after the divergence and symlink checks. A stage touching protected (S17) paths is refused: the owner applies it by hand. Working tree only: no commit, no index change. Returns JSON.",
+      "args": [
+        "chainID",
+        "n",
+        "result"
+      ],
+      "execute": "function",
+      "asks": 1
+    },
+    {
+      "name": "host_stage_reconcile",
+      "description": "Record APPLIED for an APPLYING stage left by a crash, or for an APPROVED protected (S17) stage the owner applied by hand (stage-review agent only; owner decision, requires human approval). The broker only reads the host: it records APPLIED when every path the stage changed equals the stage's pinned result and every earlier stage is APPLIED; otherwise it records nothing and returns the differences. Returns JSON.",
+      "args": [
+        "chainID",
+        "n",
+        "result"
+      ],
+      "execute": "function",
+      "asks": 1
     },
     {
       "name": "host_review_start",
@@ -545,12 +626,13 @@
     },
     {
       "name": "host_register_project",
-      "description": "Register a new project with the agentic sandbox system (host-side, creates .atl, updates profile/broker/launcher). Path must be absolute.",
+      "description": "Register a new project with the agentic sandbox system (host-side, creates .atl, updates profile/broker/launcher). Path must be absolute. With worktreeRoot=true the path is <root>/<project>: the project folder is created and the ROOT is registered (no git init, .atl or .codegraph), so every worktree under it is covered.",
       "args": [
         "path",
         "dryRun",
         "createRemote",
-        "makePublic"
+        "makePublic",
+        "worktreeRoot"
       ],
       "execute": "function",
       "asks": 1

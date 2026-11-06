@@ -308,6 +308,13 @@ describe("host tool ask metadata", () => {
     expect(ask.metadata.summary).toContain("/home/james/new-project");
   });
 
+  test("register project ask states worktree-root mode so the approver sees what is registered", () => {
+    const ask = buildRegisterProjectAsk({ path: "/home/james/ai-workspace/worktrees/p", worktreeRoot: true });
+    expect(ask.metadata).toMatchObject({ worktreeRoot: "yes", dryRun: "no", createRemote: "no", makePublic: "no" });
+    expect(ask.metadata.summary).toContain("worktreeRoot=yes");
+    expect(buildRegisterProjectAsk({ path: "/home/james/p" }).metadata).toMatchObject({ worktreeRoot: "no" });
+  });
+
   test("register project ask rejects an empty path", () => {
     expect(() => buildRegisterProjectAsk({ path: "" })).toThrow(HostToolAskError);
   });

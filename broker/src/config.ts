@@ -199,6 +199,10 @@ export interface BrokerConfig {
   planWriterAgents: string[];
   /** Agents permitted to author mini plan documents, in addition to planWriterAgents. */
   planMiniWriterAgents: string[];
+  /** Agents bound to the stage-review role (staging-chain.ts): read-only stage queries, no worker, no mutation. */
+  stageReviewAgents: string[];
+  /** D22: trusted non-LLM identities that may call gateVerdictAuto (the trust root for the Jev probabilities). Empty = denied for all. */
+  gateRouterAgents: string[];
   /** S7 + S17 protected paths (glob patterns, applied to canonical paths). */
   protectedPaths: string[];
   /** S17: security components agents must never modify. */
@@ -261,6 +265,8 @@ export interface BrokerConfig {
   hostRead: HostReadConfig;
   sddRuntime: SddRuntimeConfig;
   testRunners: TestRunnerConfig[];
+  /** Repo-relative paths a stage's test evidence may rely on although git ignores them (e.g. node_modules). Any other ignored file in /work writes no evidence. */
+  evidenceIgnoredAllow: string[];
   network: { mode: "deny-by-default"; note: string };
 }
 
@@ -411,9 +417,32 @@ function parseTestRunners(raw: string | undefined): TestRunnerConfig[] {
   });
 }
 
+/** Literal repo-relative paths (no globs, no traversal); unset = ["node_modules"], "[]" = none. */
+function parseEvidenceIgnoredAllow(raw: string | undefined): string[] {
+  if (raw === undefined || raw === "") return ["node_modules"];
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new ConfigError("invalid BROKER_EVIDENCE_IGNORED_ALLOW: expected a JSON array");
+  }
+  if (!Array.isArray(value)) throw new ConfigError("invalid BROKER_EVIDENCE_IGNORED_ALLOW: expected a JSON array");
+  return value.map((entry, index) => {
+    if (typeof entry !== "string" || !/^[A-Za-z0-9._@-]+(?:\/[A-Za-z0-9._@-]+)*$/.test(entry) || entry.split("/").some((part) => part === "." || part === "..")) {
+      throw new ConfigError(`invalid BROKER_EVIDENCE_IGNORED_ALLOW[${index}]: a literal repo-relative path`);
+    }
+    return entry;
+  });
+}
+
 function optionalStringEnv(name: string): string | null {
   const raw = process.env[name];
   return raw === undefined || raw === "" ? null : raw;
+}
+
+/** A comma-separated agent-name list: trimmed, empty entries dropped, duplicates removed, first-seen order kept. */
+function agentNamesEnv(name: string, fallback: string): string[] {
+  return [...new Set((process.env[name] ?? fallback).split(",").map((agent) => agent.trim()).filter(Boolean))];
 }
 
 export function defaultConfig(
@@ -464,6 +493,7 @@ export function defaultConfig(
     workerNamePrefix: "oc-sandbox",
     projects: DEFAULT_PROJECTS,
     testRunners: parseTestRunners(process.env.BROKER_TEST_RUNNERS),
+    evidenceIgnoredAllow: parseEvidenceIgnoredAllow(process.env.BROKER_EVIDENCE_IGNORED_ALLOW),
     approvedExternalReadRoots: DEFAULT_APPROVED_EXTERNAL_READ_ROOTS,
     externalCopyTargets: DEFAULT_EXTERNAL_COPY_TARGETS,
     protectedPaths: DEFAULT_PROTECTED_PATHS,
@@ -473,6 +503,8 @@ export function defaultConfig(
     ),
     planWriterAgents: (process.env.BROKER_PLAN_WRITER_AGENTS ?? "planner").split(",").map((agent) => agent.trim()).filter(Boolean),
     planMiniWriterAgents: (process.env.BROKER_PLAN_MINI_WRITER_AGENTS ?? "pm-odd,pm-systematic").split(",").map((agent) => agent.trim()).filter(Boolean),
+    stageReviewAgents: agentNamesEnv("BROKER_STAGE_REVIEW_AGENTS", "stage-review"),
+    gateRouterAgents: agentNamesEnv("BROKER_GATE_ROUTER_AGENTS", ""),
     advisorProjects: [],
     reapIntervalMs: positiveIntEnv("BROKER_REAP_INTERVAL_MS", 60_000),
     reapIdleMs: positiveIntEnv("BROKER_REAP_IDLE_MS", 3_600_000),
