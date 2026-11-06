@@ -538,11 +538,12 @@ export function isStageReviewAgent(
   return agent !== undefined && (config.stageReviewAgents ?? []).includes(agent);
 }
 
-/** The only mutating tools the stage-review role is admitted to: the owner's decisions, each behind an `ask` prompt. */
+/** The only tools the stage-review role is admitted to: the two stage reads, and the owner's decisions (each behind an `ask` prompt). */
+const STAGE_READ_TOOLS: readonly string[] = ["host_stage_list", "host_stage_show"];
 const STAGE_DECISION_TOOLS: readonly string[] = ["host_stage_approve", "host_stage_reject", "host_stage_apply", "host_stage_reconcile"];
 
 export function decideStageReview(capability: string, tool?: string): DecisionResult {
-  if (capability === "READ_PROJECT" || capability === "HOST_READ_STRUCTURED") {
+  if ((capability === "READ_PROJECT" || capability === "HOST_READ_STRUCTURED") && tool !== undefined && STAGE_READ_TOOLS.includes(tool)) {
     return { decision: "allow", reasonCode: "STAGE_REVIEW_READ_ONLY_ALLOWED" };
   }
   if (capability === "HOST_ADMIN_STRUCTURED" && tool !== undefined && STAGE_DECISION_TOOLS.includes(tool)) {

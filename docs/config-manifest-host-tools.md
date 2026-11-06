@@ -413,9 +413,10 @@ The approve, reject and apply tools are a later unit.
 | Broker operations | `stageList`, `stageShow` (and `chainCreate`, `chainStatus`, `chainAttach`, which have no tool yet), built in `broker/src/staging-chain.ts` |
 | Fragment | `deny` in both permission fragments: the stage-review agent's own block must enable them (agent definition and workflow_optimisation task-deny override come later) |
 | Broker gate | `stageList`/`stageShow` are refused unless the broker-bound session agent is in `stageReviewAgents` (`BROKER_STAGE_REVIEW_AGENTS`, default `stage-review`; names are trimmed and deduplicated on read, and the broker refuses to start if a name repeats, is not a plain agent name, or overlaps `readOnlyAgents`, a plan writer, a known role or an orchestrator identity); `STAGE_REVIEW_ONLY` |
-| Role | read-only: tool admission allows `READ_PROJECT` and `HOST_READ_STRUCTURED` only; every worker operation and `ensureWorker` are refused (`STAGE_REVIEW_NO_WORKER`); it is not in `readOnlyAgents`, so it holds no host mutation |
+| Role | tool admission allows exactly `host_stage_list` and `host_stage_show` (as reads) and the four stage decision tools (as admin), and denies every other tool, whatever its class; every worker operation and `ensureWorker` are refused (`STAGE_REVIEW_NO_WORKER`); it is not in `readOnlyAgents`, so it holds no host mutation |
 | Access class | `stageList`, `stageShow`, `chainStatus` are `HOST_READ_OPERATIONS` (`chainStatus` is additionally refused unless the caller may `chainCreate`, so the stage-review role, workers and unbound sessions cannot read chain internals); `chainCreate`, `chainAttach` are `HOST_MUTATION_OPERATIONS` (orchestrator identities) |
 | Data | read from `refs/opencode-sandbox/chain/<id>/stage/<n>`, never the session result ref; no approval prompt |
+| Payload and view | `chainID`, `lane` and `sessionID` must be strings (an array or object that stringifies to a valid id is refused). `changedPaths` are worker-authored, so the reviewer's view escapes control characters as `\uXXXX`, cuts each name to 300 characters and lists at most 200, reporting `changedPathsOmitted`; the broker's own checks use the full list |
 
 ### 5h. Staging chains, decision half (`host_stage_approve`, `host_stage_reject`, `host_stage_apply`)
 

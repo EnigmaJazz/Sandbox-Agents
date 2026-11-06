@@ -90,6 +90,8 @@ export interface StageStatus {
   baseline: string;
   result?: string;
   changedPaths?: string[];
+  /** Set only in the reviewer's view (boundedStageView) when more paths changed than are listed. */
+  changedPathsOmitted?: number;
   touchesProtected?: boolean;
   history?: StageEvent[];
   /** Ids of the broker's stage-bound testRun logs (D30), present only when evidence was recorded. A pointer, never trusted: gateVerdictAuto re-validates the log. */
@@ -507,9 +509,28 @@ export async function collectStageTestEvidence(ctx: OpContext, record: SessionRe
 }
 
 /** Stage-review reads: every field comes from the pinned stage refs. */
+const VIEW_PATHS_MAX = 200;
+const VIEW_PATH_CHARS_MAX = 300;
+
+/**
+ * What the stage-review model sees of a stage. changedPaths are worker-authored file names, so they are an injection
+ * surface: control characters (newlines, escape sequences) are written as \uXXXX, each name is cut to 300 characters
+ * and at most 200 are shown, with the omitted count. The broker's own checks (protected paths, scope) use the full list.
+ */
+export function boundedStageView(stage: StageStatus): StageStatus {
+  if (!stage.changedPaths) return stage;
+  const paths = stage.changedPaths.slice(0, VIEW_PATHS_MAX).map((path) => {
+    const escaped = path.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+    return escaped.length > VIEW_PATH_CHARS_MAX ? `${escaped.slice(0, VIEW_PATH_CHARS_MAX)}…` : escaped;
+  });
+  const omitted = stage.changedPaths.length - paths.length;
+  const unchanged = omitted === 0 && paths.every((path, i) => path === stage.changedPaths![i]);
+  return unchanged ? stage : { ...stage, changedPaths: paths, ...(omitted > 0 ? { changedPathsOmitted: omitted } : {}) };
+}
+
 export async function stageList(ctx: OpContext, id: string): Promise<{ chain: ChainRecord; stages: StageStatus[] }> {
   const { chain, stages } = await chainStages(ctx, id);
-  return { chain, stages };
+  return { chain, stages: stages.map(boundedStageView) };
 }
 
 export async function stageShow(ctx: OpContext, id: string, n: unknown): Promise<{ chain: ChainRecord; stage: StageStatus }> {
@@ -517,7 +538,7 @@ export async function stageShow(ctx: OpContext, id: string, n: unknown): Promise
   const { chain, stages } = await chainStages(ctx, id);
   const stage = stages.find((s) => s.n === n);
   if (!stage) throw new StateError(`chain ${id} has no stage ${n}`);
-  return { chain, stage };
+  return { chain, stage: boundedStageView(stage) };
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +556,7 @@ const NOTE_MAX = 4000;
  * `release` (reject only) also accepts a BUILDING stage, named by the all-zero result: the way to free the claim of a worker that was released or failed.
  */
 async function decisionTarget(ctx: OpContext, by: Decider, p: Record<string, unknown>, release = false) {
-  const id = String(p.chainID);
+  const id = strictString(p.chainID, "chainID");
   const n = p.n;
   if (typeof n !== "number" || !Number.isInteger(n) || n < 1) throw new ValidationError("n must be a positive integer");
   if (typeof p.result !== "string" || !SHA_RE.test(p.result)) throw new ValidationError("result must be the stage's 40-hex result commit");
@@ -780,19 +801,25 @@ function payloadFor(operation: string, payload: unknown): Record<string, unknown
   return (payload ?? {}) as Record<string, unknown>;
 }
 
+/** Payload fields arrive as untyped JSON: refuse anything but a string rather than coercing it (String([id]) would pass as id). */
+function strictString(value: unknown, name: string): string {
+  if (typeof value !== "string") throw new ValidationError(`${name} must be a string`);
+  return value;
+}
+
 export function buildChainCreateOp(ctx: OpContext): OpHandler {
   return async (req) => {
     authorizeHostDispatch(ctx, "chainCreate", req.sessionID, req.agent);
     const p = payloadFor("chainCreate", req.payload);
     const { projectID } = resolveCanonicalProjectRoot(ctx, p.projectDir);
-    return chainCreate(ctx, { projectID, lane: String(p.lane) });
+    return chainCreate(ctx, { projectID, lane: strictString(p.lane, "lane") });
   };
 }
 
 export function buildChainStatusOp(ctx: OpContext): OpHandler {
   return async (req) => {
     authorizeHostDispatch(ctx, "chainStatus", req.sessionID, req.agent);
-    return chainStatus(ctx, String(payloadFor("chainStatus", req.payload).chainID));
+    return chainStatus(ctx, strictString(payloadFor("chainStatus", req.payload).chainID, "chainID"));
   };
 }
 
@@ -800,7 +827,7 @@ export function buildChainAttachOp(ctx: OpContext): OpHandler {
   return async (req) => {
     authorizeHostDispatch(ctx, "chainAttach", req.sessionID, req.agent);
     const p = payloadFor("chainAttach", req.payload);
-    await chainAttach(ctx, String(p.chainID), p.sessionID as string);
+    await chainAttach(ctx, strictString(p.chainID, "chainID"), strictString(p.sessionID, "sessionID"));
     return { chainID: p.chainID, sessionID: p.sessionID, n: ctx.store.get(p.sessionID as string)?.chain?.n };
   };
 }
@@ -808,7 +835,7 @@ export function buildChainAttachOp(ctx: OpContext): OpHandler {
 export function buildStageListOp(ctx: OpContext): OpHandler {
   return async (req) => {
     authorizeHostDispatch(ctx, "stageList", req.sessionID, req.agent);
-    return stageList(ctx, String(payloadFor("stageList", req.payload).chainID));
+    return stageList(ctx, strictString(payloadFor("stageList", req.payload).chainID, "chainID"));
   };
 }
 
@@ -816,7 +843,7 @@ export function buildStageShowOp(ctx: OpContext): OpHandler {
   return async (req) => {
     authorizeHostDispatch(ctx, "stageShow", req.sessionID, req.agent);
     const p = payloadFor("stageShow", req.payload);
-    return stageShow(ctx, String(p.chainID), p.n);
+    return stageShow(ctx, strictString(p.chainID, "chainID"), p.n);
   };
 }
 
