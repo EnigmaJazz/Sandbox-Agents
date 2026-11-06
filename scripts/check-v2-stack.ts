@@ -26,9 +26,14 @@ export const EXPECTED_PLUGINS = [
   "systematic-routing-guard", "workflow-health-check", "sandbox-tools", "routing-guard", "reviewer-relay-transport",
 ];
 
-/** The ids in a `plugin list` table (a plugin that failed to load has the id `-`). */
+/** The ids in a `plugin list` table (a plugin that failed to load has the id `-`, except Orca's TUI status plugins). */
 export function parsePluginList(text: string): string[] {
-  return text.split("\n").map((line) => line.trim().split(/\s+/)).filter((p) => p.length >= 3 && p[0] !== "ID" && /^(\d|local)/.test(p[1]!)).map((p) => p[0]!);
+  return text.split("\n").map((line) => line.trim().split(/\s+/)).filter((p) => p.length >= 3 && p[0] !== "ID" && /^(\d|local)/.test(p[1]!) && !isOrcaStatusPlugin(p)).map((p) => p[0]!);
+}
+
+/** Orca registers two TUI status plugins as bare directories (a tui.js, no package.json), so V2 lists them with id `-`; they are not load failures. */
+function isOrcaStatusPlugin(row: string[]): boolean {
+  return row[0] === "-" && /\/orca-opencode2?-status-tui\/?$/.test(row.slice(2).join(" "));
 }
 
 /** The effect of the LAST rule that matches the action with the catch-all resource (later rules win in V2). */

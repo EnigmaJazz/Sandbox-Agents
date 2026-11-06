@@ -90,6 +90,14 @@ describe("evaluate", () => {
     expect(bad?.detail).toContain("routing-guard");
   });
 
+  test("Orca's TUI status plugins (id '-', no package.json) are not load failures", () => {
+    const orca = "-   local    /home/u/.config/opencode/plugins/orca-opencode-status-tui\n-   local    /home/u/.config/opencode/plugins/orca-opencode2-status-tui\n";
+    expect(failures(healthyAgents(), PLUGIN_TABLE + orca)).not.toContain("plugins: none failed to load");
+  });
+  test("a local '-' plugin that is not an Orca status plugin still fails", () => {
+    expect(failures(healthyAgents(), PLUGIN_TABLE + "-   local    /home/u/.config/opencode/plugins/orca-status-tui-evil\n")).toContain("plugins: none failed to load");
+    expect(failures(healthyAgents(), PLUGIN_TABLE + "-   local    /home/u/.config/opencode/plugins/sandbox-tools\n")).toContain("plugins: none failed to load");
+  });
   test("a plugin that failed to load fails", () => {
     expect(failures(healthyAgents(), PLUGIN_TABLE + "-  9.9.9  broken\n")).toContain("plugins: none failed to load");
   });
