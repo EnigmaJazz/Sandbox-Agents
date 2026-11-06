@@ -28,6 +28,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { BrokerConfig, TestRunnerConfig } from "./config.ts";
 import { RESULT_EXCLUDE_PATHS } from "./diff-spec.ts";
+import { registerChainStage } from "./staging-chain.ts";
 import { gitSubcommand } from "./gitguard.ts";
 import type { SessionStore } from "./state.ts";
 import type { MsbAdapter } from "./msb.ts";
@@ -719,7 +720,7 @@ async function runQueuedCreation(
   }
 }
 
-function projectDirFor(ctx: OpContext, projectID: string): string {
+export function projectDirFor(ctx: OpContext, projectID: string): string {
   const project = ctx.config.projects.find((p) => p.id === projectID);
   if (!project) throw new StateError(`project ${projectID} not in allowlist`);
   return project.path;
@@ -1995,6 +1996,7 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
   // transport bundle + temp index are redundant. Best effort: a GC failure
   // must never fail an already-successful import.
   await gcSessionArtifacts(ctx, sessionID, "prepareResult", { durable: true });
+  await registerChainStage(ctx, record, ref);
   return ref;
 }
 
