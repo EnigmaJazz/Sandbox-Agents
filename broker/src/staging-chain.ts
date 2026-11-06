@@ -404,6 +404,9 @@ export async function stageApply(ctx: OpContext, by: Decider, p: Record<string, 
   const projectDir = projectDirFor(ctx, chain.projectID);
   let landing = false; // true once `git apply` may have run: from then on a failure is NOT recorded as a clean refusal
   try {
+    // The approval is of one commit: the APPROVED event, the payload and the pinned stage ref must all name it (a host-side ref rewrite after approval is refused).
+    const approved = loadEvents(ctx, id).filter((e) => e.n === n && e.event === "APPROVED").pop();
+    if (!approved || approved.result !== result) throw new StateError(`stage ${n}: stage ref moved since approval; the approved result commit is not the one to apply`);
     // S17 / AGENTS.md: protected paths are never applied from an agent session, whatever was confirmed at approval (applyResult's rule).
     if (stage.touchesProtected) throw new StateError(`stage ${n} touches protected paths (S7/S17); the owner applies it by hand`);
     const diverged = await hostDivergence(ctx, key, chain.projectID, stage.baseline);

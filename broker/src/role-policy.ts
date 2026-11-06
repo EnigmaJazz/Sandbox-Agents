@@ -182,7 +182,8 @@ export const TOOL_CLASSIFICATION_INVENTORY: Readonly<Record<string, Capability>>
   host_stage_list: "HOST_READ_STRUCTURED", host_stage_show: "HOST_READ_STRUCTURED",
   chainCreate: "MUTATE_PROJECT", chainAttach: "MUTATE_PROJECT", chainStatus: "HOST_READ_STRUCTURED",
   stageList: "HOST_READ_STRUCTURED", stageShow: "HOST_READ_STRUCTURED",
-  host_stage_approve: "HOST_APPROVED_MUTATION", host_stage_reject: "HOST_APPROVED_MUTATION", host_stage_apply: "HOST_APPROVED_MUTATION",
+  // The owner's decisions are classed HOST_ADMIN_STRUCTURED so every identity but the stage-review role (decideStageReview, by tool name) is denied.
+  host_stage_approve: "HOST_ADMIN_STRUCTURED", host_stage_reject: "HOST_ADMIN_STRUCTURED", host_stage_apply: "HOST_ADMIN_STRUCTURED",
   sddArchiveCompose: "MUTATE_PROJECT", sddAttemptGrant: "MUTATE_PROJECT", planDocAppend: "MUTATE_PROJECT", taskMark: "MUTATE_PROJECT",
   reviewStart: "MUTATE_PROJECT", reviewCaptureResult: "MUTATE_PROJECT", reviewCaptureUnachievable: "MUTATE_PROJECT",
   reviewAcknowledgeApproved: "MUTATE_PROJECT", reviewCaptureCorrectionPlan: "MUTATE_PROJECT", reviewCaptureRefuter: "MUTATE_PROJECT",
@@ -542,7 +543,7 @@ export function decideStageReview(capability: string, tool?: string): DecisionRe
   if (capability === "READ_PROJECT" || capability === "HOST_READ_STRUCTURED") {
     return { decision: "allow", reasonCode: "STAGE_REVIEW_READ_ONLY_ALLOWED" };
   }
-  if (capability === "HOST_APPROVED_MUTATION" && tool !== undefined && STAGE_DECISION_TOOLS.includes(tool)) {
+  if (capability === "HOST_ADMIN_STRUCTURED" && tool !== undefined && STAGE_DECISION_TOOLS.includes(tool)) {
     return { decision: "allow", reasonCode: "STAGE_REVIEW_DECISION_ALLOWED" };
   }
   return { decision: "deny", reasonCode: "STAGE_REVIEW_READ_ONLY" };

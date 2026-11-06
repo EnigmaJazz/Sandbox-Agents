@@ -162,14 +162,17 @@ describe("registry, classification and positive controls", () => {
     const admit = (tool: string, session = "rev") =>
       buildToolAdmissionOp(e.ctx)({ version: 1, id: "a", operation: "toolAdmission", sessionID: session, payload: { tool } } as BrokerRequestEnvelope) as Promise<{ decision: string; classification: string }>;
     for (const tool of TOOLS) {
-      expect(classifyOperation(tool)).toBe("HOST_APPROVED_MUTATION");
+      expect(classifyOperation(tool)).toBe("HOST_ADMIN_STRUCTURED");
       expect((await admit(tool)).decision, tool).toBe("allow");
-      expect((await admit(tool, "wrk")).decision, `${tool} for a worker`).toBe("deny");
+      // Every other identity is denied, as the broker operation does: the orchestrator, a plain and an unbound session, a worker.
+      for (const other of ["orch", "plain", "wrk", "unknown-session"]) expect((await admit(tool, other)).decision, `${tool} for ${other}`).toBe("deny");
     }
     // The widening is by tool name, never by capability class: a sibling approved mutation stays denied.
     expect((await admit("host_git_commit")).decision).toBe("deny");
     expect(decideStageReview("HOST_APPROVED_MUTATION").decision).toBe("deny");
-    expect(decideStageReview("HOST_APPROVED_MUTATION", "host_stage_apply").decision).toBe("allow");
+    expect(decideStageReview("HOST_APPROVED_MUTATION", "host_stage_apply").decision).toBe("deny");
+    expect(decideStageReview("HOST_ADMIN_STRUCTURED", "host_stage_apply").decision).toBe("allow");
+    expect(decideStageReview("HOST_ADMIN_STRUCTURED").decision).toBe("deny");
     expect(decideStageReview("MUTATE_PROJECT", "host_stage_apply").decision).toBe("deny");
   });
 
@@ -344,6 +347,46 @@ describe("apply: owner approval, strict order, pinned ref, fail closed (S80, S81
     const h = await history(e, 1);
     expect(h.map((x) => x.event)).toEqual(["APPROVED", "APPLYING", "APPLIED"]);
     expect(h[2]).toMatchObject({ by: { sessionID: "rev", agent: REVIEWER }, result: e.s1 });
+  });
+
+  test("B1: a stage ref rewritten after approval is refused even when the payload names the new commit", async () => {
+    const e = fixture();
+    await e.decide("stageApprove", 1);
+    git(e.repo, "checkout", "-q", "-b", "evil", e.base);
+    writeFileSync(join(e.repo, "evil.txt"), "evil\n");
+    git(e.repo, "add", "-A");
+    git(e.repo, "commit", "-q", "-m", "evil");
+    const evil = git(e.repo, "rev-parse", "HEAD");
+    git(e.repo, "checkout", "-q", "main");
+    git(e.repo, "update-ref", `${REF(e.chain)}/stage/1`, evil);
+    const before = hostFingerprint(e.repo);
+    await refusedLeavesHost(e, () => e.decide("stageApply", 1, { result: evil }), /moved since approval/);
+    expect(existsSync(join(e.repo, "evil.txt"))).toBe(false);
+    expect(hostFingerprint(e.repo)).toBe(before);
+    expect((await history(e, 1)).map((x) => x.event)).toEqual(["APPROVED", "APPLYING", "APPLY_REFUSED"]);
+    // the old approved commit is no longer the pinned one either
+    await expect(e.decide("stageApply", 1)).rejects.toThrow(/pinned result commit/);
+    // positive control: the fingerprint does see the evil content when it is written
+    writeFileSync(join(e.repo, "evil.txt"), "evil\n");
+    expect(hostFingerprint(e.repo)).not.toBe(before);
+  });
+
+  test("B1: a decisions file whose APPROVED event names another result than the stage ref is not applied", async () => {
+    const e = fixture();
+    await e.decide("stageApprove", 1);
+    const file = join(e.stateDir, "chains", `${e.chain}.decisions.json`);
+    const rec = JSON.parse(readFileSync(file, "utf8"));
+    rec.events[0].result = e.base;
+    writeFileSync(file, JSON.stringify(rec));
+    await refusedLeavesHost(e, () => e.decide("stageApply", 1), /moved since approval/);
+    expect(existsSync(join(e.repo, "b.txt"))).toBe(false);
+  });
+
+  test("B1: matching approval, payload and stage ref still applies", async () => {
+    const e = fixture();
+    await e.decide("stageApprove", 1);
+    expect((await e.decide("stageApply", 1)).state).toBe("APPLIED");
+    expect(readFileSync(join(e.repo, "b.txt"), "utf8")).toBe("b\n");
   });
 
   test("a second apply is refused and leaves the host unchanged", async () => {
