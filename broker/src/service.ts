@@ -1870,6 +1870,38 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
 // Result boundary (§15, §18-§20)
 // ---------------------------------------------------------------------------
 
+/**
+ * Sessions whose result is being finished right now. Keyed on the store so that the `{ ...ctx }` copies
+ * the server and the tests make all see one set. A finish blocks for the evidence runners' timeouts, and
+ * the reaper's skip checks (idle age, no resultRef) stay true for all of it: without this, a second sweep
+ * runs the finish again, or releases the worker under a running runner.
+ */
+const finishing = new WeakMap<object, Set<string>>();
+
+/** True while a finish (prepareResult, keepResult, idle auto-finish, disconnect reap) of this session is in flight. */
+export function isFinishing(ctx: OpContext, sessionID: string): boolean {
+  return finishing.get(ctx.store)?.has(sessionID) === true;
+}
+
+/**
+ * Run one finish of a session exclusively. A finish already in flight is refused (never queued behind: the
+ * caller re-reads the session afterwards), so the evidence runners can never run twice at once. The check and
+ * the claim have no await between them, and the claim is released in `finally`, so a throw cannot leak it.
+ * It is separate from the server's per-session operation lock on purpose: the reaper does not take that
+ * lock, and a finish inside the lock must not wait for it again.
+ */
+export async function withFinishGuard<T>(ctx: OpContext, sessionID: string, fn: () => Promise<T>): Promise<T> {
+  let set = finishing.get(ctx.store);
+  if (!set) finishing.set(ctx.store, (set = new Set()));
+  if (set.has(sessionID)) throw new StateError("a result export is already in flight for this session; retry after it finishes");
+  set.add(sessionID);
+  try {
+    return await fn();
+  } finally {
+    set.delete(sessionID);
+  }
+}
+
 export function buildPrepareResultOp(ctx: OpContext): OpHandler {
   return async (req) => {
     payloadOf(req);
@@ -1879,16 +1911,18 @@ export function buildPrepareResultOp(ctx: OpContext): OpHandler {
     }
     // Always re-export: runPrepare commits only new changes, so a retained
     // result after a failed apply is refreshed, not frozen (Gate 6 finding).
-    const ref = await runPrepare(ctx, req.sessionID);
-    if (record.state === "SANDBOX_ACTIVE") {
-      record = ctx.store.transition(
-        req.sessionID,
-        "SANDBOX_ACTIVE",
-        "RESULT_READY",
-        { resultRef: ref },
-      );
-    }
-    return { resultRef: ref, state: record.state, imported: true };
+    return withFinishGuard(ctx, req.sessionID, async () => {
+      const ref = await runPrepare(ctx, req.sessionID);
+      if (record.state === "SANDBOX_ACTIVE") {
+        record = ctx.store.transition(
+          req.sessionID,
+          "SANDBOX_ACTIVE",
+          "RESULT_READY",
+          { resultRef: ref },
+        );
+      }
+      return { resultRef: ref, state: record.state, imported: true };
+    });
   };
 }
 
@@ -2389,15 +2423,10 @@ export function buildKeepResultOp(ctx: OpContext): OpHandler {
     let record = recordOr404(ctx.store, req.sessionID);
     if (record.state === "SANDBOX_ACTIVE") {
       // §20 KEEP: prepare the result first, then retire the transient worker.
-      const ref = await runPrepare(ctx, req.sessionID);
-      record = ctx.store.transition(
-        req.sessionID,
-        "SANDBOX_ACTIVE",
-        "RESULT_READY",
-        {
-          resultRef: ref,
-        },
-      );
+      record = await withFinishGuard(ctx, req.sessionID, async () => {
+        const ref = await runPrepare(ctx, req.sessionID);
+        return ctx.store.transition(req.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", { resultRef: ref });
+      });
     }
     if (record.state !== "RESULT_READY" && record.state !== "APPLIED") {
       throw new StateError(`cannot keep result from state ${record.state}`);

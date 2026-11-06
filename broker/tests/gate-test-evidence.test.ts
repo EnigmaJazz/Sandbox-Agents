@@ -16,7 +16,8 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { defaultConfig, type TestRunnerConfig } from "../src/config.ts";
 import { assertWorkerEnv, spawnArgv } from "../src/msb.ts";
-import { buildEnsureWorkerOp, buildPrepareResultOp, buildTestRunOp, type OpContext } from "../src/service.ts";
+import { startReaper, sweepUnfinished, type ReaperLogEntry } from "../src/reaper.ts";
+import { buildEnsureWorkerOp, buildKeepResultOp, buildPrepareResultOp, buildTestRunOp, isFinishing, withFinishGuard, type OpContext } from "../src/service.ts";
 import { BrokerServer } from "../src/server.ts";
 import { chainAttach, chainCreate, chainStatus, stageList, stageShow } from "../src/staging-chain.ts";
 import type { BrokerRequestEnvelope } from "../src/types.ts";
@@ -126,9 +127,10 @@ function harness(opts: Opts = {}) {
     writeFileSync(join(dirOf(`worker-${session}`), path), content);
   };
   /** Start stage 1 of the chain, let the worker write `files`, and finish it. */
-  const stageOne = async (files: Record<string, string> = { "src/feature.ts": "export const x = 1;\n" }, session = "s1") => {
+  const stageOne = async (files: Record<string, string> = { "src/feature.ts": "export const x = 1;\n" }, session = "s1", setup?: (workerDir: string) => void) => {
     await buildEnsureWorkerOp(ctx)(req("ensureWorker", session, { projectDir: repo }));
     await chainAttach(ctx, chain, session);
+    setup?.(dirOf(`worker-${session}`));
     for (const [path, content] of Object.entries(files)) put(session, path, content);
     return buildPrepareResultOp(ctx)(req("prepareResult", session, {}));
   };
@@ -527,5 +529,187 @@ describe("unchanged behaviour", () => {
     expect(again.result).toBe(first.result!);
     expect(again.testRunRefs).toHaveLength(1);
     expect((await h.gate(again.testRunRefs!)).route).toBe("RECORD_PASS");
+  }, 60_000);
+});
+
+describe("repository content the tree id does not cover writes no evidence (B2)", () => {
+  const nestedRepo = (dir: string) => {
+    const nested = join(dir, "vendor/lib");
+    mkdirSync(nested, { recursive: true });
+    git(nested, "init", "-q", "-b", "main");
+    git(nested, "config", "user.name", "t");
+    git(nested, "config", "user.email", "t@local");
+    writeFileSync(join(nested, "lib.txt"), "lib\n");
+    git(nested, "add", "-A");
+    git(nested, "commit", "-q", "-m", "lib");
+    // Untracked in the nested repository: visible to the runner, in no tree.
+    writeFileSync(join(nested, "untracked.sh"), "echo hidden\n");
+  };
+
+  test("a nested git repository (a gitlink in the tree) writes no evidence, though the stage itself registers", async () => {
+    const h = harness({ runners: [sh("unit", "test -f vendor/lib/untracked.sh && echo ran-marker")] });
+    await h.stageOne({ "src/feature.ts": "export const x = 1;\n" }, "s1", nestedRepo);
+    const stage = await h.stage();
+    expect(stage.state).toBe("READY");
+    // Positive control: the pinned stage really holds a gitlink, so the refusal is the gitlink check and nothing else.
+    expect(git(h.repo, "ls-tree", "-r", stage.result!)).toMatch(/^160000 commit [0-9a-f]{40}\tvendor\/lib$/m);
+    expect(stage.testRunRefs).toBeUndefined();
+    expect(h.logs()).toEqual([]);
+    expect(runnerExecs(h.execs)).toEqual([]);
+    // The gate has no tests result either (it also routes back for the out-of-scope vendor path, which is not what is under test).
+    const verdict = await h.gate([]);
+    expect(verdict).toMatchObject({ recorded: false });
+    expect(verdict.checks.find((c: { check: string }) => c.check === "tests")).toMatchObject({ passed: false, missing: true });
+  }, 60_000);
+
+  test("regression pin: a nested repository that appears while the runner executes invalidates the evidence (already caught by the after-run tree check)", async () => {
+    const h = harness({ runners: [sh("unit", "true")] });
+    let armed = true;
+    // The runner is the only /bin/sh exec: add the nested repository as soon as it starts, so only the closing tree check sees it.
+    (h.ctx as unknown as { adapter: { exec: (...a: unknown[]) => Promise<unknown> } }).adapter.exec = ((orig) => async (name: string, argv: string[], o: unknown) => {
+      const r = await (orig as (...a: unknown[]) => Promise<unknown>)(name, argv, o);
+      if (armed && argv[0] === "/bin/sh") { armed = false; nestedRepo(h.dirOf(name)); }
+      return r;
+    })((h.ctx as unknown as { adapter: { exec: unknown } }).adapter.exec);
+    await h.stageOne();
+    expect(armed).toBe(false);
+    expect((await h.stage()).testRunRefs).toBeUndefined();
+    expect(h.logs()).toEqual([]);
+  }, 60_000);
+
+  test("core.fileMode=false in the worker repository writes no evidence; an explicit core.fileMode=true still does (positive control)", async () => {
+    const off = harness({ runners: [sh("unit", "true")] });
+    await off.stageOne(undefined, "s1", (dir) => git(dir, "config", "core.fileMode", "false"));
+    expect((await off.stage()).state).toBe("READY");
+    expect((await off.stage()).testRunRefs).toBeUndefined();
+    expect(off.logs()).toEqual([]);
+    expect(runnerExecs(off.execs)).toEqual([]);
+
+    const on = harness({ runners: [sh("unit", "true")] });
+    await on.stageOne(undefined, "s1", (dir) => git(dir, "config", "core.fileMode", "true"));
+    expect((await on.stage()).testRunRefs).toHaveLength(1);
+  }, 60_000);
+
+  for (const [key, value] of [["core.fileMode", "off"], ["core.fileMode", "0"], ["core.symlinks", "false"], ["core.sparseCheckout", "true"], ["core.worktree", "<worker dir>"]] as const) {
+    test(`${key}=${value} writes no evidence`, async () => {
+      const h = harness({ runners: [sh("unit", "true")] });
+      await h.stageOne(undefined, "s1", (dir) => git(dir, "config", key, value === "<worker dir>" ? dir : value));
+      expect((await h.stage()).state).toBe("READY");
+      expect((await h.stage()).testRunRefs).toBeUndefined();
+      expect(h.logs()).toEqual([]);
+    }, 60_000);
+  }
+});
+
+describe("one finish per session at a time (B1)", () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const until = async (what: string, ok: () => boolean, ms = 15_000) => {
+    const end = Date.now() + ms;
+    while (!ok()) {
+      if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+      await sleep(10);
+    }
+  };
+  /** A started stage whose worker holds an unexported edit, ready for the reaper to auto-finish. */
+  const unfinished = async (h: ReturnType<typeof harness>) => {
+    await buildEnsureWorkerOp(h.ctx)(h.req("ensureWorker", "s1", { projectDir: h.repo }));
+    await chainAttach(h.ctx, h.chain, "s1");
+    h.put("s1", "src/feature.ts", "export const x = 1;\n");
+    await sleep(30);
+  };
+  const SLOW = "sleep 1; echo slow-ok";
+  const slowRuns = (h: ReturnType<typeof harness>) => runnerExecs(h.execs).filter((e) => e.argv[2] === SLOW);
+
+  test("overlapping sweeps run the runners once, write one log and never release the worker under a running runner", async () => {
+    const h = harness({ runners: [sh("unit", SLOW)] });
+    await unfinished(h);
+    const entries: ReaperLogEntry[] = [];
+    const first = sweepUnfinished(h.ctx, 10, (e) => entries.push(e));
+    await until("the runner to start", () => slowRuns(h).length === 1);
+    // The first sweep is inside the runner: its worker tree is already committed, so it looks clean.
+    expect(h.ctx.store.get("s1")).toMatchObject({ state: "SANDBOX_ACTIVE" });
+    expect(h.ctx.store.get("s1")!.resultRef).toBeUndefined();
+    const second = await sweepUnfinished(h.ctx, 10, (e) => entries.push(e));
+    expect(entries).not.toContainEqual(expect.objectContaining({ action: "reaped_active", detail: "idle clean worker released" })); // the old code releases the worker here
+    expect(second.finished).toBe(0);
+    await first;
+    expect(entries.map((e) => e.action)).toEqual(["auto_finished"]);
+    expect(slowRuns(h)).toHaveLength(1);
+    expect(h.logs()).toHaveLength(1);
+    expect(h.ctx.store.get("s1")).toMatchObject({ state: "RESULT_READY" });
+    expect(isFinishing(h.ctx, "s1")).toBe(false);
+  }, 60_000);
+
+  test("an explicit prepareResult or keepResult during an in-flight finish is refused, and no runner runs", async () => {
+    const h = harness({ runners: [sh("unit", SLOW)] });
+    await unfinished(h); // SANDBOX_ACTIVE: keepResult only exports (and so only needs the guard) from this state
+    const before = runnerExecs(h.execs).length;
+    expect(before).toBe(0);
+    let release!: () => void;
+    const held = withFinishGuard(h.ctx, "s1", () => new Promise<void>((r) => (release = r)));
+    expect(isFinishing(h.ctx, "s1")).toBe(true);
+    await expect(buildPrepareResultOp(h.ctx)(h.req("prepareResult", "s1", {}))).rejects.toThrow(/already in flight/);
+    await expect(buildKeepResultOp(h.ctx)(h.req("applyResult", "s1", { confirm: "KEEP" }))).rejects.toThrow(/already in flight/);
+    expect(runnerExecs(h.execs)).toHaveLength(before);
+    release();
+    await held;
+    // Positive control: with the finish over, the same call is accepted and runs the runner.
+    await buildPrepareResultOp(h.ctx)(h.req("prepareResult", "s1", {}));
+    expect(runnerExecs(h.execs).length).toBeGreaterThan(before);
+  }, 60_000);
+
+  test("two overlapping explicit prepareResult calls run the runners once; the second is refused", async () => {
+    const h = harness({ runners: [sh("unit", SLOW)] });
+    await buildEnsureWorkerOp(h.ctx)(h.req("ensureWorker", "s1", { projectDir: h.repo }));
+    await chainAttach(h.ctx, h.chain, "s1");
+    h.put("s1", "src/feature.ts", "export const x = 1;\n");
+    const op = buildPrepareResultOp(h.ctx);
+    const first = op(h.req("prepareResult", "s1", {}));
+    const second = op(h.req("prepareResult", "s1", {}));
+    const settled = await Promise.allSettled([first, second]);
+    expect(settled.map((r) => r.status)).toEqual(["fulfilled", "rejected"]);
+    expect(String((settled[1] as PromiseRejectedResult).reason)).toMatch(/already in flight/);
+    expect(slowRuns(h)).toHaveLength(1);
+    expect(h.logs()).toHaveLength(1);
+  }, 60_000);
+
+  test("the guard is released when the finish throws, so the next finish is accepted", async () => {
+    await expect(withFinishGuard({ store: {} } as unknown as OpContext, "x", async () => { throw new Error("boom"); })).rejects.toThrow("boom");
+    let fail = true;
+    const h = harness({
+      runners: [sh("unit", "true")],
+      beforeExec: (argv) => {
+        if (fail && argv[0] === "mkdir") { fail = false; throw new Error("sandbox gone"); }
+      },
+    });
+    await buildEnsureWorkerOp(h.ctx)(h.req("ensureWorker", "s1", { projectDir: h.repo }));
+    await chainAttach(h.ctx, h.chain, "s1");
+    h.put("s1", "src/feature.ts", "export const x = 1;\n");
+    await expect(buildPrepareResultOp(h.ctx)(h.req("prepareResult", "s1", {}))).rejects.toThrow(/sandbox gone/);
+    expect(fail).toBe(false); // the failure was injected inside the finish
+    expect(isFinishing(h.ctx, "s1")).toBe(false);
+    await expect(buildPrepareResultOp(h.ctx)(h.req("prepareResult", "s1", {}))).resolves.toMatchObject({ state: "RESULT_READY" });
+  }, 60_000);
+
+  test("a reaper tick does not start while the previous sweep is still running", async () => {
+    const h = harness({ runners: [sh("unit", "sleep 2")] });
+    await unfinished(h);
+    // Age the session past the reaper's fixed 60 s idle threshold.
+    const store = h.ctx.store as unknown as { persist(r: unknown): void; get(id: string): Record<string, unknown>; list(): unknown[] };
+    store.persist({ ...store.get("s1"), updatedAt: new Date(Date.now() - 120_000).toISOString() });
+    let ticks = 0;
+    const list = store.list.bind(store);
+    store.list = () => { ticks++; return list(); };
+    const reaper = startReaper(h.ctx, { intervalMs: 30, idleMs: 3_600_000 });
+    try {
+      await until("the sweep to be inside the runner", () => runnerExecs(h.execs).some((e) => e.argv[2] === "sleep 2"));
+      const during = ticks;
+      await sleep(500); // about 16 intervals while the first sweep is still running
+      expect(ticks).toBe(during);
+    } finally {
+      reaper.stop();
+    }
+    await until("the sweep to finish", () => h.ctx.store.get("s1")?.state === "RESULT_READY");
+    expect(runnerExecs(h.execs).filter((e) => e.argv[2] === "sleep 2")).toHaveLength(1);
   }, 60_000);
 });

@@ -375,7 +375,8 @@ const TREE_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 /**
  * Tree id of the worker's /work content, as `prepareResult` would commit it: a throwaway index (never the
  * worker's own) seeded from the result ref, then `add -A` with the result excludes, then `write-tree`.
- * Undefined whenever the sandbox cannot say.
+ * Undefined whenever the sandbox cannot say, and whenever the tree or the repository settings mean the runner would see
+ * content the id does not cover (a gitlink, `core.fileMode=false`, ...): no evidence is better than evidence for part of it.
  */
 async function sandboxTree(ctx: OpContext, worker: string, ref: string): Promise<string | undefined> {
   const index = `/work/.broker-tmp/evidence-${randomUUID()}.index`;
@@ -388,10 +389,28 @@ async function sandboxTree(ctx: OpContext, worker: string, ref: string): Promise
   try {
     // A clean filter would let `add` hash different bytes than the files the runner reads: no filter may be configured (exit 1 = none).
     if ((await run(["git", "config", "--get-regexp", "^filter[.]"])).status !== 1) return undefined;
+    // Repository settings under which the hash and the runner's view of /work can differ: a mode the hash
+    // ignores (fileMode, symlinks), files it skips (sparse checkout), a work tree somewhere else (worktree,
+    // bare). --type=bool normalises no/off/0; core.worktree is a path, so it fails the conversion (exit 128).
+    // Exit 1 = none set. Anything else, or a value other than the git default, writes no evidence.
+    const core = await run(["git", "config", "--type=bool", "--get-regexp", "^core[.](filemode|symlinks|bare|sparsecheckout|worktree)$"]);
+    if (core.status !== 0 && core.status !== 1) return undefined;
+    for (const line of core.stdout.split("\n").filter((l) => l !== "")) {
+      const [key, value] = line.split(" ");
+      if ((key === "core.filemode" || key === "core.symlinks") && value !== "true") return undefined;
+      if ((key === "core.bare" || key === "core.sparsecheckout") && value !== "false") return undefined;
+    }
     if ((await run(["git", "read-tree", ref])).status !== 0) return undefined;
     if ((await run(["git", "add", "-A", "--", ".", ...RESULT_EXCLUDE_PATHS])).status !== 0) return undefined;
     const written = await run(["git", "write-tree"]);
-    return written.status === 0 && TREE_RE.test(written.stdout.trim()) ? written.stdout.trim() : undefined;
+    const tree = written.status === 0 ? written.stdout.trim() : "";
+    if (!TREE_RE.test(tree)) return undefined;
+    // A nested repository is recorded as a bare gitlink (mode 160000): its content, tracked or not, is visible to
+    // the runner but is not in the tree id. Refuse the whole tree rather than bind a log to part of what ran.
+    const listing = await ctx.adapter.exec(worker, ["git", "ls-tree", "-r", "-z", tree], { cwd: "/work", timeoutMs: 60_000, maxOutputBytes: 8 * 1024 * 1024, env });
+    if (listing.status !== 0 || listing.outputTruncated === true) return undefined;
+    if (listing.stdout.split("\0").some((entry) => entry.startsWith("160000 "))) return undefined;
+    return tree;
   } finally {
     await ctx.adapter.exec(worker, ["rm", "-f", "--", index], { cwd: "/work", timeoutMs: 30_000 }).catch(() => undefined);
   }
