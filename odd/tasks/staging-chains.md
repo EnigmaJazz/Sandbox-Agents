@@ -38,3 +38,4 @@ Not scheduled: P3 (S86, deferred), P5 (S87, only on a demonstrated unattended mu
 
 - 2026-11-05: tracker created by the multi-tier-orchestration T6 unit U0 (docs only; no tests apply).
 - 2026-11-06: owner placed S93 in the B2 gate-routing unit (T6).
+- 2026-11-06: P1 (8c88d44) independently verified: no blockers; S76, S77 pass; non-chain differential against d61f322 identical. Carry-forward from the advisories: (1) a refused re-finish moves refs/opencode-sandbox/result/<session> before the pin refuses, so apply must read refs/.../stage/<n>, never the session result ref; (2) chainAttach must call assertSessionID when it becomes a socket op (P2); (3) a stage claim can leak when a worker is released after a failed finish, so the reduced P4 needs a documented way to release or rebuild a stage claim; (4) `chain` is not shape-validated on load (broker-written only; validate when convenient).
