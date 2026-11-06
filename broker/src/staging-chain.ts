@@ -511,18 +511,35 @@ export async function collectStageTestEvidence(ctx: OpContext, record: SessionRe
 /** Stage-review reads: every field comes from the pinned stage refs. */
 const VIEW_PATHS_MAX = 200;
 const VIEW_PATH_CHARS_MAX = 300;
+// Controls, line separators, soft hyphen, zero-width and bidi formatting characters, and the byte-order mark: all can make a name read differently from its bytes.
+const LOOKALIKE_RE = /[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g;
+
+/** A name as the reviewer reads it: the backslash is escaped first, so an escape sequence in the output can only come from this function. */
+function viewName(path: string): string {
+  return path.replace(/\\/g, "\\\\").replace(LOOKALIKE_RE, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/** Cut at a whole code point, never inside a surrogate pair. */
+function cutName(name: string): string {
+  const chars = Array.from(name);
+  return chars.length > VIEW_PATH_CHARS_MAX ? `${chars.slice(0, VIEW_PATH_CHARS_MAX).join("")}…` : name;
+}
+
+/** True when the reviewer's view omits or cuts anything: such a stage can be rejected but never approved or applied. */
+export function viewTruncated(stage: StageStatus): boolean {
+  const paths = stage.changedPaths ?? [];
+  return paths.length > VIEW_PATHS_MAX || paths.some((path) => Array.from(viewName(path)).length > VIEW_PATH_CHARS_MAX);
+}
 
 /**
  * What the stage-review model sees of a stage. changedPaths are worker-authored file names, so they are an injection
- * surface: control characters (newlines, escape sequences) are written as \uXXXX, each name is cut to 300 characters
- * and at most 200 are shown, with the omitted count. The broker's own checks (protected paths, scope) use the full list.
+ * surface: backslashes, control, zero-width and bidi characters are written as escapes, each name is cut to 300
+ * characters and at most 200 are shown, with the omitted count. The broker's own checks (protected paths, scope) use
+ * the full list, and approve and apply refuse a stage whose view was truncated (viewTruncated).
  */
 export function boundedStageView(stage: StageStatus): StageStatus {
   if (!stage.changedPaths) return stage;
-  const paths = stage.changedPaths.slice(0, VIEW_PATHS_MAX).map((path) => {
-    const escaped = path.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
-    return escaped.length > VIEW_PATH_CHARS_MAX ? `${escaped.slice(0, VIEW_PATH_CHARS_MAX)}…` : escaped;
-  });
+  const paths = stage.changedPaths.slice(0, VIEW_PATHS_MAX).map((path) => cutName(viewName(path)));
   const omitted = stage.changedPaths.length - paths.length;
   const unchanged = omitted === 0 && paths.every((path, i) => path === stage.changedPaths![i]);
   return unchanged ? stage : { ...stage, changedPaths: paths, ...(omitted > 0 ? { changedPathsOmitted: omitted } : {}) };
@@ -549,6 +566,13 @@ export async function stageShow(ctx: OpContext, id: string, n: unknown): Promise
 // ---------------------------------------------------------------------------
 
 type Decider = { sessionID: string; agent: string };
+
+/** The owner decides on what the reviewer saw: a stage whose path list was cut cannot be approved or applied (reject it and rebuild it smaller). */
+function assertViewComplete(stage: StageStatus): void {
+  if (viewTruncated(stage)) {
+    throw new StateError(`stage ${stage.n} changes more than the reviewer can be shown (over ${VIEW_PATHS_MAX} paths or a name over ${VIEW_PATH_CHARS_MAX} characters) and cannot be shown to the reviewer in full; reject it and rebuild it smaller`);
+  }
+}
 const NOTE_MAX = 4000;
 
 /**
@@ -581,6 +605,7 @@ function protectedConfirmed(p: Record<string, unknown>, stage: StageStatus): boo
 
 export async function stageApprove(ctx: OpContext, by: Decider, p: Record<string, unknown>) {
   const { id, n, result, stage } = await decisionTarget(ctx, by, p);
+  assertViewComplete(stage);
   const confirmed = protectedConfirmed(p, stage);
   recordEvent(ctx, id, { n, event: "APPROVED", result, by, ...attemptField(stage), ...(confirmed ? { protectedConfirmed: true as const } : {}) }, (events) => {
     const state = decidedState(events, n, attemptOf(stage));
@@ -635,6 +660,7 @@ export async function stageApply(ctx: OpContext, by: Decider, p: Record<string, 
   if (p.confirm !== "APPLY") throw new ValidationError('stageApply requires confirm: "APPLY"');
   if (ctx.git.runnerMode !== "real") throw new StateError("stage apply requires the real git runner");
   const { id, n, result, chain, stage, stages } = await decisionTarget(ctx, by, p);
+  assertViewComplete(stage);
   const attempt = attemptOf(stage);
   recordEvent(ctx, id, { n, event: "APPLYING", result, by, ...attemptField(stage) }, (events) => {
     const state = decidedState(events, n, attempt);
@@ -651,7 +677,8 @@ export async function stageApply(ctx: OpContext, by: Decider, p: Record<string, 
   try {
     // Stage numbers alone do not order a chain: a stage built on a rejected attempt keeps its number. Its baseline
     // must be the pinned result of the newest attempt of the stage before it (a recorded refusal, like the rest).
-    if (n > 1 && stages.find((s) => s.n === n - 1)?.result !== stage.baseline) {
+    const predecessor = n > 1 ? stages.find((s) => s.n === n - 1)?.result : undefined;
+    if (n > 1 && (predecessor === undefined || predecessor !== stage.baseline)) {
       throw new StateError(`stage ${n}'s baseline is not stage ${n - 1}'s pinned result (a rebuilt predecessor?); re-run stage ${n} from the current tip`);
     }
     // The approval is of one commit: the APPROVED event, the payload and the pinned stage ref must all name it (a host-side ref rewrite after approval is refused).

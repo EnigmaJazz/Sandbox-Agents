@@ -21,7 +21,7 @@ import { spawnArgv } from "../src/msb.ts";
 import { classifyOperation, decideStageReview } from "../src/role-policy.ts";
 import { BrokerServer } from "../src/server.ts";
 import { buildEnsureWorkerOp, buildPrepareResultOp, buildToolAdmissionOp, type OpContext } from "../src/service.ts";
-import { chainAttach, chainCreate, chainStatus } from "../src/staging-chain.ts";
+import { boundedStageView, chainAttach, chainCreate, chainStatus, viewTruncated } from "../src/staging-chain.ts";
 import { StateError } from "../src/state.ts";
 import { OPERATIONS, SANDBOX_GUARD_CLASS, type BrokerRequestEnvelope } from "../src/types.ts";
 import { ALLOWED_PAYLOAD_KEYS, HOST_MUTATION_IDENTITY_OPERATIONS, HOST_MUTATION_OPERATIONS, hostToolAccess } from "../src/validation.ts";
@@ -688,4 +688,45 @@ describe("chain races and record shape (H3)", () => {
     expect(events.at(-1)).toMatchObject({ event: "APPLY_REFUSED", result: r2 });
     expect(events.at(-1).reason).toMatch(/baseline is not stage 1's pinned result/);
   }, 90_000);
+
+describe("H4c: a stage the reviewer cannot see in full is never approved or applied", () => {
+  const base = { n: 1, sessionID: "s", state: "READY" as const, baseline: "b" };
+
+  test("the reviewer view is injective, strips look-alike characters and never splits a surrogate pair", () => {
+    const literal = boundedStageView({ ...base, changedPaths: ["a\\u000ab.txt"] }).changedPaths![0];
+    const real = boundedStageView({ ...base, changedPaths: ["a\nb.txt"] }).changedPaths![0];
+    expect(literal).not.toBe(real);
+    for (const ch of ["\u202e", "\u2066", "\u200b", "\u200f", "\ufeff", "\u00ad"]) {
+      expect(boundedStageView({ ...base, changedPaths: [`a${ch}b`] }).changedPaths![0], JSON.stringify(ch)).not.toContain(ch);
+    }
+    const cut = boundedStageView({ ...base, changedPaths: ["x".repeat(299) + "😀" + "tail"] }).changedPaths![0]!;
+    expect(cut).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/);
+    expect(boundedStageView({ ...base, changedPaths: ["plain/ok.txt"] }).changedPaths).toEqual(["plain/ok.txt"]); // control
+  });
+
+  test("viewTruncated is true past 200 paths or 300 characters, false at the limits", () => {
+    expect(viewTruncated({ ...base, changedPaths: Array.from({ length: 200 }, (_, i) => `f${i}`) })).toBe(false);
+    expect(viewTruncated({ ...base, changedPaths: Array.from({ length: 201 }, (_, i) => `f${i}`) })).toBe(true);
+    expect(viewTruncated({ ...base, changedPaths: ["y".repeat(300)] })).toBe(false);
+    expect(viewTruncated({ ...base, changedPaths: ["y".repeat(301)] })).toBe(true);
+  });
+
+  test("approve and apply are refused for a truncated stage, reject still works, and a normal stage is unaffected", async () => {
+    const e = env();
+    const chainID = chainCreate(e.ctx, { projectID: "repo", lane: "feature" }).id;
+    await stage(e, chainID, "s1");
+    for (let i = 0; i < 201; i++) writeFileSync(join(e.workerDir("s1"), `f${i}.txt`), `${i}\n`);
+    await buildPrepareResultOp(e.ctx)(req("prepareResult", "s1", {}));
+    const shown = await show(e, chainID, 1);
+    expect(shown.changedPaths).toHaveLength(200);
+    expect(shown.changedPathsOmitted).toBe(1);
+    const before = hostFingerprint(e.repo);
+    await expect(decide(e, "stageApprove", chainID, 1, shown.result)).rejects.toThrow(/cannot be shown to the reviewer in full/);
+    await expect(decide(e, "stageApply", chainID, 1, shown.result)).rejects.toThrow(/cannot be shown to the reviewer in full/);
+    expect(hostFingerprint(e.repo)).toBe(before);
+    expect((await show(e, chainID, 1)).state).toBe("READY");
+    await decide(e, "stageReject", chainID, 1, shown.result); // the way out: rework with a smaller stage
+    expect((await show(e, chainID, 1)).state).toBe("REJECTED");
+  }, 60_000);
+});
 });
