@@ -92,6 +92,26 @@ describe("gate checks: plan surfaces (D28, D29)", () => {
       expect(r.missing, w).toBeUndefined();
     }
   });
+  test("every all-wildcard spelling is repo-wide, not only five strings (H1)", () => {
+    for (const w of ["**/**", "*/**", "**/*/**", "*/*", "./**/**", ".", "./", "***", "**//**"]) {
+      const r = checkSurfaces(["src/**", w], prot);
+      expect(r.passed, w).toBe(false);
+      expect(r.missing, w).toBeUndefined();
+    }
+    // Positive control: anchored globs are bounded.
+    for (const ok of ["src/**/*.ts", "**/*.ts", "docs/*.md", "a/**/b"]) expect(checkSurfaces([ok], ["docs/secret/**"]).passed, ok).toBe(true);
+  });
+  test("a glob that can reach a protected path is a clear failure, in both directions (H1)", () => {
+    for (const g of ["broker/src/**", "docs/**", "broker/**/*.ts", "**/role-policy.ts", "docs/secret/*"]) {
+      const r = checkSurfaces([g], prot);
+      expect(r.passed, g).toBe(false);
+      expect(r.missing, g).toBeUndefined();
+    }
+    // Default protected patterns: a surface that can reach credentials or key files.
+    const defaults = ["**/.ssh/**", "**/*.key", "**/.env*"];
+    for (const g of ["home/.ssh/**", "keys/*.key", "app/.env*"]) expect(checkSurfaces([g], defaults).passed, g).toBe(false);
+    for (const ok of ["src/**", "docs/*.md", "keys/*.txt"]) expect(checkSurfaces([ok], defaults).passed, ok).toBe(true);
+  });
   test("a malformed or protected surface is a clear failure", () => {
     for (const bad of ["../x", "/etc/passwd", "a/../b", "broker/src/role-policy.ts", "docs/secret/key.md"]) {
       const r = checkSurfaces(["src/**", bad], prot);

@@ -88,17 +88,30 @@ export function checkBudget(entries: readonly NumstatEntry[] | undefined, maxApp
     : fail("budget", `${total} > ${maxApplyDiffLines} maxApplyDiffLines`);
 }
 
-const REPO_WIDE = new Set(["*", "**", "**/*", "./**", "./*"]);
+/** A surface with no anchor: every segment is only stars (`**`, `*`, `**\/**`, `*\/**`, `*\/*`), or the project root itself. */
+const isRepoWide = (p: string): boolean => {
+  const norm = p.replace(/\/+/g, "/").replace(/^(?:\.\/)+/, "").replace(/\/$/, "");
+  return norm === "" || norm === "." || /^(?:\*+\/)*\*+$/.test(norm);
+};
+
+/** A concrete path a glob matches: wildcards become the letter `a` (`**\/` becomes `a/`). */
+const witness = (glob: string): string => glob.replace(/\*\*\//g, "a/").replace(/\*+/g, "a");
+
+/** Two globs overlap when a witness of either is matched by the other (conservative, not exhaustive). */
+const reachesProtected = (surface: string, protectedPatterns: readonly string[]): boolean =>
+  checkProtectedPaths([witness(surface)], protectedPatterns).length > 0 ||
+  protectedPatterns.some((pattern) => globToRegExp(surface).test(witness(pattern)));
 
 /**
  * Plan-vs-spec (D28, D29): the only check derivable from the plan alone. The plan's `## Allowed edit surfaces`
- * must exist, be well-formed, bounded (no repo-wide pattern) and name no protected path. A plan defect is a
- * clear failure (returns to the Planner); an absent section is unsure. Entries are matched literally against
- * the protected patterns, so a glob surface that could reach a protected file is still caught at the scope check.
+ * must exist, be well-formed, bounded (no all-wildcard pattern) and not reach a protected path. A plan defect is
+ * a clear failure (returns to the Planner); an absent section is unsure. Overlap with the protected patterns is
+ * tested with a witness path in each direction, so it catches a glob over a protected directory or file but is
+ * not a full glob-intersection proof: the scope check still decides the stage's actual paths.
  */
 export function checkSurfaces(allowed: readonly string[] | undefined, protectedPatterns: readonly string[] = []): GateCheck {
   if (!allowed || allowed.length === 0) return fail("surfaces", "the plan has no Allowed edit surfaces", true);
-  const bad = allowed.filter((p) => unsafePath(p) || REPO_WIDE.has(p) || checkProtectedPaths([p], protectedPatterns).length > 0);
+  const bad = allowed.filter((p) => unsafePath(p) || isRepoWide(p) || reachesProtected(p, protectedPatterns));
   return bad.length === 0
     ? { check: "surfaces", passed: true, detail: `${allowed.length} bounded surface(s)` }
     : fail("surfaces", `malformed, repo-wide or protected surface: ${bad.join(", ")}`);
