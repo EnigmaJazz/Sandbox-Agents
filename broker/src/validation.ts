@@ -12,7 +12,7 @@
  * - shell metacharacters rejected in argv (defence-in-depth: we spawn without
  *   a shell, but no payload may be safe to pipe through one either).
  */
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { FORBIDDEN_WORKER_FIELDS, type BrokerResponseEnvelope, OPERATIONS } from "./types.ts";
 
@@ -1387,6 +1387,98 @@ export function isWithin(parent: string, child: string): boolean {
   return child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
 }
 
+/**
+ * Worktree-root rule (D36). A registered root that is NOT itself a git checkout holds worktrees at exactly
+ * `<root>/<project>/<name>`, each with its own `.git`. Returns the canonical worktree path when `canonical`
+ * is such a worktree, the root when it is the root, and undefined otherwise. An ordinary project (a git
+ * checkout) only ever resolves to its own root, so nested checkouts stay refused.
+ */
+export function resolveWorktreeAwareRoot(root: string, canonical: string): string | undefined {
+  if (canonical === root) return root;
+  if (!isWithin(root, canonical) || existsSync(join(root, ".git"))) return undefined;
+  const rel = canonical.slice(root.length + 1).split(sep);
+  if (rel.length !== 2 || !rel.every((part) => WORKTREE_SEGMENT_RE.test(part))) return undefined;
+  const dotGit = join(canonical, ".git");
+  if (!existsSync(dotGit)) return undefined;
+  return statSync(dotGit).isFile() && verifiedLinkedGitDir(canonical) === undefined ? undefined : canonical;
+}
+
+/** One path segment of a worktree under a root; `.` and `..` are excluded by the leading-alphanumeric rule. */
+const WORKTREE_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** Separates `<rootID>~<project>~<name>`; broker project ids never contain it. */
+const WORKTREE_ID_SEP = "~";
+
+/**
+ * Look a project up by id. A virtual id `<rootID>~<project>~<name>` names a worktree under a worktree root:
+ * it resolves to that worktree's canonical path only while the worktree still satisfies the root rule.
+ */
+export function findProject<T extends { id: string; path: string }>(
+  projects: readonly T[],
+  id: string,
+): { id: string; path: string } | undefined {
+  if (!id.includes(WORKTREE_ID_SEP)) return projects.find((p) => p.id === id);
+  const [rootID, project, name, ...extra] = id.split(WORKTREE_ID_SEP);
+  if (extra.length > 0 || !rootID || !project || !name) return undefined;
+  const base = projects.find((p) => p.id === rootID);
+  if (!base) return undefined;
+  try {
+    const root = realpathSync(base.path);
+    const canonical = realpathSync(join(root, project, name));
+    const resolved = resolveWorktreeAwareRoot(root, canonical);
+    return resolved && resolved !== root ? { id, path: resolved } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The verified git directory of a linked worktree whose `.git` is a file, or undefined. The pointer inside
+ * that file is writable by whatever works in the worktree, so it is trusted only when git's own back-link
+ * agrees: the target must be `<repo>/.git/worktrees/<name>`, outside the worktree, and its `gitdir` file must
+ * name THIS worktree's `.git`. A pointer redirected at any other repository fails the back-link.
+ */
+function verifiedLinkedGitDir(repoDir: string): string | undefined {
+  try {
+    const dotGit = join(realpathSync(repoDir), ".git");
+    const match = /^gitdir:\s*(.+)$/.exec(readFileSync(dotGit, "utf8").split("\n", 1)[0]?.trim() ?? "");
+    if (!match) return undefined;
+    const target = match[1]!.trim();
+    const entry = realpathSync(isAbsolute(target) ? target : resolve(repoDir, target));
+    // The entry must be git's own: `<repo>/.git/worktrees/<name>`, and never inside the worktree itself,
+    // because whatever works in the worktree could build a matching entry there (gitdir back-link and a
+    // foreign `commondir`) and redirect git at another repository.
+    if (!statSync(entry).isDirectory() || basename(dirname(entry)) !== "worktrees") return undefined;
+    if (basename(dirname(dirname(entry))) !== ".git" || isWithin(realpathSync(repoDir), entry)) return undefined;
+    const backlink = readFileSync(join(entry, "gitdir"), "utf8").trim();
+    return realpathSync(backlink) === dotGit ? entry : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The git directory of a checkout. An ordinary checkout has a `.git` directory; a linked worktree has a `.git`
+ * FILE, which is followed only when it is verified (see verifiedLinkedGitDir) and refused otherwise.
+ */
+export function gitDirFor(repoDir: string): string {
+  const dotGit = join(repoDir, ".git");
+  let stats;
+  try {
+    stats = statSync(dotGit);
+  } catch {
+    return dotGit;
+  }
+  if (!stats.isFile()) return dotGit;
+  const verified = verifiedLinkedGitDir(repoDir);
+  if (!verified) throw new ValidationError("the worktree's .git does not point at its own linked git directory");
+  return verified;
+}
+
+/** The registered root's id for any project id, virtual or not (advisor sockets and records are keyed per root). */
+export function baseProjectID(id: string): string {
+  return id.split(WORKTREE_ID_SEP, 1)[0]!;
+}
+
 /** Resolve the allowed project for a directory the agent claims to work in. */
 export function resolveProjectID(
   projectDir: unknown,
@@ -1408,6 +1500,10 @@ export function resolveProjectID(
   for (const project of projects) {
     const root = realpathSync(project.path);
     if (isWithin(root, canonical)) {
+      const worktree = resolveWorktreeAwareRoot(root, canonical);
+      if (worktree && worktree !== root) {
+        return [project.id, ...canonical.slice(root.length + 1).split(sep)].join(WORKTREE_ID_SEP);
+      }
       return project.id;
     }
   }

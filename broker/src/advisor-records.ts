@@ -40,7 +40,7 @@ import { PolicyError } from "./policy.ts";
 import type { SddRuntimeExecutor } from "./sdd-runtime.ts";
 import { authorizeHostDispatch, type OpContext } from "./service.ts";
 import type { BrokerRequestEnvelope } from "./types.ts";
-import { ValidationError, assertPayloadKeys, resolveProjectID } from "./validation.ts";
+import { ValidationError, assertPayloadKeys, resolveProjectID, findProject, baseProjectID, gitDirFor } from "./validation.ts";
 
 export const ADVISOR_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -334,7 +334,7 @@ export function buildAdvisorAskOp(ctx: AdvisorContext, now: Clock = Date.now) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
     const p = payloadOf(req);
     authorizeHostDispatch(ctx, "advisorAsk", req.sessionID, req.agent);
-    const projectId = resolveProjectID(p.projectDir, ctx.config.projects);
+    const projectId = baseProjectID(resolveProjectID(p.projectDir, ctx.config.projects));
     const kind = p.kind;
     if (kind !== "pre-code-advice" && kind !== "review-lens") {
       throw new ValidationError("kind must be pre-code-advice or review-lens");
@@ -458,7 +458,7 @@ export function buildAdvisorGetOp(ctx: OpContext, now: Clock = Date.now) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
     const p = payloadOf(req);
     authorizeHostDispatch(ctx, "advisorGet", req.sessionID, req.agent);
-    const dir = requestsDir(ctx, resolveProjectID(p.projectDir, ctx.config.projects));
+    const dir = requestsDir(ctx, baseProjectID(resolveProjectID(p.projectDir, ctx.config.projects)));
     return view(dir, loadRequest(dir, matching(p.id, ID_RE, "id")), now());
   };
 }
@@ -467,7 +467,7 @@ export function buildAdvisorListOp(ctx: OpContext, now: Clock = Date.now) {
   return async (req: BrokerRequestEnvelope): Promise<unknown> => {
     const p = payloadOf(req);
     authorizeHostDispatch(ctx, "advisorList", req.sessionID, req.agent);
-    const dir = requestsDir(ctx, resolveProjectID(p.projectDir, ctx.config.projects));
+    const dir = requestsDir(ctx, baseProjectID(resolveProjectID(p.projectDir, ctx.config.projects)));
     const task = p.task === undefined ? undefined : matching(p.task, TASK_RE, "task");
     const step = p.step === undefined ? undefined : text(p.step, "step", true, 128);
     const status = p.status === undefined ? undefined : matching(p.status, /^(pending|claimed|submitted|declined|expired)$/, "status");
@@ -576,9 +576,9 @@ export function buildAdvisorEvidenceKeepOp(ctx: OpContext, now: Clock = Date.now
     let tree = snapshotIdentity?.tree;
     if (!commit || !tree) {
       if (!session.baselineRef || !ctx.git?.spawn) throw new PolicyError("broker-pinned snapshot identity is unavailable");
-      const project = ctx.config.projects.find((entry) => entry.id === projectId);
+      const project = findProject(ctx.config.projects, projectId);
       if (!project) throw new PolicyError("broker-pinned snapshot project is unavailable");
-      const env = { GIT_DIR: join(project.path, ".git") };
+      const env = { GIT_DIR: gitDirFor(project.path) };
       checkDeadline();
       const resolved = await ctx.git.spawn(["git", "rev-parse", "--verify", `${session.baselineRef}^{commit}`], { env, cwd: project.path });
       checkDeadline();

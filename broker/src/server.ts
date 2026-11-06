@@ -61,7 +61,7 @@ import {
   refuseAdvisorSessionOnMain,
   type AdvisorBinding,
 } from "./advisor-socket.ts";
-import { HOST_MUTATION_IDENTITY_OPERATIONS, ValidationError } from "./validation.ts";
+import { HOST_MUTATION_IDENTITY_OPERATIONS, ValidationError, findProject } from "./validation.ts";
 import { isRole, normalizeRoleKey } from "./role-policy.ts";
 import { PolicyError } from "./policy.ts";
 import { PendingQueue, QueuedTimedOutError } from "./queue.ts";
@@ -533,7 +533,7 @@ export class BrokerServer {
    */
   private async startAdvisorListeners(): Promise<void> {
     for (const projectId of this.config.advisorProjects) {
-      const project = this.config.projects.find((p) => p.id === projectId);
+      const project = findProject(this.config.projects, projectId);
       if (!project) {
         throw new ValidationError(`advisor project '${projectId}' is not a registered project`);
       }

@@ -147,6 +147,8 @@ import { dirname } from "node:path";
 import {
   assertPlanDocHeading,
   assertPlanDocName,
+  findProject,
+  gitDirFor,
   isWithin,
   normalizePlanDocContent,
   PLAN_DOC_TARGETS,
@@ -766,7 +768,7 @@ async function runQueuedCreation(
 }
 
 export function projectDirFor(ctx: OpContext, projectID: string): string {
-  const project = ctx.config.projects.find((p) => p.id === projectID);
+  const project = findProject(ctx.config.projects, projectID);
   if (!project) throw new StateError(`project ${projectID} not in allowlist`);
   return project.path;
 }
@@ -811,7 +813,7 @@ async function assertPinnedSnapshotCompatible(
 ): Promise<void> {
   const selection = snapshotFromPayload(rawSelection);
   const repoDir = projectDirFor(ctx, projectID);
-  const env = { GIT_DIR: join(repoDir, ".git") };
+  const env = { GIT_DIR: gitDirFor(repoDir) };
   if (!record.baselineRef) throw new StateError("existing worker has no pinned snapshot identity");
   const current = await ctx.git.spawn(["git", "rev-parse", "--verify", `${record.baselineRef}^{commit}`], { env, cwd: repoDir });
   if (current.status !== 0 || !/^[0-9a-f]{40}$/.test(current.stdout.trim())) throw new StateError("existing worker snapshot identity cannot be resolved");
@@ -853,7 +855,7 @@ async function pinnedSnapshotIdentity(
   rawSelection: unknown,
 ): Promise<SnapshotIdentity> {
   const repoDir = projectDirFor(ctx, projectID);
-  const env = { GIT_DIR: join(repoDir, ".git") };
+  const env = { GIT_DIR: gitDirFor(repoDir) };
   if (!record.baselineRef) throw new StateError("existing worker has no pinned snapshot identity");
   const commit = await ctx.git.spawn(["git", "rev-parse", "--verify", `${record.baselineRef}^{commit}`], { env, cwd: repoDir });
   if (commit.status !== 0 || !/^[0-9a-f]{40}$/.test(commit.stdout.trim())) {
@@ -904,7 +906,7 @@ async function runSnapshot(
     mode: 0o700,
   });
   mkdirSync(join(ctx.config.stateDir, "tmp"), { recursive: true, mode: 0o700 });
-  const gitDir = join(repoDir, ".git");
+  const gitDir = gitDirFor(repoDir);
   const tmpIndex = join(ctx.config.stateDir, "tmp", `${sessionID}.index`);
   const ref = baselineRef(sessionID);
   const env = {
@@ -2109,7 +2111,7 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     if (record.projectID === undefined)
       throw new StateError("project not in allowlist");
     const projectID: string = record.projectID;
-    const project = ctx.config.projects.find((p) => p.id === projectID);
+    const project = findProject(ctx.config.projects, projectID);
     if (!project) throw new StateError("project not in allowlist");
     const resultRefName = record.resultRef ?? resultRef(req.sessionID);
     const baselineRefName = record.baselineRef ?? baselineRef(req.sessionID);
@@ -2278,9 +2280,9 @@ export async function hostDivergence(
   projectID: string,
   baselineRefName: string,
 ): Promise<string[]> {
-  const project = ctx.config.projects.find((p) => p.id === projectID);
+  const project = findProject(ctx.config.projects, projectID);
   if (!project) throw new StateError("no projects configured");
-  const gitDir = join(project.path, ".git");
+  const gitDir = gitDirFor(project.path);
   // Session-scoped (not a random UUID): the divergence temp index is a
   // transport artifact under the same state-dir retention rules.
   const tmpIndex = divergenceIndexPathFor(ctx.config.stateDir, sessionID);
@@ -2330,9 +2332,9 @@ async function changedPathsBetween(
   baselineRefName: string,
   resultRefName: string,
 ): Promise<string[]> {
-  const project = ctx.config.projects.find((p) => p.id === projectID);
+  const project = findProject(ctx.config.projects, projectID);
   if (!project) throw new StateError("no projects configured");
-  const gitDir = join(project.path, ".git");
+  const gitDir = gitDirFor(project.path);
   const raw = await ctx.git.spawn(
     buildChangedPathsArgv(baselineRefName, resultRefName),
     { env: { GIT_DIR: gitDir }, timeoutMs: 60_000 },
@@ -2357,7 +2359,7 @@ async function buildRetainedDiff(
     throw new StateError(
       `cannot inspect retained result from state ${record.state}`,
     );
-  const project = ctx.config.projects.find((p) => p.id === record.projectID);
+  const project = findProject(ctx.config.projects, record.projectID);
   if (!project) throw new StateError("project not in allowlist");
   const baseline = record.baselineRef ?? baselineRef(record.sessionID);
   const result = record.resultRef;
@@ -2405,9 +2407,9 @@ export async function rawChangesBetween(
   baselineRefName: string,
   resultRefName: string,
 ) {
-  const project = ctx.config.projects.find((p) => p.id === projectID);
+  const project = findProject(ctx.config.projects, projectID);
   if (!project) throw new StateError("no projects configured");
-  const gitDir = join(project.path, ".git");
+  const gitDir = gitDirFor(project.path);
   const raw = await ctx.git.spawn(
     [
       "git",
@@ -2725,7 +2727,7 @@ export function resolveCanonicalProjectRoot(
   projectDir: unknown,
 ): { projectID: string; projectRoot: string } {
   const projectID = resolveProjectID(projectDir, ctx.config.projects);
-  const project = ctx.config.projects.find((p) => p.id === projectID);
+  const project = findProject(ctx.config.projects, projectID);
   if (!project) throw new ValidationError("project is not in the trusted allowlist");
   let canonicalRoot: string;
   let canonicalRequested: string;
@@ -3096,7 +3098,7 @@ export function buildResultDiffOp(ctx: OpContext): OpHandler {
         return nonce.length === 16 && [...nonce].every((c) => "0123456789abcdef".includes(c));
       });
     if (!projectID) throw new PolicyError("resultDiff is available only to a registered advisor session");
-    const project = ctx.config.projects.find((entry) => entry.id === projectID);
+    const project = findProject(ctx.config.projects, projectID);
     if (!project) throw new StateError("advisor project is not registered");
 
     const sessionID = ref.slice(RESULT_REF_PREFIX.length + 1);
