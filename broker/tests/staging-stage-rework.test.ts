@@ -22,6 +22,7 @@ import { classifyOperation, decideStageReview } from "../src/role-policy.ts";
 import { BrokerServer } from "../src/server.ts";
 import { buildEnsureWorkerOp, buildPrepareResultOp, buildToolAdmissionOp, type OpContext } from "../src/service.ts";
 import { chainAttach, chainCreate, chainStatus } from "../src/staging-chain.ts";
+import { StateError } from "../src/state.ts";
 import { OPERATIONS, SANDBOX_GUARD_CLASS, type BrokerRequestEnvelope } from "../src/types.ts";
 import { ALLOWED_PAYLOAD_KEYS, HOST_MUTATION_IDENTITY_OPERATIONS, HOST_MUTATION_OPERATIONS, hostToolAccess } from "../src/validation.ts";
 
@@ -591,4 +592,96 @@ describe("registration, admission, tool and fragments for stageReconcile", () =>
       expect(rule(file, "host_stage_list")).toBe("deny"); // positive control: the reader finds rules
     }
   });
+});
+
+describe("chain races and record shape (H3)", () => {
+  /** Run `during` once, inside the next changed-paths diff of a stage read (the await window of chainStages). */
+  const armDuring = (e: Env, during: () => Promise<unknown>) => {
+    const spawn = e.ctx.git.spawn;
+    let armed = true;
+    (e.ctx as { git: unknown }).git = {
+      runnerMode: "real",
+      spawn: async (argv: string[], opts: unknown) => {
+        const out = await (spawn as (a: string[], o: unknown) => Promise<unknown>)(argv, opts);
+        if (armed && argv.includes("diff")) {
+          armed = false;
+          await during();
+        }
+        return out;
+      },
+    };
+  };
+  const started = async (e: Env, chainID: string, sessionID: string) => {
+    const { nextSnapshot } = await chainStatus(e.ctx, chainID);
+    await buildEnsureWorkerOp(e.ctx)(req("ensureWorker", sessionID, { projectDir: e.repo, snapshot: nextSnapshot }));
+  };
+
+  test("a chain record with a non-integer or non-positive maxStages is corrupt", async () => {
+    const e = env();
+    const chainID = chainCreate(e.ctx, { projectID: "repo", lane: "feature" }).id;
+    const file = join(e.stateDir, "chains", `${chainID}.json`);
+    const original = readFileSync(file, "utf8");
+    expect((await chainStatus(e.ctx, chainID)).stages).toEqual([]); // positive control
+    for (const bad of [0, -1, 1.5]) {
+      writeFileSync(file, JSON.stringify({ ...JSON.parse(original), maxStages: bad }));
+      await expect(chainStatus(e.ctx, chainID), String(bad)).rejects.toThrow(/corrupt chain record/);
+    }
+  });
+
+  test("a stage claimed while a reject is in flight is marked STALE by that reject", async () => {
+    const e = env();
+    const chainID = chainCreate(e.ctx, { projectID: "repo", lane: "feature" }).id;
+    await stage(e, chainID, "s1", "one.txt");
+    await started(e, chainID, "s2"); // started from stage 1's result, not yet attached
+    const result = (await show(e, chainID, 1)).result;
+    armDuring(e, () => chainAttach(e.ctx, chainID, "s2")); // binds stage 2 while the reject is reading stages
+    await decide(e, "stageReject", chainID, 1, result);
+    expect(await states(e, chainID)).toEqual(["REJECTED", "STALE"]);
+  }, 60_000);
+
+  test("a session cannot attach to a stage whose predecessor was rejected while it was attaching", async () => {
+    const e = env();
+    const chainID = chainCreate(e.ctx, { projectID: "repo", lane: "feature" }).id;
+    await stage(e, chainID, "s1", "one.txt");
+    await started(e, chainID, "s2");
+    const result = (await show(e, chainID, 1)).result;
+    armDuring(e, () => decide(e, "stageReject", chainID, 1, result));
+    await expect(chainAttach(e.ctx, chainID, "s2")).rejects.toThrow(StateError);
+    expect(e.ctx.store.get("s2")!.chain).toBeUndefined();
+    expect(await states(e, chainID)).toEqual(["REJECTED"]);
+  }, 60_000);
+
+  test("two attaches racing for the same stage: the second is refused", async () => {
+    const e = env();
+    const chainID = chainCreate(e.ctx, { projectID: "repo", lane: "feature" }).id;
+    await stage(e, chainID, "s1", "one.txt");
+    await started(e, chainID, "s2");
+    await started(e, chainID, "s3");
+    armDuring(e, () => chainAttach(e.ctx, chainID, "s3"));
+    await expect(chainAttach(e.ctx, chainID, "s2")).rejects.toThrow(StateError);
+    expect(e.ctx.store.get("s3")!.chain).toBeDefined();
+    expect(e.ctx.store.get("s2")!.chain).toBeUndefined();
+  }, 60_000);
+
+  test("apply verifies the stage baseline is the previous stage's pinned result, not just its number", async () => {
+    const e = env();
+    const chainID = chainCreate(e.ctx, { projectID: "repo", lane: "feature" }).id;
+    await stage(e, chainID, "s1", "one.txt");
+    await stage(e, chainID, "s2", "two.txt");
+    const r1 = (await show(e, chainID, 1)).result;
+    const r2 = (await show(e, chainID, 2)).result;
+    await decide(e, "stageReject", chainID, 1, r1); // stage 2 becomes STALE
+    await stage(e, chainID, "s3", "one-b.txt"); // stage 1 attempt 2
+    const r1b = (await show(e, chainID, 1)).result;
+    await decide(e, "stageApprove", chainID, 1, r1b);
+    await decide(e, "stageApply", chainID, 1, r1b);
+    // A forged approval of the old stage 2 (built on the rejected attempt) must not apply.
+    const file = join(e.stateDir, "chains", `${chainID}.decisions.json`);
+    const doc = JSON.parse(readFileSync(file, "utf8"));
+    doc.events.push({ n: 2, event: "APPROVED", result: r2, by: { sessionID: "rev", agent: REVIEWER }, at: new Date().toISOString() });
+    writeFileSync(file, JSON.stringify(doc));
+    const before = hostFingerprint(e.repo);
+    await expect(decide(e, "stageApply", chainID, 2, r2)).rejects.toThrow(/baseline is not stage 1's pinned result/);
+    expect(hostFingerprint(e.repo)).toBe(before);
+  }, 90_000);
 });

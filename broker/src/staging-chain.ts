@@ -127,7 +127,7 @@ function loadChain(ctx: OpContext, id: string): ChainRecord {
   } catch (err) {
     throw new StateError(`corrupt chain record ${id}: ${err instanceof Error ? err.message : String(err)}`);
   }
-  if (c.id !== id || typeof c.projectID !== "string" || typeof c.maxStages !== "number" || typeof c.createdAt !== "string" || !Object.hasOwn(CHAIN_LANES, String(c.lane))) {
+  if (c.id !== id || typeof c.projectID !== "string" || !Number.isInteger(c.maxStages) || (c.maxStages as number) < 1 || typeof c.createdAt !== "string" || !Object.hasOwn(CHAIN_LANES, String(c.lane))) {
     throw new StateError(`corrupt chain record ${id}: shape validation failed`);
   }
   return c as ChainRecord;
@@ -351,6 +351,17 @@ export async function chainAttach(ctx: OpContext, id: string, sessionID: string)
   } else if (baseline !== target.prev.result) {
     throw new StateError(`session baseline is not stage ${target.prev.n}'s result`);
   }
+  // `stages` was read before an await: re-check against the live decisions and claims, still without an await,
+  // so a reject or another attach that landed in that window cannot leave this session on a dead or taken slot.
+  if (target.prev) {
+    const decided = decidedState(loadEvents(ctx, id), target.prev.n, attemptOf(target.prev));
+    if (decided === "REJECTED" || decided === "STALE") throw new StateError(`stage ${target.prev.n} was ${decided === "REJECTED" ? "rejected" : "marked STALE"} while this session was attaching`);
+  }
+  for (const other of ctx.store.list()) {
+    if (other.sessionID !== sessionID && other.chain?.id === id && other.chain.n === target.n && attemptOf(other.chain) === target.attempt && other.state !== "FAILED_CLOSED") {
+      throw new StateError(`stage ${target.n} was claimed by another session while this session was attaching`);
+    }
+  }
   ctx.store.touch(sessionID, { chain: { id, n: target.n, baseline, ...attemptField(target) } }, "chainAttach");
 }
 
@@ -572,6 +583,16 @@ export async function stageReject(ctx: OpContext, by: Decider, p: Record<string,
   const stale = stages
     .filter((s) => s.n > n && !["APPLIED", "REJECTED", "STALE"].includes(s.state))
     .map((s) => ({ n: s.n, event: "STALE" as const, result: s.result ?? ZERO_OID, by, ...attemptField(s), reason: `stage ${n} was rejected` }));
+  // `stages` was read before awaits: a session may have attached to a later stage since. Everything from here to
+  // the write is synchronous, so mark any such live claim too (it can only be BUILDING, with no result yet).
+  const live = loadEvents(ctx, id);
+  for (const other of ctx.store.list()) {
+    const member = other.chain;
+    if (member?.id !== id || member.n <= n || other.state === "FAILED_CLOSED") continue;
+    if (stale.some((e) => e.n === member.n && attemptOf(e) === attemptOf(member))) continue;
+    if (["APPLIED", "REJECTED", "STALE"].includes(decidedState(live, member.n, attemptOf(member)) ?? "")) continue;
+    stale.push({ n: member.n, event: "STALE" as const, result: ZERO_OID, by, ...attemptField(member), reason: `stage ${n} was rejected` });
+  }
   recordEvent(ctx, id, [{ n, event: "REJECTED", result, by, ...attemptField(stage), note: p.note }, ...stale], (events) => {
     const state = decidedState(events, n, attempt);
     if (state && state !== "APPROVED") throw new StateError(`stage ${n} is ${state}; only a READY or APPROVED stage can be rejected`);
@@ -592,8 +613,13 @@ export async function stageReject(ctx: OpContext, by: Decider, p: Record<string,
 export async function stageApply(ctx: OpContext, by: Decider, p: Record<string, unknown>) {
   if (p.confirm !== "APPLY") throw new ValidationError('stageApply requires confirm: "APPLY"');
   if (ctx.git.runnerMode !== "real") throw new StateError("stage apply requires the real git runner");
-  const { id, n, result, chain, stage } = await decisionTarget(ctx, by, p);
+  const { id, n, result, chain, stage, stages } = await decisionTarget(ctx, by, p);
   const attempt = attemptOf(stage);
+  // Stage numbers alone do not order a chain: a stage built on a rejected attempt keeps its number. Its baseline
+  // must be the pinned result of the newest attempt of the stage before it.
+  if (n > 1 && stages.find((s) => s.n === n - 1)?.result !== stage.baseline) {
+    throw new StateError(`stage ${n}'s baseline is not stage ${n - 1}'s pinned result (a rebuilt predecessor?); re-run stage ${n} from the current tip`);
+  }
   recordEvent(ctx, id, { n, event: "APPLYING", result, by, ...attemptField(stage) }, (events) => {
     const state = decidedState(events, n, attempt);
     if (state !== "APPROVED") throw new StateError(`stage ${n} is ${state ?? "READY"}, not APPROVED; only an APPROVED stage is applied`);

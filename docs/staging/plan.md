@@ -134,7 +134,7 @@ Only a human-only operation moves a stage to `APPROVED`, `APPLIED` or `REJECTED`
 
 ### Apply rules
 
-- Stages apply strictly in order. Stage n applies only when stage n-1 is `APPLIED`.
+- Stages apply strictly in order. Stage n applies only when stage n-1 is `APPLIED` and stage n's baseline is the pinned result of stage n-1's newest attempt (a stage built on a rejected attempt is refused). `chainAttach` and `stageReject` re-check live decisions and claims after their reads, so an attach that races a reject or another attach is refused, and a stage claimed during a reject is marked `STALE`.
 - Apply reuses today's path: the divergence check compares the host to the stage's baseline,
   which equals the host after the previous stage applied, so a clean in-order apply passes
   naturally. Any host edit made meanwhile shows as divergence and blocks that stage, as today.
