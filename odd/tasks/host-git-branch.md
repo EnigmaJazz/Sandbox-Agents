@@ -1,6 +1,6 @@
 # ODD task — host-git-branch
 
-**Status:** implemented, installed and verified; commit + native review pending. Spec item **D33**. Contract fixed by the owner; a parallel agent writes permission rules against the same names, so `host_git_branch` / `gitBranch` must not be renamed.
+**Status:** implemented, installed and verified — **code commit BLOCKED by S17 policy**. Spec item **D33**. Contract fixed by the owner; a parallel agent writes permission rules against the same names, so `host_git_branch` / `gitBranch` must not be renamed.
 
 ## Objective
 
@@ -53,7 +53,7 @@ Deleting, renaming or force-moving a branch; `--force`/`-f`; remote creation, pu
 
 ## Acceptance criteria — outcome
 
-- Creates at `HEAD` by default and at an explicit base: **met** (unit tests + builder argv).
+- Creates at `HEAD` by default and at an explicit base: **met**.
 - `switch: true` uses one fixed `git switch -c`: **met**.
 - Existing branch, invalid name, flag-shaped/unresolvable base, unknown payload key, non-orchestrator caller all refused: **met**.
 - Plugin surface 52 tools / 25 asking; both fragments carry `host_git_branch: ask`: **met**.
@@ -71,14 +71,14 @@ ROUTE: substantial feature | intent: authorized change | route: ODD secure / PM 
 
 - Authorization: the Orca dispatch authorizes `host_git_branch` under spec D33 and supersedes `odd/tasks/host-archive-and-branch-tools.md`, which left branch unit B deferred.
 - Worktree: `/home/james/ai-workspace/worktrees/agent-sandbox-integration/host-git-branch`, branch `feat/host-git-branch`, merged with current master.
-- Unit-start HEAD: `c2615451e9a26f0ee588cae31d794abd13977746` (after the tracker-only commit).
-- **Pre-code advice actually ran.** `pm-odd` dispatched `planner` by literal agent name in the foreground (session `ses_e4cee5057ffejW1lIf5FrvwTXN`). It returned six source-cited findings: the `gitguard` `switch` gap (out of scope), `OPERATIONS`-array parity, the `HostMutationOperation` union addition, authorize-before-payload ordering, fail-closed precision items, and a missing executable plugin-execution test. The in-scope items were forwarded verbatim into the writer brief.
+- Unit-start HEAD: `c2615451e9a26f0ee588cae31d794abd13977746`.
+- **Pre-code advice actually ran.** `pm-odd` dispatched `planner` by literal agent name in the foreground (session `ses_e4cee5057ffejW1lIf5FrvwTXN`). It returned six source-cited findings: the `gitguard` `switch` gap (out of scope), `OPERATIONS`-array parity, the `HostMutationOperation` union addition, authorize-before-payload ordering, fail-closed precision items, and a missing executable plugin-execution test. In-scope items were forwarded verbatim into the writer brief.
 - Availability correction: from the `pm-odd` surface `planner` IS dispatchable; `pr-comment-resolver` and `general` are refused there with `Permission denied: subagent`; `odd-apply` is the working writer there. This corrects the attempt-1 assumption.
 - Frozen prior draft (`refs/opencode-sandbox/result/ses_e4dd0b405ffe6cUen4IHE6EQRR`, commit `47d9a9d`) was never installed: unreviewed and not bound to this worktree project.
 
 ## Review-size exception
 
-**`review-size-exception` (recorded before the commit).** Technical reason: the change is one indivisible host-operation behaviour — `Operation` union + guard map + runtime `OPERATIONS`, payload allowlist, identity classification, argv builder, service handler, server dispatch, plugin tool, approval metadata, both permission fragments, the two docs and seven test files cannot be split without leaving the surface inconsistent (a tool registered without its permission rule, or a payload key without its handler, is a live defect). Measured on the exported result: **501 authored changed lines** (added 501 / removed 0 across 19 paths; `patchBytes` 41 708) against the 400-line default cap. The native START guard remains the authority.
+**`review-size-exception` (recorded before the commit attempt).** Technical reason: the change is one indivisible host-operation behaviour — `Operation` union + guard map + runtime `OPERATIONS`, payload allowlist, identity classification, argv builder, service handler, server dispatch, plugin tool, approval metadata, both permission fragments, the two docs and seven test files cannot be split without leaving the surface inconsistent (a tool registered without its permission rule, or a payload key without its handler, is a live defect). Measured on the exported result: **501 authored changed lines** across 19 paths; `patchBytes` 41 708, against the 400-line default cap. The native START guard remains the authority.
 
 ## Evidence
 
@@ -89,16 +89,32 @@ ROUTE: substantial feature | intent: authorized change | route: ODD secure / PM 
 - Installed via `host_sandbox_result_install` (19 paths restored from that exact result commit; nothing else touched).
 - **Final suite on the installed tree** (`host_test_run` `broker-unit`, HEAD `c261545`, dirty = the 19 paths, digest `sha256:0ee0daaa…48000e68`): **1903 pass / 9 skip / 1 fail**, 8703 expect() calls, 107 files. Delta +15 tests.
 - Final failing-test list (exactly one): `tests/v2-launch.test.ts:94` — "V2 nono profile > reaches the same hosts and project roots as V1, with the same isolation" (`platform.claude.com` extra allow-domain from the owner's uncommitted nono profile). Identical to baseline; untouched by this change.
-- Build: `bun build --target=bun src/main.ts` (cwd `broker`) → exit 0, `Bundled 37 modules in 14ms`, observed by the writer on result commit `7a7d208`; the install restored exactly those bytes, so the installed tree is byte-identical to what was built. Not re-executed from the orchestrator (no build runner is configured for `host_test_run`).
+- Build: `bun build --target=bun src/main.ts` (cwd `broker`) → exit 0, `Bundled 37 modules in 14ms`, observed by the writer on result commit `7a7d208`; the install restored exactly those bytes. Not re-executed from the orchestrator (no build runner is configured for `host_test_run`).
+
+## Commit blocker (2026-11-06)
+
+`host_git_commit` with `sandboxSessionID=ses_e4cebd141ffezmNCI8xC6B60qn` was **refused**:
+
+```
+refusing to commit protected paths (S17): broker/src/gitops.ts, broker/src/role-policy.ts,
+broker/src/server.ts, broker/src/service.ts, broker/src/types.ts, broker/src/validation.ts,
+opencode/config-fragments/sandbox-permissions.jsonc, opencode/plugins/lib/host-tool-approval.ts,
+opencode/plugins/lib/tool-specs-host-ops.ts
+```
+
+This is the designed S17 gate (`AGENTS.md` §S17: agent-produced changes touching these paths require explicit manual review; the owner installs and commits those bytes). It is not bypassable and must not be worked around. The change is therefore **installed in the worktree but uncommitted**; there is no code commit. The only commits produced by this attempt are metadata commits: `c261545` (tracker r2) and `766b050` (tracker r3), plus this revision.
+
+Owner action required: review the 19 installed paths and commit them with the prepared Conventional Commit message (`feat(broker): add host_git_branch host tool` … `— ROUTED: substantial-feature@host-git-branch (2026-11-06)`). Native review cannot be assessed until that commit exists, because `host_review_assess` needs a committed range.
 
 ## Deviations, recorded rather than papered over
 
 1. The fixed contract's "Appendix A.2" does not exist in this checkout (the file ends at §8); the writer mirrored every `host_git_push` occurrence instead — §4 ASK list and the §5a row.
 2. No standalone plugin ask-order test exists and it is outside the allowed surfaces; coverage is the fixture `asks: 1` plus the call sweep.
 3. Approval metadata stores `switch` as a boolean, per the contract `{ name, base, switch }`.
-4. `gitBranch` was also added to the runtime `OPERATIONS` array — required by `operations-parity.test.ts`; a necessary completion, not a redesign.
+4. `gitBranch` was also added to the runtime `OPERATIONS` array — required by `operations-parity.test.ts`.
 5. `buildGitBranchArgv` validates the resolved base with `assertGitBranch` (strictly stricter) and `switch: true` additionally verifies HEAD equals the requested branch. Both are fail-closed tightenings.
-6. Post-code advisory (`advisor-*-post`) and `ce:review` are not dispatchable from this surface; the pre-code planner pass is the only advisory evidence. No independent verifier was dispatched (substantial-feature budget owes none absent a named security boundary; the code is security-adjacent but the pre-code planner covered it).
+6. Post-code advisory (`advisor-*-post`) and `ce:review` are not dispatchable from this surface; the pre-code planner pass is the only advisory evidence. Gate 1 / Gate 2 verdict tools are not in the PM surface, so no technical gate verdict was recorded.
+7. Native review has not been run: no committed candidate exists (see Commit blocker).
 
 ## Progress
 
@@ -109,21 +125,23 @@ ROUTE: substantial feature | intent: authorized change | route: ODD secure / PM 
 | Implementation | done | `buildGitBranchOp` + argv builder + dispatch |
 | Docs + fragments + fixture | done | 34-tool arithmetic; both fragments `ask` |
 | Suite + build | done | 1903/9/1 on installed tree; build exit 0 |
-| Commit | pending | review-size-exception recorded above |
-| Native review | pending | RDD `on` (global); assess after the commit |
+| Commit | **blocked** | `host_git_commit` refuses the S17 paths; owner must commit |
+| Native review | pending | RDD `on` (global); cannot assess an uncommitted candidate |
 
 ## Log
 
 - 2026-11-06: tracker created after the broker worktree fix; RDD `on` (global).
 - 2026-11-06: attempt 2 under an Orca dispatch. Baseline 1888/9/1 at HEAD `ffe5fe7`.
 - 2026-11-06: `planner` pre-code advice ran from `pm-odd`; writer `odd-apply` produced result `7a7d208`; installed; suite 1903/9/1; build exit 0.
+- 2026-11-06: `host_git_commit` refused the 9 S17 paths; code left installed and uncommitted for owner review.
 
 ## Next step
 
-Commit the installed result as one work unit, then assess native review against the committed candidate.
+Owner commits the 19 installed paths with the prepared message; then run native review assessment against that commit.
 
 
 ## Revisions
 - r1 2026-11-06T18:46:14Z gentle-orchestrator: Create tracker for the host_git_branch host tool (spec D33)
 - r2 2026-11-06T22:48:22Z gentle-orchestrator: Attempt 2: Orca dispatch, pm-odd route, baseline recorded
 - r3 2026-11-06T23:22:47Z gentle-orchestrator: Implementation verified; review-size exception recorded
+- r4 2026-11-06T23:27:41Z gentle-orchestrator: Commit refused by S17 policy; owner must commit
