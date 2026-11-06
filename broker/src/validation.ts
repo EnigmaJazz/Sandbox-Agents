@@ -1434,8 +1434,8 @@ export function findProject<T extends { id: string; path: string }>(
 /**
  * The verified git directory of a linked worktree whose `.git` is a file, or undefined. The pointer inside
  * that file is writable by whatever works in the worktree, so it is trusted only when git's own back-link
- * agrees: the target must be an entry of a `worktrees` directory and its `gitdir` file must name THIS
- * worktree's `.git`. A pointer redirected at any other repository fails the back-link.
+ * agrees: the target must be `<repo>/.git/worktrees/<name>`, outside the worktree, and its `gitdir` file must
+ * name THIS worktree's `.git`. A pointer redirected at any other repository fails the back-link.
  */
 function verifiedLinkedGitDir(repoDir: string): string | undefined {
   try {
@@ -1444,7 +1444,11 @@ function verifiedLinkedGitDir(repoDir: string): string | undefined {
     if (!match) return undefined;
     const target = match[1]!.trim();
     const entry = realpathSync(isAbsolute(target) ? target : resolve(repoDir, target));
+    // The entry must be git's own: `<repo>/.git/worktrees/<name>`, and never inside the worktree itself,
+    // because whatever works in the worktree could build a matching entry there (gitdir back-link and a
+    // foreign `commondir`) and redirect git at another repository.
     if (!statSync(entry).isDirectory() || basename(dirname(entry)) !== "worktrees") return undefined;
+    if (basename(dirname(dirname(entry))) !== ".git" || isWithin(realpathSync(repoDir), entry)) return undefined;
     const backlink = readFileSync(join(entry, "gitdir"), "utf8").trim();
     return realpathSync(backlink) === dotGit ? entry : undefined;
   } catch {

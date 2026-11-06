@@ -81,6 +81,25 @@ describe("a real linked worktree under a worktree root", () => {
       expect(() => gitDirFor(forge("to-nowhere", "/elsewhere"))).toThrow();
       expect(() => gitDirFor(forge("to-relative", "../../../main/.git"))).toThrow();
     });
+    test("a forged worktrees/ entry INSIDE the worktree, with a matching back-link and a foreign commondir, is refused", () => {
+      const dir = join(root, "proj", "self-forged");
+      const entry = join(dir, "worktrees", "x");
+      mkdirSync(entry, { recursive: true });
+      writeFileSync(join(entry, "gitdir"), `${join(dir, ".git")}\n`);
+      writeFileSync(join(entry, "commondir"), `${join(main, ".git")}\n`);
+      writeFileSync(join(dir, ".git"), `gitdir: ${entry}\n`);
+      expect(() => gitDirFor(dir)).toThrow("own linked git directory");
+      expect(resolveWorktreeAwareRoot(root, dir)).toBeUndefined();
+    });
+    test("a back-linked entry whose parent chain is not <repo>/.git/worktrees is refused", () => {
+      const dir = join(root, "proj", "wrong-chain");
+      const entry = join(base, "elsewhere", "worktrees", "y");
+      mkdirSync(entry, { recursive: true });
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(entry, "gitdir"), `${join(dir, ".git")}\n`);
+      writeFileSync(join(dir, ".git"), `gitdir: ${entry}\n`);
+      expect(() => gitDirFor(dir)).toThrow("own linked git directory");
+    });
     test("positive control: the genuine worktree still verifies and its back-link names its own .git", () => {
       expect(gitDirFor(wt)).toBe(realpathSync(gitDirFor(wt)));
       expect(realpathSync(readFileSync(join(gitDirFor(wt), "gitdir"), "utf8").trim())).toBe(join(wt, ".git"));
