@@ -62,6 +62,9 @@
     // Orca report bridge: fixed binary/argv, broker-validated fields, no approval
     // (low impact). V2 silently allows a tool with NO rule, so this rule is required.
     "host_orca_report": "allow",
+    // Staging chains: denied for every agent; the stage-review agent's own block enables them. The broker also refuses any other identity (stageReviewAgents).
+    "host_stage_list": "deny",
+    "host_stage_show": "deny",
     "host_docker_list": "allow",
     "host_docker_logs": "allow",
     // Dormant since gentle-ai 4 (docs/upgrades/gentle-ai-4.md); rollback: restore host_sdd_status/host_sdd_continue/host_sdd_task_result to "allow" and host_sdd_attempt_grant/host_sdd_archive_compose to "ask".

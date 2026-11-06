@@ -370,6 +370,25 @@
       "asks": 0
     },
     {
+      "name": "host_stage_list",
+      "description": "List the stages of one staging chain (stage-review agent only; read-only, no approval). Each stage reports its number, state (BUILDING or READY), baseline, result commit, changed paths and whether it touches a protected (S17) path. The broker reads the pinned stage refs, never a session result ref. Returns JSON.",
+      "args": [
+        "chainID"
+      ],
+      "execute": "function",
+      "asks": 0
+    },
+    {
+      "name": "host_stage_show",
+      "description": "Show one stage of a staging chain (stage-review agent only; read-only, no approval): the chain header plus the stage's state, baseline, result commit, changed paths and protected-path (S17) flag, from the pinned stage ref. Returns JSON.",
+      "args": [
+        "chainID",
+        "n"
+      ],
+      "execute": "function",
+      "asks": 0
+    },
+    {
       "name": "host_review_start",
       "description": "Start a review lifecycle run (orchestrator-only mutation; requires human approval). Provider-issued tokens are forwarded verbatim. Typical committed-range call: pass contract, target, projection and expectedUntrackedInventory exactly as the preflight host_review_status next_transition returned them, untrackedScope \"exclude\", and lenses (comma list of risk|resilience|readability|reliability) with a one-sentence lensesReason. Never look up these values elsewhere; see the native review call card in odd-and-review.md. Returns JSON.",
       "args": [

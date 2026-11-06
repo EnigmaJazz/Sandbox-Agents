@@ -115,6 +115,12 @@ export type Operation =
 
   // Orca report bridge: fixed binary + fixed argv, broker-validated fields (S1–S6).
   | "orcaReport"
+  // Staging chains (staging-chain.ts, P2 read half): chain records and the stage-review reads.
+  | "chainCreate"
+  | "chainStatus"
+  | "chainAttach"
+  | "stageList"
+  | "stageShow"
   // External advisors (advisor-records.ts): evidence records, never authority.
   | "resultDiff"
   | "advisorAsk"
@@ -203,6 +209,11 @@ export const SANDBOX_GUARD_CLASS = {
   toolAdmission: "exempt-from-sandbox-guard",
   registerProject: "exempt-from-sandbox-guard",
   orcaReport: "exempt-from-sandbox-guard",
+  chainCreate: "exempt-from-sandbox-guard",
+  chainStatus: "exempt-from-sandbox-guard",
+  chainAttach: "exempt-from-sandbox-guard",
+  stageList: "exempt-from-sandbox-guard",
+  stageShow: "exempt-from-sandbox-guard",
   resultDiff: "exempt-from-sandbox-guard",
   advisorAsk: "exempt-from-sandbox-guard",
   advisorGet: "exempt-from-sandbox-guard",
@@ -287,6 +298,11 @@ export const OPERATIONS: readonly Operation[] = [
   "toolAdmission",
   "registerProject",
   "orcaReport",
+  "chainCreate",
+  "chainStatus",
+  "chainAttach",
+  "stageList",
+  "stageShow",
   "resultDiff",
   "advisorAsk",
   "advisorGet",

@@ -178,6 +178,10 @@ export const TOOL_CLASSIFICATION_INVENTORY: Readonly<Record<string, Capability>>
   host_sdd_status: "HOST_READ_STRUCTURED", host_sdd_continue: "HOST_READ_STRUCTURED",
   host_sdd_task_result: "HOST_READ_STRUCTURED", host_sdd_archive_compose: "HOST_APPROVED_MUTATION",
   host_sdd_attempt_grant: "HOST_APPROVED_MUTATION",
+  // Staging chains: the review tools are structured reads; the chain operations change state.
+  host_stage_list: "HOST_READ_STRUCTURED", host_stage_show: "HOST_READ_STRUCTURED",
+  chainCreate: "MUTATE_PROJECT", chainAttach: "MUTATE_PROJECT", chainStatus: "HOST_READ_STRUCTURED",
+  stageList: "HOST_READ_STRUCTURED", stageShow: "HOST_READ_STRUCTURED",
   sddArchiveCompose: "MUTATE_PROJECT", sddAttemptGrant: "MUTATE_PROJECT", planDocAppend: "MUTATE_PROJECT", taskMark: "MUTATE_PROJECT",
   reviewStart: "MUTATE_PROJECT", reviewCaptureResult: "MUTATE_PROJECT", reviewCaptureUnachievable: "MUTATE_PROJECT",
   reviewAcknowledgeApproved: "MUTATE_PROJECT", reviewCaptureCorrectionPlan: "MUTATE_PROJECT", reviewCaptureRefuter: "MUTATE_PROJECT",
@@ -516,6 +520,25 @@ export function decide(ctx: AuthorizationContext): DecisionResult {
   }
 
   return { decision: "allow", reasonCode: "ALLOWED" };
+}
+
+/**
+ * Stage-review role (staging-chain.ts): an identity from the broker `stageReviewAgents`
+ * allowlist. Read-only: structured host reads only, never a mutation, execution or worker.
+ * Fail closed on anything else, including an unknown capability.
+ */
+export function isStageReviewAgent(
+  agent: string | undefined,
+  config: { stageReviewAgents?: readonly string[] },
+): boolean {
+  return agent !== undefined && (config.stageReviewAgents ?? []).includes(agent);
+}
+
+export function decideStageReview(capability: string): DecisionResult {
+  if (capability === "READ_PROJECT" || capability === "HOST_READ_STRUCTURED") {
+    return { decision: "allow", reasonCode: "STAGE_REVIEW_READ_ONLY_ALLOWED" };
+  }
+  return { decision: "deny", reasonCode: "STAGE_REVIEW_READ_ONLY" };
 }
 
 /**

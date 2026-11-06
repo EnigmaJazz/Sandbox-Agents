@@ -943,7 +943,14 @@ export const HOST_READ_OPERATIONS: readonly string[] = [
   "advisorList",
   "toolAdmission",
   "orcaReport",
+  // Staging chains: stageList/stageShow are further restricted to stageReviewAgents by authorizeHostDispatch.
+  "chainStatus",
+  "stageList",
+  "stageShow",
 ];
+
+/** Operations only a session bound to a `stageReviewAgents` name may call (deny by default). */
+export const STAGE_REVIEW_OPERATIONS: readonly string[] = ["stageList", "stageShow"];
 
 /** Host mutation names; HOST_MUTATION_IDENTITY_OPERATIONS grants each identity its explicit subset. */
 export const HOST_MUTATION_OPERATIONS: readonly string[] = [
@@ -972,6 +979,8 @@ export const HOST_MUTATION_OPERATIONS: readonly string[] = [
   "reviewPersist",
   "sandboxResultInstall",
   "advisorAsk",
+  "chainCreate",
+  "chainAttach",
 ];
 
 export function hostToolAccess(operation: unknown): HostToolAccess {
@@ -1184,6 +1193,12 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   // Orca report bridge: fixed binary/argv; a field the message type cannot carry
   // is refused by broker/src/orca.ts, never dropped.
   orcaReport: ["terminal", "taskId", "dispatchId", "type", "subject", "body", "outcome", "options", "phase"],
+  // Staging chains (staging-chain.ts); the broker derives every baseline, so no ref or commit is accepted.
+  chainCreate: ["projectDir", "lane"],
+  chainStatus: ["chainID"],
+  chainAttach: ["chainID", "sessionID"],
+  stageList: ["chainID"],
+  stageShow: ["chainID", "n"],
   // External advisors (advisor-records.ts). No field may carry an acknowledgement token.
   advisorAsk: [
     "projectDir", "kind", "binding", "snapshot", "host", "selection", "group", "parentId",

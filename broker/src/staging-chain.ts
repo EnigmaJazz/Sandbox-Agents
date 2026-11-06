@@ -14,17 +14,21 @@
  *  - results: refs refs/opencode-sandbox/chain/<id>/{base,stage/<n>}, created
  *    create-only (`update-ref <ref> <new> <zero-oid>`) and never moved, so a
  *    registered stage is immutable.
- * A stage is BUILDING until its ref exists, then READY. The functions are not
- * socket operations yet (P2 adds host_stage_* tools and their registration).
+ * A stage is BUILDING until its ref exists, then READY.
+ *
+ * P2 (read half) exposes them as broker operations: chainCreate / chainAttach
+ * (orchestrator mutations), chainStatus (host read) and stageList / stageShow
+ * (stage-review role only; they read the stage refs, never a session result
+ * ref, which can move ahead of the pinned stage).
  */
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildChangedPathsArgv, checkProtectedPaths, parseNulDelimitedPaths, resultRef } from "./gitops.ts";
-import { projectDirFor, type OpContext } from "./service.ts";
+import { authorizeHostDispatch, projectDirFor, resolveCanonicalProjectRoot, type OpContext, type OpHandler } from "./service.ts";
 import { StateError } from "./state.ts";
 import type { SessionRecord } from "./types.ts";
-import { ValidationError, assertRefComponent } from "./validation.ts";
+import { ValidationError, assertPayloadKeys, assertRefComponent, assertSessionID } from "./validation.ts";
 
 /** Lane -> default maximum stages (plan: feature 5, fix 2). */
 export const CHAIN_LANES = { feature: 5, fix: 2 } as const;
@@ -146,7 +150,8 @@ export function chainCreate(ctx: OpContext, input: { projectID: string; lane: st
   return chain;
 }
 
-export async function chainStatus(ctx: OpContext, id: string): Promise<ChainStatus> {
+/** The chain's stages, from the stage refs (READY) and the sessions holding a stage (BUILDING). */
+async function chainStages(ctx: OpContext, id: string): Promise<{ chain: ChainRecord; git: Git; stages: StageStatus[] }> {
   const chain = loadChain(ctx, id);
   const git = gitFor(ctx, chain);
   const ready = await readyStages(git, id);
@@ -164,6 +169,11 @@ export async function chainStatus(ctx: OpContext, id: string): Promise<ChainStat
     }
     stages.push(stage);
   }
+  return { chain, git, stages };
+}
+
+export async function chainStatus(ctx: OpContext, id: string): Promise<ChainStatus> {
+  const { chain, git, stages } = await chainStages(ctx, id);
   const tip = stages.at(-1);
   if (!tip) return { chain, stages, nextSnapshot: { worktree: true } };
   // Offer the session's result ref only while it still IS the pinned stage commit (a refused re-finish or a discard moves/deletes it).
@@ -179,6 +189,7 @@ export async function chainStatus(ctx: OpContext, id: string): Promise<ChainStat
  * otherwise (fail closed, no fallback).
  */
 export async function chainAttach(ctx: OpContext, id: string, sessionID: string): Promise<void> {
+  assertSessionID(sessionID);
   if (ctx.git.runnerMode !== "real") throw new StateError("chain staging requires the real git runner");
   const chain = loadChain(ctx, id);
   const session = ctx.store.get(sessionID);
@@ -221,4 +232,67 @@ export async function registerChainStage(ctx: OpContext, record: SessionRecord, 
   if (based.status !== 0) throw new StateError("result is not based on the stage baseline");
   if (member.n === 1) await pin(git, `${REF_ROOT}/${member.id}/base`, member.baseline);
   await pin(git, `${REF_ROOT}/${member.id}/stage/${member.n}`, result);
+}
+
+/** Stage-review reads: every field comes from the pinned stage refs. */
+export async function stageList(ctx: OpContext, id: string): Promise<{ chain: ChainRecord; stages: StageStatus[] }> {
+  const { chain, stages } = await chainStages(ctx, id);
+  return { chain, stages };
+}
+
+export async function stageShow(ctx: OpContext, id: string, n: unknown): Promise<{ chain: ChainRecord; stage: StageStatus }> {
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 1) throw new ValidationError("n must be a positive integer");
+  const { chain, stages } = await chainStages(ctx, id);
+  const stage = stages.find((s) => s.n === n);
+  if (!stage) throw new StateError(`chain ${id} has no stage ${n}`);
+  return { chain, stage };
+}
+
+// ---------------------------------------------------------------------------
+// Broker operations. Authorization first (deny by default), then the payload allowlist.
+// ---------------------------------------------------------------------------
+
+function payloadFor(operation: string, payload: unknown): Record<string, unknown> {
+  assertPayloadKeys(operation, payload);
+  return (payload ?? {}) as Record<string, unknown>;
+}
+
+export function buildChainCreateOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    authorizeHostDispatch(ctx, "chainCreate", req.sessionID, req.agent);
+    const p = payloadFor("chainCreate", req.payload);
+    const { projectID } = resolveCanonicalProjectRoot(ctx, p.projectDir);
+    return chainCreate(ctx, { projectID, lane: String(p.lane) });
+  };
+}
+
+export function buildChainStatusOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    authorizeHostDispatch(ctx, "chainStatus", req.sessionID, req.agent);
+    return chainStatus(ctx, String(payloadFor("chainStatus", req.payload).chainID));
+  };
+}
+
+export function buildChainAttachOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    authorizeHostDispatch(ctx, "chainAttach", req.sessionID, req.agent);
+    const p = payloadFor("chainAttach", req.payload);
+    await chainAttach(ctx, String(p.chainID), p.sessionID as string);
+    return { chainID: p.chainID, sessionID: p.sessionID, n: ctx.store.get(p.sessionID as string)?.chain?.n };
+  };
+}
+
+export function buildStageListOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    authorizeHostDispatch(ctx, "stageList", req.sessionID, req.agent);
+    return stageList(ctx, String(payloadFor("stageList", req.payload).chainID));
+  };
+}
+
+export function buildStageShowOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    authorizeHostDispatch(ctx, "stageShow", req.sessionID, req.agent);
+    const p = payloadFor("stageShow", req.payload);
+    return stageShow(ctx, String(p.chainID), p.n);
+  };
 }

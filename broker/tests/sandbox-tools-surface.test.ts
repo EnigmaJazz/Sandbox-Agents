@@ -47,10 +47,10 @@ test("positive control: the surface check can see a changed tool", async () => {
 
 test("the recorded baseline lists every expected tool group", () => {
   const names = JSON.parse(readFileSync(FIXTURE, "utf-8")).tools.map((t: { name: string }) => t.name);
-  for (const required of ["sandbox_read", "sandbox_apply", "host_git_commit", "host_review_start", "host_register_project", "host_orca_report"]) {
+  for (const required of ["sandbox_read", "sandbox_apply", "host_git_commit", "host_review_start", "host_register_project", "host_orca_report", "host_stage_list", "host_stage_show"]) {
     expect(names).toContain(required);
   }
-  expect(names.length).toBe(43);
+  expect(names.length).toBe(45);
 });
 
 test("approval prompts are preserved: 20 ctx.ask call sites, as in the pre-P0 plugin (the 21st grep hit was a header comment)", () => {

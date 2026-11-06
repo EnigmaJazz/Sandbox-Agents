@@ -66,6 +66,7 @@ import { PolicyError } from "./policy.ts";
 import { PendingQueue, QueuedTimedOutError } from "./queue.ts";
 import { reapOnDisconnect, startReaper, toReaperLogEntry, type ReaperHandle } from "./reaper.ts";
 import { drainQueue } from "./service.ts";
+import { buildChainAttachOp, buildChainCreateOp, buildChainStatusOp, buildStageListOp, buildStageShowOp } from "./staging-chain.ts";
 import { SANDBOX_OPERATIONS } from "./types.ts";
 import {
   buildApplyOp,
@@ -83,6 +84,7 @@ import {
   buildGrepOp,
   buildGhIssueCreateOp,
   buildOrcaReportOp,
+  refuseStageReviewWorker,
   buildGitCommitOp,
   buildGitClearCommitIntentOp,
   buildGitPushOp,
@@ -401,6 +403,14 @@ export class BrokerServer {
     ) {
       throw new TypeError(
         "BrokerConfig.readOnlyAgents must be an array of non-empty agent names",
+      );
+    }
+    if (
+      !Array.isArray(config.stageReviewAgents) ||
+      config.stageReviewAgents.some((agent) => typeof agent !== "string" || agent.length === 0 || config.readOnlyAgents.includes(agent))
+    ) {
+      throw new TypeError(
+        "BrokerConfig.stageReviewAgents must be an array of non-empty agent names disjoint from readOnlyAgents",
       );
     }
     this.logger =
@@ -859,6 +869,7 @@ export class BrokerServer {
           `orchestrator agent "${agent}" is not allowed to use sandbox operation "${op}" (orchestrator-readonly)`,
         );
       }
+      refuseStageReviewWorker(this.ctx.config, agent, undefined);
     }
     switch (op) {
       case "ensureWorker":
@@ -992,6 +1003,16 @@ export class BrokerServer {
         return buildRegisterProjectOp(this.ctx)(req);
       case "orcaReport":
         return buildOrcaReportOp(this.ctx)(req);
+      case "chainCreate":
+        return buildChainCreateOp(this.ctx)(req);
+      case "chainStatus":
+        return buildChainStatusOp(this.ctx)(req);
+      case "chainAttach":
+        return buildChainAttachOp(this.ctx)(req);
+      case "stageList":
+        return buildStageListOp(this.ctx)(req);
+      case "stageShow":
+        return buildStageShowOp(this.ctx)(req);
       case "advisorAsk":
         return buildAdvisorAskOp(this.ctx)(req);
       case "advisorGet":

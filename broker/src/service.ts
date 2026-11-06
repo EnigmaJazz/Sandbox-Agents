@@ -52,6 +52,7 @@ import {
   assertRefComponent,
   assertSandboxPath,
   HostToolPolicy,
+  STAGE_REVIEW_OPERATIONS,
   resolveProjectID,
   ValidationError,
   type HostToolAccess,
@@ -120,7 +121,7 @@ import {
   shouldRemoveSessionArtifacts,
 } from "./artifacts.ts";
 import { PolicyError, checkAdmission, type Admission } from "./policy.ts";
-import { classifyAft, classifyOperation, decide, isRole, normalizeRoleKey } from "./role-policy.ts";
+import { classifyAft, classifyOperation, decide, decideStageReview, isRole, isStageReviewAgent, normalizeRoleKey } from "./role-policy.ts";
 import {
   PendingQueue,
   QueuedTimedOutError,
@@ -201,7 +202,7 @@ function payloadOf(req: BrokerRequestEnvelope): Payload {
 export type HostDispatchCategory = "orchestrator" | "plan-writer";
 
 export function authorizeHostDispatch(
-  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> },
+  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> & Partial<Pick<BrokerConfig, "stageReviewAgents">> },
   operation: string,
   sessionID: string,
   _reqAgent?: string,
@@ -210,6 +211,10 @@ export function authorizeHostDispatch(
   const policy = new HostToolPolicy(ctx.config.readOnlyAgents);
   const existing = ctx.store.get(sessionID);
   const trusted = existing?.agent;
+  // Stage queries are open to the stage-review role only (broker-derived identity, never the envelope claim).
+  if (STAGE_REVIEW_OPERATIONS.includes(operation) && !isStageReviewAgent(trusted, ctx.config)) {
+    throw new PolicyError(`host read tool "${operation}" is stage-review-only (STAGE_REVIEW_ONLY)`);
+  }
   const access = policy.access(operation);
   if (category === "plan-writer") {
     const isPlanRole = trusted && ["planner", "pm"].includes(normalizeRoleKey(trusted));
@@ -239,7 +244,7 @@ export function authorizeHostDispatch(
  * roles. Binding records the host-resolved identity; authorization is separate.
  */
 function assertBindableAgent(
-  config: Pick<BrokerConfig, "readOnlyAgents">,
+  config: Pick<BrokerConfig, "readOnlyAgents"> & Partial<Pick<BrokerConfig, "stageReviewAgents">>,
   agent: unknown,
 ): string {
   if (typeof agent !== "string" || agent.length === 0) {
@@ -249,7 +254,7 @@ function assertBindableAgent(
     throw new ValidationError("bindSessionAgent agent exceeds 128 bytes");
   }
   const allow = config.readOnlyAgents;
-  if (!allow.includes(agent) && !isRole(normalizeRoleKey(agent))) {
+  if (!allow.includes(agent) && !isStageReviewAgent(agent, config) && !isRole(normalizeRoleKey(agent))) {
     throw new PolicyError(
       `session agent binding refused: "${agent}" is neither a host-authoritative identity nor a known role`,
     );
@@ -272,7 +277,7 @@ function assertBindableAgent(
  * overwritten, and each operation category checks its own authority.
  */
 export function bindSessionAgent(
-  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> },
+  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> & Partial<Pick<BrokerConfig, "stageReviewAgents">> },
   sessionID: string,
   payload: unknown,
 ): SessionRecord {
@@ -342,11 +347,23 @@ function recordOr404(store: SessionStore, sessionID: string): SessionRecord {
 // ensureWorker — lazy creation (§4, §11, §13) + pool queue (Feature 2)
 // ---------------------------------------------------------------------------
 
+/** The stage-review role never holds a worker: refuse on the bound identity or the envelope claim, before any side effect. */
+export function refuseStageReviewWorker(
+  config: { stageReviewAgents?: readonly string[] },
+  boundAgent: string | undefined,
+  claimedAgent: string | undefined,
+): void {
+  if (isStageReviewAgent(boundAgent, config) || isStageReviewAgent(claimedAgent, config)) {
+    throw new PolicyError("stage-review agent is not allowed to create a worker or use a sandbox operation (STAGE_REVIEW_NO_WORKER)");
+  }
+}
+
 export function buildEnsureWorkerOp(ctx: OpContext): (req: BrokerRequestEnvelope, sendProgress?: (position: number) => void) => Promise<unknown> {
   return async (req, sendProgress) => {
     // Orchestrator read-only: refuse before any touch/admission side effect (R2).
     const existing = ctx.store.get(req.sessionID);
     const trusted = existing?.agent ?? req.agent;
+    refuseStageReviewWorker(ctx.config, existing?.agent, req.agent);
     const readOnly = ctx.config.readOnlyAgents;
     if (trusted && readOnly.includes(trusted)) {
       throw new PolicyError(
@@ -442,6 +459,7 @@ async function createWorkerForSession(
   // Orchestrator read-only: fail closed even for queued creations
   const existing2 = ctx.store.get(sessionID);
   const trusted2 = existing2?.agent ?? req.agent;
+  refuseStageReviewWorker(ctx.config, existing2?.agent, req.agent);
   const ro2 = ctx.config.readOnlyAgents;
   if (trusted2 && ro2.includes(trusted2)) {
     throw new PolicyError(
@@ -2551,6 +2569,10 @@ export function buildToolAdmissionOp(ctx: OpContext): OpHandler {
       }
       return { schema, tool: payload.tool, classification: capability, decision: "allow", reason: "UNBOUND_SESSION_READ_ONLY_CLASS" };
     }
+    if (isStageReviewAgent(record.agent, ctx.config)) {
+      const stage = decideStageReview(capability);
+      return { schema, tool: payload.tool, classification: capability, decision: stage.decision, reason: stage.reasonCode };
+    }
     const role = normalizeRoleKey(record.agent);
     if (
       classifyAft(payload.tool as string) === "HOST_READ_STRUCTURED" &&
@@ -2619,7 +2641,7 @@ export function buildPolicyOp(ctx: OpContext): OpHandler {
  * Resolve an approved project directory to its canonical root with realpath
  * equality (the same BROKER_PROJECTS boundary the SDD runtime uses).
  */
-function resolveCanonicalProjectRoot(
+export function resolveCanonicalProjectRoot(
   ctx: OpContext,
   projectDir: unknown,
 ): { projectID: string; projectRoot: string } {

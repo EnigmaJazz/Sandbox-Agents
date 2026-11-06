@@ -401,6 +401,22 @@ and parsed by `parseOrcaDispatchProbe` in `broker/src/orca.ts`, so a CLI that
 answers differently makes every report refuse with a named reason rather than
 send unchecked.
 
+### 5g. Staging chains, read half (`host_stage_list`, `host_stage_show`)
+
+Added with phase P2 of `docs/staging/plan.md` (the table now registers 45 tools: 13
+`sandbox_*` and 32 host tools). NOT INSTALLED: S17 paths the owner reviews and installs.
+The approve, reject and apply tools are a later unit.
+
+| Aspect | Value |
+|---|---|
+| Tools | `host_stage_list` (`chainID`), `host_stage_show` (`chainID`, `n`) in `opencode/plugins/lib/tool-specs-host-ops.ts` |
+| Broker operations | `stageList`, `stageShow` (and `chainCreate`, `chainStatus`, `chainAttach`, which have no tool yet), built in `broker/src/staging-chain.ts` |
+| Fragment | `deny` in both permission fragments: the stage-review agent's own block must enable them (agent definition and workflow_optimisation task-deny override come later) |
+| Broker gate | `stageList`/`stageShow` are refused unless the broker-bound session agent is in `stageReviewAgents` (`BROKER_STAGE_REVIEW_AGENTS`, default `stage-review`; must not overlap `readOnlyAgents`); `STAGE_REVIEW_ONLY` |
+| Role | read-only: tool admission allows `READ_PROJECT` and `HOST_READ_STRUCTURED` only; every worker operation and `ensureWorker` are refused (`STAGE_REVIEW_NO_WORKER`); it is not in `readOnlyAgents`, so it holds no host mutation |
+| Access class | `stageList`, `stageShow`, `chainStatus` are `HOST_READ_OPERATIONS`; `chainCreate`, `chainAttach` are `HOST_MUTATION_OPERATIONS` (orchestrator identities) |
+| Data | read from `refs/opencode-sandbox/chain/<id>/stage/<n>`, never the session result ref; no approval prompt |
+
 ### Discrepancies (explicitly flagged)
 
 1. **In code, missing from the permission fragment:** `sandbox_copy_in` and

@@ -282,4 +282,34 @@ export const hostOpsToolSpecs = {
       return JSON.stringify(result, null, 2);
     },
   }),
+
+  host_stage_list: defineTool({
+    description:
+      "List the stages of one staging chain (stage-review agent only; read-only, no approval). " +
+      "Each stage reports its number, state (BUILDING or READY), baseline, result commit, " +
+      "changed paths and whether it touches a protected (S17) path. The broker reads the " +
+      "pinned stage refs, never a session result ref. Returns JSON.",
+    args: { chainID: z.string().regex(/^c[0-9a-f]{12}$/) },
+    execute: async (args, ctx) => {
+      const c = await client();
+      const result = await c.request("stageList", ctx.sessionID, { chainID: args.chainID }, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
+
+  host_stage_show: defineTool({
+    description:
+      "Show one stage of a staging chain (stage-review agent only; read-only, no approval): " +
+      "the chain header plus the stage's state, baseline, result commit, changed paths and " +
+      "protected-path (S17) flag, from the pinned stage ref. Returns JSON.",
+    args: {
+      chainID: z.string().regex(/^c[0-9a-f]{12}$/),
+      n: z.number().int().min(1).max(99),
+    },
+    execute: async (args, ctx) => {
+      const c = await client();
+      const result = await c.request("stageShow", ctx.sessionID, { chainID: args.chainID, n: args.n }, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
 };
