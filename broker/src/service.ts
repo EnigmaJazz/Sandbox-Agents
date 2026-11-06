@@ -216,6 +216,8 @@ export function authorizeHostDispatch(
     throw new PolicyError(`host read tool "${operation}" is stage-review-only (STAGE_REVIEW_ONLY)`);
   }
   const access = policy.access(operation);
+  // The stage-review role is not an orchestrator identity: the gate above is its whole authorization.
+  if (STAGE_REVIEW_OPERATIONS.includes(operation)) return access;
   if (category === "plan-writer") {
     const isPlanRole = trusted && ["planner", "pm"].includes(normalizeRoleKey(trusted));
     if (operation === "taskMark" && normalizeRoleKey(trusted ?? "") !== "pm") {
@@ -996,7 +998,7 @@ async function gcSessionArtifacts(
 // Worker file/exec ops — all argv vectors, all validation-gated (§28)
 // ---------------------------------------------------------------------------
 
-function planRootPatterns(config: OpContext["config"]): string[] {
+export function planRootPatterns(config: OpContext["config"]): string[] {
   return config.planRootProtection ? ["odd/tasks/**", "odd/mini/**"] : [];
 }
 
@@ -1614,7 +1616,7 @@ export interface ApplyPreviewFiles {
  * reader never observes a partial artifact. 0600 file (umask-independent via
  * chmod) mirroring the patches/<sessionID>.patch precedent.
  */
-function writeFileAtomic(target: string, content: string): void {
+export function writeFileAtomic(target: string, content: string): void {
   const tmp = join(dirname(target), `.${basename(target)}.${randomUUID()}.tmp`);
   try {
     writeFileSync(tmp, content, { mode: 0o600 });
@@ -1653,7 +1655,7 @@ export function writeApplyPreviewFiles(
  * Only a write/verify failure — the condition that actually makes approval
  * blind — refuses; the diff's size is never a reason to refuse.
  */
-function ensureCompleteApplyPreview(
+export function ensureCompleteApplyPreview(
   stateDir: string,
   sessionID: string,
   completeDiff: string,
@@ -2194,7 +2196,7 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
 }
 
 /** S16: compare current host tree with the baseline tree. */
-async function hostDivergence(
+export async function hostDivergence(
   ctx: OpContext,
   sessionID: string,
   projectID: string,
@@ -2321,7 +2323,7 @@ async function buildRetainedDiff(
   };
 }
 
-async function rawChangesBetween(
+export async function rawChangesBetween(
   ctx: OpContext,
   projectID: string,
   baselineRefName: string,
@@ -2570,7 +2572,7 @@ export function buildToolAdmissionOp(ctx: OpContext): OpHandler {
       return { schema, tool: payload.tool, classification: capability, decision: "allow", reason: "UNBOUND_SESSION_READ_ONLY_CLASS" };
     }
     if (isStageReviewAgent(record.agent, ctx.config)) {
-      const stage = decideStageReview(capability);
+      const stage = decideStageReview(capability, payload.tool as string);
       return { schema, tool: payload.tool, classification: capability, decision: stage.decision, reason: stage.reasonCode };
     }
     const role = normalizeRoleKey(record.agent);

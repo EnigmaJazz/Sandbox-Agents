@@ -132,7 +132,7 @@ describe("registry and classification", () => {
     expect(classifyOperation("host_stage_show")).toBe("HOST_READ_STRUCTURED");
     expect(classifyOperation("chainCreate")).toBe("MUTATE_PROJECT");
     expect(classifyOperation("chainAttach")).toBe("MUTATE_PROJECT");
-    expect(classifyOperation("host_stage_approve")).toBeNull(); // U2b: not classified yet, so denied
+    expect(classifyOperation("host_stage_replay")).toBeNull(); // an unknown stage tool stays unclassified, so denied (the decision tools are classified in staging-stage-decisions.test.ts)
   });
 
   test("an existing comparable host read and mutation keep their classification and policy", () => {

@@ -417,6 +417,22 @@ The approve, reject and apply tools are a later unit.
 | Access class | `stageList`, `stageShow`, `chainStatus` are `HOST_READ_OPERATIONS`; `chainCreate`, `chainAttach` are `HOST_MUTATION_OPERATIONS` (orchestrator identities) |
 | Data | read from `refs/opencode-sandbox/chain/<id>/stage/<n>`, never the session result ref; no approval prompt |
 
+### 5h. Staging chains, decision half (`host_stage_approve`, `host_stage_reject`, `host_stage_apply`)
+
+Added with phase P2 (unit U2b) of `docs/staging/plan.md` (the table now registers 48 tools; 23
+`ctx.ask` call sites). NOT INSTALLED: S17 paths the owner reviews and installs.
+
+| Aspect | Value |
+|---|---|
+| Tools | `host_stage_approve` (`chainID`, `n`, `result`, `confirmProtected?`), `host_stage_reject` (`chainID`, `n`, `result`, `note`), `host_stage_apply` (`chainID`, `n`, `result`; the tool sends `confirm: "APPLY"`); each calls `ctx.ask` with the broker's own `stageShow` view of the stage before the broker operation |
+| Broker operations | `stageApprove`, `stageReject`, `stageApply` in `broker/src/staging-chain.ts`; accepted only from a session bound to `stageReviewAgents`, never from a session that owns a stage of the chain (`STAGE_DECISION_NOT_WORKER`) |
+| Fragment | `deny` in both permission fragments, like `host_stage_list/show`: the stage-review agent block (a later unit) enables the three as `ask`. Until then no agent can call them; the broker refuses every other identity regardless |
+| Access class | `STAGE_DECISION_OPERATIONS` (host mutation, in no orchestrator identity's subset); tool admission classes `HOST_APPROVED_MUTATION`, admitted to the stage-review role by tool name only |
+| Binding | every decision names the stage's pinned result commit (`result`); a mismatch is refused |
+| Record | append-only `<stateDir>/chains/<id>.decisions.json` (`APPROVED`, `REJECTED` + revision note, `APPLYING`, `APPLIED`, `APPLY_REFUSED`), each with the deciding session and agent and a timestamp; `stageList`/`stageShow` report the state and `history` |
+| Apply | strictly in order; only `APPROVED`; source is the pinned stage commit, never the session result ref; checks: baseline divergence (S16), plan-root paths, symlink/submodule, complete preview, `git apply --check`, then `git apply` (working tree only). A stage touching S17 paths can be approved with `confirmProtected: true` (per stage, never batched) but is never applied through this path (`applyResult`'s rule, `AGENTS.md`): apply refuses it as `APPLY_REFUSED` and the owner applies it by hand; consequently stages after it cannot apply either (open item for U3). Every refusal before `git apply` is recorded as `APPLY_REFUSED` and leaves the host unchanged; an interrupted apply stays `APPLYING` and blocks further applies until the owner reconciles it |
+| Not here | `STALE`, replay and rebuild after a reject, "approve through stage k" (unit U3 and later) |
+
 ### Discrepancies (explicitly flagged)
 
 1. **In code, missing from the permission fragment:** `sandbox_copy_in` and

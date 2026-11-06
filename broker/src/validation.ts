@@ -949,8 +949,14 @@ export const HOST_READ_OPERATIONS: readonly string[] = [
   "stageShow",
 ];
 
+/**
+ * The owner's decisions on a stage. Mutations, but deliberately NOT in HOST_MUTATION_OPERATIONS:
+ * no orchestrator identity is granted them; only the stage-review role may call them.
+ */
+export const STAGE_DECISION_OPERATIONS: readonly string[] = ["stageApprove", "stageReject", "stageApply"];
+
 /** Operations only a session bound to a `stageReviewAgents` name may call (deny by default). */
-export const STAGE_REVIEW_OPERATIONS: readonly string[] = ["stageList", "stageShow"];
+export const STAGE_REVIEW_OPERATIONS: readonly string[] = ["stageList", "stageShow", ...STAGE_DECISION_OPERATIONS];
 
 /** Host mutation names; HOST_MUTATION_IDENTITY_OPERATIONS grants each identity its explicit subset. */
 export const HOST_MUTATION_OPERATIONS: readonly string[] = [
@@ -987,6 +993,7 @@ export function hostToolAccess(operation: unknown): HostToolAccess {
   if (typeof operation === "string") {
     if ((HOST_READ_OPERATIONS as readonly string[]).includes(operation)) return "read";
     if ((HOST_MUTATION_OPERATIONS as readonly string[]).includes(operation)) return "mutation";
+    if (STAGE_DECISION_OPERATIONS.includes(operation)) return "mutation";
   }
   throw new ValidationError(`unknown host tool operation: ${String(operation)}`);
 }
@@ -1199,6 +1206,10 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   chainAttach: ["chainID", "sessionID"],
   stageList: ["chainID"],
   stageShow: ["chainID", "n"],
+  // Owner decisions: each names the stage's pinned result commit, so it cannot land on content the owner did not see.
+  stageApprove: ["chainID", "n", "result", "confirmProtected"],
+  stageReject: ["chainID", "n", "result", "note"],
+  stageApply: ["chainID", "n", "result", "confirm"],
   // External advisors (advisor-records.ts). No field may carry an acknowledgement token.
   advisorAsk: [
     "projectDir", "kind", "binding", "snapshot", "host", "selection", "group", "parentId",

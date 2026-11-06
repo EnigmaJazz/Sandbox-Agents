@@ -121,6 +121,9 @@ export type Operation =
   | "chainAttach"
   | "stageList"
   | "stageShow"
+  | "stageApprove"
+  | "stageReject"
+  | "stageApply"
   // External advisors (advisor-records.ts): evidence records, never authority.
   | "resultDiff"
   | "advisorAsk"
@@ -214,6 +217,9 @@ export const SANDBOX_GUARD_CLASS = {
   chainAttach: "exempt-from-sandbox-guard",
   stageList: "exempt-from-sandbox-guard",
   stageShow: "exempt-from-sandbox-guard",
+  stageApprove: "exempt-from-sandbox-guard",
+  stageReject: "exempt-from-sandbox-guard",
+  stageApply: "exempt-from-sandbox-guard",
   resultDiff: "exempt-from-sandbox-guard",
   advisorAsk: "exempt-from-sandbox-guard",
   advisorGet: "exempt-from-sandbox-guard",
@@ -303,6 +309,9 @@ export const OPERATIONS: readonly Operation[] = [
   "chainAttach",
   "stageList",
   "stageShow",
+  "stageApprove",
+  "stageReject",
+  "stageApply",
   "resultDiff",
   "advisorAsk",
   "advisorGet",

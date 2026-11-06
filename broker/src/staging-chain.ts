@@ -22,10 +22,23 @@
  * ref, which can move ahead of the pinned stage).
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { buildChangedPathsArgv, checkProtectedPaths, parseNulDelimitedPaths, resultRef } from "./gitops.ts";
-import { authorizeHostDispatch, projectDirFor, resolveCanonicalProjectRoot, type OpContext, type OpHandler } from "./service.ts";
+import { buildChangedPathsArgv, buildCheckArgv, checkProtectedPaths, parseNulDelimitedPaths, patchPathFor, resultRef } from "./gitops.ts";
+import { PolicyError } from "./policy.ts";
+import {
+  authorizeHostDispatch,
+  buildApplyPreview,
+  ensureCompleteApplyPreview,
+  hostDivergence,
+  planRootPatterns,
+  projectDirFor,
+  rawChangesBetween,
+  resolveCanonicalProjectRoot,
+  writeFileAtomic,
+  type OpContext,
+  type OpHandler,
+} from "./service.ts";
 import { StateError } from "./state.ts";
 import type { SessionRecord } from "./types.ts";
 import { ValidationError, assertPayloadKeys, assertRefComponent, assertSessionID } from "./validation.ts";
@@ -42,14 +55,27 @@ export interface ChainRecord {
   createdAt: string;
 }
 
+/** Who decided, when, on which result commit. Recorded append-only per chain (see decisions below). */
+export interface StageEvent {
+  n: number;
+  event: "APPROVED" | "REJECTED" | "APPLYING" | "APPLIED" | "APPLY_REFUSED";
+  result: string;
+  at: string;
+  by: { sessionID: string; agent: string };
+  note?: string;
+  reason?: string;
+  protectedConfirmed?: true;
+}
+
 export interface StageStatus {
   n: number;
   sessionID: string;
-  state: "BUILDING" | "READY";
+  state: "BUILDING" | "READY" | "APPROVED" | "REJECTED" | "APPLYING" | "APPLIED";
   baseline: string;
   result?: string;
   changedPaths?: string[];
   touchesProtected?: boolean;
+  history?: StageEvent[];
 }
 
 export interface ChainStatus {
@@ -143,11 +169,53 @@ export function chainCreate(ctx: OpContext, input: { projectID: string; lane: st
   };
   const dir = join(ctx.config.stateDir, "chains");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  // state.ts's atomic writer is private to SessionStore; this record is written once (temp + rename).
-  const tmp = `${chainPath(ctx, chain.id)}.${randomBytes(6).toString("hex")}.tmp`;
-  writeFileSync(tmp, JSON.stringify(chain, null, 2), { mode: 0o600 });
-  renameSync(tmp, chainPath(ctx, chain.id));
+  writeFileAtomic(chainPath(ctx, chain.id), JSON.stringify(chain, null, 2)); // written once
   return chain;
+}
+
+// ---------------------------------------------------------------------------
+// Owner decisions. Stage refs stay immutable; a decision is an event appended to
+// <stateDir>/chains/<id>.decisions.json (temp + rename, rewritten whole). The
+// read-check-write below never awaits, so two decisions cannot interleave.
+// A stage's state is its last event: APPLY_REFUSED returns it to APPROVED.
+// ---------------------------------------------------------------------------
+
+const EVENT_NAMES: readonly StageEvent["event"][] = ["APPROVED", "REJECTED", "APPLYING", "APPLIED", "APPLY_REFUSED"];
+
+function decisionsPath(ctx: OpContext, id: string): string {
+  return join(ctx.config.stateDir, "chains", `${assertChainID(id)}.decisions.json`);
+}
+
+function loadEvents(ctx: OpContext, id: string): StageEvent[] {
+  const path = decisionsPath(ctx, id);
+  if (!existsSync(path)) return [];
+  let parsed: { events?: unknown };
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8")) as { events?: unknown };
+  } catch (err) {
+    throw new StateError(`corrupt decision record ${id}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const valid = (e: Partial<StageEvent>): boolean =>
+    Number.isInteger(e.n) && (e.n as number) >= 1 && EVENT_NAMES.includes(e.event as StageEvent["event"]) && typeof e.result === "string" && SHA_RE.test(e.result) &&
+    typeof e.at === "string" && typeof e.by?.sessionID === "string" && typeof e.by.agent === "string";
+  if (!Array.isArray(parsed.events) || !parsed.events.every((e) => typeof e === "object" && e !== null && valid(e))) {
+    throw new StateError(`corrupt decision record ${id}: shape validation failed`);
+  }
+  return parsed.events as StageEvent[];
+}
+
+function decidedState(events: readonly StageEvent[], n: number): Exclude<StageStatus["state"], "BUILDING" | "READY"> | undefined {
+  let state: Exclude<StageStatus["state"], "BUILDING" | "READY"> | undefined;
+  for (const e of events) if (e.n === n) state = e.event === "APPLY_REFUSED" ? "APPROVED" : e.event;
+  return state;
+}
+
+/** Append one event after `guard` accepted the current events. Synchronous on purpose (no interleaving). */
+function recordEvent(ctx: OpContext, id: string, event: Omit<StageEvent, "at">, guard?: (events: readonly StageEvent[]) => void): void {
+  const events = loadEvents(ctx, id);
+  guard?.(events);
+  mkdirSync(join(ctx.config.stateDir, "chains"), { recursive: true, mode: 0o700 });
+  writeFileAtomic(decisionsPath(ctx, id), JSON.stringify({ events: [...events, { ...event, at: new Date().toISOString() }] }, null, 2));
 }
 
 /** The chain's stages, from the stage refs (READY) and the sessions holding a stage (BUILDING). */
@@ -156,11 +224,14 @@ async function chainStages(ctx: OpContext, id: string): Promise<{ chain: ChainRe
   const git = gitFor(ctx, chain);
   const ready = await readyStages(git, id);
   const protectedPatterns = [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles];
+  const events = loadEvents(ctx, id);
   const stages: StageStatus[] = [];
   for (const s of claims(ctx, id, ready)) {
     const { n, baseline } = s.chain!;
     const result = ready.get(n);
-    const stage: StageStatus = { n, sessionID: s.sessionID, state: result ? "READY" : "BUILDING", baseline };
+    const stage: StageStatus = { n, sessionID: s.sessionID, state: result ? (decidedState(events, n) ?? "READY") : "BUILDING", baseline };
+    const own = events.filter((e) => e.n === n);
+    if (own.length > 0) stage.history = own;
     if (result) {
       const diff = await git(buildChangedPathsArgv(baseline, result));
       const parsed = parseNulDelimitedPaths(diff.stdout);
@@ -249,6 +320,124 @@ export async function stageShow(ctx: OpContext, id: string, n: unknown): Promise
 }
 
 // ---------------------------------------------------------------------------
+// The owner's decisions: approve, reject, apply (stage-review role only).
+// Nothing here approves because an agent asked: the broker records what the
+// stage-review identity decided, and apply additionally needs the owner's
+// APPLY confirmation. Only apply touches the host.
+// ---------------------------------------------------------------------------
+
+type Decider = { sessionID: string; agent: string };
+const NOTE_MAX = 4000;
+
+/** Resolve the stage a decision names and bind the decision to its pinned result commit. */
+async function decisionTarget(ctx: OpContext, by: Decider, p: Record<string, unknown>) {
+  const id = String(p.chainID);
+  const n = p.n;
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 1) throw new ValidationError("n must be a positive integer");
+  if (typeof p.result !== "string" || !SHA_RE.test(p.result)) throw new ValidationError("result must be the stage's 40-hex result commit");
+  // A session that owns a stage of the chain can never decide on it, whatever name it is bound to.
+  if (ctx.store.get(by.sessionID)?.chain?.id === id) throw new PolicyError("a worker session of the chain cannot decide on its stages (STAGE_DECISION_NOT_WORKER)");
+  const { chain, stages } = await chainStages(ctx, id);
+  const stage = stages.find((s) => s.n === n);
+  if (!stage) throw new StateError(`chain ${id} has no stage ${n}`);
+  if (!stage.result) throw new StateError(`stage ${n} is BUILDING; it has no result to decide on`);
+  if (stage.result !== p.result) throw new StateError(`stage ${n}: the decision names a result commit that is not the stage's pinned result commit`);
+  return { id, n, result: p.result, chain, stage };
+}
+
+/** S17 stages need `confirmProtected: true` to be approved, per stage; there is no batch form. They are never applied through this path. */
+function protectedConfirmed(p: Record<string, unknown>, stage: StageStatus): boolean {
+  if (p.confirmProtected !== undefined && p.confirmProtected !== true) throw new ValidationError("confirmProtected must be true when present");
+  if (stage.touchesProtected && p.confirmProtected !== true) {
+    throw new StateError(`stage ${stage.n} touches protected (S17) paths: confirmProtected: true is required for this stage (never batched)`);
+  }
+  return stage.touchesProtected === true;
+}
+
+export async function stageApprove(ctx: OpContext, by: Decider, p: Record<string, unknown>) {
+  const { id, n, result, stage } = await decisionTarget(ctx, by, p);
+  const confirmed = protectedConfirmed(p, stage);
+  recordEvent(ctx, id, { n, event: "APPROVED", result, by, ...(confirmed ? { protectedConfirmed: true as const } : {}) }, (events) => {
+    const state = decidedState(events, n);
+    if (state) throw new StateError(`stage ${n} is already ${state}; only a READY stage can be approved`);
+  });
+  return { chainID: id, n, state: "APPROVED", result };
+}
+
+/** Records REJECTED with the revision note. Replay and rebuild are the next unit (reduced P4). */
+export async function stageReject(ctx: OpContext, by: Decider, p: Record<string, unknown>) {
+  if (typeof p.note !== "string" || p.note.trim().length === 0 || p.note.length > NOTE_MAX) {
+    throw new ValidationError(`note must be a non-empty revision note of at most ${NOTE_MAX} characters`);
+  }
+  const { id, n, result } = await decisionTarget(ctx, by, p);
+  recordEvent(ctx, id, { n, event: "REJECTED", result, by, note: p.note }, (events) => {
+    const state = decidedState(events, n);
+    if (state && state !== "APPROVED") throw new StateError(`stage ${n} is ${state}; only a READY or APPROVED stage can be rejected`);
+  });
+  return { chainID: id, n, state: "REJECTED", result };
+}
+
+/**
+ * Apply one APPROVED stage, in order, from the PINNED stage commits (never the
+ * session result ref), through the same checks as applyResult (S17 paths are
+ * refused outright, as there): baseline
+ * divergence (S16), plan-root paths, symlink/submodule changes, a complete
+ * preview, `git apply --check`, then `git apply` (working tree only, atomic).
+ * Every refusal before `git apply` is recorded as APPLY_REFUSED and the host is
+ * unchanged; an interruption after APPLYING leaves the stage APPLYING, which
+ * blocks any further apply until the owner reconciles it (fail closed).
+ */
+export async function stageApply(ctx: OpContext, by: Decider, p: Record<string, unknown>) {
+  if (p.confirm !== "APPLY") throw new ValidationError('stageApply requires confirm: "APPLY"');
+  if (ctx.git.runnerMode !== "real") throw new StateError("stage apply requires the real git runner");
+  const { id, n, result, chain, stage } = await decisionTarget(ctx, by, p);
+  recordEvent(ctx, id, { n, event: "APPLYING", result, by }, (events) => {
+    const state = decidedState(events, n);
+    if (state !== "APPROVED") throw new StateError(`stage ${n} is ${state ?? "READY"}, not APPROVED; only an APPROVED stage is applied`);
+    for (let k = 1; k < n; k++) {
+      if (decidedState(events, k) !== "APPLIED") throw new StateError(`stage ${k} is not APPLIED; stages apply strictly in order`);
+    }
+  });
+
+  const key = `stage-${id}-${n}`; // scratch names for the divergence index, patch and preview
+  const patchFile = patchPathFor(ctx.config.stateDir, key);
+  const projectDir = projectDirFor(ctx, chain.projectID);
+  let landing = false; // true once `git apply` may have run: from then on a failure is NOT recorded as a clean refusal
+  try {
+    // S17 / AGENTS.md: protected paths are never applied from an agent session, whatever was confirmed at approval (applyResult's rule).
+    if (stage.touchesProtected) throw new StateError(`stage ${n} touches protected paths (S7/S17); the owner applies it by hand`);
+    const diverged = await hostDivergence(ctx, key, chain.projectID, stage.baseline);
+    if (diverged.length > 0) throw new StateError(`host project diverged from stage ${n}'s baseline (S16); nothing applied (${diverged.slice(0, 10).join(", ")})`);
+    const planRoot = checkProtectedPaths(stage.changedPaths ?? [], planRootPatterns(ctx.config));
+    if (planRoot.length > 0) throw new StateError(`stage ${n} touches plan-root paths (BROKER_PLAN_ROOT_PROTECTION): ${planRoot.join(", ")}`);
+    const unsafe = (await rawChangesBetween(ctx, chain.projectID, stage.baseline, result))
+      .filter((c) => c.kind === "symlink" || c.kind === "submodule")
+      .map((c) => `${c.kind}:${c.path}`);
+    if (unsafe.length > 0) throw new StateError(`stage ${n} contains unsafe symlink/submodule changes: ${unsafe.join(", ")}`);
+    const patch = await ctx.git.spawn(["git", "diff", stage.baseline, result, "--", "."], { cwd: projectDir, timeoutMs: 60_000 });
+    if (patch.status !== 0 || patch.outputTruncated === true) throw new StateError(`diff generation failed for stage ${n}`);
+    mkdirSync(join(ctx.config.stateDir, "patches"), { recursive: true, mode: 0o700 });
+    writeFileAtomic(patchFile, patch.stdout);
+    const applyPreviewFiles = ensureCompleteApplyPreview(ctx.config.stateDir, key, patch.stdout);
+    const check = await ctx.git.spawn(buildCheckArgv(patchFile), { cwd: projectDir, timeoutMs: 60_000 });
+    if (check.status !== 0) throw new StateError(`git apply --check failed for stage ${n}: ${check.stderr.trim().slice(0, 500)}`);
+    landing = true;
+    const applied = await ctx.git.spawn(["git", "apply", patchFile], { cwd: projectDir, timeoutMs: 120_000 });
+    if (applied.status !== 0) {
+      landing = false; // git apply is all-or-nothing: a non-zero exit left the host unchanged
+      throw new StateError(`git apply failed for stage ${n}: ${applied.stderr.trim().slice(0, 500)}; host unchanged`);
+    }
+    recordEvent(ctx, id, { n, event: "APPLIED", result, by });
+    return { chainID: id, n, state: "APPLIED", applied: true, result, touchesProtected: stage.touchesProtected === true, applyPreview: buildApplyPreview(patch.stdout), applyPreviewFiles };
+  } catch (err) {
+    if (!landing) recordEvent(ctx, id, { n, event: "APPLY_REFUSED", result, by, reason: (err instanceof Error ? err.message : String(err)).slice(0, 500) });
+    throw err;
+  } finally {
+    rmSync(patchFile, { force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Broker operations. Authorization first (deny by default), then the payload allowlist.
 // ---------------------------------------------------------------------------
 
@@ -296,3 +485,16 @@ export function buildStageShowOp(ctx: OpContext): OpHandler {
     return stageShow(ctx, String(p.chainID), p.n);
   };
 }
+
+function buildDecisionOp(ctx: OpContext, operation: "stageApprove" | "stageReject" | "stageApply", run: typeof stageApprove): OpHandler {
+  return async (req) => {
+    authorizeHostDispatch(ctx, operation, req.sessionID, req.agent);
+    const p = payloadFor(operation, req.payload);
+    // The identity is the broker-bound one (authorizeHostDispatch proved it is a stage-review agent), never the envelope claim.
+    return run(ctx, { sessionID: req.sessionID, agent: ctx.store.get(req.sessionID)!.agent as string }, p);
+  };
+}
+
+export const buildStageApproveOp = (ctx: OpContext): OpHandler => buildDecisionOp(ctx, "stageApprove", stageApprove);
+export const buildStageRejectOp = (ctx: OpContext): OpHandler => buildDecisionOp(ctx, "stageReject", stageReject);
+export const buildStageApplyOp = (ctx: OpContext): OpHandler => buildDecisionOp(ctx, "stageApply", stageApply);

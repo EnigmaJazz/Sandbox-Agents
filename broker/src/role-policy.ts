@@ -182,6 +182,7 @@ export const TOOL_CLASSIFICATION_INVENTORY: Readonly<Record<string, Capability>>
   host_stage_list: "HOST_READ_STRUCTURED", host_stage_show: "HOST_READ_STRUCTURED",
   chainCreate: "MUTATE_PROJECT", chainAttach: "MUTATE_PROJECT", chainStatus: "HOST_READ_STRUCTURED",
   stageList: "HOST_READ_STRUCTURED", stageShow: "HOST_READ_STRUCTURED",
+  host_stage_approve: "HOST_APPROVED_MUTATION", host_stage_reject: "HOST_APPROVED_MUTATION", host_stage_apply: "HOST_APPROVED_MUTATION",
   sddArchiveCompose: "MUTATE_PROJECT", sddAttemptGrant: "MUTATE_PROJECT", planDocAppend: "MUTATE_PROJECT", taskMark: "MUTATE_PROJECT",
   reviewStart: "MUTATE_PROJECT", reviewCaptureResult: "MUTATE_PROJECT", reviewCaptureUnachievable: "MUTATE_PROJECT",
   reviewAcknowledgeApproved: "MUTATE_PROJECT", reviewCaptureCorrectionPlan: "MUTATE_PROJECT", reviewCaptureRefuter: "MUTATE_PROJECT",
@@ -534,9 +535,15 @@ export function isStageReviewAgent(
   return agent !== undefined && (config.stageReviewAgents ?? []).includes(agent);
 }
 
-export function decideStageReview(capability: string): DecisionResult {
+/** The only mutating tools the stage-review role is admitted to: the owner's decisions, each behind an `ask` prompt. */
+const STAGE_DECISION_TOOLS: readonly string[] = ["host_stage_approve", "host_stage_reject", "host_stage_apply"];
+
+export function decideStageReview(capability: string, tool?: string): DecisionResult {
   if (capability === "READ_PROJECT" || capability === "HOST_READ_STRUCTURED") {
     return { decision: "allow", reasonCode: "STAGE_REVIEW_READ_ONLY_ALLOWED" };
+  }
+  if (capability === "HOST_APPROVED_MUTATION" && tool !== undefined && STAGE_DECISION_TOOLS.includes(tool)) {
+    return { decision: "allow", reasonCode: "STAGE_REVIEW_DECISION_ALLOWED" };
   }
   return { decision: "deny", reasonCode: "STAGE_REVIEW_READ_ONLY" };
 }
