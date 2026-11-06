@@ -1398,7 +1398,9 @@ export function resolveWorktreeAwareRoot(root: string, canonical: string): strin
   if (!isWithin(root, canonical) || existsSync(join(root, ".git"))) return undefined;
   const rel = canonical.slice(root.length + 1).split(sep);
   if (rel.length !== 2 || !rel.every((part) => WORKTREE_SEGMENT_RE.test(part))) return undefined;
-  return existsSync(join(canonical, ".git")) ? canonical : undefined;
+  const dotGit = join(canonical, ".git");
+  if (!existsSync(dotGit)) return undefined;
+  return statSync(dotGit).isFile() && verifiedLinkedGitDir(canonical) === undefined ? undefined : canonical;
 }
 
 /** One path segment of a worktree under a root; `.` and `..` are excluded by the leading-alphanumeric rule. */
@@ -1430,8 +1432,29 @@ export function findProject<T extends { id: string; path: string }>(
 }
 
 /**
+ * The verified git directory of a linked worktree whose `.git` is a file, or undefined. The pointer inside
+ * that file is writable by whatever works in the worktree, so it is trusted only when git's own back-link
+ * agrees: the target must be an entry of a `worktrees` directory and its `gitdir` file must name THIS
+ * worktree's `.git`. A pointer redirected at any other repository fails the back-link.
+ */
+function verifiedLinkedGitDir(repoDir: string): string | undefined {
+  try {
+    const dotGit = join(realpathSync(repoDir), ".git");
+    const match = /^gitdir:\s*(.+)$/.exec(readFileSync(dotGit, "utf8").split("\n", 1)[0]?.trim() ?? "");
+    if (!match) return undefined;
+    const target = match[1]!.trim();
+    const entry = realpathSync(isAbsolute(target) ? target : resolve(repoDir, target));
+    if (!statSync(entry).isDirectory() || basename(dirname(entry)) !== "worktrees") return undefined;
+    const backlink = readFileSync(join(entry, "gitdir"), "utf8").trim();
+    return realpathSync(backlink) === dotGit ? entry : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * The git directory of a checkout. An ordinary checkout has a `.git` directory; a linked worktree has a `.git`
- * FILE (`gitdir: <main>/.git/worktrees/<name>`), which is the directory every GIT_DIR must name.
+ * FILE, which is followed only when it is verified (see verifiedLinkedGitDir) and refused otherwise.
  */
 export function gitDirFor(repoDir: string): string {
   const dotGit = join(repoDir, ".git");
@@ -1442,10 +1465,9 @@ export function gitDirFor(repoDir: string): string {
     return dotGit;
   }
   if (!stats.isFile()) return dotGit;
-  const match = /^gitdir:\s*(.+)$/.exec(readFileSync(dotGit, "utf8").split("\n", 1)[0]?.trim() ?? "");
-  if (!match) return dotGit;
-  const target = match[1]!.trim();
-  return isAbsolute(target) ? target : resolve(repoDir, target);
+  const verified = verifiedLinkedGitDir(repoDir);
+  if (!verified) throw new ValidationError("the worktree's .git does not point at its own linked git directory");
+  return verified;
 }
 
 /** The registered root's id for any project id, virtual or not (advisor sockets and records are keyed per root). */

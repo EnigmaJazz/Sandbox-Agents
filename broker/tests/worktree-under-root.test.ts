@@ -9,23 +9,30 @@ import { baseProjectID, findProject, resolveProjectID, resolveWorktreeAwareRoot 
 let base: string;
 let root: string; // a registered worktree root: not itself a git checkout
 let repoRoot: string; // an ordinary registered project: a git checkout
+/** A linked worktree as git writes it: `<dir>/.git` is a file whose target holds a `gitdir` back-link to that file. */
+function link(dir: string, name: string): void {
+  const entry = join(base, "gitdirs", "main", ".git", "worktrees", name);
+  mkdirSync(entry, { recursive: true });
+  writeFileSync(join(entry, "gitdir"), `${join(dir, ".git")}\n`);
+  writeFileSync(join(dir, ".git"), `gitdir: ${entry}\n`);
+}
 const ctxFor = (path: string) => ({ config: { projects: [{ id: "p", path }] } }) as never;
 
 beforeAll(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), "wt-under-root-")));
   root = join(base, "worktrees");
   mkdirSync(join(root, "proj", "feat-a"), { recursive: true });
-  writeFileSync(join(root, "proj", "feat-a", ".git"), "gitdir: /elsewhere\n");
+  link(join(root, "proj", "feat-a"), "feat-a");
   mkdirSync(join(root, "proj", "plain-dir"), { recursive: true }); // no .git
   mkdirSync(join(root, "proj", "feat-a", "sub"), { recursive: true });
   mkdirSync(join(root, "toplevel"), { recursive: true });
-  writeFileSync(join(root, "toplevel", ".git"), "gitdir: /elsewhere\n"); // depth 1, not <project>/<name>
+  link(join(root, "toplevel"), "toplevel"); // depth 1, not <project>/<name>
   repoRoot = join(base, "repo");
   mkdirSync(join(repoRoot, ".git"), { recursive: true });
   mkdirSync(join(repoRoot, "pkg", "inner"), { recursive: true });
-  writeFileSync(join(repoRoot, "pkg", "inner", ".git"), "gitdir: /elsewhere\n");
+  link(join(repoRoot, "pkg", "inner"), "inner");
   mkdirSync(join(base, "outside", "x"), { recursive: true });
-  writeFileSync(join(base, "outside", "x", ".git"), "gitdir: /elsewhere\n");
+  link(join(base, "outside", "x"), "x");
   symlinkSync(join(base, "outside"), join(root, "escape"));
 });
 afterAll(() => rmSync(base, { recursive: true, force: true }));

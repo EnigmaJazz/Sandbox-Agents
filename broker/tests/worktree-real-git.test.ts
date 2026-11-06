@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertRepositoryLocalConfigSafe } from "../src/gitguard.ts";
-import { gitDirFor, resolveProjectID, findProject } from "../src/validation.ts";
+import { gitDirFor, resolveProjectID, resolveWorktreeAwareRoot, findProject } from "../src/validation.ts";
 
 // A REAL linked worktree (git init + git worktree add), not a fake `.git` file: its `.git` is a file.
 let base: string;
@@ -57,5 +57,34 @@ describe("a real linked worktree under a worktree root", () => {
     expect(() => assertRepositoryLocalConfigSafe(wt, { GIT_DIR: gitDirFor(wt) })).toThrow();
     git(main, "config", "--unset", "core.sshCommand");
     expect(() => assertRepositoryLocalConfigSafe(wt, { GIT_DIR: gitDirFor(wt) })).not.toThrow();
+  });
+
+  describe("a forged .git pointer is refused (review finding R1-gitdir-redirect)", () => {
+    const forge = (name: string, pointer: string) => {
+      const dir = join(root, "proj", name);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, ".git"), `gitdir: ${pointer}\n`);
+      return dir;
+    };
+    test("a pointer at another repository's .git directory is refused", () => {
+      const dir = forge("to-main", join(main, ".git"));
+      expect(() => gitDirFor(dir)).toThrow("own linked git directory");
+      expect(resolveWorktreeAwareRoot(root, dir)).toBeUndefined();
+    });
+    test("a pointer at a real worktree entry that belongs to a DIFFERENT worktree is refused", () => {
+      const entry = gitDirFor(wt);
+      const dir = forge("to-sibling", entry);
+      expect(() => gitDirFor(dir)).toThrow("own linked git directory");
+      expect(findProject([{ id: "p", path: root }], "p~proj~to-sibling")).toBeUndefined();
+    });
+    test("a fake pointer to a path that does not exist, and a relative escape, are refused", () => {
+      expect(() => gitDirFor(forge("to-nowhere", "/elsewhere"))).toThrow();
+      expect(() => gitDirFor(forge("to-relative", "../../../main/.git"))).toThrow();
+    });
+    test("positive control: the genuine worktree still verifies and its back-link names its own .git", () => {
+      expect(gitDirFor(wt)).toBe(realpathSync(gitDirFor(wt)));
+      expect(realpathSync(readFileSync(join(gitDirFor(wt), "gitdir"), "utf8").trim())).toBe(join(wt, ".git"));
+      expect(resolveWorktreeAwareRoot(root, wt)).toBe(wt);
+    });
   });
 });
