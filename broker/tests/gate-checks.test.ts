@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { checkBudget, checkScope, checkTests, runDeterministicChecks } from "../src/gate-checks.ts";
+import { checkBudget, checkScope, checkSurfaces, checkTests, runDeterministicChecks } from "../src/gate-checks.ts";
 
 describe("gate checks: scope (S98)", () => {
   test("in-scope paths pass; literal and glob patterns", () => {
@@ -74,5 +74,36 @@ describe("gate checks: aggregate", () => {
     expect(runDeterministicChecks({ ...ok, touchedPaths: ["z.ts"] }).deterministicPass).toBe(false);
     expect(runDeterministicChecks({ ...ok, testResults: [{ command: "t", exitCode: 1 }] }).deterministicPass).toBe(false);
     expect(runDeterministicChecks({ ...ok, numstat: undefined }).deterministicPass).toBe(false);
+  });
+});
+
+describe("gate checks: plan surfaces (D28, D29)", () => {
+  const prot = ["broker/src/role-policy.ts", "docs/secret/**"];
+  test("bounded surfaces pass", () => {
+    expect(checkSurfaces(["src/**", "docs/*.md"], prot)).toMatchObject({ check: "surfaces", passed: true });
+  });
+  test("a missing or empty section is unsure, not a failure", () => {
+    for (const a of [undefined, []]) expect(checkSurfaces(a, prot)).toMatchObject({ check: "surfaces", passed: false, missing: true });
+  });
+  test("a repo-wide surface is a clear failure", () => {
+    for (const w of ["*", "**", "**/*", "./**"]) {
+      const r = checkSurfaces(["src/**", w], prot);
+      expect(r.passed, w).toBe(false);
+      expect(r.missing, w).toBeUndefined();
+    }
+  });
+  test("a malformed or protected surface is a clear failure", () => {
+    for (const bad of ["../x", "/etc/passwd", "a/../b", "broker/src/role-policy.ts", "docs/secret/key.md"]) {
+      const r = checkSurfaces(["src/**", bad], prot);
+      expect(r.passed, bad).toBe(false);
+      expect(r.missing, bad).toBeUndefined();
+    }
+  });
+  test("plan-vs-spec runs only the plan-derivable check; implementation-vs-spec is unchanged", () => {
+    const plan = runDeterministicChecks({ checkpoint: "plan-vs-spec", allowedPaths: ["src/**"], protectedPatterns: prot, maxApplyDiffLines: 200 });
+    expect(plan.checks.map((c) => c.check)).toEqual(["surfaces"]);
+    expect(plan.deterministicPass).toBe(true);
+    const impl = runDeterministicChecks({ maxApplyDiffLines: 200 });
+    expect(impl.checks.map((c) => c.check)).toEqual(["scope", "tests", "budget"]);
   });
 });

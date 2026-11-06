@@ -473,10 +473,26 @@ describe("deterministic evidence is re-derived by the broker; confidence alone c
     expect(noStage).toBeInstanceOf(StateError);
   });
 
-  test("the plan-vs-spec checkpoint has no deterministic evidence: always SPEC_CHECK", async () => {
-    const e = fixture();
-    const out = await recordsNothing(e, () => e.dispatch("gateVerdictAuto", "router", e.payload({ checkpoint: "plan-vs-spec", ...high })));
-    expect(out).toMatchObject({ route: "SPEC_CHECK", recorded: false });
+  test("plan-vs-spec routes on the plan's own surfaces (D29)", async () => {
+    const plan = (surfaces: string) => `# Gate feature\n\n## Specs\n- S1 one\n- S2 two\n\n## Tasks\n- T1 one\n\n## Allowed edit surfaces\n${surfaces}\n`;
+    const pvs = { checkpoint: "plan-vs-spec", ...high };
+    // Bounded surfaces and a clear match record a PASS.
+    const ok = fixture({ plan: plan("- `src/**`") });
+    const rec = await ok.dispatch("gateVerdictAuto", "router", ok.payload(pvs));
+    expect(rec).toMatchObject({ route: "RECORD_PASS", recorded: true });
+    expect(rec.checks.map((c: any) => c.check)).toEqual(["surfaces"]);
+    // A repo-wide surface goes back to the Planner even with a clear match, and records nothing.
+    const wide = fixture({ plan: plan("- `**`") });
+    expect(await recordsNothing(wide, () => wide.dispatch("gateVerdictAuto", "router", wide.payload(pvs)))).toMatchObject({ route: "RETURN_TO_PLANNER", recorded: false });
+    // A protected surface goes back to the Planner.
+    const prot = fixture({ plan: plan("- `src/**`\n- `broker/src/role-policy.ts`") });
+    expect(await recordsNothing(prot, () => prot.dispatch("gateVerdictAuto", "router", prot.payload(pvs)))).toMatchObject({ route: "RETURN_TO_PLANNER", recorded: false });
+    // No Allowed edit surfaces section is unsure: SPEC_CHECK, never a pass.
+    const none = fixture({ plan: "# Gate feature\n\n## Specs\n- S1 one\n- S2 two\n\n## Tasks\n- T1 one\n" });
+    expect(await recordsNothing(none, () => none.dispatch("gateVerdictAuto", "router", none.payload(pvs)))).toMatchObject({ route: "SPEC_CHECK", recorded: false });
+    // A clear mismatch still returns to the Planner on a good plan.
+    const bad = fixture({ plan: plan("- `src/**`") });
+    expect(await recordsNothing(bad, () => bad.dispatch("gateVerdictAuto", "router", bad.payload({ checkpoint: "plan-vs-spec", criteria: [{ id: "S1", p: 0.1 }, { id: "S2", p: 0.95 }] })))).toMatchObject({ route: "RETURN_TO_PLANNER" });
   });
 
   test("RETURN_TO_PLANNER and SPEC_CHECK carry reasons, never a verdict", async () => {

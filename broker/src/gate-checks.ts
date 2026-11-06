@@ -8,10 +8,11 @@
  * (diff-spec.ts only holds pathspec excludes; it has no budget logic).
  */
 import { isSourceCodeTarget } from "./copy-review.ts";
+import { checkProtectedPaths } from "./gitops.ts";
 import type { NumstatEntry } from "./sandbox-result.ts";
 
 export interface GateCheck {
-  check: "scope" | "tests" | "budget";
+  check: "scope" | "tests" | "budget" | "surfaces";
   passed: boolean;
   /** True when the evidence was absent or unusable: unsure, not a clear failure. */
   missing?: boolean;
@@ -87,7 +88,25 @@ export function checkBudget(entries: readonly NumstatEntry[] | undefined, maxApp
     : fail("budget", `${total} > ${maxApplyDiffLines} maxApplyDiffLines`);
 }
 
+const REPO_WIDE = new Set(["*", "**", "**/*", "./**", "./*"]);
+
+/**
+ * Plan-vs-spec (D28, D29): the only check derivable from the plan alone. The plan's `## Allowed edit surfaces`
+ * must exist, be well-formed, bounded (no repo-wide pattern) and name no protected path. A plan defect is a
+ * clear failure (returns to the Planner); an absent section is unsure. Entries are matched literally against
+ * the protected patterns, so a glob surface that could reach a protected file is still caught at the scope check.
+ */
+export function checkSurfaces(allowed: readonly string[] | undefined, protectedPatterns: readonly string[] = []): GateCheck {
+  if (!allowed || allowed.length === 0) return fail("surfaces", "the plan has no Allowed edit surfaces", true);
+  const bad = allowed.filter((p) => unsafePath(p) || REPO_WIDE.has(p) || checkProtectedPaths([p], protectedPatterns).length > 0);
+  return bad.length === 0
+    ? { check: "surfaces", passed: true, detail: `${allowed.length} bounded surface(s)` }
+    : fail("surfaces", `malformed, repo-wide or protected surface: ${bad.join(", ")}`);
+}
+
 export function runDeterministicChecks(i: {
+  checkpoint?: "plan-vs-spec" | "implementation-vs-spec";
+  protectedPatterns?: readonly string[];
   touchedPaths?: readonly string[];
   allowedPaths?: readonly string[];
   testResults?: readonly { command: string; exitCode: number }[];
@@ -95,6 +114,10 @@ export function runDeterministicChecks(i: {
   numstat?: readonly NumstatEntry[];
   maxApplyDiffLines: number;
 }): DeterministicResult {
+  if (i.checkpoint === "plan-vs-spec") {
+    const checks = [checkSurfaces(i.allowedPaths, i.protectedPatterns)];
+    return { checks, deterministicPass: checks.every((c) => c.passed) };
+  }
   const checks = [
     checkScope(i.touchedPaths, i.allowedPaths),
     checkTests(i.testResults, i.requiredCommands),

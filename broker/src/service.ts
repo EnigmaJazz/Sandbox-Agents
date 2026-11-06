@@ -4928,17 +4928,14 @@ export function buildGateVerdictAutoOp(ctx: OpContext): OpHandler {
       if (!new RegExp(`(?:^|[^A-Za-z0-9._-])${taskId.replace(/\./g, "\\.")}(?![A-Za-z0-9._-])`).test(planTasks)) {
         throw new ValidationError(`GATE_AUTO_TASK_UNKNOWN: ${taskId} is not in the plan's Tasks section`);
       }
-      // plan-vs-spec has no diff and no test run to check: every check is missing, so it can only route to the spec check.
+      // plan-vs-spec is checked against the plan alone (D29): only its Allowed edit surfaces are derivable.
       const deterministic = runDeterministicChecks({
+        checkpoint,
         maxApplyDiffLines: ctx.config.resource.maxApplyDiffLines,
+        allowedPaths: planDocSectionBullets(current, "Allowed edit surfaces"),
+        protectedPatterns: [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles],
         ...(checkpoint === "implementation-vs-spec" && stagePaths.length > 0
-          ? {
-              touchedPaths: stagePaths,
-              allowedPaths: planDocSectionBullets(current, "Allowed edit surfaces"),
-              testResults,
-              requiredCommands: ctx.config.testRunners.map((runner) => runner.id),
-              numstat,
-            }
+          ? { touchedPaths: stagePaths, testResults, requiredCommands: ctx.config.testRunners.map((runner) => runner.id), numstat }
           : {}),
       });
       const route = routeGate({ checkpoint, deterministic, expectedCriteria, criteria });
