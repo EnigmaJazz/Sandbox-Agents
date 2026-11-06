@@ -28,7 +28,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { BrokerConfig, TestRunnerConfig } from "./config.ts";
 import { RESULT_EXCLUDE_PATHS } from "./diff-spec.ts";
-import { registerChainStage, stageShow } from "./staging-chain.ts";
+import { collectStageTestEvidence, registerChainStage, stageShow } from "./staging-chain.ts";
 import { runDeterministicChecks, type GateCheck } from "./gate-checks.ts";
 import { CHECKPOINTS, routeGate } from "./gate-route.ts";
 import { gitSubcommand } from "./gitguard.ts";
@@ -2036,6 +2036,8 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
   // must never fail an already-successful import.
   await gcSessionArtifacts(ctx, sessionID, "prepareResult", { durable: true });
   await registerChainStage(ctx, record, ref);
+  // D30: test evidence for the gate. Never blocks or alters the registration above (it swallows its own errors).
+  await collectStageTestEvidence(ctx, record, ref);
   return ref;
 }
 
@@ -4164,6 +4166,41 @@ export function testRunProvenance(
   }
 }
 
+export interface TestRunLogInput {
+  runner: string;
+  exitCode: number | null;
+  signal: string | null;
+  timedOut: boolean;
+  truncated: boolean;
+  /** Present only on stage-bound evidence (staging-chain.ts): the project and the stage result's tree, written after the flags. */
+  binding?: { project: string; tree: string };
+  stdout: Buffer;
+  stderr: Buffer;
+}
+
+/**
+ * Write one broker-owned testRun log under <stateDir>/test-runs (0700 directory, 0600 file, temp + rename,
+ * never inside the project) and return its path. The header is the one `readTestRunLog` parses: the flags,
+ * the optional binding, then a literal backslash-n. Throws when it cannot write.
+ */
+export function writeTestRunLog(stateDir: string, projectRoot: string, run: TestRunLogInput): string {
+  const directory = join(stateDir, "test-runs");
+  if (isWithin(projectRoot, directory)) throw new Error("test-run artifact directory is inside the project");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const path = join(directory, `${randomUUID()}.log`);
+  const temporary = `${path}.tmp`;
+  const binding = run.binding ? ` project=${run.binding.project} tree=${run.binding.tree}` : "";
+  writeFileSync(temporary, Buffer.concat([
+    Buffer.from(`runner=${run.runner} exitCode=${String(run.exitCode)} signal=${String(run.signal)} timedOut=${run.timedOut} truncated=${run.truncated}${binding}\\nstdout\\n`),
+    run.stdout,
+    Buffer.from("\\nstderr\\n"),
+    run.stderr,
+    ...(run.truncated ? [Buffer.from("\\n[output truncated at configured combined cap]\\n")] : []),
+  ]), { mode: 0o600, flag: "wx" });
+  renameSync(temporary, path);
+  return path;
+}
+
 export function buildTestRunOp(ctx: OpContext): OpHandler {
   return async (req) => {
     const trustedAgent = ctx.store.get(req.sessionID)?.agent;
@@ -4219,20 +4256,15 @@ export function buildTestRunOp(ctx: OpContext): OpHandler {
       const stderrTail = result.stderr.subarray(-8192).toString("utf8");
       let logArtifact: string | null = null;
       try {
-        const directory = join(ctx.config.stateDir, "test-runs");
-        if (isWithin(projectRoot, directory)) throw new Error("test-run artifact directory is inside the project");
-        mkdirSync(directory, { recursive: true, mode: 0o700 });
-        const path = join(directory, `${randomUUID()}.log`);
-        const temporary = `${path}.tmp`;
-        writeFileSync(temporary, Buffer.concat([
-          Buffer.from(`runner=${runner.id} exitCode=${String(result.exitCode)} signal=${String(result.signal)} timedOut=${result.timedOut} truncated=${result.truncated}\\nstdout\\n`),
-          result.stdout,
-          Buffer.from("\\nstderr\\n"),
-          result.stderr,
-          ...(result.truncated ? [Buffer.from("\\n[output truncated at configured combined cap]\\n")] : []),
-        ]), { mode: 0o600, flag: "wx" });
-        renameSync(temporary, path);
-        logArtifact = path;
+        logArtifact = writeTestRunLog(ctx.config.stateDir, projectRoot, {
+          runner: runner.id,
+          exitCode: result.exitCode,
+          signal: result.signal,
+          timedOut: result.timedOut,
+          truncated: result.truncated,
+          stdout: result.stdout,
+          stderr: result.stderr,
+        });
       } catch {
         // Artifact storage is best-effort; never write test output into the project.
       }
@@ -4705,10 +4737,10 @@ const GATE_AUTO_MAX_ITEMS = 64;
 const GATE_AUTO_MAX_TEST_REFS = 8;
 const TEST_RUN_LOG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /**
- * The header buildTestRunOp writes; its flags are followed by a literal backslash-n. testRun does
- * NOT write the optional ` project=<id> tree=<sha>` binding yet: until it does, no log is bound to a
- * staged commit and the tests check is always missing (a stage is unapplied, so a host worktree run
- * says nothing about it).
+ * The header writeTestRunLog writes; its flags are followed by a literal backslash-n. The optional
+ * ` project=<id> tree=<sha>` binding is written ONLY for stage-bound evidence (staging-chain.ts,
+ * collectStageTestEvidence: runners run in the worker sandbox on the stage content); a host `testRun`
+ * log carries none, so it is never evidence for an unapplied stage and the tests check ignores it.
  */
 const TEST_RUN_LOG_HEADER_RE = /^runner=(\S+) exitCode=(-?\d+|null) signal=\S+ timedOut=(true|false) truncated=(?:true|false)(?: project=(\S+) tree=([0-9a-f]{40}|[0-9a-f]{64}))?\\nstdout/;
 

@@ -41,6 +41,17 @@ Implemented at the D24 scope (no merge-tree replay, no conflict hand-back):
   paths is refused). It
   never writes the host; a mismatch records nothing and returns the differences.
 
+## Update 2026-11-06: stage-bound test evidence (unit U4d, owner decision D30)
+
+At stage finish the broker runs its configured test runners (`BROKER_TEST_RUNNERS`) inside the
+worker's sandbox, on the stage content, and writes one broker-owned log per runner bound to the
+project and the pinned result's tree (`tree=` header). The binding is written only when the sandbox
+tree equals the pinned tree before and after the runners; failures are failing logs, infrastructure
+failures write nothing, and registration is never blocked. The ids show as `testRunRefs` on stage
+reads; `gateVerdictAuto` re-validates them, so a clear match can now record a PASS. Nothing runs on
+the host. Limits (test tampering, ignored files, finish latency) are in the PROPOSED section of
+`docs/threat-model.md`. NOT INSTALLED: S17 paths, the owner reviews and installs.
+
 ## Goal
 
 Agents keep working on a project without waiting for the user. Each finished piece of work is

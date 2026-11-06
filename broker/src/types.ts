@@ -808,8 +808,8 @@ export interface SessionRecord {
   agent?: string;
   baselineRef?: string;
   resultRef?: string;
-  /** Staging-chain membership (staging-chain.ts); `baseline` is broker-derived, never worker-supplied. */
-  chain?: { id: string; n: number; baseline: string; attempt?: number };
+  /** Staging-chain membership (staging-chain.ts); `baseline` is broker-derived, never worker-supplied. `testRunRefs`: ids of the broker's stage-bound testRun logs (D30), a pointer only. */
+  chain?: { id: string; n: number; baseline: string; attempt?: number; testRunRefs?: string[] };
   /** Exact result-ref commit installed into the host worktree. */
   installedCommit?: string;
   /** Host commit intent persisted before git commit; retries if HEAD is unchanged and recovers a proven commit transition. */

@@ -75,8 +75,8 @@ interface Env {
   /** A new chain whose stage 1 changes `files` (path -> content) on top of the base commit. */
   stage(files: Record<string, string>): string;
   /**
-   * A test-run log id in the header format `testRun` writes PLUS the project/tree binding it does not write
-   * yet (synthetic: the positive control for the future header change). `forChain` binds it to that chain's
+   * A test-run log id in the header format `testRun` writes PLUS the project/tree binding that only stage-bound
+   * evidence carries (synthetic here; gate-test-evidence.test.ts produces the real one end to end). `forChain` binds it to that chain's
    * stage result tree (default: the fixture's first chain); `bind: false` writes today's unbound header.
    */
   log(runner: string, exitCode: number | null, extra?: { timedOut?: boolean; forChain?: string; bind?: boolean; project?: string; tree?: string; mtimeSeconds?: number }): string;
@@ -147,7 +147,7 @@ function fixture(opts: { plan?: string; runners?: boolean } = {}): Env {
     const id = `00000000-0000-4000-8000-${String(logCounter).padStart(12, "0")}`;
     mkdirSync(join(stateDir, "test-runs"), { recursive: true });
     const binding = extra.bind === false ? "" : ` project=${extra.project ?? "repo"} tree=${extra.tree ?? treeOf(extra.forChain ?? chain)}`;
-    // The header buildTestRunOp writes (a literal backslash-n follows the flags), plus the binding it does not write yet.
+    // The header buildTestRunOp writes (a literal backslash-n follows the flags), plus the stage binding (synthetic; see gate-test-evidence.test.ts).
     const file = join(stateDir, "test-runs", `${id}.log`);
     writeFileSync(file, `runner=${runner} exitCode=${String(exitCode)} signal=null timedOut=${extra.timedOut === true} truncated=false${binding}\\nstdout\\nok\\nstderr\\n`);
     if (extra.mtimeSeconds !== undefined) utimesSync(file, extra.mtimeSeconds, extra.mtimeSeconds);

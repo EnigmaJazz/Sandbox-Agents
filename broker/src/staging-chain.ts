@@ -26,10 +26,12 @@
  * (stage-review role only; they read the stage refs, never a session result
  * ref, which can move ahead of the pinned stage).
  */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
+import { RESULT_EXCLUDE_PATHS } from "./diff-spec.ts";
 import { buildChangedPathsArgv, buildCheckArgv, checkProtectedPaths, parseNulDelimitedPaths, patchPathFor, resultRef } from "./gitops.ts";
+import { redact } from "./logging.ts";
 import { PolicyError } from "./policy.ts";
 import {
   authorizeHostDispatch,
@@ -41,6 +43,7 @@ import {
   rawChangesBetween,
   resolveCanonicalProjectRoot,
   writeFileAtomic,
+  writeTestRunLog,
   type OpContext,
   type OpHandler,
 } from "./service.ts";
@@ -88,6 +91,8 @@ export interface StageStatus {
   changedPaths?: string[];
   touchesProtected?: boolean;
   history?: StageEvent[];
+  /** Ids of the broker's stage-bound testRun logs (D30), present only when evidence was recorded. A pointer, never trusted: gateVerdictAuto re-validates the log. */
+  testRunRefs?: string[];
 }
 
 export interface ChainStatus {
@@ -274,6 +279,7 @@ async function chainStages(ctx: OpContext, id: string): Promise<{ chain: ChainRe
       const parsed = parseNulDelimitedPaths(diff.stdout);
       if (diff.status !== 0 || !parsed.complete) throw new StateError(`cannot list changed paths of stage ${n}`);
       Object.assign(stage, { result, changedPaths: parsed.paths, touchesProtected: checkProtectedPaths(parsed.paths, protectedPatterns).length > 0 });
+      if (s.chain!.testRunRefs?.length) stage.testRunRefs = [...s.chain!.testRunRefs];
     }
     stages.push(stage);
   }
@@ -362,6 +368,99 @@ export async function registerChainStage(ctx: OpContext, record: SessionRecord, 
   if (based.status !== 0) throw new StateError("result is not based on the stage baseline");
   if (member.n === 1 && attemptOf(member) === 1) await pin(git, `${REF_ROOT}/${member.id}/base`, member.baseline);
   await pin(git, `${REF_ROOT}/${member.id}/stage/${stageKey(member.n, attemptOf(member))}`, result);
+}
+
+const TREE_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/**
+ * Tree id of the worker's /work content, as `prepareResult` would commit it: a throwaway index (never the
+ * worker's own) seeded from the result ref, then `add -A` with the result excludes, then `write-tree`.
+ * Undefined whenever the sandbox cannot say.
+ */
+async function sandboxTree(ctx: OpContext, worker: string, ref: string): Promise<string | undefined> {
+  const index = `/work/.broker-tmp/evidence-${randomUUID()}.index`;
+  // core.fsmonitor=false: a worker-set monitor cannot hide edited files from `add`.
+  const env = {
+    GIT_INDEX_FILE: index, GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: "/work",
+    GIT_CONFIG_KEY_1: "core.fsmonitor", GIT_CONFIG_VALUE_1: "false",
+  };
+  const run = (argv: string[]) => ctx.adapter.exec(worker, argv, { cwd: "/work", timeoutMs: 60_000, env });
+  try {
+    // A clean filter would let `add` hash different bytes than the files the runner reads: no filter may be configured (exit 1 = none).
+    if ((await run(["git", "config", "--get-regexp", "^filter[.]"])).status !== 1) return undefined;
+    if ((await run(["git", "read-tree", ref])).status !== 0) return undefined;
+    if ((await run(["git", "add", "-A", "--", ".", ...RESULT_EXCLUDE_PATHS])).status !== 0) return undefined;
+    const written = await run(["git", "write-tree"]);
+    return written.status === 0 && TREE_RE.test(written.stdout.trim()) ? written.stdout.trim() : undefined;
+  } finally {
+    await ctx.adapter.exec(worker, ["rm", "-f", "--", index], { cwd: "/work", timeoutMs: 30_000 }).catch(() => undefined);
+  }
+}
+
+/**
+ * D30: stage-bound test evidence. For a chain stage whose result was just imported and pinned, run each
+ * CONFIGURED test runner (broker config only; never the worker, the stage content or the plan) inside the
+ * worker's own sandbox, in its /work tree, and write one broker-owned testRun log per runner whose header
+ * binds it to the project and the pinned stage result's tree. Nothing runs on the host.
+ *
+ * The binding is only written when the sandbox content is exactly the pinned stage: the sandbox tree must
+ * equal `<stage>^{tree}` before the runners start AND after they finish (a racing worker, or a runner that
+ * edits the tree, leaves no evidence). Anything that is not a clean exit 0 (non-zero exit, timeout, signal,
+ * no exit code, output over the cap) is recorded as a FAILING log; an infrastructure failure writes nothing,
+ * so the tests check stays missing. Every error is swallowed here: evidence can never block or alter the
+ * registration that already happened. The log ids are stored on the session's chain membership so stage
+ * reads can point at them; gateVerdictAuto still re-validates each log itself.
+ */
+export async function collectStageTestEvidence(ctx: OpContext, record: SessionRecord, ref: string): Promise<void> {
+  const member = record.chain;
+  if (!member || !record.workerName || !record.projectID || ctx.config.testRunners.length === 0) return;
+  try {
+    const git = gitFor(ctx, loadChain(ctx, member.id));
+    const stageRef = `${REF_ROOT}/${member.id}/stage/${stageKey(member.n, attemptOf(member))}`;
+    const treeRun = await git(["git", "rev-parse", "--verify", "--quiet", `${stageRef}^{tree}`]);
+    const tree = treeRun.stdout.trim();
+    if (treeRun.status !== 0 || !TREE_RE.test(tree)) return;
+    const worker = record.workerName;
+    if ((await sandboxTree(ctx, worker, ref)) !== tree) return;
+    const runs = [];
+    for (const runner of ctx.config.testRunners) {
+      const result = await ctx.adapter.exec(worker, runner.argv, {
+        cwd: join("/work", runner.cwd),
+        timeoutMs: runner.timeoutMs,
+        maxOutputBytes: runner.maxOutputBytes,
+        env: { CI: "1", NO_COLOR: "1" },
+      });
+      runs.push({ runner, result });
+    }
+    if ((await sandboxTree(ctx, worker, ref)) !== tree) return;
+    const projectRoot = projectDirFor(ctx, record.projectID);
+    const ids = runs.map(({ runner, result }) => {
+      // Stored output is redacted and capped per stream; whatever was cut makes the run a non-pass.
+      const stdout = Buffer.from(redact(result.stdout), "utf8");
+      const stderr = Buffer.from(redact(result.stderr), "utf8");
+      const truncated = result.outputTruncated === true || result.stderrTruncated === true || stdout.length > runner.maxOutputBytes || stderr.length > runner.maxOutputBytes;
+      const clean = result.status !== null && !result.timedOut && !truncated;
+      const path = writeTestRunLog(ctx.config.stateDir, projectRoot, {
+        runner: runner.id,
+        exitCode: clean ? result.status : null,
+        signal: result.status === null ? "unknown" : null,
+        timedOut: result.timedOut,
+        truncated,
+        binding: { project: record.projectID!, tree },
+        stdout: stdout.subarray(0, runner.maxOutputBytes),
+        stderr: stderr.subarray(0, runner.maxOutputBytes),
+      });
+      return basename(path, ".log");
+    });
+    const current = ctx.store.get(record.sessionID)?.chain ?? member;
+    ctx.store.touch(record.sessionID, { chain: { ...current, testRunRefs: ids } }, "chainEvidence");
+  } catch (error) {
+    try {
+      ctx.logger?.log?.({ sessionID: record.sessionID, operation: "chainEvidence", result: "error", error: redact(error instanceof Error ? error.message : String(error)).slice(0, 500) });
+    } catch {
+      // Logging must not turn a registered stage into a failed finish.
+    }
+  }
 }
 
 /** Stage-review reads: every field comes from the pinned stage refs. */
