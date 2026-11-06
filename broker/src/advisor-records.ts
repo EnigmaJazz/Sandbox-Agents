@@ -40,7 +40,7 @@ import { PolicyError } from "./policy.ts";
 import type { SddRuntimeExecutor } from "./sdd-runtime.ts";
 import { authorizeHostDispatch, type OpContext } from "./service.ts";
 import type { BrokerRequestEnvelope } from "./types.ts";
-import { ValidationError, assertPayloadKeys, resolveProjectID, findProject, baseProjectID } from "./validation.ts";
+import { ValidationError, assertPayloadKeys, resolveProjectID, findProject, baseProjectID, gitDirFor } from "./validation.ts";
 
 export const ADVISOR_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -578,7 +578,7 @@ export function buildAdvisorEvidenceKeepOp(ctx: OpContext, now: Clock = Date.now
       if (!session.baselineRef || !ctx.git?.spawn) throw new PolicyError("broker-pinned snapshot identity is unavailable");
       const project = findProject(ctx.config.projects, projectId);
       if (!project) throw new PolicyError("broker-pinned snapshot project is unavailable");
-      const env = { GIT_DIR: join(project.path, ".git") };
+      const env = { GIT_DIR: gitDirFor(project.path) };
       checkDeadline();
       const resolved = await ctx.git.spawn(["git", "rev-parse", "--verify", `${session.baselineRef}^{commit}`], { env, cwd: project.path });
       checkDeadline();

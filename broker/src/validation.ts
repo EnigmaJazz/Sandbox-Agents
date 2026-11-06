@@ -12,7 +12,7 @@
  * - shell metacharacters rejected in argv (defence-in-depth: we spawn without
  *   a shell, but no payload may be safe to pipe through one either).
  */
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { FORBIDDEN_WORKER_FIELDS, type BrokerResponseEnvelope, OPERATIONS } from "./types.ts";
 
@@ -1427,6 +1427,25 @@ export function findProject<T extends { id: string; path: string }>(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The git directory of a checkout. An ordinary checkout has a `.git` directory; a linked worktree has a `.git`
+ * FILE (`gitdir: <main>/.git/worktrees/<name>`), which is the directory every GIT_DIR must name.
+ */
+export function gitDirFor(repoDir: string): string {
+  const dotGit = join(repoDir, ".git");
+  let stats;
+  try {
+    stats = statSync(dotGit);
+  } catch {
+    return dotGit;
+  }
+  if (!stats.isFile()) return dotGit;
+  const match = /^gitdir:\s*(.+)$/.exec(readFileSync(dotGit, "utf8").split("\n", 1)[0]?.trim() ?? "");
+  if (!match) return dotGit;
+  const target = match[1]!.trim();
+  return isAbsolute(target) ? target : resolve(repoDir, target);
 }
 
 /** The registered root's id for any project id, virtual or not (advisor sockets and records are keyed per root). */

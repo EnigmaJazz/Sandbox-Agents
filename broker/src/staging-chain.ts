@@ -50,7 +50,7 @@ import {
 } from "./service.ts";
 import { StateError } from "./state.ts";
 import type { SessionRecord } from "./types.ts";
-import { ValidationError, assertPayloadKeys, assertRefComponent, assertSessionID } from "./validation.ts";
+import { ValidationError, assertPayloadKeys, assertRefComponent, assertSessionID, gitDirFor } from "./validation.ts";
 
 /** Lane -> default maximum stages (plan: feature 5, fix 2). */
 export const CHAIN_LANES = { feature: 5, fix: 2 } as const;
@@ -138,7 +138,7 @@ function loadChain(ctx: OpContext, id: string): ChainRecord {
 /** The chain's project repository, as a git argv runner (GIT_DIR pinned like the other snapshot code). */
 function gitFor(ctx: OpContext, chain: ChainRecord) {
   const repoDir = projectDirFor(ctx, chain.projectID);
-  return (argv: string[]) => ctx.git.spawn(argv, { env: { GIT_DIR: join(repoDir, ".git") }, cwd: repoDir, timeoutMs: 60_000 });
+  return (argv: string[]) => ctx.git.spawn(argv, { env: { GIT_DIR: gitDirFor(repoDir) }, cwd: repoDir, timeoutMs: 60_000 });
 }
 type Git = ReturnType<typeof gitFor>;
 
@@ -743,7 +743,7 @@ async function hostDifferences(ctx: OpContext, chain: ChainRecord, stage: StageS
   const paths = stage.changedPaths ?? [];
   if (paths.length === 0) throw new StateError(`stage ${stage.n} changed no paths; there is nothing to verify on the host`);
   const tree = await ctx.git.spawn(["git", "ls-tree", "-r", "-z", "--full-tree", stage.result!, "--", ...paths], {
-    env: { GIT_DIR: join(projectDir, ".git"), GIT_LITERAL_PATHSPECS: "1" },
+    env: { GIT_DIR: gitDirFor(projectDir), GIT_LITERAL_PATHSPECS: "1" },
     cwd: projectDir,
     timeoutMs: 60_000,
   });
