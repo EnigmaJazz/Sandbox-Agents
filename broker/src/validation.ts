@@ -955,6 +955,12 @@ export const HOST_READ_OPERATIONS: readonly string[] = [
  */
 export const STAGE_DECISION_OPERATIONS: readonly string[] = ["stageApprove", "stageReject", "stageApply", "stageReconcile"];
 
+/**
+ * D22: operations only a session bound to a `gateRouterAgents` name may call (deny by default).
+ * Deliberately NOT in HOST_MUTATION_OPERATIONS: every orchestrator identity subset is a filter of that list.
+ */
+export const GATE_ROUTER_OPERATIONS: readonly string[] = ["gateVerdictAuto"];
+
 /** Operations only a session bound to a `stageReviewAgents` name may call (deny by default). */
 export const STAGE_REVIEW_OPERATIONS: readonly string[] = ["stageList", "stageShow", ...STAGE_DECISION_OPERATIONS];
 
@@ -994,6 +1000,7 @@ export function hostToolAccess(operation: unknown): HostToolAccess {
     if ((HOST_READ_OPERATIONS as readonly string[]).includes(operation)) return "read";
     if ((HOST_MUTATION_OPERATIONS as readonly string[]).includes(operation)) return "mutation";
     if (STAGE_DECISION_OPERATIONS.includes(operation)) return "mutation";
+    if (GATE_ROUTER_OPERATIONS.includes(operation)) return "mutation";
   }
   throw new ValidationError(`unknown host tool operation: ${String(operation)}`);
 }
@@ -1121,6 +1128,8 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   taskMark: ["projectDir", "target", "name", "taskId", "status", "evidenceCommit", "evidenceBaseRef", "gateRef", "note"],
   testRun: ["projectDir", "runner"],
   gateVerdict: ["projectDir", "name", "taskId", "verdict", "refinementPlan", "evidenceRef", "agent"],
+  // D22: no agent, verdict, threshold or deterministic input; the broker derives scope, budget and test status itself.
+  gateVerdictAuto: ["projectDir", "name", "taskId", "checkpoint", "chainID", "n", "expectedCriteria", "criteria", "testRunRefs"],
   // Host-authoritative session→agent binding: the host plugin supplies exactly
   // the host-resolved agent. No other key is accepted; this is never a model
   // tool, so `hostToolAccess` deliberately does not classify it.

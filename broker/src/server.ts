@@ -61,7 +61,8 @@ import {
   refuseAdvisorSessionOnMain,
   type AdvisorBinding,
 } from "./advisor-socket.ts";
-import { ValidationError } from "./validation.ts";
+import { HOST_MUTATION_IDENTITY_OPERATIONS, ValidationError } from "./validation.ts";
+import { isRole, normalizeRoleKey } from "./role-policy.ts";
 import { PolicyError } from "./policy.ts";
 import { PendingQueue, QueuedTimedOutError } from "./queue.ts";
 import { reapOnDisconnect, startReaper, toReaperLogEntry, type ReaperHandle } from "./reaper.ts";
@@ -98,6 +99,7 @@ import {
   buildTestRunOp,
   buildPlanDocAppendOp,
   buildPlanDocWriteOp,
+  buildGateVerdictAutoOp,
   buildGateVerdictOp,
   buildTaskMarkOp,
   buildReviewMaterializeOp,
@@ -411,6 +413,26 @@ export class BrokerServer {
     ) {
       throw new TypeError(
         "BrokerConfig.stageReviewAgents must be an array of non-empty agent names disjoint from readOnlyAgents",
+      );
+    }
+    // D22: the gate router is deny-by-default and disjoint from every other authority, so no other grant rides on its name.
+    const planAuthors = [...(config.planWriterAgents ?? []), ...(config.planMiniWriterAgents ?? [])];
+    if (
+      !Array.isArray(config.gateRouterAgents) ||
+      new Set(config.gateRouterAgents).size !== config.gateRouterAgents.length ||
+      config.gateRouterAgents.some(
+        (agent) =>
+          typeof agent !== "string" ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(agent) ||
+          config.readOnlyAgents.includes(agent) ||
+          config.stageReviewAgents.includes(agent) ||
+          planAuthors.includes(agent) ||
+          isRole(normalizeRoleKey(agent)) ||
+          Object.hasOwn(HOST_MUTATION_IDENTITY_OPERATIONS, agent),
+      )
+    ) {
+      throw new TypeError(
+        "BrokerConfig.gateRouterAgents must be an array of unique plain agent names disjoint from readOnlyAgents, stageReviewAgents, plan writers, roles and orchestrator identities",
       );
     }
     this.logger =
@@ -961,6 +983,8 @@ export class BrokerServer {
         return buildTestRunOp(this.ctx)(req);
       case "gateVerdict":
         return buildGateVerdictOp(this.ctx)(req);
+      case "gateVerdictAuto":
+        return buildGateVerdictAutoOp(this.ctx)(req);
       case "bindSessionAgent":
         return buildBindSessionAgentOp(this.ctx)(req);
       case "reviewStart":

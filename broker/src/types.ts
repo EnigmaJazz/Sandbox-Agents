@@ -65,6 +65,8 @@ export type Operation =
   | "taskMark"
   | "testRun"
   | "gateVerdict"
+  // D22: the one operation through which code records a gate verdict (PASS only), gateRouterAgents only.
+  | "gateVerdictAuto"
   // Host sandbox-result read (T1): fixed argv, read-only, no worker (§31).
   | "sandboxResult"
   // Host sandbox-result install (T2): fixed argv, approval-gated host mutation.
@@ -174,6 +176,7 @@ export const SANDBOX_GUARD_CLASS = {
   taskMark: "exempt-from-sandbox-guard",
   testRun: "exempt-from-sandbox-guard",
   gateVerdict: "exempt-from-sandbox-guard",
+  gateVerdictAuto: "exempt-from-sandbox-guard",
   sandboxResult: "exempt-from-sandbox-guard",
   sandboxResultInstall: "exempt-from-sandbox-guard",
   bindSessionAgent: "exempt-from-sandbox-guard",
@@ -267,6 +270,7 @@ export const OPERATIONS: readonly Operation[] = [
   "taskMark",
   "testRun",
   "gateVerdict",
+  "gateVerdictAuto",
   "sandboxResult",
   "sandboxResultInstall",
   "bindSessionAgent",

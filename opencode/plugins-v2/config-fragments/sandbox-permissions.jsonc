@@ -70,6 +70,8 @@
     "host_stage_reject": "deny",
     "host_stage_apply": "deny",
     "host_stage_reconcile": "deny",
+    // D22: only the gate-router identity (a non-LLM caller, broker gateRouterAgents) may record a code PASS; denied for every OpenCode agent here.
+    "host_gate_verdict_auto": "deny",
     "host_docker_list": "allow",
     "host_docker_logs": "allow",
     // Dormant since gentle-ai 4 (docs/upgrades/gentle-ai-4.md); rollback: restore host_sdd_status/host_sdd_continue/host_sdd_task_result to "allow" and host_sdd_attempt_grant/host_sdd_archive_compose to "ask".

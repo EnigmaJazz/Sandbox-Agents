@@ -28,7 +28,9 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { BrokerConfig, TestRunnerConfig } from "./config.ts";
 import { RESULT_EXCLUDE_PATHS } from "./diff-spec.ts";
-import { registerChainStage } from "./staging-chain.ts";
+import { registerChainStage, stageShow } from "./staging-chain.ts";
+import { runDeterministicChecks, type GateCheck } from "./gate-checks.ts";
+import { CHECKPOINTS, routeGate } from "./gate-route.ts";
 import { gitSubcommand } from "./gitguard.ts";
 import type { SessionStore } from "./state.ts";
 import type { MsbAdapter } from "./msb.ts";
@@ -52,6 +54,7 @@ import {
   assertRefComponent,
   assertSandboxPath,
   HostToolPolicy,
+  GATE_ROUTER_OPERATIONS,
   STAGE_REVIEW_OPERATIONS,
   resolveProjectID,
   ValidationError,
@@ -85,7 +88,9 @@ import {
   buildResultCommitArgv,
   buildResultDeleteArgv,
   buildResultPatchArgv,
+  buildNumstatArgv,
   buildResultRestoreArgv,
+  parseNumstat,
   planSandboxResultInstall,
   readSandboxResult,
 } from "./sandbox-result.ts";
@@ -121,7 +126,7 @@ import {
   shouldRemoveSessionArtifacts,
 } from "./artifacts.ts";
 import { PolicyError, checkAdmission, type Admission } from "./policy.ts";
-import { classifyAft, classifyOperation, decide, decideStageReview, isRole, isStageReviewAgent, normalizeRoleKey } from "./role-policy.ts";
+import { classifyAft, classifyOperation, decide, decideGateRouter, decideStageReview, isGateRouterAgent, isRole, isStageReviewAgent, normalizeRoleKey } from "./role-policy.ts";
 import {
   PendingQueue,
   QueuedTimedOutError,
@@ -133,6 +138,7 @@ import {
   fsyncSync,
   lstatSync,
   openSync,
+  readSync,
   unlinkSync,
 } from "node:fs";
 import { dirname } from "node:path";
@@ -202,7 +208,7 @@ function payloadOf(req: BrokerRequestEnvelope): Payload {
 export type HostDispatchCategory = "orchestrator" | "plan-writer";
 
 export function authorizeHostDispatch(
-  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> & Partial<Pick<BrokerConfig, "stageReviewAgents">> },
+  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> & Partial<Pick<BrokerConfig, "stageReviewAgents" | "gateRouterAgents">> },
   operation: string,
   sessionID: string,
   _reqAgent?: string,
@@ -211,6 +217,16 @@ export function authorizeHostDispatch(
   const policy = new HostToolPolicy(ctx.config.readOnlyAgents);
   const existing = ctx.store.get(sessionID);
   const trusted = existing?.agent;
+  // D22: the gate router holds exactly one operation and nothing else (broker-derived identity, never the envelope claim).
+  if (GATE_ROUTER_OPERATIONS.includes(operation)) {
+    if (!isGateRouterAgent(trusted, ctx.config)) {
+      throw new PolicyError(`host mutation tool "${operation}" is gate-router-only (GATE_ROUTER_ONLY)`);
+    }
+    return policy.access(operation);
+  }
+  if (isGateRouterAgent(trusted, ctx.config)) {
+    throw new PolicyError(`the gate-router identity may call only gateVerdictAuto, not "${operation}" (GATE_ROUTER_ONLY)`);
+  }
   // Stage queries are open to the stage-review role only (broker-derived identity, never the envelope claim).
   if (STAGE_REVIEW_OPERATIONS.includes(operation) && !isStageReviewAgent(trusted, ctx.config)) {
     throw new PolicyError(`host read tool "${operation}" is stage-review-only (STAGE_REVIEW_ONLY)`);
@@ -246,7 +262,7 @@ export function authorizeHostDispatch(
  * roles. Binding records the host-resolved identity; authorization is separate.
  */
 function assertBindableAgent(
-  config: Pick<BrokerConfig, "readOnlyAgents"> & Partial<Pick<BrokerConfig, "stageReviewAgents">>,
+  config: Pick<BrokerConfig, "readOnlyAgents"> & Partial<Pick<BrokerConfig, "stageReviewAgents" | "gateRouterAgents">>,
   agent: unknown,
 ): string {
   if (typeof agent !== "string" || agent.length === 0) {
@@ -256,7 +272,7 @@ function assertBindableAgent(
     throw new ValidationError("bindSessionAgent agent exceeds 128 bytes");
   }
   const allow = config.readOnlyAgents;
-  if (!allow.includes(agent) && !isStageReviewAgent(agent, config) && !isRole(normalizeRoleKey(agent))) {
+  if (!allow.includes(agent) && !isStageReviewAgent(agent, config) && !isGateRouterAgent(agent, config) && !isRole(normalizeRoleKey(agent))) {
     throw new PolicyError(
       `session agent binding refused: "${agent}" is neither a host-authoritative identity nor a known role`,
     );
@@ -279,7 +295,7 @@ function assertBindableAgent(
  * overwritten, and each operation category checks its own authority.
  */
 export function bindSessionAgent(
-  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> & Partial<Pick<BrokerConfig, "stageReviewAgents">> },
+  ctx: Pick<OpContext, "store"> & { config: Pick<BrokerConfig, "readOnlyAgents"> & Partial<Pick<BrokerConfig, "stageReviewAgents" | "gateRouterAgents">> },
   sessionID: string,
   payload: unknown,
 ): SessionRecord {
@@ -351,10 +367,13 @@ function recordOr404(store: SessionStore, sessionID: string): SessionRecord {
 
 /** The stage-review role never holds a worker: refuse on the bound identity or the envelope claim, before any side effect. */
 export function refuseStageReviewWorker(
-  config: { stageReviewAgents?: readonly string[] },
+  config: { stageReviewAgents?: readonly string[]; gateRouterAgents?: readonly string[] },
   boundAgent: string | undefined,
   claimedAgent: string | undefined,
 ): void {
+  if (isGateRouterAgent(boundAgent, config) || isGateRouterAgent(claimedAgent, config)) {
+    throw new PolicyError("gate-router agent is not allowed to create a worker or use a sandbox operation (GATE_ROUTER_NO_WORKER)");
+  }
   if (isStageReviewAgent(boundAgent, config) || isStageReviewAgent(claimedAgent, config)) {
     throw new PolicyError("stage-review agent is not allowed to create a worker or use a sandbox operation (STAGE_REVIEW_NO_WORKER)");
   }
@@ -2571,6 +2590,10 @@ export function buildToolAdmissionOp(ctx: OpContext): OpHandler {
       }
       return { schema, tool: payload.tool, classification: capability, decision: "allow", reason: "UNBOUND_SESSION_READ_ONLY_CLASS" };
     }
+    if (isGateRouterAgent(record.agent, ctx.config)) {
+      const router = decideGateRouter(capability, payload.tool as string);
+      return { schema, tool: payload.tool, classification: capability, decision: router.decision, reason: router.reasonCode };
+    }
     if (isStageReviewAgent(record.agent, ctx.config)) {
       const stage = decideStageReview(capability, payload.tool as string);
       return { schema, tool: payload.tool, classification: capability, decision: stage.decision, reason: stage.reasonCode };
@@ -4666,6 +4689,185 @@ export function buildGateVerdictOp(ctx: OpContext): OpHandler {
       return { gates, ...commit };
     });
     return { name: payload.name, taskId: payload.taskId, verdict: payload.verdict, path: relative, verdictHash: gateVerdictHash(line), ...result };
+  };
+}
+
+// ---------------------------------------------------------------------------
+// D22 gateVerdictAuto: code records a PASS for a clear match, and nothing else.
+// The identity (gateRouterAgents) is the trust root for the Jev probabilities: the Jev call lives
+// outside the broker, which has no network and no API key. The broker re-derives scope, budget and
+// test status itself; anything it cannot derive is MISSING and can never route to RECORD_PASS.
+// ---------------------------------------------------------------------------
+
+const GATE_CRITERION_ID_RE = /^[A-Za-z][A-Za-z0-9._-]{0,31}$/;
+const GATE_CHAIN_ID_RE = /^c[0-9a-f]{12}$/;
+const GATE_AUTO_MAX_ITEMS = 64;
+const GATE_AUTO_MAX_TEST_REFS = 8;
+const TEST_RUN_LOG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** The header buildTestRunOp writes; its flags are followed by a literal backslash-n. */
+const TEST_RUN_LOG_HEADER_RE = /^runner=(\S+) exitCode=(-?\d+|null) signal=\S+ timedOut=(true|false) truncated=(?:true|false)\\nstdout/;
+
+/** A broker-written testRun log: the runner id and its exit status (-1 when it timed out or had no exit code). */
+function readTestRunLog(stateDir: string, id: string): { command: string; exitCode: number } | undefined {
+  const path = join(stateDir, "test-runs", `${id}.log`);
+  try {
+    if (!lstatSync(path).isFile()) return undefined;
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const buffer = Buffer.alloc(512);
+      const read = readSync(fd, buffer, 0, buffer.length, 0);
+      const match = TEST_RUN_LOG_HEADER_RE.exec(buffer.subarray(0, read).toString("utf8"));
+      if (!match) return undefined;
+      return { command: match[1]!, exitCode: match[3] === "true" || match[2] === "null" ? -1 : Number(match[2]) };
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+/** Bullet entries of a level-2 plan section; undefined when the section is absent. */
+function planDocSectionBullets(document: string, heading: string): string[] | undefined {
+  const headings = scanPlanDocHeadings(document);
+  const found = headings.find((entry) => entry.level === 2 && entry.text === heading);
+  if (!found) return undefined;
+  const next = headings.find((entry) => entry.index > found.index && entry.level <= 2);
+  return document.split("\n").slice(found.index + 1, next?.index)
+    .map((line) => /^- `?([^`\s]+)`?\s*$/.exec(line)?.[1])
+    .filter((entry): entry is string => entry !== undefined);
+}
+
+export function buildGateVerdictAutoOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    authorizeHostDispatch(ctx, "gateVerdictAuto", req.sessionID, req.agent);
+    const boundIdentity = ctx.store.get(req.sessionID)!.agent as string;
+    assertPayloadKeys("gateVerdictAuto", req.payload);
+    const payload = payloadOf(req) as Record<string, unknown>;
+    assertPlanDocWriteName(payload.name);
+    const name = payload.name;
+    if (typeof payload.taskId !== "string" || !GATE_TASK_ID_RE.test(payload.taskId)) {
+      throw new ValidationError("GATE_VERDICT_TASK_ID_INVALID: taskId must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
+    }
+    const taskId = payload.taskId;
+    if (typeof payload.checkpoint !== "string" || !(CHECKPOINTS as readonly string[]).includes(payload.checkpoint)) {
+      throw new ValidationError("GATE_AUTO_CHECKPOINT_INVALID: checkpoint must be plan-vs-spec or implementation-vs-spec");
+    }
+    const checkpoint = payload.checkpoint as (typeof CHECKPOINTS)[number];
+    if (typeof payload.chainID !== "string" || !GATE_CHAIN_ID_RE.test(payload.chainID)) {
+      throw new ValidationError("GATE_AUTO_CHAIN_INVALID: chainID must be a chain id");
+    }
+    if (typeof payload.n !== "number" || !Number.isInteger(payload.n) || payload.n < 1) {
+      throw new ValidationError("GATE_AUTO_STAGE_INVALID: n must be a positive integer");
+    }
+    const strings = (value: unknown, what: string, pattern: RegExp, max: number): string[] => {
+      if (!Array.isArray(value) || value.length > max || value.some((entry) => typeof entry !== "string" || !pattern.test(entry))) {
+        throw new ValidationError(`GATE_AUTO_PAYLOAD_INVALID: ${what} must be an array of at most ${max} valid entries`);
+      }
+      return value as string[];
+    };
+    const expectedCriteria = strings(payload.expectedCriteria, "expectedCriteria", GATE_CRITERION_ID_RE, GATE_AUTO_MAX_ITEMS);
+    if (expectedCriteria.length === 0) throw new ValidationError("GATE_AUTO_PAYLOAD_INVALID: expectedCriteria must not be empty");
+    const testRunRefs = strings(payload.testRunRefs, "testRunRefs", TEST_RUN_LOG_ID_RE, GATE_AUTO_MAX_TEST_REFS);
+    if (!Array.isArray(payload.criteria) || payload.criteria.length > GATE_AUTO_MAX_ITEMS) {
+      throw new ValidationError("GATE_AUTO_PAYLOAD_INVALID: criteria must be an array of at most 64 entries");
+    }
+    // An absent p is "unsure" (routes to the spec check); a present p must be a finite probability.
+    const criteria = (payload.criteria as unknown[]).map((entry): { id: string; p?: number } => {
+      const item = entry as Record<string, unknown> | null;
+      if (typeof item !== "object" || item === null || Array.isArray(item) || Object.keys(item).some((key) => key !== "id" && key !== "p")) {
+        throw new ValidationError("GATE_AUTO_PAYLOAD_INVALID: every criterion is exactly { id, p? }");
+      }
+      if (typeof item.id !== "string" || !GATE_CRITERION_ID_RE.test(item.id)) throw new ValidationError("GATE_AUTO_PAYLOAD_INVALID: criterion id is invalid");
+      if (item.p === undefined) return { id: item.id };
+      if (typeof item.p !== "number" || !Number.isFinite(item.p) || item.p < 0 || item.p > 1) {
+        throw new ValidationError(`GATE_AUTO_PROBABILITY_INVALID: p of ${item.id} must be a finite number in [0, 1]`);
+      }
+      return { id: item.id, p: item.p };
+    });
+
+    const { projectID, projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const relative = `odd/tasks/${name}.md`;
+    assertPlanDocCommitPath(relative);
+    const destination = resolve(projectRoot, relative);
+    if (!isWithin(projectRoot, destination)) throw new ValidationError("GATE_VERDICT_PATH_ESCAPE: destination escapes project root");
+    const rejected = checkProtectedPaths([relative], [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles]);
+    if (rejected.length > 0) throw new ValidationError(`GATE_VERDICT_PROTECTED_PATH: ${rejected.join(", ")}`);
+
+    // Broker-held evidence: the pinned stage (baseline..result), never a caller-named diff.
+    const { chain, stage } = await stageShow(ctx, payload.chainID, payload.n);
+    if (chain.projectID !== projectID) throw new ValidationError("GATE_AUTO_STAGE_PROJECT: the chain belongs to another project");
+    if ((stage.state !== "READY" && stage.state !== "APPROVED") || !stage.result || !stage.changedPaths) {
+      throw new ValidationError(`GATE_AUTO_STAGE_STATE: stage ${payload.n} is ${stage.state}; only a READY or APPROVED stage with a result can be gated`);
+    }
+    const stageResult = stage.result;
+    const stagePaths = stage.changedPaths;
+    const numstatRun = await runHostStep(ctx, buildNumstatArgv(stage.baseline, stageResult), projectRoot);
+    let numstat: ReturnType<typeof parseNumstat> | undefined;
+    if (numstatRun.status === 0 && !numstatRun.stdoutTruncated) {
+      try { numstat = parseNumstat(numstatRun.stdout); } catch { numstat = undefined; }
+    }
+    // The line counts must describe exactly the stage's changed paths, or they are unusable.
+    if (numstat && numstat.map((entry) => entry.path).sort().join("\0") !== [...stagePaths].sort().join("\0")) numstat = undefined;
+    // Test status is read from the broker's own testRun logs: the exit code is the broker's observation, not the caller's.
+    const testResults = testRunRefs
+      .map((id) => readTestRunLog(ctx.config.stateDir, id))
+      .filter((entry): entry is { command: string; exitCode: number } => entry !== undefined);
+
+    return withPlanDocLock(destination, async () => {
+      const documentStat = lstatIfExists(destination);
+      if (documentStat === undefined || !documentStat.isFile()) throw new ValidationError("GATE_VERDICT_DOCUMENT_MISSING: plan document must already exist as a regular file");
+      const current = readFileSync(destination, "utf8");
+      const gates = scanPlanDocHeadings(current).find((entry) => entry.level === 2 && entry.text === "Gates");
+      const specText = gates ? current.slice(0, gates.offset) : current;
+      for (const id of expectedCriteria) {
+        if (!new RegExp(`(?:^|[^A-Za-z0-9._-])${id.replace(/\./g, "\\.")}(?![A-Za-z0-9._-])`).test(specText)) {
+          throw new ValidationError(`GATE_AUTO_CRITERION_UNKNOWN: ${id} does not appear in the plan document`);
+        }
+      }
+      // plan-vs-spec has no diff and no test run to check: every check is missing, so it can only route to the spec check.
+      const deterministic = runDeterministicChecks({
+        maxApplyDiffLines: ctx.config.resource.maxApplyDiffLines,
+        ...(checkpoint === "implementation-vs-spec" && stagePaths.length > 0
+          ? {
+              touchedPaths: stagePaths,
+              allowedPaths: planDocSectionBullets(current, "Allowed edit surfaces"),
+              testResults,
+              requiredCommands: ctx.config.testRunners.map((runner) => runner.id),
+              numstat,
+            }
+          : {}),
+      });
+      const route = routeGate({ checkpoint, deterministic, expectedCriteria, criteria });
+      const summary = { route, recorded: false, taskId, checkpoint, checks: deterministic.checks as GateCheck[] };
+      if (route !== "RECORD_PASS") return summary;
+
+      const canonical = JSON.stringify({
+        taskId, checkpoint, chainID: payload.chainID, n: payload.n, baseline: stage.baseline, result: stageResult,
+        expected: [...expectedCriteria].sort(),
+        criteria: criteria.map((entry) => [entry.id, entry.p]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+        checks: deterministic.checks.map((entry) => [entry.check, entry.passed, entry.detail]),
+      });
+      const ref = `d22-auto:${checkpoint}:${payload.chainID}.${payload.n}:sha256:${createHash("sha256").update(canonical, "utf8").digest("hex")}`;
+      const latest = readLatestGateVerdict(current, taskId);
+      if (latest) {
+        if (latest.verdict !== "PASS") {
+          throw new PolicyError(`GATE_AUTO_SUPERSEDE_REFUSED: the latest verdict for ${taskId} is a Planner ${latest.verdict}; code may only record a first PASS`);
+        }
+        const author = latest.line.split(" ")[4];
+        if (latest.line.includes(` ref=${ref} :: `) && author !== undefined && ctx.config.gateRouterAgents.includes(author)) {
+          return { ...summary, replayed: true, verdict: "PASS", path: relative, verdictHash: gateVerdictHash(latest.line) };
+        }
+        throw new PolicyError(`GATE_AUTO_PASS_EXISTS: ${taskId} already has a PASS; code never adds a second or conflicting one`);
+      }
+      const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+      const probabilities = [...criteria].sort((a, b) => a.id.localeCompare(b.id)).map((entry) => `${entry.id}=${entry.p}`).join(",");
+      const line = `- ${taskId} PASS ${timestamp} ${boundIdentity} ref=${ref} :: code-recorded under D22; p=${probabilities}; ` +
+        `checks=${deterministic.checks.map((entry) => `${entry.check}:pass`).join(",")}; stage=${stageResult.slice(0, 12)}`;
+      const appended = await appendGateVerdictAtomically(projectRoot, destination, line);
+      const commit = await commitPlanDocRevision(ctx, projectRoot, relative, `docs(odd): ${name} gate ${taskId} PASS (code-recorded, D22)`);
+      return { ...summary, recorded: true, verdict: "PASS", name, path: relative, verdictHash: gateVerdictHash(line), gates: appended, ...commit };
+    });
   };
 }
 

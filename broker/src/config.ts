@@ -201,6 +201,8 @@ export interface BrokerConfig {
   planMiniWriterAgents: string[];
   /** Agents bound to the stage-review role (staging-chain.ts): read-only stage queries, no worker, no mutation. */
   stageReviewAgents: string[];
+  /** D22: trusted non-LLM identities that may call gateVerdictAuto (the trust root for the Jev probabilities). Empty = denied for all. */
+  gateRouterAgents: string[];
   /** S7 + S17 protected paths (glob patterns, applied to canonical paths). */
   protectedPaths: string[];
   /** S17: security components agents must never modify. */
@@ -476,6 +478,7 @@ export function defaultConfig(
     planWriterAgents: (process.env.BROKER_PLAN_WRITER_AGENTS ?? "planner").split(",").map((agent) => agent.trim()).filter(Boolean),
     planMiniWriterAgents: (process.env.BROKER_PLAN_MINI_WRITER_AGENTS ?? "pm-odd,pm-systematic").split(",").map((agent) => agent.trim()).filter(Boolean),
     stageReviewAgents: (process.env.BROKER_STAGE_REVIEW_AGENTS ?? "stage-review").split(",").map((agent) => agent.trim()).filter(Boolean),
+    gateRouterAgents: (process.env.BROKER_GATE_ROUTER_AGENTS ?? "").split(",").map((agent) => agent.trim()).filter(Boolean),
     advisorProjects: [],
     reapIntervalMs: positiveIntEnv("BROKER_REAP_INTERVAL_MS", 60_000),
     reapIdleMs: positiveIntEnv("BROKER_REAP_IDLE_MS", 3_600_000),

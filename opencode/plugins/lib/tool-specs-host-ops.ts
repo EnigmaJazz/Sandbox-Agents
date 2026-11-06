@@ -254,6 +254,34 @@ export const hostOpsToolSpecs = {
     },
   }),
 
+  host_gate_verdict_auto: defineTool({
+    description:
+      "Record a PASS gate verdict from code (decision D22; gate-router identity only, never an LLM agent). " +
+      "The caller supplies only the per-criterion probabilities its classifier returned: the broker re-derives scope, " +
+      "diff budget and test status from the pinned stage and its own test-run logs, routes the result, and appends a PASS " +
+      "to the append-only gate log only for a clear match. It never records REFINE or ESCALATE and never supersedes a Planner " +
+      "verdict; otherwise it returns the routing label (RETURN_TO_PLANNER or SPEC_CHECK) and records nothing. Returns JSON.",
+    args: {
+      name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+      taskId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
+      checkpoint: z.enum(["plan-vs-spec", "implementation-vs-spec"]),
+      chainID: z.string().regex(/^c[0-9a-f]{12}$/),
+      n: z.number().int().min(1).max(99),
+      expectedCriteria: z.array(z.string().regex(/^[A-Za-z][A-Za-z0-9._-]{0,31}$/)).min(1).max(64),
+      criteria: z.array(z.object({ id: z.string().regex(/^[A-Za-z][A-Za-z0-9._-]{0,31}$/), p: z.number().min(0).max(1).optional() })).max(64),
+      testRunRefs: z.array(z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)).max(8),
+    },
+    execute: async (args, ctx) => {
+      // No ctx.ask: the caller is a non-LLM router identity; the broker authorizes by bound identity and the gate log is append-only.
+      const c = await client();
+      const result = await c.request("gateVerdictAuto", ctx.sessionID, {
+        projectDir: currentProjectDirectory(ctx.directory),
+        ...args,
+      }, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
+
   host_plan_append: defineTool({
     description:
       "Append approved content to an allowlisted plan document (orchestrator-only mutation; " +

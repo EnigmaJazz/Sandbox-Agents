@@ -446,6 +446,21 @@ sites). NOT INSTALLED: S17 paths the owner reviews and installs.
 | Release | rejecting a `BUILDING` stage with the all-zero `result` (40 zeros) releases the claim of a worker that was released or failed; recorded as `REJECTED` |
 | Rebuild | `chainStatus.nextSnapshot` after a rejection is `{ commit: <previous stage's pinned result> }` (or `{ worktree: true }` for stage 1), offered only when that previous stage is `APPROVED` or `APPLIED`. The worker bound with `chainAttach` is a new attempt for the first `REJECTED`/`STALE` stage number. Attempt 1 keeps `stage/<n>`; attempt a > 1 is pinned create-only at `stage/<n>.<a>`; older refs are never moved. Stage status and events carry `attempt` only from attempt 2 |
 
+### 5j. Gate verdict recorded by code (`host_gate_verdict_auto`, decision D22)
+
+Added with unit U4b of the multi-tier orchestration spec (the tool table now registers 50 tools; still 24
+`ctx.ask` call sites, because the caller is a non-LLM identity). NOT INSTALLED: S17 paths the owner reviews and installs.
+
+| Aspect | Value |
+|---|---|
+| Tool | `host_gate_verdict_auto` (`name`, `taskId`, `checkpoint`, `chainID`, `n`, `expectedCriteria`, `criteria[{id, p?}]`, `testRunRefs`); no `ctx.ask`; `deny` in both permission fragments |
+| Broker operation | `gateVerdictAuto` (`GATE_ROUTER_OPERATIONS`; in no `HOST_MUTATION_IDENTITY_OPERATIONS` subset); accepted only from a session bound to a `gateRouterAgents` name (config, default empty; `BROKER_GATE_ROUTER_AGENTS`). The router holds no other operation, no worker and no sandbox operation |
+| Access class | tool admission classes `HOST_ADMIN_STRUCTURED`, admitted to the gate router by tool name only (`decideGateRouter`); every other identity, and an unbound session, is denied |
+| Existing tool | `host_gate_verdict` (PLANNER only, append-only) is unchanged |
+| Derived by the broker | touched paths (stage baseline..result), `## Allowed edit surfaces` of the plan document, diff-line budget (`maxApplyDiffLines`), test exit status from the broker's `testRun` log headers (not tied to the stage content: the router chooses which logs to cite); anything missing fails closed |
+| Supplied by the router | the per-criterion probabilities from Jev (unverifiable by the broker: the router identity is their trust root), the expected criterion ids, the stage and log references |
+| Record | one line on the `## Gates` log of `odd/tasks/<name>.md`, author = the bound router identity, `ref=d22-auto:<checkpoint>:<chain>.<n>:sha256:<digest>`; only a first `PASS`; replay-idempotent; refused after a PLANNER `REFINE`/`ESCALATE` or any existing `PASS` |
+
 ### Discrepancies (explicitly flagged)
 
 1. **In code, missing from the permission fragment:** `sandbox_copy_in` and

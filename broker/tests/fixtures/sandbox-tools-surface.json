@@ -342,6 +342,22 @@
       "asks": 0
     },
     {
+      "name": "host_gate_verdict_auto",
+      "description": "Record a PASS gate verdict from code (decision D22; gate-router identity only, never an LLM agent). The caller supplies only the per-criterion probabilities its classifier returned: the broker re-derives scope, diff budget and test status from the pinned stage and its own test-run logs, routes the result, and appends a PASS to the append-only gate log only for a clear match. It never records REFINE or ESCALATE and never supersedes a Planner verdict; otherwise it returns the routing label (RETURN_TO_PLANNER or SPEC_CHECK) and records nothing. Returns JSON.",
+      "args": [
+        "name",
+        "taskId",
+        "checkpoint",
+        "chainID",
+        "n",
+        "expectedCriteria",
+        "criteria",
+        "testRunRefs"
+      ],
+      "execute": "function",
+      "asks": 0
+    },
+    {
       "name": "host_plan_append",
       "description": "Append approved content to an allowlisted plan document (orchestrator-only mutation; requires human approval). doc is an enum: todo -> docs/TODO.md, plan -> docs/PLAN.md. The broker preserves existing bytes, creates the document when absent, and writes atomically; optional heading inserts before the next heading of equal or higher level. Returns JSON.",
       "args": [
