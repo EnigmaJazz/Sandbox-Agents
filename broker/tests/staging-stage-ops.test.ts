@@ -207,6 +207,52 @@ describe("stage-review role policy (deny by default)", () => {
   });
 });
 
+describe("H4: chainStatus and stage-review config hardening", () => {
+  test("chainStatus is orchestrator-only: the reviewer, a worker, a plain or unknown session are refused", async () => {
+    const e = fixture();
+    const id = seededChain(e);
+    for (const session of ["rev", "wrk", "plain", "unknown-session"]) {
+      await expect(e.dispatch("chainStatus", session, { chainID: id }), session).rejects.toBeInstanceOf(PolicyError);
+    }
+    expect((await e.dispatch("chainStatus", "orch", { chainID: id })).stages).toHaveLength(2); // positive control
+  });
+
+  test("stageReviewAgents refuses plan roles, plan writers, orchestrator identities and duplicates", () => {
+    const make = (stageReviewAgents: unknown, extra: Record<string, unknown> = {}) =>
+      () => new BrokerServer(defaultConfig({ stageReviewAgents: stageReviewAgents as string[], ...extra }));
+    for (const name of ["planner", "pm", "pm-odd", "worker", "gentle-orchestrator", "has space"]) {
+      expect(make([name]), name).toThrow(/stageReviewAgents/);
+    }
+    expect(make(["custom-writer"], { planWriterAgents: ["custom-writer"] })).toThrow(/stageReviewAgents/);
+    expect(make(["custom-mini"], { planMiniWriterAgents: ["custom-mini"] })).toThrow(/stageReviewAgents/);
+    expect(make(["a", "a"])).toThrow(/stageReviewAgents/);
+    expect(make(["stage-review"])).not.toThrow(); // positive control
+  });
+
+  test("config names are trimmed, deduplicated and order-stable when read from the environment", () => {
+    const saved = [process.env.BROKER_STAGE_REVIEW_AGENTS, process.env.BROKER_GATE_ROUTER_AGENTS];
+    process.env.BROKER_STAGE_REVIEW_AGENTS = " rev-a , rev-b,rev-a ,, ";
+    process.env.BROKER_GATE_ROUTER_AGENTS = "r1,r1, r2";
+    try {
+      const config = defaultConfig();
+      expect(config.stageReviewAgents).toEqual(["rev-a", "rev-b"]);
+      expect(config.gateRouterAgents).toEqual(["r1", "r2"]);
+    } finally {
+      for (const [i, key] of ["BROKER_STAGE_REVIEW_AGENTS", "BROKER_GATE_ROUTER_AGENTS"].entries()) {
+        if (saved[i] === undefined) delete process.env[key];
+        else process.env[key] = saved[i];
+      }
+    }
+  });
+
+  test("a hand-built config without gateRouterAgents starts with the gate router denied", () => {
+    const config = defaultConfig() as Record<string, unknown>;
+    delete config.gateRouterAgents;
+    const server = new BrokerServer(config as never);
+    expect((server as unknown as { ctx: { config: { gateRouterAgents: string[] } } }).ctx.config.gateRouterAgents).toEqual([]);
+  });
+});
+
 describe("chain operations through the dispatcher", () => {
   test("an orchestrator creates a chain from a project root, reads its status, and a bad root is refused", async () => {
     const e = fixture();

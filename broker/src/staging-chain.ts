@@ -615,11 +615,6 @@ export async function stageApply(ctx: OpContext, by: Decider, p: Record<string, 
   if (ctx.git.runnerMode !== "real") throw new StateError("stage apply requires the real git runner");
   const { id, n, result, chain, stage, stages } = await decisionTarget(ctx, by, p);
   const attempt = attemptOf(stage);
-  // Stage numbers alone do not order a chain: a stage built on a rejected attempt keeps its number. Its baseline
-  // must be the pinned result of the newest attempt of the stage before it.
-  if (n > 1 && stages.find((s) => s.n === n - 1)?.result !== stage.baseline) {
-    throw new StateError(`stage ${n}'s baseline is not stage ${n - 1}'s pinned result (a rebuilt predecessor?); re-run stage ${n} from the current tip`);
-  }
   recordEvent(ctx, id, { n, event: "APPLYING", result, by, ...attemptField(stage) }, (events) => {
     const state = decidedState(events, n, attempt);
     if (state !== "APPROVED") throw new StateError(`stage ${n} is ${state ?? "READY"}, not APPROVED; only an APPROVED stage is applied`);
@@ -633,6 +628,11 @@ export async function stageApply(ctx: OpContext, by: Decider, p: Record<string, 
   const projectDir = projectDirFor(ctx, chain.projectID);
   let landing = false; // true once `git apply` may have run: from then on a failure is NOT recorded as a clean refusal
   try {
+    // Stage numbers alone do not order a chain: a stage built on a rejected attempt keeps its number. Its baseline
+    // must be the pinned result of the newest attempt of the stage before it (a recorded refusal, like the rest).
+    if (n > 1 && stages.find((s) => s.n === n - 1)?.result !== stage.baseline) {
+      throw new StateError(`stage ${n}'s baseline is not stage ${n - 1}'s pinned result (a rebuilt predecessor?); re-run stage ${n} from the current tip`);
+    }
     // The approval is of one commit: the APPROVED event, the payload and the pinned stage ref must all name it (a host-side ref rewrite after approval is refused).
     const approved = loadEvents(ctx, id).filter((e) => e.n === n && attemptOf(e) === attempt && e.event === "APPROVED").pop();
     if (!approved || approved.result !== result) throw new StateError(`stage ${n}: stage ref moved since approval; the approved result commit is not the one to apply`);

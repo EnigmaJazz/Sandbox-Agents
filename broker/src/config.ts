@@ -440,6 +440,11 @@ function optionalStringEnv(name: string): string | null {
   return raw === undefined || raw === "" ? null : raw;
 }
 
+/** A comma-separated agent-name list: trimmed, empty entries dropped, duplicates removed, first-seen order kept. */
+function agentNamesEnv(name: string, fallback: string): string[] {
+  return [...new Set((process.env[name] ?? fallback).split(",").map((agent) => agent.trim()).filter(Boolean))];
+}
+
 export function defaultConfig(
   overrides: BrokerConfigOverrides = {},
 ): BrokerConfig {
@@ -498,8 +503,8 @@ export function defaultConfig(
     ),
     planWriterAgents: (process.env.BROKER_PLAN_WRITER_AGENTS ?? "planner").split(",").map((agent) => agent.trim()).filter(Boolean),
     planMiniWriterAgents: (process.env.BROKER_PLAN_MINI_WRITER_AGENTS ?? "pm-odd,pm-systematic").split(",").map((agent) => agent.trim()).filter(Boolean),
-    stageReviewAgents: (process.env.BROKER_STAGE_REVIEW_AGENTS ?? "stage-review").split(",").map((agent) => agent.trim()).filter(Boolean),
-    gateRouterAgents: (process.env.BROKER_GATE_ROUTER_AGENTS ?? "").split(",").map((agent) => agent.trim()).filter(Boolean),
+    stageReviewAgents: agentNamesEnv("BROKER_STAGE_REVIEW_AGENTS", "stage-review"),
+    gateRouterAgents: agentNamesEnv("BROKER_GATE_ROUTER_AGENTS", ""),
     advisorProjects: [],
     reapIntervalMs: positiveIntEnv("BROKER_REAP_INTERVAL_MS", 60_000),
     reapIdleMs: positiveIntEnv("BROKER_REAP_IDLE_MS", 3_600_000),

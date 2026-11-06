@@ -683,5 +683,9 @@ describe("chain races and record shape (H3)", () => {
     const before = hostFingerprint(e.repo);
     await expect(decide(e, "stageApply", chainID, 2, r2)).rejects.toThrow(/baseline is not stage 1's pinned result/);
     expect(hostFingerprint(e.repo)).toBe(before);
+    // H4: the refusal is on the audit record like every other pre-apply refusal (APPLYING then APPLY_REFUSED, with the reason).
+    const events = JSON.parse(readFileSync(file, "utf8")).events.filter((x: { n: number }) => x.n === 2);
+    expect(events.at(-1)).toMatchObject({ event: "APPLY_REFUSED", result: r2 });
+    expect(events.at(-1).reason).toMatch(/baseline is not stage 1's pinned result/);
   }, 90_000);
 });

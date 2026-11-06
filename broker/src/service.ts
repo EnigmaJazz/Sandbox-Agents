@@ -235,6 +235,10 @@ export function authorizeHostDispatch(
   const access = policy.access(operation);
   // The stage-review role is not an orchestrator identity: the gate above is its whole authorization.
   if (STAGE_REVIEW_OPERATIONS.includes(operation)) return access;
+  // chainStatus is a read that exposes chain internals (stage refs, session ids): only an identity that may create a chain sees it.
+  if (operation === "chainStatus" && !policy.decide("chainCreate", trusted).allowed) {
+    throw new PolicyError(`host read tool "${operation}" is orchestrator-only (CHAIN_STATUS_ORCHESTRATOR_ONLY)`);
+  }
   if (category === "plan-writer") {
     const isPlanRole = trusted && ["planner", "pm"].includes(normalizeRoleKey(trusted));
     if (operation === "taskMark" && normalizeRoleKey(trusted ?? "") !== "pm") {

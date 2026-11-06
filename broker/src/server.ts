@@ -391,11 +391,16 @@ export class BrokerServer {
   private listener: { stop(): void } | null = null;
   private reaper: ReaperHandle | null = null;
 
+  private readonly config: BrokerConfig;
+
   constructor(
-    private readonly config: BrokerConfig,
+    rawConfig: BrokerConfig,
     logger?: Logger,
     private readonly options: { framerFailureDrainTimeoutMs?: number } = {},
   ) {
+    // A hand-built config that predates gateRouterAgents starts with the gate router denied (deny by default), not a crash.
+    const config: BrokerConfig = rawConfig.gateRouterAgents === undefined ? { ...rawConfig, gateRouterAgents: [] } : rawConfig;
+    this.config = config;
     if (typeof config.failLoudUnexpectedErrors !== "boolean") {
       throw new TypeError("BrokerConfig.failLoudUnexpectedErrors must be a boolean");
     }
@@ -407,16 +412,26 @@ export class BrokerServer {
         "BrokerConfig.readOnlyAgents must be an array of non-empty agent names",
       );
     }
+    // The stage-review role holds the owner's stage decisions: it is disjoint from every other authority, so no other grant rides on its name.
+    const planAuthors = [...(config.planWriterAgents ?? []), ...(config.planMiniWriterAgents ?? [])];
     if (
       !Array.isArray(config.stageReviewAgents) ||
-      config.stageReviewAgents.some((agent) => typeof agent !== "string" || agent.length === 0 || config.readOnlyAgents.includes(agent))
+      new Set(config.stageReviewAgents).size !== config.stageReviewAgents.length ||
+      config.stageReviewAgents.some(
+        (agent) =>
+          typeof agent !== "string" ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(agent) ||
+          config.readOnlyAgents.includes(agent) ||
+          planAuthors.includes(agent) ||
+          isRole(normalizeRoleKey(agent)) ||
+          Object.hasOwn(HOST_MUTATION_IDENTITY_OPERATIONS, agent),
+      )
     ) {
       throw new TypeError(
-        "BrokerConfig.stageReviewAgents must be an array of non-empty agent names disjoint from readOnlyAgents",
+        "BrokerConfig.stageReviewAgents must be an array of unique plain agent names disjoint from readOnlyAgents, plan writers, roles and orchestrator identities",
       );
     }
     // D22: the gate router is deny-by-default and disjoint from every other authority, so no other grant rides on its name.
-    const planAuthors = [...(config.planWriterAgents ?? []), ...(config.planMiniWriterAgents ?? [])];
     if (
       !Array.isArray(config.gateRouterAgents) ||
       new Set(config.gateRouterAgents).size !== config.gateRouterAgents.length ||
