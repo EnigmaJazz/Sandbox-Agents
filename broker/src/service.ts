@@ -139,6 +139,7 @@ import {
   lstatSync,
   openSync,
   readSync,
+  readdirSync,
   unlinkSync,
 } from "node:fs";
 import { dirname } from "node:path";
@@ -1876,7 +1877,7 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
  * the reaper's skip checks (idle age, no resultRef) stay true for all of it: without this, a second sweep
  * runs the finish again, or releases the worker under a running runner.
  */
-const finishing = new WeakMap<object, Set<string>>();
+const finishing = new WeakMap<object, Map<string, symbol>>();
 
 /** True while a finish (prepareResult, keepResult, idle auto-finish, disconnect reap) of this session is in flight. */
 export function isFinishing(ctx: OpContext, sessionID: string): boolean {
@@ -1889,16 +1890,31 @@ export function isFinishing(ctx: OpContext, sessionID: string): boolean {
  * the claim have no await between them, and the claim is released in `finally`, so a throw cannot leak it.
  * It is separate from the server's per-session operation lock on purpose: the reaper does not take that
  * lock, and a finish inside the lock must not wait for it again.
+ *
+ * A finish whose promise never settles (the adapter kills a runner at its timeout, so this means the exec
+ * call itself hung) loses the guard at a deadline: the configured runners' timeouts plus a grace period. The
+ * claim is an identity token, so that finish settling late cannot release a newer claim.
  */
 export async function withFinishGuard<T>(ctx: OpContext, sessionID: string, fn: () => Promise<T>): Promise<T> {
-  let set = finishing.get(ctx.store);
-  if (!set) finishing.set(ctx.store, (set = new Set()));
-  if (set.has(sessionID)) throw new StateError("a result export is already in flight for this session; retry after it finishes");
-  set.add(sessionID);
+  let claims = finishing.get(ctx.store);
+  if (!claims) finishing.set(ctx.store, (claims = new Map()));
+  if (claims.has(sessionID)) throw new StateError("a result export is already in flight for this session; retry after it finishes");
+  const claim = Symbol(sessionID);
+  claims.set(sessionID, claim);
+  const config = (ctx.config ?? {}) as { testRunners?: { timeoutMs: number }[]; finishGuardGraceMs?: number };
+  const deadlineMs = (config.testRunners ?? []).reduce((total, runner) => total + runner.timeoutMs, 0) + (config.finishGuardGraceMs ?? 300_000);
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await fn();
+    return await Promise.race([
+      fn(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new StateError("the result export exceeded its deadline; the guard was released")), deadlineMs);
+        timer.unref?.();
+      }),
+    ]);
   } finally {
-    set.delete(sessionID);
+    if (timer) clearTimeout(timer);
+    if (claims.get(sessionID) === claim) claims.delete(sessionID);
   }
 }
 
@@ -2507,6 +2523,8 @@ export function buildDestroyWorkerOp(ctx: OpContext): OpHandler {
   return async (req) => {
     payloadOf(req);
     const record = recordOr404(ctx.store, req.sessionID);
+    // The runners run in this worker: never remove it under them.
+    if (isFinishing(ctx, req.sessionID)) throw new StateError("a result export is already in flight for this session; retry after it finishes");
     if (!record.workerName) {
       return { destroyed: true, worker: null };
     }
@@ -4228,6 +4246,25 @@ export function writeTestRunLog(stateDir: string, projectRoot: string, run: Test
   ]), { mode: 0o600, flag: "wx" });
   renameSync(temporary, path);
   return path;
+}
+
+/** Newest test-run logs kept; evidence is re-validated on read, so a pruned log is simply missing evidence. */
+export const TEST_RUN_LOG_KEEP = 500;
+
+/** Delete all but the newest `keep` test-run logs (by mtime). Only `<uuid>.log` files are touched; errors are ignored. */
+export function pruneTestRunLogs(stateDir: string, keep: number = TEST_RUN_LOG_KEEP): void {
+  try {
+    const directory = join(stateDir, "test-runs");
+    const logs = readdirSync(directory)
+      .filter((name) => /^[0-9a-f-]{36}\.log$/.test(name))
+      .map((name) => ({ name, mtime: lstatSync(join(directory, name)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime || (a.name < b.name ? 1 : -1));
+    for (const old of logs.slice(Math.max(0, keep))) {
+      try { unlinkSync(join(directory, old.name)); } catch { /* best effort */ }
+    }
+  } catch {
+    // A missing or unreadable directory means nothing to prune.
+  }
 }
 
 export function buildTestRunOp(ctx: OpContext): OpHandler {

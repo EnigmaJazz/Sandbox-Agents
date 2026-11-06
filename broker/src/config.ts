@@ -265,6 +265,8 @@ export interface BrokerConfig {
   hostRead: HostReadConfig;
   sddRuntime: SddRuntimeConfig;
   testRunners: TestRunnerConfig[];
+  /** Repo-relative paths a stage's test evidence may rely on although git ignores them (e.g. node_modules). Any other ignored file in /work writes no evidence. */
+  evidenceIgnoredAllow: string[];
   network: { mode: "deny-by-default"; note: string };
 }
 
@@ -415,6 +417,24 @@ function parseTestRunners(raw: string | undefined): TestRunnerConfig[] {
   });
 }
 
+/** Literal repo-relative paths (no globs, no traversal); unset = ["node_modules"], "[]" = none. */
+function parseEvidenceIgnoredAllow(raw: string | undefined): string[] {
+  if (raw === undefined || raw === "") return ["node_modules"];
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new ConfigError("invalid BROKER_EVIDENCE_IGNORED_ALLOW: expected a JSON array");
+  }
+  if (!Array.isArray(value)) throw new ConfigError("invalid BROKER_EVIDENCE_IGNORED_ALLOW: expected a JSON array");
+  return value.map((entry, index) => {
+    if (typeof entry !== "string" || !/^[A-Za-z0-9._@-]+(?:\/[A-Za-z0-9._@-]+)*$/.test(entry) || entry.split("/").some((part) => part === "." || part === "..")) {
+      throw new ConfigError(`invalid BROKER_EVIDENCE_IGNORED_ALLOW[${index}]: a literal repo-relative path`);
+    }
+    return entry;
+  });
+}
+
 function optionalStringEnv(name: string): string | null {
   const raw = process.env[name];
   return raw === undefined || raw === "" ? null : raw;
@@ -468,6 +488,7 @@ export function defaultConfig(
     workerNamePrefix: "oc-sandbox",
     projects: DEFAULT_PROJECTS,
     testRunners: parseTestRunners(process.env.BROKER_TEST_RUNNERS),
+    evidenceIgnoredAllow: parseEvidenceIgnoredAllow(process.env.BROKER_EVIDENCE_IGNORED_ALLOW),
     approvedExternalReadRoots: DEFAULT_APPROVED_EXTERNAL_READ_ROOTS,
     externalCopyTargets: DEFAULT_EXTERNAL_COPY_TARGETS,
     protectedPaths: DEFAULT_PROTECTED_PATHS,

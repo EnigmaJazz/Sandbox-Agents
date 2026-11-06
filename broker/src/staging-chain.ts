@@ -43,6 +43,7 @@ import {
   rawChangesBetween,
   resolveCanonicalProjectRoot,
   writeFileAtomic,
+  pruneTestRunLogs,
   writeTestRunLog,
   type OpContext,
   type OpHandler,
@@ -378,7 +379,7 @@ const TREE_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
  * Undefined whenever the sandbox cannot say, and whenever the tree or the repository settings mean the runner would see
  * content the id does not cover (a gitlink, `core.fileMode=false`, ...): no evidence is better than evidence for part of it.
  */
-async function sandboxTree(ctx: OpContext, worker: string, ref: string): Promise<string | undefined> {
+async function sandboxTree(ctx: OpContext, worker: string, ref: string, ignoredAllow: readonly string[]): Promise<string | undefined> {
   const index = `/work/.broker-tmp/evidence-${randomUUID()}.index`;
   // core.fsmonitor=false: a worker-set monitor cannot hide edited files from `add`.
   const env = {
@@ -392,6 +393,8 @@ async function sandboxTree(ctx: OpContext, worker: string, ref: string): Promise
     // Repository settings under which the hash and the runner's view of /work can differ: a mode the hash
     // ignores (fileMode, symlinks), files it skips (sparse checkout), a work tree somewhere else (worktree,
     // bare). --type=bool normalises no/off/0; core.worktree is a path, so it fails the conversion (exit 128).
+    // core.worktree is read as a raw value: --type=bool would turn a bool spelling (true, yes, 1, on) into "true" and miss it.
+    if ((await run(["git", "config", "--get", "core.worktree"])).status !== 1) return undefined;
     // Exit 1 = none set. Anything else, or a value other than the git default, writes no evidence.
     const core = await run(["git", "config", "--type=bool", "--get-regexp", "^core[.](filemode|symlinks|bare|sparsecheckout|worktree)$"]);
     if (core.status !== 0 && core.status !== 1) return undefined;
@@ -405,6 +408,15 @@ async function sandboxTree(ctx: OpContext, worker: string, ref: string): Promise
     const written = await run(["git", "write-tree"]);
     const tree = written.status === 0 ? written.stdout.trim() : "";
     if (!TREE_RE.test(tree)) return undefined;
+    // `add -A` skips git-ignored files, but the runner can load them (a shimmed dependency): only the allowed
+    // ignored paths may exist, or the tree id covers less than what ran. --directory keeps a whole ignored
+    // directory to one entry, so node_modules is not listed file by file.
+    const ignored = await ctx.adapter.exec(worker, ["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", ".", ...RESULT_EXCLUDE_PATHS], { cwd: "/work", timeoutMs: 60_000, maxOutputBytes: 8 * 1024 * 1024, env });
+    if (ignored.status !== 0 || ignored.outputTruncated === true) return undefined;
+    for (const entry of ignored.stdout.split("\0").filter((e) => e !== "")) {
+      const path = entry.replace(/\/+$/, "");
+      if (!ignoredAllow.some((allowed) => path === allowed || path.startsWith(`${allowed}/`))) return undefined;
+    }
     // A nested repository is recorded as a bare gitlink (mode 160000): its content, tracked or not, is visible to
     // the runner but is not in the tree id. Refuse the whole tree rather than bind a log to part of what ran.
     const listing = await ctx.adapter.exec(worker, ["git", "ls-tree", "-r", "-z", tree], { cwd: "/work", timeoutMs: 60_000, maxOutputBytes: 8 * 1024 * 1024, env });
@@ -440,7 +452,7 @@ export async function collectStageTestEvidence(ctx: OpContext, record: SessionRe
     const tree = treeRun.stdout.trim();
     if (treeRun.status !== 0 || !TREE_RE.test(tree)) return;
     const worker = record.workerName;
-    if ((await sandboxTree(ctx, worker, ref)) !== tree) return;
+    if ((await sandboxTree(ctx, worker, ref, ctx.config.evidenceIgnoredAllow)) !== tree) return;
     const runs = [];
     for (const runner of ctx.config.testRunners) {
       const result = await ctx.adapter.exec(worker, runner.argv, {
@@ -451,7 +463,7 @@ export async function collectStageTestEvidence(ctx: OpContext, record: SessionRe
       });
       runs.push({ runner, result });
     }
-    if ((await sandboxTree(ctx, worker, ref)) !== tree) return;
+    if ((await sandboxTree(ctx, worker, ref, ctx.config.evidenceIgnoredAllow)) !== tree) return;
     const projectRoot = projectDirFor(ctx, record.projectID);
     const ids = runs.map(({ runner, result }) => {
       // Stored output is redacted and capped per stream; whatever was cut makes the run a non-pass.
@@ -471,6 +483,7 @@ export async function collectStageTestEvidence(ctx: OpContext, record: SessionRe
       });
       return basename(path, ".log");
     });
+    pruneTestRunLogs(ctx.config.stateDir);
     const current = ctx.store.get(record.sessionID)?.chain ?? member;
     ctx.store.touch(record.sessionID, { chain: { ...current, testRunRefs: ids } }, "chainEvidence");
   } catch (error) {

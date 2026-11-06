@@ -51,10 +51,10 @@ failures write nothing, and registration is never blocked. The ids show as `test
 reads; `gateVerdictAuto` re-validates them, so a clear match can now record a PASS. Nothing runs on
 the host. The binding is a consistency check inside a worker-controlled sandbox, not a trust boundary;
 a green log proves only that the stage passes its own tests. Evidence is refused for a nested git
-repository (gitlink) or `core.fileMode=false`, `core.symlinks=false`, `core.worktree`, `core.bare=true`
-or `core.sparseCheckout=true`; git-ignored files, tracked `*.bundle` and `.broker-tmp/`, anything
+repository (gitlink) or `core.fileMode=false`, `core.symlinks=false`, `core.worktree` (any value), `core.bare=true`
+or `core.sparseCheckout=true`, or git-ignored files outside `BROKER_EVIDENCE_IGNORED_ALLOW` (default `node_modules`); tracked `*.bundle` and `.broker-tmp/`, anything
 outside `/work`, `.gitattributes` eol normalisation and symlinks remain visible to the runner but not to
-the tree id. One finish per session runs at a time. `test-runs` is not garbage collected. Limits (test
+the tree id. One finish per session runs at a time. `test-runs` keeps the newest 500 logs. Limits (test
 tampering, the items above, finish latency) are in the PROPOSED section of `docs/threat-model.md`. NOT INSTALLED: S17 paths, the owner reviews and installs.
 
 ## Goal

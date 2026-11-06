@@ -11,13 +11,13 @@
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { defaultConfig, type TestRunnerConfig } from "../src/config.ts";
 import { assertWorkerEnv, spawnArgv } from "../src/msb.ts";
 import { startReaper, sweepUnfinished, type ReaperLogEntry } from "../src/reaper.ts";
-import { buildEnsureWorkerOp, buildKeepResultOp, buildPrepareResultOp, buildTestRunOp, isFinishing, withFinishGuard, type OpContext } from "../src/service.ts";
+import { buildDestroyWorkerOp, buildEnsureWorkerOp, buildKeepResultOp, buildPrepareResultOp, buildTestRunOp, isFinishing, pruneTestRunLogs, withFinishGuard, type OpContext } from "../src/service.ts";
 import { BrokerServer } from "../src/server.ts";
 import { chainAttach, chainCreate, chainStatus, stageList, stageShow } from "../src/staging-chain.ts";
 import type { BrokerRequestEnvelope } from "../src/types.ts";
@@ -58,6 +58,7 @@ const sh = (id: string, script: string, over: Partial<TestRunnerConfig> = {}) =>
 interface Exec { argv: string[]; cwd?: string; env?: Record<string, string> }
 interface Opts {
   runners?: TestRunnerConfig[];
+  evidenceIgnoredAllow?: string[];
   /** Runs before every sandbox exec (worker directory given): simulates a racing worker or a sandbox that vanished. */
   beforeExec?: (argv: string[], workerDir: string) => void | Promise<void>;
 }
@@ -85,6 +86,7 @@ function harness(opts: Opts = {}) {
       stageReviewAgents: [REVIEWER],
       gateRouterAgents: [ROUTER],
       testRunners: opts.runners ?? [],
+      ...(opts.evidenceIgnoredAllow === undefined ? {} : { evidenceIgnoredAllow: opts.evidenceIgnoredAllow }),
     }),
   );
   const internals = server as unknown as { ctx: OpContext & { store: { touch(id: string, patch: Record<string, unknown>): unknown } }; dispatch(req: BrokerRequestEnvelope): Promise<unknown> };
@@ -459,7 +461,7 @@ describe("limits of the tree binding", () => {
     expect(readdirSync(join(h.dirOf("worker-s1"), ".broker-tmp")).filter((f) => f.endsWith(".index"))).toEqual([]);
   }, 60_000);
 
-  test("KNOWN RESIDUAL (owner decision): a gitignored file in the sandbox tree is visible to the runner but is not part of the stage", async () => {
+  test("a gitignored file the runner can see but the stage lacks writes no evidence (was a known residual; allowlist, H2)", async () => {
     const h = harness({ runners: [sh("unit", "test -f helper.sh")] });
     await buildEnsureWorkerOp(h.ctx)(h.req("ensureWorker", "s1", { projectDir: h.repo }));
     await chainAttach(h.ctx, h.chain, "s1");
@@ -469,7 +471,9 @@ describe("limits of the tree binding", () => {
     await buildPrepareResultOp(h.ctx)(h.req("prepareResult", "s1", {}));
     const stage = await h.stage();
     expect(git(h.repo, "ls-tree", "-r", "--name-only", stage.result!)).not.toContain("helper.sh");
-    expect(h.readLog(stage.testRunRefs![0]!)).toMatch(/^runner=unit exitCode=0 /);
+    expect(stage.state).toBe("READY");
+    expect(stage.testRunRefs).toBeUndefined();
+    expect(h.logs()).toEqual([]);
   }, 60_000);
 });
 
@@ -601,6 +605,55 @@ describe("repository content the tree id does not cover writes no evidence (B2)"
   }
 });
 
+describe("git-ignored content the tree id does not cover (H2)", () => {
+  const ignore = (dir: string, rule: string) => writeFileSync(join(dir, ".gitignore"), `${rule}\n`);
+  const plant = (dir: string, path: string) => {
+    mkdirSync(join(dir, path, ".."), { recursive: true });
+    writeFileSync(join(dir, path), "module.exports = 'shim';\n");
+  };
+  const files = { "src/feature.ts": "export const x = 1;\n", ".gitignore": "shim/\nnode_modules/\n" };
+
+  test("an ignored file the runner could load writes no evidence, though the stage registers", async () => {
+    const h = harness({ runners: [sh("unit", "true")] });
+    await h.stageOne(files, "s1", (dir) => plant(dir, "shim/dep.js"));
+    expect((await h.stage()).state).toBe("READY");
+    expect((await h.stage()).testRunRefs).toBeUndefined();
+    expect(h.logs()).toEqual([]);
+    expect(runnerExecs(h.execs)).toEqual([]);
+  }, 60_000);
+
+  test("ignored content under an allowed path (default node_modules) still records evidence", async () => {
+    const h = harness({ runners: [sh("unit", "true")] });
+    await h.stageOne(files, "s1", (dir) => plant(dir, "node_modules/pkg/index.js"));
+    expect((await h.stage()).testRunRefs).toHaveLength(1);
+  }, 60_000);
+
+  test("one allowed and one not allowed ignored path refuses; the configured list replaces the default", async () => {
+    const both = harness({ runners: [sh("unit", "true")] });
+    await both.stageOne(files, "s1", (dir) => { plant(dir, "node_modules/pkg/index.js"); plant(dir, "shim/dep.js"); });
+    expect((await both.stage()).testRunRefs).toBeUndefined();
+    const custom = harness({ runners: [sh("unit", "true")], evidenceIgnoredAllow: ["shim"] });
+    await custom.stageOne(files, "s1", (dir) => plant(dir, "node_modules/pkg/index.js"));
+    expect((await custom.stage()).testRunRefs).toBeUndefined();
+    const allowed = harness({ runners: [sh("unit", "true")], evidenceIgnoredAllow: ["shim"] });
+    await allowed.stageOne(files, "s1", (dir) => plant(dir, "shim/dep.js"));
+    expect((await allowed.stage()).testRunRefs).toHaveLength(1);
+  }, 90_000);
+
+  test("a sibling path that merely shares the allowed prefix is not allowed", async () => {
+    const h = harness({ runners: [sh("unit", "true")] });
+    await h.stageOne({ ...files, ".gitignore": "node_modules_evil/\n" }, "s1", (dir) => plant(dir, "node_modules_evil/dep.js"));
+    expect((await h.stage()).testRunRefs).toBeUndefined();
+  }, 60_000);
+
+  test("core.worktree set to a bool spelling with a matching directory writes no evidence", async () => {
+    const h = harness({ runners: [sh("unit", "true")] });
+    await h.stageOne(undefined, "s1", (dir) => { mkdirSync(join(dir, ".git", "true"), { recursive: true }); git(dir, "config", "core.worktree", "true"); });
+    expect((await h.stage()).testRunRefs).toBeUndefined();
+    expect(h.logs()).toEqual([]);
+  }, 60_000);
+});
+
 describe("one finish per session at a time (B1)", () => {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const until = async (what: string, ok: () => boolean, ms = 15_000) => {
@@ -712,4 +765,72 @@ describe("one finish per session at a time (B1)", () => {
     await until("the sweep to finish", () => h.ctx.store.get("s1")?.state === "RESULT_READY");
     expect(runnerExecs(h.execs).filter((e) => e.argv[2] === "sleep 2")).toHaveLength(1);
   }, 60_000);
+});
+
+describe("finish guard limits and log retention (H2)", () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const until = async (what: string, ok: () => boolean, ms = 15_000) => {
+    const end = Date.now() + ms;
+    while (!ok()) {
+      if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+      await sleep(10);
+    }
+  };
+  const SLOW = "sleep 1; echo slow-ok";
+
+  test("an explicit destroyWorker during an in-flight finish is refused and the worker stays", async () => {
+    const h = harness({ runners: [sh("unit", SLOW)] });
+    await buildEnsureWorkerOp(h.ctx)(h.req("ensureWorker", "s1", { projectDir: h.repo }));
+    await chainAttach(h.ctx, h.chain, "s1");
+    h.put("s1", "src/feature.ts", "export const x = 1;\n");
+    await sleep(30);
+    const first = sweepUnfinished(h.ctx, 10, () => undefined);
+    await until("the runner to start", () => runnerExecs(h.execs).filter((e) => e.argv[2] === SLOW).length === 1);
+    await expect(buildDestroyWorkerOp(h.ctx)(h.req("destroyWorker", "s1", {}))).rejects.toThrow(/already in flight/);
+    expect(h.ctx.store.get("s1")!.workerName).toBeDefined();
+    await first;
+    // Positive control: with no finish in flight the same destroy goes through.
+    expect(await buildDestroyWorkerOp(h.ctx)(h.req("destroyWorker", "s1", {}))).toMatchObject({ destroyed: true });
+  }, 60_000);
+
+  test("a finish that never settles loses the guard at its deadline; the late settle cannot drop a newer claim", async () => {
+    const h = harness();
+    (h.ctx.config as { finishGuardGraceMs?: number }).finishGuardGraceMs = 50;
+    let settleFirst!: () => void;
+    const hung = withFinishGuard(h.ctx, "sx", () => new Promise<void>((resolve) => { settleFirst = resolve; }));
+    const hungResult = hung.then(() => "ok", (e: Error) => e.message);
+    expect(isFinishing(h.ctx, "sx")).toBe(true);
+    expect(await hungResult).toMatch(/deadline/);
+    expect(isFinishing(h.ctx, "sx")).toBe(false);
+    // A newer finish takes the guard; the first one settling late must leave it alone.
+    let settleSecond!: () => void;
+    const second = withFinishGuard(h.ctx, "sx", () => new Promise<void>((resolve) => { settleSecond = resolve; }));
+    settleFirst();
+    await sleep(10);
+    expect(isFinishing(h.ctx, "sx")).toBe(true);
+    settleSecond();
+    await second;
+    expect(isFinishing(h.ctx, "sx")).toBe(false);
+  }, 30_000);
+
+  test("test-run logs are pruned to the newest N; an unrelated file is left alone", () => {
+    const state = mkdtempSync(join(tmpdir(), "prune-"));
+    roots.push(state);
+    const dir = join(state, "test-runs");
+    mkdirSync(dir);
+    for (let i = 0; i < 6; i++) {
+      const file = join(dir, `00000000-0000-4000-8000-00000000000${i}.log`);
+      writeFileSync(file, "x");
+      utimesSync(file, 1000 + i, 1000 + i);
+    }
+    writeFileSync(join(dir, "notes.txt"), "keep");
+    pruneTestRunLogs(state, 4);
+    expect(readdirSync(dir).sort()).toEqual([
+      "00000000-0000-4000-8000-000000000002.log", "00000000-0000-4000-8000-000000000003.log",
+      "00000000-0000-4000-8000-000000000004.log", "00000000-0000-4000-8000-000000000005.log", "notes.txt",
+    ]);
+    pruneTestRunLogs(state, 4); // idempotent
+    expect(readdirSync(dir)).toHaveLength(5);
+    pruneTestRunLogs(join(state, "missing"), 4); // a missing directory is not an error
+  });
 });
