@@ -9,7 +9,7 @@
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
@@ -52,10 +52,18 @@ const PLAN = `# Gate feature
 - S1 the first criterion
 - S2 the second criterion
 
+## Tasks
+- T1 the feature
+- T1.impl its implementation gate
+- T2 second
+- T3 third
+
 ## Allowed edit surfaces
 - \`src/**\`
 - \`docs/*.md\`
 `;
+
+interface LogOpts { timedOut?: boolean; forChain?: string; bind?: boolean; project?: string; tree?: string; mtimeSeconds?: number }
 
 interface Env {
   ctx: OpContext & { store: { touch(id: string, patch: Record<string, unknown>): unknown } };
@@ -66,8 +74,12 @@ interface Env {
   dispatch(operation: string, sessionID: string, payload?: unknown, agent?: string): Promise<any>;
   /** A new chain whose stage 1 changes `files` (path -> content) on top of the base commit. */
   stage(files: Record<string, string>): string;
-  /** A test-run log id, written in the exact header format `testRun` writes. */
-  log(runner: string, exitCode: number | null, extra?: { timedOut?: boolean }): string;
+  /**
+   * A test-run log id in the header format `testRun` writes PLUS the project/tree binding it does not write
+   * yet (synthetic: the positive control for the future header change). `forChain` binds it to that chain's
+   * stage result tree (default: the fixture's first chain); `bind: false` writes today's unbound header.
+   */
+  log(runner: string, exitCode: number | null, extra?: { timedOut?: boolean; forChain?: string; bind?: boolean; project?: string; tree?: string; mtimeSeconds?: number }): string;
   payload(over?: Record<string, unknown>): Record<string, unknown>;
   doc(): string;
   commits(): number;
@@ -129,19 +141,25 @@ function fixture(opts: { plan?: string; runners?: boolean } = {}): Env {
     return chain.id;
   };
   let logCounter = 0;
-  const log = (runner: string, exitCode: number | null, extra: { timedOut?: boolean } = {}): string => {
+  const treeOf = (chainID: string): string => git(repo, "rev-parse", `${git(repo, "rev-parse", `${REF(chainID)}/stage/1`)}^{tree}`);
+  const log = (runner: string, exitCode: number | null, extra: LogOpts = {}): string => {
     logCounter += 1;
     const id = `00000000-0000-4000-8000-${String(logCounter).padStart(12, "0")}`;
     mkdirSync(join(stateDir, "test-runs"), { recursive: true });
-    // Exactly the header buildTestRunOp writes: a literal backslash-n follows the flags.
-    writeFileSync(join(stateDir, "test-runs", `${id}.log`), `runner=${runner} exitCode=${String(exitCode)} signal=null timedOut=${extra.timedOut === true} truncated=false\\nstdout\\nok\\nstderr\\n`);
+    const binding = extra.bind === false ? "" : ` project=${extra.project ?? "repo"} tree=${extra.tree ?? treeOf(extra.forChain ?? chain)}`;
+    // The header buildTestRunOp writes (a literal backslash-n follows the flags), plus the binding it does not write yet.
+    const file = join(stateDir, "test-runs", `${id}.log`);
+    writeFileSync(file, `runner=${runner} exitCode=${String(exitCode)} signal=null timedOut=${extra.timedOut === true} truncated=false${binding}\\nstdout\\nok\\nstderr\\n`);
+    if (extra.mtimeSeconds !== undefined) utimesSync(file, extra.mtimeSeconds, extra.mtimeSeconds);
     return id;
   };
   const chain = stage({ "src/feature.ts": "export const x = 1;\n" });
   const goodLog = log("unit", 0);
   const payload = (over: Record<string, unknown> = {}) => ({
     projectDir: repo, name: "gate-feature", taskId: "T1", checkpoint: IMPL, chainID: chain, n: 1,
-    expectedCriteria: ["S1", "S2"], criteria: [{ id: "S1", p: 0.9 }, { id: "S2", p: 0.95 }], testRunRefs: [goodLog],
+    expectedCriteria: ["S1", "S2"], criteria: [{ id: "S1", p: 0.9 }, { id: "S2", p: 0.95 }],
+    // Default evidence: a bound passing log for the stage being gated.
+    testRunRefs: [typeof over.chainID === "string" && over.chainID !== chain && /^c[0-9a-f]{12}$/.test(over.chainID) && over.chainID !== "c000000000000" ? log("unit", 0, { forChain: over.chainID }) : goodLog],
     ...over,
   });
   return {
@@ -437,7 +455,7 @@ describe("deterministic evidence is re-derived by the broker; confidence alone c
     const noRunners = fixture({ runners: false });
     const out = await recordsNothing(noRunners, () => noRunners.dispatch("gateVerdictAuto", "router", noRunners.payload({ ...high })));
     expect(out).toMatchObject({ route: "SPEC_CHECK", recorded: false });
-    const noScope = fixture({ plan: "# Gate feature\n\n## Specs\n- S1 one\n- S2 two\n" });
+    const noScope = fixture({ plan: "# Gate feature\n\n## Specs\n- S1 one\n- S2 two\n\n## Tasks\n- T1 one\n" });
     const out2 = await recordsNothing(noScope, () => noScope.dispatch("gateVerdictAuto", "router", noScope.payload({ ...high })));
     expect(out2).toMatchObject({ route: "SPEC_CHECK", recorded: false });
     // Positive control: with the evidence present the same call records.
@@ -469,6 +487,109 @@ describe("deterministic evidence is re-derived by the broker; confidence alone c
     expect(out).not.toHaveProperty("verdictHash");
     expect(out.checks).toHaveLength(3);
     expect(gateLines(e.doc())).toHaveLength(0);
+  });
+});
+
+describe("test evidence must be bound to the staged commit (F1), and the stage is re-checked under the lock (F2)", () => {
+  const high = { criteria: [{ id: "S1", p: 0.999 }, { id: "S2", p: 0.999 }] };
+  const testsMissing = (out: any) => expect(out.checks.find((c: any) => c.check === "tests")).toMatchObject({ passed: false, missing: true });
+
+  test("a log written before the stage existed cannot clear a stage that was never tested", async () => {
+    const e = fixture();
+    const earlier = e.log("unit", 0); // passes, bound to the first stage's tree
+    const broken = e.stage({ "src/never_tested.ts": "throw new Error('broken');\n" });
+    const out = await recordsNothing(e, () => e.dispatch("gateVerdictAuto", "router", e.payload({ chainID: broken, testRunRefs: [earlier], ...high })));
+    expect(out).toMatchObject({ route: "SPEC_CHECK", recorded: false });
+    testsMissing(out);
+    // Positive control: a log bound to that stage's own tree records.
+    expect((await e.dispatch("gateVerdictAuto", "router", e.payload({ chainID: broken, testRunRefs: [e.log("unit", 0, { forChain: broken })], ...high }))).recorded).toBe(true);
+  });
+
+  test("an unbound log (what testRun writes today), a log for another tree or project, or an older log is not evidence", async () => {
+    const e = fixture();
+    const other = e.stage({ "src/other.ts": "export {};\n" });
+    const stale = [
+      e.log("unit", 0, { bind: false }),
+      e.log("unit", 0, { forChain: other }),
+      e.log("unit", 0, { project: "elsewhere" }),
+      e.log("unit", 0, { tree: "0".repeat(40) }),
+      e.log("unit", 0, { mtimeSeconds: 1000 }),
+    ];
+    for (const ref of stale) {
+      const out = await recordsNothing(e, () => e.dispatch("gateVerdictAuto", "router", e.payload({ testRunRefs: [ref], ...high })));
+      expect(out, ref).toMatchObject({ route: "SPEC_CHECK", recorded: false });
+      testsMissing(out);
+    }
+    expect((await e.dispatch("gateVerdictAuto", "router", e.payload({ testRunRefs: [e.log("unit", 0)], ...high }))).recorded).toBe(true);
+  });
+
+  test("a failing bound log the caller omits does not matter: without a bound passing log the tests are missing", async () => {
+    const e = fixture();
+    e.log("unit", 1); // bound and failing, never referenced
+    for (const refs of [[], [e.log("unit", 0, { bind: false })]]) {
+      const out = await recordsNothing(e, () => e.dispatch("gateVerdictAuto", "router", e.payload({ testRunRefs: refs, ...high })));
+      expect(out).toMatchObject({ route: "SPEC_CHECK", recorded: false });
+      testsMissing(out);
+    }
+    // A referenced bound failing log still returns to the Planner.
+    const red = await recordsNothing(e, () => e.dispatch("gateVerdictAuto", "router", e.payload({ testRunRefs: [e.log("unit", 1)], ...high })));
+    expect(red).toMatchObject({ route: "RETURN_TO_PLANNER", recorded: false });
+  });
+
+  test("a stage rejected between the read and the append is refused and records nothing", async () => {
+    const run = async (reject: boolean) => {
+      const e = fixture();
+      const git = e.ctx as unknown as { git: { spawn: (argv: string[], opts: unknown) => Promise<unknown> } };
+      const real = git.git.spawn;
+      let release!: () => void;
+      let reached!: () => void;
+      const hold = new Promise<void>((r) => (release = r));
+      const at = new Promise<void>((r) => (reached = r));
+      git.git.spawn = async (argv, opts) => {
+        if (argv.includes("--numstat")) { reached(); await hold; }
+        return real(argv, opts);
+      };
+      try {
+        const before = e.doc();
+        const commits = e.commits();
+        const pending = e.dispatch("gateVerdictAuto", "router", e.payload()).catch((error) => error);
+        await at;
+        if (reject) {
+          const result = execFileSync("git", ["rev-parse", `${REF(e.chain)}/stage/1`], { cwd: e.repo, encoding: "utf8" }).trim();
+          await e.dispatch("stageReject", "rev", { chainID: e.chain, n: 1, result, note: "no" });
+        }
+        release();
+        const out = await pending;
+        return { out, unchanged: e.doc() === before && e.commits() === commits };
+      } finally {
+        git.git.spawn = real;
+      }
+    };
+    const raced = await run(true);
+    expect(String(raced.out.message)).toMatch(/GATE_AUTO_STAGE_STATE/);
+    expect(raced.unchanged).toBe(true);
+    // Positive control: the same paused call without the rejection records.
+    const calm = await run(false);
+    expect(calm.out).toMatchObject({ recorded: true, verdict: "PASS" });
+  });
+
+  test("a taskId that is not in the plan's Tasks section is refused", async () => {
+    const e = fixture();
+    const out = await recordsNothing(e, () => e.dispatch("gateVerdictAuto", "router", e.payload({ taskId: "T99" })));
+    expect(out).toBeInstanceOf(ValidationError);
+    expect(String(out.message)).toMatch(/GATE_AUTO_TASK_UNKNOWN/);
+    expect((await e.dispatch("gateVerdictAuto", "router", e.payload({ taskId: "T2" }))).recorded).toBe(true);
+  });
+
+  test("a bullet inside a fenced code block under Allowed edit surfaces is not scope", async () => {
+    const plan = (surfaces: string) => `# Gate feature\n\n## Specs\n- S1 one\n- S2 two\n\n## Tasks\n- T1 one\n\n## Allowed edit surfaces\n- \`docs/*.md\`\n${surfaces}\n`;
+    const fenced = fixture({ plan: plan("\n```\n- `**`\n```") });
+    const out = await recordsNothing(fenced, () => fenced.dispatch("gateVerdictAuto", "router", fenced.payload({ ...high })));
+    expect(out).toMatchObject({ route: "RETURN_TO_PLANNER", recorded: false });
+    expect(out.checks.find((c: any) => c.check === "scope").passed).toBe(false);
+    // Positive control: the same bullet outside a fence widens scope and records.
+    const open = fixture({ plan: plan("- `**`") });
+    expect((await open.dispatch("gateVerdictAuto", "router", open.payload({ ...high }))).recorded).toBe(true);
   });
 });
 

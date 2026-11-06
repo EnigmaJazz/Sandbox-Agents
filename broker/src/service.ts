@@ -4704,21 +4704,34 @@ const GATE_CHAIN_ID_RE = /^c[0-9a-f]{12}$/;
 const GATE_AUTO_MAX_ITEMS = 64;
 const GATE_AUTO_MAX_TEST_REFS = 8;
 const TEST_RUN_LOG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-/** The header buildTestRunOp writes; its flags are followed by a literal backslash-n. */
-const TEST_RUN_LOG_HEADER_RE = /^runner=(\S+) exitCode=(-?\d+|null) signal=\S+ timedOut=(true|false) truncated=(?:true|false)\\nstdout/;
+/**
+ * The header buildTestRunOp writes; its flags are followed by a literal backslash-n. testRun does
+ * NOT write the optional ` project=<id> tree=<sha>` binding yet: until it does, no log is bound to a
+ * staged commit and the tests check is always missing (a stage is unapplied, so a host worktree run
+ * says nothing about it).
+ */
+const TEST_RUN_LOG_HEADER_RE = /^runner=(\S+) exitCode=(-?\d+|null) signal=\S+ timedOut=(true|false) truncated=(?:true|false)(?: project=(\S+) tree=([0-9a-f]{40}|[0-9a-f]{64}))?\\nstdout/;
 
-/** A broker-written testRun log: the runner id and its exit status (-1 when it timed out or had no exit code). */
-function readTestRunLog(stateDir: string, id: string): { command: string; exitCode: number } | undefined {
+interface TestRunLog { command: string; exitCode: number; project?: string; tree?: string; mtimeSeconds: number }
+
+/** A broker-written testRun log: the runner id and its exit status (-1 when it timed out or had no exit code), plus its optional binding. */
+function readTestRunLog(stateDir: string, id: string): TestRunLog | undefined {
   const path = join(stateDir, "test-runs", `${id}.log`);
   try {
-    if (!lstatSync(path).isFile()) return undefined;
+    const entry = lstatSync(path);
+    if (!entry.isFile()) return undefined;
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
       const buffer = Buffer.alloc(512);
       const read = readSync(fd, buffer, 0, buffer.length, 0);
       const match = TEST_RUN_LOG_HEADER_RE.exec(buffer.subarray(0, read).toString("utf8"));
       if (!match) return undefined;
-      return { command: match[1]!, exitCode: match[3] === "true" || match[2] === "null" ? -1 : Number(match[2]) };
+      return {
+        command: match[1]!,
+        exitCode: match[3] === "true" || match[2] === "null" ? -1 : Number(match[2]),
+        ...(match[4] === undefined ? {} : { project: match[4], tree: match[5]! }),
+        mtimeSeconds: Math.floor(entry.mtimeMs / 1000),
+      };
     } finally {
       closeSync(fd);
     }
@@ -4727,14 +4740,31 @@ function readTestRunLog(stateDir: string, id: string): { command: string; exitCo
   }
 }
 
-/** Bullet entries of a level-2 plan section; undefined when the section is absent. */
-function planDocSectionBullets(document: string, heading: string): string[] | undefined {
+/** Non-fenced lines of a level-2 plan section; undefined when the section is absent. */
+function planDocSectionLines(document: string, heading: string): string[] | undefined {
   const headings = scanPlanDocHeadings(document);
   const found = headings.find((entry) => entry.level === 2 && entry.text === heading);
   if (!found) return undefined;
   const next = headings.find((entry) => entry.index > found.index && entry.level <= 2);
-  return document.split("\n").slice(found.index + 1, next?.index)
-    .map((line) => /^- `?([^`\s]+)`?\s*$/.exec(line)?.[1])
+  const out: string[] = [];
+  let fence: { character: string; length: number } | undefined;
+  for (const raw of document.split("\n").slice(found.index + 1, next?.index)) {
+    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    if (fence) {
+      if (new RegExp(`^[ \\t]{0,3}${fence.character}{${fence.length},}[ \\t]*$`).test(line)) fence = undefined;
+      continue;
+    }
+    const opening = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+    if (opening) { fence = { character: opening[1]![0]!, length: opening[1]!.length }; continue; }
+    out.push(line);
+  }
+  return out;
+}
+
+/** Bullet entries of a level-2 plan section (fenced code is not scope); undefined when the section is absent. */
+function planDocSectionBullets(document: string, heading: string): string[] | undefined {
+  return planDocSectionLines(document, heading)
+    ?.map((line) => /^- `?([^`\s]+)`?\s*$/.exec(line)?.[1])
     .filter((entry): entry is string => entry !== undefined);
 }
 
@@ -4809,10 +4839,18 @@ export function buildGateVerdictAutoOp(ctx: OpContext): OpHandler {
     }
     // The line counts must describe exactly the stage's changed paths, or they are unusable.
     if (numstat && numstat.map((entry) => entry.path).sort().join("\0") !== [...stagePaths].sort().join("\0")) numstat = undefined;
-    // Test status is read from the broker's own testRun logs: the exit code is the broker's observation, not the caller's.
+    // Test status is read from the broker's own testRun logs, and only a log whose header binds it to THIS
+    // project and the stage result's tree, and that is newer than the pinned result, counts as evidence
+    // for the staged content. Anything else is dropped, so the tests check is missing (fail closed).
+    const treeRun = await runHostStep(ctx, ["git", "rev-parse", "--verify", `${stageResult}^{tree}`], projectRoot);
+    const timeRun = await runHostStep(ctx, ["git", "show", "-s", "--format=%ct", stageResult], projectRoot);
+    const stageTree = treeRun.status === 0 ? treeRun.stdout.trim() : undefined;
+    const stageSeconds = timeRun.status === 0 && /^\d+$/.test(timeRun.stdout.trim()) ? Number(timeRun.stdout.trim()) : undefined;
     const testResults = testRunRefs
       .map((id) => readTestRunLog(ctx.config.stateDir, id))
-      .filter((entry): entry is { command: string; exitCode: number } => entry !== undefined);
+      .filter((entry): entry is TestRunLog =>
+        entry !== undefined && stageTree !== undefined && stageSeconds !== undefined &&
+        entry.project === projectID && entry.tree === stageTree && entry.mtimeSeconds >= stageSeconds);
 
     return withPlanDocLock(destination, async () => {
       const documentStat = lstatIfExists(destination);
@@ -4824,6 +4862,10 @@ export function buildGateVerdictAutoOp(ctx: OpContext): OpHandler {
         if (!new RegExp(`(?:^|[^A-Za-z0-9._-])${id.replace(/\./g, "\\.")}(?![A-Za-z0-9._-])`).test(specText)) {
           throw new ValidationError(`GATE_AUTO_CRITERION_UNKNOWN: ${id} does not appear in the plan document`);
         }
+      }
+      const planTasks = (planDocSectionLines(current, "Tasks") ?? []).join("\n");
+      if (!new RegExp(`(?:^|[^A-Za-z0-9._-])${taskId.replace(/\./g, "\\.")}(?![A-Za-z0-9._-])`).test(planTasks)) {
+        throw new ValidationError(`GATE_AUTO_TASK_UNKNOWN: ${taskId} is not in the plan's Tasks section`);
       }
       // plan-vs-spec has no diff and no test run to check: every check is missing, so it can only route to the spec check.
       const deterministic = runDeterministicChecks({
@@ -4859,6 +4901,11 @@ export function buildGateVerdictAutoOp(ctx: OpContext): OpHandler {
           return { ...summary, replayed: true, verdict: "PASS", path: relative, verdictHash: gateVerdictHash(latest.line) };
         }
         throw new PolicyError(`GATE_AUTO_PASS_EXISTS: ${taskId} already has a PASS; code never adds a second or conflicting one`);
+      }
+      // The stage may have been rejected or replaced since it was read: re-check it under the lock, immediately before the append.
+      const again = (await stageShow(ctx, payload.chainID as string, payload.n as number)).stage;
+      if ((again.state !== "READY" && again.state !== "APPROVED") || again.result !== stageResult) {
+        throw new ValidationError(`GATE_AUTO_STAGE_STATE: stage ${payload.n} changed to ${again.state} before the verdict was recorded`);
       }
       const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
       const probabilities = [...criteria].sort((a, b) => a.id.localeCompare(b.id)).map((entry) => `${entry.id}=${entry.p}`).join(",");
