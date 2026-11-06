@@ -94,6 +94,7 @@
     "host_gh_issue_create": "ask",
     "host_plan_append": "ask",
     "host_plan_write": "allow",
+    "host_plan_archive": "allow",
     "host_task_mark": "allow",
     "host_test_run": "allow",
     "host_gate_verdict": "allow",

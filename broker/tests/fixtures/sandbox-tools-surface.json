@@ -313,6 +313,17 @@
       "asks": 0
     },
     {
+      "name": "host_plan_archive",
+      "description": "Archive one finished odd/tasks or odd/mini plan document by moving it to odd/<target>/archive/<name>.md and committing exactly that move (docs(odd): archive <target>/<name>). The move is fixed and same-repository; the caller cannot choose a path or argv. No approval is requested because the commit record is the compensating control. Refuses a missing source, occupied destination, escaping/protected path, and a staged/conflicted entry on either path; a commit failure rolls the move back. Returns JSON.",
+      "args": [
+        "target",
+        "name",
+        "note"
+      ],
+      "execute": "function",
+      "asks": 0
+    },
+    {
       "name": "host_task_mark",
       "description": "Record a PM-authored task mark with broker-derived review tier from evidenceCommit. Assessment failure means high tier. Only PM identities may call this tool. A gated tick requires gateRef: the verdictHash returned by host_gate_verdict for the latest PASS on this task, required by the broker whenever the document has a `## Gates` section; omitting it fails with TASK_MARK_GATE_REF_REQUIRED. evidenceBaseRef is the base commit for the review assessment; omit it to let the broker use the evidence commit's first parent. Returns JSON.",
       "args": [

@@ -96,6 +96,7 @@ import {
   buildTestRunOp,
   buildPlanDocAppendOp,
   buildPlanDocWriteOp,
+  buildPlanArchiveOp,
   buildGateVerdictOp,
   buildTaskMarkOp,
   buildReviewMaterializeOp,
@@ -944,6 +945,8 @@ export class BrokerServer {
         return buildPlanDocAppendOp(this.ctx)(req);
       case "planDocWrite":
         return buildPlanDocWriteOp(this.ctx)(req);
+      case "planArchive":
+        return buildPlanArchiveOp(this.ctx)(req);
       case "taskMark":
         return buildTaskMarkOp(this.ctx)(req);
       case "testRun":

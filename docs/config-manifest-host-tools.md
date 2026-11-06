@@ -330,7 +330,19 @@ are already-retired tools and are not registered.
 | `host_sandbox_result_install` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:583`; op `sandboxResultInstall`; mutation list `validation.ts:811-829`; payload `validation.ts:988`; fragment `sandbox-permissions.jsonc:83` |
 | `host_gh_issue_create` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:980`; op `ghIssueCreate` `service.ts:1947`; `validation.ts:769`; fragment `:92` |
 | `host_plan_append` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:1003`; `service.ts:2270`; `validation.ts:776`; fragment `:93` |
+| `host_plan_archive` | mutation | none (no prompt) | planner/pm per target allowlist, plus configured read-only orchestrators; payload agent must equal the bound identity | plugin `lib/tool-specs-host-ops.ts`; op `planArchive` and handler `service.ts`; payload `validation.ts`; classifications `role-policy.ts` |
 | `host_register_project` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:1280`; `service.ts:2038`; `validation.ts:770`; fragment `:94` |
+
+`host_plan_archive` is a fixed same-repository move of `odd/<target>/<name>.md` to
+`odd/<target>/archive/<name>.md` (`target` is exactly `tasks` or `mini`; fields are
+`projectDir`, `target`, `name`, `note`, `agent`). It commits exactly the two move paths
+with `docs(odd): archive <target>/<name>`, requests no approval, and refuses a missing
+source, occupied destination, protected/escaping path, nonregular or hardlinked source, a
+staged/conflicted entry on either path, and an agent outside the target allowlist. A commit
+failure restores the source and its index entries; a failed move-back reports
+`PLAN_ARCHIVE_ROLLBACK_FAILED` with both relative paths. Like every plugin fragment in this
+manifest, the tool row is a manual delivery: it is NOT INSTALLED until the user merges and
+restarts.
 
 ### 5e. Side table — `sandbox_*` family (same plugin)
 

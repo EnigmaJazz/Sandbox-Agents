@@ -62,6 +62,7 @@ export type Operation =
   | "sddAttemptGrant"
   | "planDocAppend"
   | "planDocWrite"
+  | "planArchive"
   | "taskMark"
   | "testRun"
   | "gateVerdict"
@@ -161,6 +162,7 @@ export const SANDBOX_GUARD_CLASS = {
   sddAttemptGrant: "exempt-from-sandbox-guard",
   planDocAppend: "exempt-from-sandbox-guard",
   planDocWrite: "exempt-from-sandbox-guard",
+  planArchive: "exempt-from-sandbox-guard",
   taskMark: "exempt-from-sandbox-guard",
   testRun: "exempt-from-sandbox-guard",
   gateVerdict: "exempt-from-sandbox-guard",
@@ -245,6 +247,7 @@ export const OPERATIONS: readonly Operation[] = [
   "sddAttemptGrant",
   "planDocAppend",
   "planDocWrite",
+  "planArchive",
   "taskMark",
   "testRun",
   "gateVerdict",
@@ -409,6 +412,24 @@ export interface PlanDocWritePayload {
   name: string;
   content: string;
   expectedRevision: number;
+  note: string;
+  agent: string;
+}
+
+/** Fixed move of one finished plan document into its archive directory. */
+export interface PlanArchivePayload {
+  projectDir: string;
+  target: "tasks" | "mini";
+  name: string;
+  note: string;
+  agent: string;
+}
+
+/** Fixed move of one finished plan document into its archive directory. */
+export interface PlanArchivePayload {
+  projectDir: string;
+  target: "tasks" | "mini";
+  name: string;
   note: string;
   agent: string;
 }

@@ -50,7 +50,7 @@ test("the recorded baseline lists every expected tool group", () => {
   for (const required of ["sandbox_read", "sandbox_apply", "host_git_commit", "host_review_start", "host_register_project", "host_orca_report"]) {
     expect(names).toContain(required);
   }
-  expect(names.length).toBe(43);
+  expect(names.length).toBe(44);
 });
 
 test("approval prompts are preserved: 20 ctx.ask call sites, as in the pre-P0 plugin (the 21st grep hit was a header comment)", () => {

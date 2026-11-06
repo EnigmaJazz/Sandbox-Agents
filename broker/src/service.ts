@@ -216,7 +216,7 @@ export function authorizeHostDispatch(
       throw new PolicyError(`TASK_MARK_PM_ONLY: host operation "${operation}" requires a PM identity`);
     }
     if (
-      (operation === "planDocWrite" && trusted && (isPlanRole || ctx.config.readOnlyAgents.includes(trusted))) ||
+      ((operation === "planDocWrite" || operation === "planArchive") && trusted && (isPlanRole || ctx.config.readOnlyAgents.includes(trusted))) ||
       (operation === "gateVerdict" && isPlanRole) ||
       (operation === "taskMark" && normalizeRoleKey(trusted ?? "") === "pm")
     ) return access;
@@ -2643,6 +2643,8 @@ interface HostStepResult {
   status: number | null;
   stdout: string;
   stderr: string;
+  /** The runner reported a timeout: the step outcome is ambiguous, not a plain failure. */
+  timedOut: boolean;
   /** stdout reached the byte cap (spawn flag or redaction truncation). */
   stdoutTruncated: boolean;
   /** stderr reached the byte cap (spawn flag or redaction truncation). */
@@ -2673,6 +2675,7 @@ async function runHostStep(
     status: result.status,
     stdout: stdout.text,
     stderr: stderr.text,
+    timedOut: result.timedOut === true,
     stdoutTruncated: result.outputTruncated === true || stdout.truncated,
     stderrTruncated: result.stderrTruncated === true || stderr.truncated,
   };
@@ -4735,6 +4738,334 @@ export function buildPlanDocWriteOp(ctx: OpContext): OpHandler {
       return { ...written, ...commit };
     });
     return { target: payload.target, path: relative, ...result };
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Plan document archive (fixed same-repository move + path-scoped commit)
+// ---------------------------------------------------------------------------
+
+interface PlanArchiveIndexEntry {
+  mode: string;
+  sha: string;
+}
+
+class PlanArchiveUncertainError extends StateError {}
+
+export function planArchiveRelativePaths(
+  target: "tasks" | "mini",
+  name: string,
+): { source: string; destination: string } {
+  return { source: `odd/${target}/${name}.md`, destination: `odd/${target}/archive/${name}.md` };
+}
+
+/** Only the two matching archive layouts form a valid pair; never a generic regex. */
+export function assertPlanArchivePair(
+  target: unknown,
+  name: unknown,
+  source: unknown,
+  destination: unknown,
+): void {
+  if (target !== "tasks" && target !== "mini") {
+    throw new ValidationError("PLAN_ARCHIVE_TARGET_INVALID: target must be tasks or mini");
+  }
+  const expected = planArchiveRelativePaths(target, String(name));
+  if (source !== expected.source || destination !== expected.destination) {
+    throw new ValidationError(`PLAN_ARCHIVE_PATH_ESCAPE: ${String(source)} -> ${String(destination)}`);
+  }
+}
+
+function planArchiveFailure(code: string, result: HostStepResult): StateError {
+  const detail = planDocCommitError(result.stderr) ||
+    (result.timedOut ? "git step timed out" : `git exited ${String(result.status)}`);
+  return new StateError(`${code}: ${detail}`);
+}
+
+async function planArchiveIndexEntries(
+  ctx: OpContext,
+  projectRoot: string,
+  paths: readonly string[],
+): Promise<Map<string, PlanArchiveIndexEntry>> {
+  const result = await runHostStep(
+    ctx,
+    ["git", "ls-files", "--stage", "-z", "--", ...paths],
+    projectRoot,
+    PLAN_DOC_COMMIT_TIMEOUT_MS,
+    { ...PLAN_DOC_COMMIT_ENV },
+  );
+  if (result.status !== 0) throw planArchiveFailure("PLAN_ARCHIVE_INDEX_UNREADABLE", result);
+  const entries = new Map<string, PlanArchiveIndexEntry>();
+  for (const record of result.stdout.split("\0")) {
+    const tab = record.indexOf("\t");
+    if (tab < 0) continue;
+    const [mode, sha] = record.slice(0, tab).split(" ");
+    if (mode && sha) entries.set(record.slice(tab + 1), { mode, sha });
+  }
+  return entries;
+}
+
+/** Refuse preexisting staged or conflicted entries on the two participating paths. */
+async function assertPlanArchiveIndexClean(
+  ctx: OpContext,
+  projectRoot: string,
+  paths: readonly string[],
+): Promise<void> {
+  const result = await runHostStep(
+    ctx,
+    ["git", "status", "--porcelain=v1", "-z", "--", ...paths],
+    projectRoot,
+    PLAN_DOC_COMMIT_TIMEOUT_MS,
+    { ...PLAN_DOC_COMMIT_ENV },
+  );
+  if (result.status !== 0) throw planArchiveFailure("PLAN_ARCHIVE_INDEX_UNREADABLE", result);
+  for (const record of result.stdout.split("\0")) {
+    const code = record.slice(0, 2);
+    if (!/^[ MADRCUT?!]{2}$/.test(code) || record[2] !== " ") continue;
+    if (code === "??" || code === "!!" || code[0] === " " || code[0] === "?") continue;
+    throw new ValidationError(`PLAN_ARCHIVE_INDEX_DIRTY: ${record.slice(3)}`);
+  }
+}
+
+/** Restore only the two path-scoped index entries captured before the move. */
+async function restorePlanArchiveIndex(
+  ctx: OpContext,
+  projectRoot: string,
+  paths: readonly string[],
+  before: Map<string, PlanArchiveIndexEntry>,
+): Promise<void> {
+  for (const path of paths) {
+    const entry = before.get(path);
+    const argv = entry
+      ? ["git", "update-index", "--add", "--cacheinfo", `${entry.mode},${entry.sha},${path}`]
+      : ["git", "update-index", "--force-remove", "--", path];
+    const result = await runHostStep(
+      ctx, argv, projectRoot, PLAN_DOC_COMMIT_TIMEOUT_MS, { ...PLAN_DOC_COMMIT_ENV },
+    );
+    if (result.status !== 0) throw planArchiveFailure(`PLAN_ARCHIVE_INDEX_RESTORE_FAILED: ${path}`, result);
+  }
+}
+
+/** Move the archived bytes back; a failure names both relative paths. */
+export function rollbackPlanArchiveMove(
+  source: string,
+  destination: string,
+  sourceRelative: string,
+  destinationRelative: string,
+  rename: (from: string, to: string) => void = renameSync,
+): void {
+  try {
+    rename(destination, source);
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    const error = new StateError(
+      `PLAN_ARCHIVE_ROLLBACK_FAILED: ${sourceRelative} -> ${destinationRelative}: ${detail}`,
+    );
+    (error as { cause?: unknown }).cause = cause;
+    throw error;
+  }
+}
+
+/**
+ * Reconcile an ambiguous commit result against the pre-operation HEAD and the
+ * exact two-path committed state. Never undo a commit that may have landed.
+ */
+async function reconcilePlanArchiveCommit(
+  ctx: OpContext,
+  projectRoot: string,
+  source: string,
+  destination: string,
+  preHead: string,
+): Promise<"committed" | "not-committed" | "uncertain"> {
+  try {
+    const step = (argv: string[]) =>
+      runHostStep(ctx, argv, projectRoot, PLAN_DOC_COMMIT_TIMEOUT_MS, { ...PLAN_DOC_COMMIT_ENV });
+    const head = await step(["git", "rev-parse", "HEAD"]);
+    const id = head.stdout.trim();
+    if (head.status !== 0 || head.timedOut || !/^[0-9a-f]{40}$/.test(id)) return "uncertain";
+    if (id === preHead) return "not-committed";
+    const diff = await step(["git", "diff", "--quiet", "HEAD", "--", source, destination]);
+    // `git diff --quiet` reports only through its exit status, so a killed or
+    // timed-out comparison must never be read as a completed clean tree.
+    if (diff.timedOut) return "uncertain";
+    if (diff.status === 0) return "committed";
+    return diff.status === 1 ? "not-committed" : "uncertain";
+  } catch {
+    // A spawn/runner failure is never thrown to the rollback path: a possibly
+    // committed archive must not be undone on an unreconciled lookup error.
+    return "uncertain";
+  }
+}
+
+export function buildPlanArchiveOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    const payload = payloadOf(req) as {
+      projectDir?: unknown; target?: unknown; name?: unknown; note?: unknown; agent?: unknown;
+    };
+    authorizeHostDispatch(ctx, "planArchive", req.sessionID, req.agent, "plan-writer");
+    const boundIdentity = ctx.store.get(req.sessionID)?.agent;
+    if (typeof payload.agent !== "string") {
+      throw new ValidationError("PLAN_ARCHIVE_AGENT_NOT_BOUND: agent must match the bound session identity");
+    }
+    if (!boundIdentity || payload.agent !== boundIdentity) {
+      throw new ValidationError("PLAN_ARCHIVE_AGENT_MISMATCH: agent must match the bound session identity");
+    }
+    if (payload.target !== "tasks" && payload.target !== "mini") {
+      throw new ValidationError("PLAN_ARCHIVE_TARGET_INVALID: target must be tasks or mini");
+    }
+    assertPlanDocWriteName(payload.name);
+    if (
+      typeof payload.note !== "string" || payload.note.trim().length === 0 ||
+      payload.note.trim().length > 200 || /[\r\n]/.test(payload.note)
+    ) {
+      throw new ValidationError(
+        "PLAN_ARCHIVE_NOTE_INVALID: note must be non-empty, at most 200 characters, and contain no newline",
+      );
+    }
+    const target = payload.target;
+    const allowedAgents = target === "tasks"
+      ? ctx.config.planWriterAgents
+      : [...new Set([...ctx.config.planWriterAgents, ...ctx.config.planMiniWriterAgents, ...ctx.config.readOnlyAgents])];
+    if (!allowedAgents.includes(payload.agent)) {
+      throw new ValidationError(`PLAN_ARCHIVE_AGENT_REFUSED: target=${target} allowed=[${allowedAgents.join(", ")}]`);
+    }
+    const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    const { source, destination } = planArchiveRelativePaths(target, payload.name);
+    assertPlanArchivePair(target, payload.name, source, destination);
+    const sourceAbsolute = resolve(projectRoot, source);
+    const destinationAbsolute = resolve(projectRoot, destination);
+    const protectedPatterns = [...ctx.config.protectedPaths, ...ctx.config.protectedSecurityFiles];
+    for (const relative of [source, destination]) {
+      if (!isWithin(projectRoot, resolve(projectRoot, relative))) {
+        throw new ValidationError(`PLAN_ARCHIVE_PATH_ESCAPE: ${relative}`);
+      }
+    }
+    const rejected = checkProtectedPaths([source, destination], protectedPatterns);
+    if (rejected.length > 0) throw new ValidationError(`PLAN_ARCHIVE_PROTECTED_PATH: ${rejected.join(", ")}`);
+
+    const [firstKey, secondKey] = [sourceAbsolute, destinationAbsolute].sort() as [string, string];
+    return withPlanDocLock(firstKey, () => withPlanDocLock(secondKey, async () => {
+      const paths = [source, destination];
+      const step = (argv: string[]) =>
+        runHostStep(ctx, argv, projectRoot, PLAN_DOC_COMMIT_TIMEOUT_MS, { ...PLAN_DOC_COMMIT_ENV });
+      const recheck = () => {
+        assertPlanDocWriteNoSymlinks(projectRoot, sourceAbsolute);
+        assertPlanDocWriteNoSymlinks(projectRoot, destinationAbsolute);
+        const blocked = checkProtectedPaths(paths, protectedPatterns);
+        if (blocked.length > 0) throw new ValidationError(`PLAN_ARCHIVE_PROTECTED_PATH: ${blocked.join(", ")}`);
+      };
+
+      recheck();
+      const sourceStat = lstatIfExists(sourceAbsolute);
+      if (sourceStat === undefined) throw new ValidationError(`PLAN_ARCHIVE_SOURCE_MISSING: ${source}`);
+      if (!sourceStat.isFile()) throw new ValidationError(`PLAN_ARCHIVE_NOT_REGULAR: ${source}`);
+      if (sourceStat.nlink > 1) {
+        throw new ValidationError(`PLAN_ARCHIVE_HARDLINK_REFUSED: ${source} link count=${sourceStat.nlink}`);
+      }
+      if (lstatIfExists(destinationAbsolute) !== undefined) {
+        throw new ValidationError(`PLAN_ARCHIVE_DESTINATION_EXISTS: ${destination}`);
+      }
+
+      const indexBefore = await planArchiveIndexEntries(ctx, projectRoot, paths);
+      await assertPlanArchiveIndexClean(ctx, projectRoot, paths);
+      const preHeadResult = await step(["git", "rev-parse", "HEAD"]);
+      const preHead = preHeadResult.status === 0 ? preHeadResult.stdout.trim() : "";
+
+      mkdirSync(dirname(destinationAbsolute), { recursive: true, mode: 0o755 });
+      recheck();
+      if (lstatIfExists(destinationAbsolute) !== undefined) {
+        throw new ValidationError(`PLAN_ARCHIVE_DESTINATION_EXISTS: ${destination}`);
+      }
+      if (lstatIfExists(sourceAbsolute) === undefined) {
+        throw new ValidationError(`PLAN_ARCHIVE_SOURCE_MISSING: ${source}`);
+      }
+
+      let moved = false;
+      try {
+        renameSync(sourceAbsolute, destinationAbsolute);
+        moved = true;
+        fsyncPlanDocDirectory(dirname(destinationAbsolute));
+        const add = await step(["git", "add", "-A", "--", source, destination]);
+        if (add.status !== 0 || add.timedOut) throw planArchiveFailure("PLAN_ARCHIVE_STAGE_FAILED", add);
+        const message = `docs(odd): archive ${target}/${payload.name}`;
+        let commit: HostStepResult;
+        try {
+          commit = await step(["git", "commit", "-m", message, "--", source, destination]);
+        } catch (spawnError) {
+          // A rejected commit invocation is ambiguous: the runner can fail after
+          // the child updated HEAD. Reconcile against the pre-operation HEAD; a
+          // commit that may have landed is never reverse-renamed.
+          const reconciled = await reconcilePlanArchiveCommit(ctx, projectRoot, source, destination, preHead);
+          if (reconciled === "committed") {
+            return {
+              target, path: source, archivedPath: destination, committed: true,
+              commitWarning: "commit spawn failed, but HEAD advanced and both paths are committed",
+            };
+          }
+          if (reconciled === "uncertain") {
+            throw new PlanArchiveUncertainError(
+              `PLAN_ARCHIVE_UNCERTAIN_STATE: ${source} -> ${destination}: commit spawn failed and the outcome could not be reconciled; the move was not undone`,
+            );
+          }
+          const failure = new StateError(
+            `PLAN_ARCHIVE_COMMIT_FAILED: commit spawn failed: ${spawnError instanceof Error ? spawnError.message : String(spawnError)}`,
+          );
+          (failure as { cause?: unknown }).cause = spawnError;
+          throw failure;
+        }
+        if (commit.status !== 0 || commit.timedOut) {
+          // Reconcile every failed/ambiguous commit against the pre-operation
+          // HEAD: an unchanged HEAD is cheaply "not-committed", while an
+          // advanced HEAD protects post-commit-hook and signal races (e.g. a
+          // commit killed with 143 after it updated HEAD). An unborn HEAD with a
+          // plain nonzero exit has no commit to protect and still rolls back.
+          // A status-zero timeout must also reconcile: `timeout` can leave the
+          // commit applied even when the runner reports success.
+          const reconciled = preHead !== "" || commit.timedOut || commit.status === null
+            ? await reconcilePlanArchiveCommit(ctx, projectRoot, source, destination, preHead)
+            : "not-committed";
+          if (reconciled === "committed") {
+            return {
+              target, path: source, archivedPath: destination, committed: true,
+              commitWarning: "commit result was ambiguous, but HEAD advanced and both paths are committed",
+            };
+          }
+          if (reconciled === "uncertain") {
+            throw new PlanArchiveUncertainError(
+              `PLAN_ARCHIVE_UNCERTAIN_STATE: ${source} -> ${destination}: commit outcome could not be reconciled; the move was not undone`,
+            );
+          }
+          throw planArchiveFailure("PLAN_ARCHIVE_COMMIT_FAILED", commit);
+        }
+        let commitID: string | undefined;
+        let commitWarning: string | undefined;
+        try {
+          const head = await step(["git", "rev-parse", "HEAD"]);
+          const id = head.stdout.trim();
+          if (head.status === 0 && /^[0-9a-f]{40}$/.test(id)) commitID = id;
+          else commitWarning = planDocCommitError(head.stderr) || "git rev-parse HEAD returned no commit id";
+        } catch (error) {
+          commitWarning = planDocCommitError(error instanceof Error ? error.message : String(error)) ||
+            "git rev-parse HEAD failed";
+        }
+        return {
+          target, path: source, archivedPath: destination, committed: true,
+          ...(commitID === undefined ? {} : { commit: commitID }),
+          ...(commitWarning === undefined ? {} : { commitWarning }),
+        };
+      } catch (error) {
+        if (!moved || error instanceof PlanArchiveUncertainError) throw error;
+        rollbackPlanArchiveMove(sourceAbsolute, destinationAbsolute, source, destination);
+        try {
+          await restorePlanArchiveIndex(ctx, projectRoot, paths, indexBefore);
+        } catch (indexError) {
+          const detail = indexError instanceof Error ? indexError.message : String(indexError);
+          const failure = new StateError(`PLAN_ARCHIVE_ROLLBACK_FAILED: ${source} -> ${destination}: ${detail}`);
+          (failure as { cause?: unknown }).cause = error;
+          throw failure;
+        }
+        throw error;
+      }
+    }));
   };
 }
 

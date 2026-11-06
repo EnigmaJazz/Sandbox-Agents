@@ -170,6 +170,32 @@ export const hostOpsToolSpecs = {
     },
   }),
 
+  host_plan_archive: defineTool({
+    description:
+      "Archive one finished odd/tasks or odd/mini plan document by moving it to " +
+      "odd/<target>/archive/<name>.md and committing exactly that move " +
+      "(docs(odd): archive <target>/<name>). The move is fixed and same-repository; the caller " +
+      "cannot choose a path or argv. No approval is requested because the commit record is the " +
+      "compensating control. Refuses a missing source, occupied destination, escaping/protected " +
+      "path, and a staged/conflicted entry on either path; a commit failure rolls the move back. " +
+      "Returns JSON.",
+    args: {
+      target: z.enum(["tasks", "mini"]),
+      name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+      note: z.string().min(1).max(200),
+    },
+    execute: async (args, ctx) => {
+      // The exact-move commit is the compensating control for this no-approval archive.
+      const c = await client();
+      const result = await c.request("planArchive", ctx.sessionID, {
+        projectDir: currentProjectDirectory(ctx.directory),
+        ...args,
+        agent: ctx.agent,
+      }, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
+
   host_task_mark: defineTool({
     description:
       "Record a PM-authored task mark with broker-derived review tier from evidenceCommit. " +
