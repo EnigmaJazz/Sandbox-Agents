@@ -107,7 +107,8 @@
       "/home/james/.nanobot/workspace",
       "$HOME/.local/share/opencode-v2/prefix",
       "$HOME/.local/share/opencode-v2/config",
-      "$HOME/.local/share/claude"
+      "$HOME/.local/share/claude",
+      "/home/james/ai-workspace/worktrees"
     ],
     "deny": [
       "$HOME/.ssh",

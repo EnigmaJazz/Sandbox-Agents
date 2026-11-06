@@ -108,7 +108,8 @@
       "/home/james/omni-router-setup",
       "/home/james/mem-opt",
       "/home/james/agent-sandbox-integration",
-      "/home/james/.nanobot/workspace"
+      "/home/james/.nanobot/workspace",
+      "/home/james/ai-workspace/worktrees"
     ],
     "deny": [
       "$HOME/.ssh",
