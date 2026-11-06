@@ -64,9 +64,19 @@ Deleting, renaming or force-moving a branch; `--force`/`-f`; remote creation, pu
 ROUTE: substantial feature | intent: authorized change | route: ODD secure / direct delegated writer | specialist: `pr-comment-resolver` (writer) | basis: WORKFLOW.md.
 
 - Triggers fired: **writer** (two or more non-trivial files) and **mapping** (bounded inline evidence before dispatch).
-- Environment deviations, recorded rather than papered over: `pm-odd`, `pm-systematic`, `odd-apply`, `gentle-ai-worker` and the `advisor-*-pre` / `advisor-*-post` agents are **not registered** in this session; `systematic-implementer` cannot dispatch (variant unavailable). The working writer lane is `pr-comment-resolver`. No Planner Gate 1/Gate 2 and no advisor cycle can run, so the owner-authored fixed contract is the design authority for this unit.
-- Pre-code advice: discharged by that fixed contract (approach, refusals, non-goals and acceptance criteria specified before dispatch).
+- Environment deviations, recorded rather than papered over: `pm-odd`, `pm-systematic`, `odd-apply`, `gentle-ai-worker` and the `advisor-*-pre` / `advisor-*-post` agents were **not registered** in the creating session; `systematic-implementer` cannot dispatch (variant unavailable). The working writer lane is `pr-comment-resolver`.
+- Pre-code advice: discharged by the owner-authored fixed contract (approach, refusals, non-goals and acceptance criteria specified before dispatch).
 - Blocked then resumed: from this linked worktree every host control-plane tool refused with `host tool requires the exact approved project root` until the owner fixed and restarted the broker on 2026-11-06. `host_review_mode_status` now returns `receipt-driven development: on (decided by global)`.
+
+### Attempt 2 — Orca dispatch (2026-11-06)
+
+ROUTE: substantial feature | intent: authorized change | route: ODD secure / PM (`pm-odd`) | specialist: `pm-odd` (dispatcher), writer per PM selection | basis: WORKFLOW.md.
+
+- Authorization: the Orca dispatch authorizes implementing `host_git_branch` under spec D33 and supersedes `odd/tasks/host-archive-and-branch-tools.md`, which left branch unit B deferred and unauthorized.
+- Worktree: `/home/james/ai-workspace/worktrees/agent-sandbox-integration/host-git-branch`, branch `feat/host-git-branch`, merged with current master; unit-start HEAD `ffe5fe7923f141f439bde3b809eaba1273d711d8`, dirty paths none.
+- Controlled baseline (`host_test_run` runner `broker-unit`, worktree digest `sha256:6e3a507c196364797ee6e2007dce9b651f776ceacb53934b828243329f373975`): **1888 pass, 9 skip, 1 fail** — the single failure is the known `tests/v2-launch.test.ts:94` "V2 nono profile > reaches the same hosts and project roots as V1, with the same isolation" (`platform.claude.com` extra allow-domain).
+- Pre-code advice: the dispatch requires the Planner advisor cycle. `planner`, `advisor-*-pre` and `advisor-*-post` are not in this runtime's registered subagent surface, so the cycle is re-attempted through `pm-odd` and recorded as unavailable if it cannot be dispatched. The owner-authored fixed contract above remains the design authority in that case.
+- Frozen draft: a previous writer result (`refs/opencode-sandbox/result/ses_e4dd0b405ffe6cUen4IHE6EQRR`, commit `47d9a9d`, 3 paths) is unreviewed and is **not** bound to this worktree project (`host_sandbox_result` returns `sandbox session ... is not bound to this project`). It is treated as an unseen draft and is not installed.
 
 ## Review-size forecast
 
@@ -86,11 +96,13 @@ Indivisible host-operation change: operation, authorization, validation, classif
 ## Log
 
 - 2026-11-06: tracker created after the broker worktree fix; RDD `on` (global).
+- 2026-11-06: attempt 2 under an Orca dispatch. Baseline captured: 1888 pass / 9 skip / 1 known fail at HEAD `ffe5fe7`. Route recorded as `pm-odd`. Frozen prior result unreviewed and not bound to this project; not installed.
 
 ## Next step
 
-Dispatch the writer with the fixed contract, test-first.
+Dispatch `pm-odd` with the fixed contract, test-first.
 
 
 ## Revisions
 - r1 2026-11-06T18:46:14Z gentle-orchestrator: Create tracker for the host_git_branch host tool (spec D33)
+- r2 2026-11-06T22:48:22Z gentle-orchestrator: Attempt 2: Orca dispatch, pm-odd route, baseline recorded
