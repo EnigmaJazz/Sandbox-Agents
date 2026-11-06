@@ -51,6 +51,7 @@ import {
   assertPayloadKeys,
   assertPositiveInt,
   assertRegisterableProjectPath,
+  assertRegisterableWorktreeTarget,
   assertRefComponent,
   assertSandboxPath,
   HostToolPolicy,
@@ -3740,11 +3741,18 @@ export function buildRegisterProjectOp(ctx: OpContext): OpHandler {
       dryRun?: unknown;
       createRemote?: unknown;
       makePublic?: unknown;
+      worktreeRoot?: unknown;
     };
     authorizeHostDispatch(ctx, "registerProject", req.sessionID, req.agent);
+    if (payload.worktreeRoot !== undefined && typeof payload.worktreeRoot !== "boolean") {
+      throw new ValidationError("worktreeRoot must be a boolean");
+    }
+    const worktreeRoot = payload.worktreeRoot === true;
     // Forward the canonical resolved path: the registration script writes this
     // exact value into the sourced launcher conf, never the caller's alias.
-    const target = assertRegisterableProjectPath(payload.path);
+    const target = worktreeRoot
+      ? assertRegisterableWorktreeTarget(payload.path)
+      : assertRegisterableProjectPath(payload.path);
     if (payload.dryRun !== undefined && typeof payload.dryRun !== "boolean") {
       throw new ValidationError("dryRun must be a boolean");
     }
@@ -3757,11 +3765,15 @@ export function buildRegisterProjectOp(ctx: OpContext): OpHandler {
     if (payload.makePublic === true && payload.createRemote !== true) {
       throw new ValidationError("--public requires --create-remote");
     }
+    if (worktreeRoot && (payload.createRemote === true || payload.makePublic === true)) {
+      throw new ValidationError("worktreeRoot cannot be combined with createRemote or makePublic");
+    }
     const repoRoot = resolve(join(import.meta.dir, "../.."));
     const argv: string[] = ["bun", "scripts/register-project.ts"];
     if (payload.dryRun === true) argv.push("--dry-run");
     if (payload.createRemote === true) argv.push("--create-remote");
     if (payload.makePublic === true) argv.push("--public");
+    if (worktreeRoot) argv.push("--worktree-root");
     argv.push(target);
     const result = await ctx.git.spawn(argv, {
       cwd: repoRoot,

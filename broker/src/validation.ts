@@ -12,7 +12,7 @@
  * - shell metacharacters rejected in argv (defence-in-depth: we spawn without
  *   a shell, but no payload may be safe to pipe through one either).
  */
-import { realpathSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { FORBIDDEN_WORKER_FIELDS, type BrokerResponseEnvelope, OPERATIONS } from "./types.ts";
 
@@ -674,6 +674,56 @@ export function assertRegisterableProjectPath(
   return canonical;
 }
 
+/** Project-folder name rule of worktree-root mode: the same shape as a broker project id. */
+const WORKTREE_PROJECT_NAME_RE = /^[a-z][a-z0-9._-]{0,63}$/;
+
+/**
+ * `host_register_project` target in worktree-root mode (D36): `<root>/<project>`, where `<project>` is a
+ * folder the registration script creates and `<root>` is what gets registered. Neither has to exist yet,
+ * but the parent of the root must (only the root and the project folder are ever created), and the same
+ * bans as {@link assertRegisterableProjectPath} apply to the lexical and the canonical form. Returns the
+ * canonical `<root>/<project>` path, the only value forwarded to the script.
+ */
+export function assertRegisterableWorktreeTarget(
+  value: unknown,
+  home: string = process.env.HOME ?? "",
+): string {
+  if (typeof value !== "string" || value.length === 0 || !isAbsolute(value)) {
+    throw new ValidationError("path must be an absolute string");
+  }
+  assertMaxBytes(value, REGISTER_PROJECT_PATH_MAX_BYTES, "path");
+  assertNoControlChars(value, "path");
+  const project = basename(value);
+  const root = dirname(value);
+  if (!WORKTREE_PROJECT_NAME_RE.test(project)) {
+    throw new ValidationError(`worktree project folder name must match ${WORKTREE_PROJECT_NAME_RE}`);
+  }
+  assertRegistrationRootAllowed(root, home);
+  assertRegistrationRootAllowed(value, home);
+  let canonicalRoot: string;
+  try {
+    const rootExists = existsSync(root);
+    canonicalRoot = rootExists
+      ? realpathSync(root)
+      : join(realpathSync(dirname(root)), basename(root));
+  } catch {
+    throw new ValidationError("the parent of the worktree root does not exist on the host");
+  }
+  if (!isAbsolute(canonicalRoot) || resolve(canonicalRoot) !== canonicalRoot) {
+    throw new ValidationError("worktree root must resolve to a canonical absolute path");
+  }
+  assertRegistrationRootAllowed(canonicalRoot, home);
+  const canonical = join(canonicalRoot, project);
+  assertRegistrationRootAllowed(canonical, home);
+  if (REGISTER_PROJECT_SHELL_UNSAFE_RE.test(canonical)) {
+    throw new ValidationError("path must not contain shell-active characters");
+  }
+  if (existsSync(canonicalRoot) && !statSync(canonicalRoot).isDirectory()) {
+    throw new ValidationError("worktree root is not a directory");
+  }
+  return canonical;
+}
+
 // ---------------------------------------------------------------------------
 // Host git/GH tool canonical validators (fixed argv, §31)
 // ---------------------------------------------------------------------------
@@ -1204,7 +1254,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   copyInInfo: ["hostSource", "workerPath"],
   copyIn: ["hostSource", "workerPath", "confirm"],
   policy: [],
-  registerProject: ["path", "dryRun", "createRemote", "makePublic"],
+  registerProject: ["path", "dryRun", "createRemote", "makePublic", "worktreeRoot"],
 
   // Orca report bridge: fixed binary/argv; a field the message type cannot carry
   // is refused by broker/src/orca.ts, never dropped.

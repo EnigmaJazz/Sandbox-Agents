@@ -778,6 +778,8 @@ export interface RegisterProjectPayload {
   dryRun?: boolean;
   createRemote?: boolean;
   makePublic?: boolean;
+  /** D36: `path` is `<root>/<project>`; create the project folder and register the root. */
+  worktreeRoot?: boolean;
 }
 
 /** Orca report bridge: fixed binary, fixed argv, broker-validated fields (S1–S6). */

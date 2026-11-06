@@ -332,6 +332,8 @@ are already-retired tools and are not registered.
 | `host_plan_append` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:1003`; `service.ts:2270`; `validation.ts:776`; fragment `:93` |
 | `host_register_project` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:1280`; `service.ts:2038`; `validation.ts:770`; fragment `:94` |
 
+`host_register_project` takes an optional `worktreeRoot` boolean (spec D36, `workflow_optimisation` multi-tier). With it, `path` must be `<root>/<project>`: the script creates the project folder (and the root, if its parent exists) and registers the ROOT once (read grant in both nono profiles, `BROKER_PROJECTS`, launcher root). It runs no `git init` and creates no `.atl` or `.codegraph`, and it cannot be combined with `createRemote` or `makePublic`. The project name must match `^[a-z][a-z0-9._-]{0,63}$`; the root obeys the same bans as any project, checked on the lexical and the canonical path (`validation.ts` `assertRegisterableWorktreeTarget`). The broker resolves every worktree under the registered root to that one project (`resolveProjectID`).
+
 ### 5e. Side table — `sandbox_*` family (same plugin)
 
 These are not host tools but are registered by the same plugin and complete the

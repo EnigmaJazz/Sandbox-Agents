@@ -615,12 +615,13 @@
     },
     {
       "name": "host_register_project",
-      "description": "Register a new project with the agentic sandbox system (host-side, creates .atl, updates profile/broker/launcher). Path must be absolute.",
+      "description": "Register a new project with the agentic sandbox system (host-side, creates .atl, updates profile/broker/launcher). Path must be absolute. With worktreeRoot=true the path is <root>/<project>: the project folder is created and the ROOT is registered (no git init, .atl or .codegraph), so every worktree under it is covered.",
       "args": [
         "path",
         "dryRun",
         "createRemote",
-        "makePublic"
+        "makePublic",
+        "worktreeRoot"
       ],
       "execute": "function",
       "asks": 1
