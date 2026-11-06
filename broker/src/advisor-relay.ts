@@ -24,7 +24,7 @@ import { readRelayableLensResponse } from "./advisor-records.ts";
 import { PolicyError } from "./policy.ts";
 import type { SddRuntimeExecutor, SddRuntimeResult } from "./sdd-runtime.ts";
 import type { OpContext } from "./service.ts";
-import { resolveProjectID } from "./validation.ts";
+import { resolveProjectID, baseProjectID } from "./validation.ts";
 
 type RelayContext = OpContext & {
   sddRuntime: Pick<SddRuntimeExecutor, "reviewStatus" | "reviewCaptureResult">;
@@ -51,7 +51,7 @@ export function guardExternalLensCapture(ctx: OpContext, projectDir: string, pay
   if (typeof payload.lineage !== "string") return;
   let projectId: string;
   try {
-    projectId = resolveProjectID(projectDir, ctx.config.projects);
+    projectId = baseProjectID(resolveProjectID(projectDir, ctx.config.projects));
   } catch {
     return; // the runtime refuses an unresolvable project on its own
   }
@@ -90,7 +90,7 @@ export async function relayAdvisorResponse(
       throw new PolicyError(`inputFromAdvisorResponse is exclusive: the broker supplies '${key}' itself`);
     }
   }
-  const projectId = resolveProjectID(projectDir, ctx.config.projects);
+  const projectId = baseProjectID(resolveProjectID(projectDir, ctx.config.projects));
   const stored = readRelayableLensResponse(ctx, projectId, payload.inputFromAdvisorResponse);
   const { review } = stored;
   if (!isExternalLensLineage(ctx, projectId, review.lineage)) {

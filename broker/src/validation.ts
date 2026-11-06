@@ -1387,6 +1387,53 @@ export function isWithin(parent: string, child: string): boolean {
   return child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
 }
 
+/**
+ * Worktree-root rule (D36). A registered root that is NOT itself a git checkout holds worktrees at exactly
+ * `<root>/<project>/<name>`, each with its own `.git`. Returns the canonical worktree path when `canonical`
+ * is such a worktree, the root when it is the root, and undefined otherwise. An ordinary project (a git
+ * checkout) only ever resolves to its own root, so nested checkouts stay refused.
+ */
+export function resolveWorktreeAwareRoot(root: string, canonical: string): string | undefined {
+  if (canonical === root) return root;
+  if (!isWithin(root, canonical) || existsSync(join(root, ".git"))) return undefined;
+  const rel = canonical.slice(root.length + 1).split(sep);
+  if (rel.length !== 2 || !rel.every((part) => WORKTREE_SEGMENT_RE.test(part))) return undefined;
+  return existsSync(join(canonical, ".git")) ? canonical : undefined;
+}
+
+/** One path segment of a worktree under a root; `.` and `..` are excluded by the leading-alphanumeric rule. */
+const WORKTREE_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** Separates `<rootID>~<project>~<name>`; broker project ids never contain it. */
+const WORKTREE_ID_SEP = "~";
+
+/**
+ * Look a project up by id. A virtual id `<rootID>~<project>~<name>` names a worktree under a worktree root:
+ * it resolves to that worktree's canonical path only while the worktree still satisfies the root rule.
+ */
+export function findProject<T extends { id: string; path: string }>(
+  projects: readonly T[],
+  id: string,
+): { id: string; path: string } | undefined {
+  if (!id.includes(WORKTREE_ID_SEP)) return projects.find((p) => p.id === id);
+  const [rootID, project, name, ...extra] = id.split(WORKTREE_ID_SEP);
+  if (extra.length > 0 || !rootID || !project || !name) return undefined;
+  const base = projects.find((p) => p.id === rootID);
+  if (!base) return undefined;
+  try {
+    const root = realpathSync(base.path);
+    const canonical = realpathSync(join(root, project, name));
+    const resolved = resolveWorktreeAwareRoot(root, canonical);
+    return resolved && resolved !== root ? { id, path: resolved } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The registered root's id for any project id, virtual or not (advisor sockets and records are keyed per root). */
+export function baseProjectID(id: string): string {
+  return id.split(WORKTREE_ID_SEP, 1)[0]!;
+}
+
 /** Resolve the allowed project for a directory the agent claims to work in. */
 export function resolveProjectID(
   projectDir: unknown,
@@ -1408,6 +1455,10 @@ export function resolveProjectID(
   for (const project of projects) {
     const root = realpathSync(project.path);
     if (isWithin(root, canonical)) {
+      const worktree = resolveWorktreeAwareRoot(root, canonical);
+      if (worktree && worktree !== root) {
+        return [project.id, ...canonical.slice(root.length + 1).split(sep)].join(WORKTREE_ID_SEP);
+      }
       return project.id;
     }
   }

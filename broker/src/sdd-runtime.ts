@@ -55,6 +55,7 @@ import {
   resolveProjectID,
   resolveProjectRelativePath,
   ValidationError,
+  findProject,
 } from "./validation.ts";
 
 const DEFAULT_OUTPUT_MAX_BYTES = 512 * 1024;
@@ -571,7 +572,7 @@ export class SddRuntimeExecutor {
 
   resolveProjectRoot(projectDir: unknown): string {
     const projectID = resolveProjectID(projectDir, this.options.projects);
-    const project = this.options.projects.find((entry) => entry.id === projectID);
+    const project = findProject(this.options.projects, projectID);
     if (!project) throw new ValidationError("project is not in the trusted allowlist");
     let canonicalRoot: string;
     let canonicalRequested: string;
