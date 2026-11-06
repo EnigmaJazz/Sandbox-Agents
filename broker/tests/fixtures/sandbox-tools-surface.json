@@ -402,7 +402,7 @@
     },
     {
       "name": "host_stage_reject",
-      "description": "Reject one READY or APPROVED stage of a staging chain with a revision note (stage-review agent only; owner decision, requires human approval). Records REJECTED and the note; nothing is applied or replayed. Returns JSON.",
+      "description": "Reject one READY or APPROVED stage of a staging chain with a revision note (stage-review agent only; owner decision, requires human approval). Records REJECTED and the note, and marks every later stage that is not APPLIED as STALE; nothing is applied or replayed. The stages are then re-run from the last approved tip as new attempts. A BUILDING stage whose worker was released or failed is released by naming the all-zero result commit. Returns JSON.",
       "args": [
         "chainID",
         "n",
@@ -415,6 +415,17 @@
     {
       "name": "host_stage_apply",
       "description": "Apply one APPROVED stage to the host working tree (stage-review agent only; owner decision, requires human approval). Stages apply strictly in order, from the pinned stage commit, after the divergence and symlink checks. A stage touching protected (S17) paths is refused: the owner applies it by hand. Working tree only: no commit, no index change. Returns JSON.",
+      "args": [
+        "chainID",
+        "n",
+        "result"
+      ],
+      "execute": "function",
+      "asks": 1
+    },
+    {
+      "name": "host_stage_reconcile",
+      "description": "Record APPLIED for an APPLYING stage left by a crash, or for an APPROVED protected (S17) stage the owner applied by hand (stage-review agent only; owner decision, requires human approval). The broker only reads the host: it records APPLIED when every path the stage changed equals the stage's pinned result and every earlier stage is APPLIED; otherwise it records nothing and returns the differences. Returns JSON.",
       "args": [
         "chainID",
         "n",

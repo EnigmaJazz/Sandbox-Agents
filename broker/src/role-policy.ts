@@ -183,7 +183,7 @@ export const TOOL_CLASSIFICATION_INVENTORY: Readonly<Record<string, Capability>>
   chainCreate: "MUTATE_PROJECT", chainAttach: "MUTATE_PROJECT", chainStatus: "HOST_READ_STRUCTURED",
   stageList: "HOST_READ_STRUCTURED", stageShow: "HOST_READ_STRUCTURED",
   // The owner's decisions are classed HOST_ADMIN_STRUCTURED so every identity but the stage-review role (decideStageReview, by tool name) is denied.
-  host_stage_approve: "HOST_ADMIN_STRUCTURED", host_stage_reject: "HOST_ADMIN_STRUCTURED", host_stage_apply: "HOST_ADMIN_STRUCTURED",
+  host_stage_approve: "HOST_ADMIN_STRUCTURED", host_stage_reject: "HOST_ADMIN_STRUCTURED", host_stage_apply: "HOST_ADMIN_STRUCTURED", host_stage_reconcile: "HOST_ADMIN_STRUCTURED",
   sddArchiveCompose: "MUTATE_PROJECT", sddAttemptGrant: "MUTATE_PROJECT", planDocAppend: "MUTATE_PROJECT", taskMark: "MUTATE_PROJECT",
   reviewStart: "MUTATE_PROJECT", reviewCaptureResult: "MUTATE_PROJECT", reviewCaptureUnachievable: "MUTATE_PROJECT",
   reviewAcknowledgeApproved: "MUTATE_PROJECT", reviewCaptureCorrectionPlan: "MUTATE_PROJECT", reviewCaptureRefuter: "MUTATE_PROJECT",
@@ -537,7 +537,7 @@ export function isStageReviewAgent(
 }
 
 /** The only mutating tools the stage-review role is admitted to: the owner's decisions, each behind an `ask` prompt. */
-const STAGE_DECISION_TOOLS: readonly string[] = ["host_stage_approve", "host_stage_reject", "host_stage_apply"];
+const STAGE_DECISION_TOOLS: readonly string[] = ["host_stage_approve", "host_stage_reject", "host_stage_apply", "host_stage_reconcile"];
 
 export function decideStageReview(capability: string, tool?: string): DecisionResult {
   if (capability === "READ_PROJECT" || capability === "HOST_READ_STRUCTURED") {

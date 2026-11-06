@@ -320,12 +320,12 @@ describe("apply: owner approval, strict order, pinned ref, fail closed (S80, S81
     await e.decide("stageApprove", 1);
     await e.decide("stageApprove", 2, { result: c });
     await refusedLeavesHost(e, () => e.decide("stageApply", 2, { result: c }), /stage 1/);
-    // a rejected earlier stage blocks it too
+    // a rejected earlier stage blocks it too (U3: rejecting stage 1 now marks the approved stage 2 STALE, which is what refuses it)
     const f = fixture();
     const fc = plainStage2(f);
     await f.decide("stageApprove", 2, { result: fc });
     await f.decide("stageReject", 1);
-    await refusedLeavesHost(f, () => f.decide("stageApply", 2, { result: fc }), /stage 1/);
+    await refusedLeavesHost(f, () => f.decide("stageApply", 2, { result: fc }), /STALE/);
     expect(existsSync(join(e.repo, "c.txt"))).toBe(false); // positive control: stage 2's file is observable once applied
     await e.decide("stageApply", 1);
     await e.decide("stageApply", 2, { result: c });

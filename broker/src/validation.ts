@@ -953,7 +953,7 @@ export const HOST_READ_OPERATIONS: readonly string[] = [
  * The owner's decisions on a stage. Mutations, but deliberately NOT in HOST_MUTATION_OPERATIONS:
  * no orchestrator identity is granted them; only the stage-review role may call them.
  */
-export const STAGE_DECISION_OPERATIONS: readonly string[] = ["stageApprove", "stageReject", "stageApply"];
+export const STAGE_DECISION_OPERATIONS: readonly string[] = ["stageApprove", "stageReject", "stageApply", "stageReconcile"];
 
 /** Operations only a session bound to a `stageReviewAgents` name may call (deny by default). */
 export const STAGE_REVIEW_OPERATIONS: readonly string[] = ["stageList", "stageShow", ...STAGE_DECISION_OPERATIONS];
@@ -1210,6 +1210,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   stageApprove: ["chainID", "n", "result", "confirmProtected"],
   stageReject: ["chainID", "n", "result", "note"],
   stageApply: ["chainID", "n", "result", "confirm"],
+  stageReconcile: ["chainID", "n", "result"],
   // External advisors (advisor-records.ts). No field may carry an acknowledgement token.
   advisorAsk: [
     "projectDir", "kind", "binding", "snapshot", "host", "selection", "group", "parentId",

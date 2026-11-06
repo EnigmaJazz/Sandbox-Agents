@@ -124,6 +124,7 @@ export type Operation =
   | "stageApprove"
   | "stageReject"
   | "stageApply"
+  | "stageReconcile"
   // External advisors (advisor-records.ts): evidence records, never authority.
   | "resultDiff"
   | "advisorAsk"
@@ -220,6 +221,7 @@ export const SANDBOX_GUARD_CLASS = {
   stageApprove: "exempt-from-sandbox-guard",
   stageReject: "exempt-from-sandbox-guard",
   stageApply: "exempt-from-sandbox-guard",
+  stageReconcile: "exempt-from-sandbox-guard",
   resultDiff: "exempt-from-sandbox-guard",
   advisorAsk: "exempt-from-sandbox-guard",
   advisorGet: "exempt-from-sandbox-guard",
@@ -312,6 +314,7 @@ export const OPERATIONS: readonly Operation[] = [
   "stageApprove",
   "stageReject",
   "stageApply",
+  "stageReconcile",
   "resultDiff",
   "advisorAsk",
   "advisorGet",
@@ -802,7 +805,7 @@ export interface SessionRecord {
   baselineRef?: string;
   resultRef?: string;
   /** Staging-chain membership (staging-chain.ts); `baseline` is broker-derived, never worker-supplied. */
-  chain?: { id: string; n: number; baseline: string };
+  chain?: { id: string; n: number; baseline: string; attempt?: number };
   /** Exact result-ref commit installed into the host worktree. */
   installedCommit?: string;
   /** Host commit intent persisted before git commit; retries if HEAD is unchanged and recovers a proven commit transition. */

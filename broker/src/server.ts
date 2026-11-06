@@ -66,7 +66,7 @@ import { PolicyError } from "./policy.ts";
 import { PendingQueue, QueuedTimedOutError } from "./queue.ts";
 import { reapOnDisconnect, startReaper, toReaperLogEntry, type ReaperHandle } from "./reaper.ts";
 import { drainQueue } from "./service.ts";
-import { buildChainAttachOp, buildChainCreateOp, buildChainStatusOp, buildStageApplyOp, buildStageApproveOp, buildStageListOp, buildStageRejectOp, buildStageShowOp } from "./staging-chain.ts";
+import { buildChainAttachOp, buildChainCreateOp, buildChainStatusOp, buildStageApplyOp, buildStageApproveOp, buildStageListOp, buildStageReconcileOp, buildStageRejectOp, buildStageShowOp } from "./staging-chain.ts";
 import { SANDBOX_OPERATIONS } from "./types.ts";
 import {
   buildApplyOp,
@@ -1019,6 +1019,8 @@ export class BrokerServer {
         return buildStageRejectOp(this.ctx)(req);
       case "stageApply":
         return buildStageApplyOp(this.ctx)(req);
+      case "stageReconcile":
+        return buildStageReconcileOp(this.ctx)(req);
       case "advisorAsk":
         return buildAdvisorAskOp(this.ctx)(req);
       case "advisorGet":

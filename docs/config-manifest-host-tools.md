@@ -431,7 +431,20 @@ Added with phase P2 (unit U2b) of `docs/staging/plan.md` (the table now register
 | Binding | every decision names the stage's pinned result commit (`result`); a mismatch is refused |
 | Record | append-only `<stateDir>/chains/<id>.decisions.json` (`APPROVED`, `REJECTED` + revision note, `APPLYING`, `APPLIED`, `APPLY_REFUSED`), each with the deciding session and agent and a timestamp; `stageList`/`stageShow` report the state and `history` |
 | Apply | strictly in order; only `APPROVED`; source is the pinned stage commit, never the session result ref; checks: baseline divergence (S16), plan-root paths, symlink/submodule, complete preview, `git apply --check`, then `git apply` (working tree only). A stage touching S17 paths can be approved with `confirmProtected: true` (per stage, never batched) but is never applied through this path (`applyResult`'s rule, `AGENTS.md`): apply refuses it as `APPLY_REFUSED` and the owner applies it by hand; consequently stages after it cannot apply either (open item for U3). Every refusal before `git apply` is recorded as `APPLY_REFUSED` and leaves the host unchanged; an interrupted apply stays `APPLYING` and blocks further applies until the owner reconciles it |
-| Not here | `STALE`, replay and rebuild after a reject, "approve through stage k" (unit U3 and later) |
+| Not here | merge-tree replay, "approve through stage k" (see 5i for `STALE`, rebuild and reconcile) |
+
+### 5i. Staging chains, rework and reconcile (`host_stage_reconcile`; `host_stage_reject` extended)
+
+Added with unit U3 of `docs/staging/plan.md` (the table now registers 49 tools; 24 `ctx.ask` call
+sites). NOT INSTALLED: S17 paths the owner reviews and installs.
+
+| Aspect | Value |
+|---|---|
+| Tool | `host_stage_reconcile` (`chainID`, `n`, `result`); calls `ctx.ask` first; `deny` in both permission fragments like the other decision tools; admitted to the stage-review role by tool name only (`HOST_ADMIN_STRUCTURED`) |
+| Broker operation | `stageReconcile` (`STAGE_DECISION_OPERATIONS`, payload `chainID`, `n`, `result`). Valid for an `APPLYING` stage (crash) or an `APPROVED` protected (S17) stage the owner applied by hand; every earlier stage must be `APPLIED`; the approval must name the pinned result. It only reads the host: when every path the stage changed equals the pinned result (deleted paths absent; symlinks, submodules and non-regular files count as differences) it records `APPLIED` with `reconciled: true`; otherwise it records nothing and returns `differences` |
+| Reject | `stageReject` now also records `STALE` (cause `stage <n> was rejected`) for every later stage not yet `APPLIED`, in the same write, and returns `stale: [n...]`. A `STALE` or `REJECTED` stage can never be approved, applied or rejected again |
+| Release | rejecting a `BUILDING` stage with the all-zero `result` (40 zeros) releases the claim of a worker that was released or failed; recorded as `REJECTED` |
+| Rebuild | `chainStatus.nextSnapshot` after a rejection is `{ commit: <previous stage's pinned result> }` (or `{ worktree: true }` for stage 1), offered only when that previous stage is `APPROVED` or `APPLIED`. The worker bound with `chainAttach` is a new attempt for the first `REJECTED`/`STALE` stage number. Attempt 1 keeps `stage/<n>`; attempt a > 1 is pinned create-only at `stage/<n>.<a>`; older refs are never moved. Stage status and events carry `attempt` only from attempt 2 |
 
 ### Discrepancies (explicitly flagged)
 

@@ -25,7 +25,7 @@ const stageIdArgs = {
 /** The approval prompt for a stage decision: names the stage, the exact commit and the broker's own view of it (never the agent's summary). */
 async function stageDecisionAsk(
   ctx: { sessionID: string; agent?: string },
-  permission: "host_stage_approve" | "host_stage_reject" | "host_stage_apply",
+  permission: "host_stage_approve" | "host_stage_reject" | "host_stage_apply" | "host_stage_reconcile",
   args: { chainID: string; n: number; result: string },
   extra: Record<string, unknown> = {},
 ) {
@@ -361,7 +361,9 @@ export const hostOpsToolSpecs = {
   host_stage_reject: defineTool({
     description:
       "Reject one READY or APPROVED stage of a staging chain with a revision note (stage-review agent only; owner decision, " +
-      "requires human approval). Records REJECTED and the note; nothing is applied or replayed. Returns JSON.",
+      "requires human approval). Records REJECTED and the note, and marks every later stage that is not APPLIED as STALE; " +
+      "nothing is applied or replayed. The stages are then re-run from the last approved tip as new attempts. " +
+      "A BUILDING stage whose worker was released or failed is released by naming the all-zero result commit. Returns JSON.",
     args: { ...stageIdArgs, note: z.string().min(1).max(4000) },
     execute: async (args, ctx) => {
       await ctx.ask(await stageDecisionAsk(ctx, "host_stage_reject", args, { note: args.note }));
@@ -381,6 +383,21 @@ export const hostOpsToolSpecs = {
       await ctx.ask(await stageDecisionAsk(ctx, "host_stage_apply", args));
       const c = await client();
       const result = await c.request("stageApply", ctx.sessionID, { ...args, confirm: "APPLY" }, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
+
+  host_stage_reconcile: defineTool({
+    description:
+      "Record APPLIED for an APPLYING stage left by a crash, or for an APPROVED protected (S17) stage the owner applied by hand " +
+      "(stage-review agent only; owner decision, requires human approval). The broker only reads the host: it records APPLIED " +
+      "when every path the stage changed equals the stage's pinned result and every earlier stage is APPLIED; otherwise it records " +
+      "nothing and returns the differences. Returns JSON.",
+    args: stageIdArgs,
+    execute: async (args, ctx) => {
+      await ctx.ask(await stageDecisionAsk(ctx, "host_stage_reconcile", args));
+      const c = await client();
+      const result = await c.request("stageReconcile", ctx.sessionID, args, ctx.agent);
       return JSON.stringify(result, null, 2);
     },
   }),

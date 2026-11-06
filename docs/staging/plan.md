@@ -19,6 +19,26 @@ set to the stage's baseline. It does not work on a bare ref (`assess` reports "n
 changes"). Where the review runs, and the after-apply fallback below, stay an owner decision
 (OPEN-1).
 
+## Update 2026-11-06: reject, STALE, rebuild, release and reconcile (unit U3)
+
+Implemented at the D24 scope (no merge-tree replay, no conflict hand-back):
+
+- **Reject then STALE.** `stageReject` records `REJECTED` and, in the same write, `STALE` (with the
+  cause) for every later stage that is not `APPLIED`. A `STALE` or `REJECTED` stage can never be
+  approved, applied or rejected again.
+- **Rebuild from the tip.** The first `REJECTED` or `STALE` stage number is run again as a new
+  attempt, from the previous stage's pinned result (`nextSnapshot` is `{ commit }`, or the worktree
+  for stage 1), only once that previous stage is `APPROVED` or `APPLIED`. The new attempt is pinned
+  create-only at `stage/<n>.<attempt>`; older attempts keep their refs and their history. Approve
+  and apply use the newest attempt's pinned ref, and the B1 binding (approved commit equals applied
+  commit) is per attempt. Nothing of the old attempt's content is carried over.
+- **Release a leaked claim.** Rejecting a `BUILDING` stage with the all-zero result releases a
+  claim whose worker was released or failed; the next attach takes the number as a new attempt.
+- **Reconcile.** `stageReconcile` (`host_stage_reconcile`) records `APPLIED` (marked `reconciled`)
+  for an `APPLYING` stage left by a crash, or an `APPROVED` protected stage the owner applied by
+  hand, only after reading the host and finding every changed path equal to the pinned result. It
+  never writes the host; a mismatch records nothing and returns the differences.
+
 ## Goal
 
 Agents keep working on a project without waiting for the user. Each finished piece of work is
