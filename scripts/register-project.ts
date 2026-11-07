@@ -37,6 +37,7 @@ import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   realpathSync,
@@ -44,7 +45,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 const HOME = process.env.HOME ?? "";
 const PROFILE_PATH = join(
@@ -171,6 +172,81 @@ export function planWorktreeTarget(
   const banned = bannedReason(root, home) ?? bannedReason(target, home);
   if (banned !== null) return { error: banned };
   return { root, project };
+}
+
+/** Resolve a root through its nearest existing directory without creating missing path segments. */
+export function canonicalRootForRegistration(root: string): string {
+  let ancestor = resolve(root);
+  const missingSegments: string[] = [];
+  while (!existsSync(ancestor)) {
+    const parent = dirname(ancestor);
+    if (parent === ancestor) {
+      throw new Error(`no existing ancestor for worktree root: ${root}`);
+    }
+    missingSegments.unshift(basename(ancestor));
+    ancestor = parent;
+  }
+  const canonicalAncestor = realpathSync(ancestor);
+  if (!statSync(canonicalAncestor).isDirectory()) {
+    throw new Error(`worktree root ancestor is not a directory: ${canonicalAncestor}`);
+  }
+  return join(canonicalAncestor, ...missingSegments);
+}
+
+export type ResolvedWorktreeTarget = WorktreeTarget & { canonicalRoot: string };
+
+/** Validate the canonical worktree root and project path before any directory is created. */
+export function resolveWorktreeTarget(
+  target: string,
+  home: string = HOME,
+): ResolvedWorktreeTarget | { error: string } {
+  const plan = planWorktreeTarget(target, home);
+  if ("error" in plan) return plan;
+
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = canonicalRootForRegistration(plan.root);
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+  const canonicalTarget = join(canonicalRoot, plan.project);
+  const banned = bannedReason(canonicalRoot, home) ?? bannedReason(canonicalTarget, home);
+  if (banned !== null) return { error: banned };
+
+  let targetIsSymlink = false;
+  try {
+    targetIsSymlink = lstatSync(target).isSymbolicLink();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      return { error: (error as Error).message };
+    }
+  }
+  if (targetIsSymlink) {
+    let resolvedTarget: string;
+    try {
+      resolvedTarget = realpathSync(target);
+    } catch (error) {
+      return { error: (error as Error).message };
+    }
+    const symlinkBan = bannedReason(resolvedTarget, home);
+    if (symlinkBan !== null) return { error: symlinkBan };
+    if (!isUnder(resolvedTarget, canonicalRoot) || resolvedTarget === canonicalRoot) {
+      return { error: `${target} resolves outside the worktree root (symlink): ${resolvedTarget}` };
+    }
+  }
+
+  return { ...plan, canonicalRoot };
+}
+
+export function worktreeFlagConflict(
+  worktreeRoot: boolean,
+  createRemote: boolean,
+  publicRepo: boolean,
+): string | null {
+  if (worktreeRoot && (createRemote || publicRepo)) {
+    return "--worktree-root cannot be combined with --create-remote or --public";
+  }
+  return null;
 }
 
 /** Create `<root>/<project>`; never creates anything inside the root besides the project folder. */
@@ -731,6 +807,12 @@ if (import.meta.main) {
     process.exit(2);
   }
 
+  const flagConflict = worktreeFlagConflict(WORKTREE_ROOT, CREATE_REMOTE, PUBLIC_REPO);
+  if (flagConflict !== null) {
+    console.error(`error: ${flagConflict}`);
+    process.exit(2);
+  }
+
   if (PUBLIC_REPO && !CREATE_REMOTE) {
     console.error("warning: --public has no effect without --create-remote");
   }
@@ -745,30 +827,33 @@ if (import.meta.main) {
     let path = target;
     if (WORKTREE_ROOT) {
       // D36: create <root>/<project>/ and register the ROOT once. No git init, .atl, .codegraph or remote.
-      const plan = planWorktreeTarget(target);
+      const plan = resolveWorktreeTarget(target);
       if ("error" in plan) {
         console.error(`error: ${plan.error}`);
         failed = true;
         continue;
       }
       // The parent of the root must already exist; only the root and the project folder are created.
-      if (!existsSync(dirname(plan.root))) {
-        console.error(`error: the parent of the worktree root does not exist: ${dirname(plan.root)}`);
+      if (!existsSync(dirname(plan.canonicalRoot))) {
+        console.error(`error: the parent of the worktree root does not exist: ${dirname(plan.canonicalRoot)}`);
         failed = true;
         continue;
       }
       let created: string;
       try {
-        created = ensureWorktreeProjectDir(plan, DRY_RUN);
+        created = ensureWorktreeProjectDir(
+          { root: plan.canonicalRoot, project: plan.project },
+          DRY_RUN,
+        );
       } catch (e) {
         console.error(`error: ${(e as Error).message}`);
         failed = true;
         continue;
       }
-      console.log(`\nworktree folder ${join(plan.root, plan.project)}: ${created}`);
-      if (registeredRoots.has(plan.root)) continue;
-      registeredRoots.add(plan.root);
-      path = plan.root;
+      console.log(`\nworktree folder ${join(plan.canonicalRoot, plan.project)}: ${created}`);
+      if (registeredRoots.has(plan.canonicalRoot)) continue;
+      registeredRoots.add(plan.canonicalRoot);
+      path = plan.canonicalRoot;
     }
     const invalid = DRY_RUN && WORKTREE_ROOT && !existsSync(path) ? null : validateProject(path);
     if (invalid !== null) {

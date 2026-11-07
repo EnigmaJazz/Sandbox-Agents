@@ -87,6 +87,8 @@ import {
   buildOrcaReportOp,
   refuseStageReviewWorker,
   buildGitCommitOp,
+  buildGitBranchOp,
+  buildGitHeadOp,
   buildGitClearCommitIntentOp,
   buildGitPushOp,
   buildHostOp,
@@ -977,6 +979,10 @@ export class BrokerServer {
         return buildGitClearCommitIntentOp(this.ctx)(req);
       case "gitPush":
         return buildGitPushOp(this.ctx)(req);
+      case "gitBranch":
+        return buildGitBranchOp(this.ctx)(req);
+      case "gitHead":
+        return buildGitHeadOp(this.ctx)(req);
       case "ghIssueCreate":
         return buildGhIssueCreateOp(this.ctx)(req);
       case "resultDiff":

@@ -5,6 +5,7 @@
 import { z } from "zod";
 import {
   buildGhIssueCreateAsk,
+  buildGitBranchAsk,
   buildGitCommitAsk,
   buildPlanDocAppendAsk,
   buildGitPushAsk,
@@ -75,6 +76,51 @@ export const hostOpsToolSpecs = {
         ...(args.sandboxSessionID !== undefined
           ? { sandboxSessionID: args.sandboxSessionID }
           : {}),
+      }, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
+
+  host_git_branch: defineTool({
+    description:
+      "Create a new local branch at a base commit (default HEAD), optionally switching to it " +
+      "(orchestrator-only mutation; requires human approval). The broker resolves the base to a " +
+      "commit, refuses an existing branch, an invalid name, a flag-shaped or unresolvable base, " +
+      "and verifies the created ref. Never overwrites, deletes, force-moves or pushes a branch. " +
+      "Returns JSON.",
+    args: {
+      name: z.string().min(1).max(255),
+      base: z.string().min(1).max(255).optional(),
+      switch: z.boolean().optional(),
+    },
+    execute: async (args, ctx) => {
+      await ctx.ask(buildGitBranchAsk({
+        name: args.name,
+        ...(args.base !== undefined ? { base: args.base } : {}),
+        ...(args.switch !== undefined ? { switch: args.switch } : {}),
+      }));
+      const c = await client();
+      const result = await c.request("gitBranch", ctx.sessionID, {
+        projectDir: currentProjectDirectory(ctx.directory),
+        name: args.name,
+        ...(args.base !== undefined ? { base: args.base } : {}),
+        ...(args.switch !== undefined ? { switch: args.switch } : {}),
+      }, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
+
+  host_git_head: defineTool({
+    description:
+      "Read the current branch name (null when HEAD is detached) and the HEAD commit SHA of the " +
+      "current project path, linked worktrees included (read-only; no approval). The broker binds " +
+      "the validated git directory into every fixed-argv git step and fails closed on unexpected or " +
+      "truncated output. Returns JSON.",
+    args: {},
+    execute: async (_args, ctx) => {
+      const c = await client();
+      const result = await c.request("gitHead", ctx.sessionID, {
+        projectDir: currentProjectDirectory(ctx.directory),
       }, ctx.agent);
       return JSON.stringify(result, null, 2);
     },

@@ -260,6 +260,24 @@ describe("gitguard — fail-closed refusals", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  test("`git switch` is refused in a repository with an unsafe local filter, exactly like `git checkout`", async () => {
+    const unsafe = filterRepo("t6-switch-unsafe-");
+    for (const argv of [
+      ["git", "switch", "-c", "next"],
+      ["git", "checkout", "-b", "next"],
+    ]) {
+      await expect(spawnArgv(argv, { cwd: unsafe.dir })).rejects.toThrow(/filter "probe"\.clean/);
+    }
+    expect(existsSync(unsafe.marker)).toBe(false); // neither vector ran the filter
+
+    // Positive control: the same vector is accepted once the local filter is absent,
+    // so the refusal above is the guard and not a broken repository.
+    const clean = makeRepo("t6-switch-clean-");
+    expect(runGit(clean, ["commit", "-q", "--allow-empty", "-m", "base"]).status).toBe(0);
+    const switched = await spawnArgv(["git", "switch", "-c", "next"], { cwd: clean });
+    expect(switched.status).toBe(0);
+  });
+
   test("a repository-local diff driver command is refused", async () => {
     const dir = makeRepo("t6-diffdriver-");
     runGit(dir, ["config", "diff.mine.command", "true; touch pwned"]);

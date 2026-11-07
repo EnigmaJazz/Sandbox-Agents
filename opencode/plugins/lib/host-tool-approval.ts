@@ -223,6 +223,37 @@ export function buildGitPushAsk(args: GitPushAskArgs): HostToolAsk {
   });
 }
 
+export interface GitBranchAskArgs {
+  name: string;
+  base?: string;
+  switch?: boolean;
+}
+
+/** Approval metadata for `host_git_branch` (branch name, base, switch intent). */
+export function buildGitBranchAsk(args: GitBranchAskArgs): HostToolAsk {
+  assertNonEmpty(args.name, "name");
+  if (args.name.startsWith("-")) {
+    throw new HostToolAskError("name must not start with '-'");
+  }
+  if (args.name.includes("..")) {
+    throw new HostToolAskError("name must not contain '..'");
+  }
+  if (args.base !== undefined) {
+    assertNonEmpty(args.base, "base");
+    if (args.base.startsWith("-")) {
+      throw new HostToolAskError("base must not start with '-'");
+    }
+  }
+  const base = args.base ?? "HEAD";
+  const switching = args.switch === true;
+  return buildHostToolAsk({
+    permission: "host_git_branch",
+    operation: "gitBranch",
+    summary: `Create branch ${args.name} at ${base}${switching ? " and switch to it" : ""}`,
+    details: { name: args.name, base, switch: switching },
+  });
+}
+
 export interface GhIssueCreateAskArgs {
   repo: string;
   title: string;

@@ -481,6 +481,65 @@ export function buildGitPushArgv(input: GitPushArgvInput): string[] {
   return argv;
 }
 
+export interface GitBranchArgvInput {
+  name: string;
+  /** Broker-resolved commit SHA (never a caller-supplied raw revision). */
+  base: string;
+  /** When true, create and check out with `git switch -c` in one step. */
+  switchBranch: boolean;
+}
+
+/**
+ * The ONLY permitted branch-creation argv: create `name` at the resolved base
+ * commit, or `git switch -c` to create and check it out in one step. Never
+ * `--force`, `-f`, a delete, a rename, a remote, or a tracking setup.
+ */
+export function buildGitBranchArgv(input: GitBranchArgvInput): string[] {
+  assertGitBranch(input.name);
+  assertGitBranch(input.base);
+  return input.switchBranch
+    ? ["git", "switch", "-c", input.name, input.base]
+    : ["git", "branch", input.name, input.base];
+}
+
+export interface GitHeadArgv {
+  /** `git symbolic-ref --short -q HEAD`: exit 0 prints the branch, exit 1 means detached. */
+  branch: string[];
+  /** `git rev-parse --verify HEAD`: the commit HEAD resolves to. */
+  head: string[];
+}
+
+/**
+ * The ONLY permitted HEAD-read argv vectors: no caller-controlled revision and
+ * no repository mutation. `-q` turns a detached HEAD into an ordinary exit 1
+ * instead of an error message.
+ */
+export function buildGitHeadArgv(): GitHeadArgv {
+  return {
+    branch: ["git", "symbolic-ref", "--short", "-q", "HEAD"],
+    head: ["git", "rev-parse", "--verify", "HEAD"],
+  };
+}
+
+/** Upper bound for a branch line read from git; a ref is far shorter than this. */
+export const GIT_HEAD_BRANCH_MAX_BYTES = 1024;
+
+/**
+ * True when `value` is acceptable branch text READ from `git symbolic-ref`.
+ * This is deliberately NOT `assertGitBranch`: that is a creation policy that
+ * admits ASCII only and refuses '+', so reusing it here rejects branches git
+ * itself accepted (for example 'release+hotfix' or a Unicode name). The read
+ * path only requires non-empty, bounded, single-line, NUL-free and
+ * control-character-free text.
+ */
+export function isGitHeadBranchOutput(value: string): boolean {
+  if (value.length === 0) return false;
+  if (Buffer.byteLength(value, "utf8") > GIT_HEAD_BRANCH_MAX_BYTES) return false;
+  if (value.includes("\u0000")) return false;
+  if (/[\u0000-\u001f\u007f]/.test(value)) return false;
+  return true;
+}
+
 export interface GhIssueCreateArgvInput {
   repo: string;
   title: string;

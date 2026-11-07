@@ -2,13 +2,25 @@
 
 ### Requirement: Session-repository root resolution
 
-The relay MUST resolve cwd from the Task session's repository, never from the OpenCode server or plugin-instance project, and MUST accept only the exact allowlisted canonical root.
+The relay MUST resolve cwd from the Task session's repository, never from the OpenCode server or plugin-instance project. It MUST accept either the exact allowlisted canonical root or a verified linked git worktree whose git common directory equals a registered project's. Worktree acceptance MUST be decided by git common-directory equality, never by path prefix, and MUST fail closed otherwise.
 
 #### Scenario: Session repository selected
 
 - GIVEN a reviewer Task belongs to an allowlisted repository session
 - WHEN the relay resolves cwd
 - THEN it MUST use that session repository's canonical root
+
+#### Scenario: Linked worktree of a registered project accepted
+
+- GIVEN a linked worktree's verified `.git` pointer, `gitdir` back-link, and `commondir` agree, and its git common directory equals a registered project's
+- WHEN the relay resolves cwd
+- THEN it MUST use the linked worktree's canonical root
+
+#### Scenario: Lookalike or forged worktree rejected
+
+- GIVEN a path-prefix lookalike, a worktree of an unregistered repository, a forged `gitdir` back-link, or a forged `commondir`
+- WHEN the relay resolves cwd
+- THEN it MUST fail before spawning a child
 
 #### Scenario: Untrusted root rejected
 

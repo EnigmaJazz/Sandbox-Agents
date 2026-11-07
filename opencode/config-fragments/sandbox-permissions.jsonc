@@ -109,6 +109,8 @@
     "host_sdd_attempt_settle": "deny",
     "host_git_commit": "ask",
     "host_git_push": "ask",
+    "host_git_branch": "ask",
+    "host_git_head": "allow",
     "host_gh_issue_create": "ask",
     "host_plan_append": "ask",
     "host_plan_write": "allow",

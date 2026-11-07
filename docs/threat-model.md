@@ -71,21 +71,32 @@ executable and not on the S17 list.
 
 **Boundary**: `registerProject` is an orchestrator-only broker mutation that
 runs the existing fixed-argv operator tool
-`bun scripts/register-project.ts [--dry-run] [--create-remote] [--public] <path>`.
-The broker accepts exactly `{path,dryRun,createRemote,makePublic}` and rejects
-every other key.
+`bun scripts/register-project.ts [--dry-run] [--create-remote] [--public] [--worktree-root] <path>`.
+The broker accepts exactly `{path,dryRun,createRemote,makePublic,worktreeRoot}` and
+rejects every other key.
 
 **Invariants**
 
 - Authority: orchestrator-only mutation (broker `HOST_MUTATION_OPERATIONS` +
   `authorizeHostDispatch`); broker authorization is authoritative, and a
   non-orchestrator call is denied before any spawn.
-- Path ban before spawn: the target must be an existing absolute directory that
-  is neither `/`, `$HOME`, nor beneath
+- Path ban before spawn: in project mode, the target must be an existing
+  absolute directory that is neither `/`, `$HOME`, nor beneath
   `$HOME/.ssh|.config|.local|.cache|.gnupg|.aws|.kube`, `/etc`, `/usr`, `/var`,
-  or `/tmp`. An ineligible path or an invalid flag combination
-  (`--public` without `--create-remote`) fails validation with NO process
+  or `/tmp`. In worktree-root mode, the broker validates the lexical and
+  canonical forms of both `<root>` and `<root>/<project>` against the same bans
+  before spawning; neither must exist, but the parent of `<root>` must. An
+  ineligible path or invalid flag combination fails validation with NO process
   spawned.
+- Worktree-root mode: `worktreeRoot: true` means `path` is `<root>/<project>`.
+  The script independently re-validates the canonical root before any `mkdir`
+  or profile, `broker.env`, or launcher write; it rejects an existing symlink
+  alias whose target is a banned directory and a symlink whose target leaves
+  the root. It creates only `<root>/<project>` and registers the canonical
+  root. `worktreeRoot` cannot be combined with `createRemote` or `makePublic`:
+  the broker rejects this before spawn, and the script exits 2 if either flag
+  arrives directly. The broker forwards the canonical `<root>/<project>` with
+  `--worktree-root` appended to the fixed argv.
 - Fixed argv only: no caller-supplied cwd, binary, or argv; the script path is
   a broker-owned constant.
 
@@ -330,11 +341,11 @@ first cache write, and OpenCode logs nothing. Plugin and package installs belong
 to the non-secure OpenCode instance, which shares `~/.cache/opencode`; the secure
 instance consumes that cache only.
 
-## Staged work chains and gate verdicts (PROPOSED - for owner review)
+## Staged work chains and gate verdicts (ACCEPTED - owner approved T1, 2026-11-07)
 
-Status: **PROPOSED - for owner review.** Not in force until the user reviews and installs it
-(S17 path). Written in P0 of `docs/staging/plan.md` (scope D24); the gate-verdict part comes from
-decision D22 of the multi-tier orchestration spec. Nothing above this section changes.
+Status: **ACCEPTED - owner approved T1 on 2026-11-07.** This section is an S17 path. Written in
+P0 of `docs/staging/plan.md` (scope D24); the gate-verdict part comes from decision D22 of the
+multi-tier orchestration spec. Nothing above this section changes.
 
 **New assets**: chain and stage records and their refs (`refs/opencode-sandbox/chain/**`); the
 stage baseline; the owner's approve, reject and apply decisions; the recorded gate verdict; and,

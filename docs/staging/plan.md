@@ -1,7 +1,6 @@
 # Plan: staged work chains (queue changes now, review them in bursts later)
 
-Status: **proposed, design only. No code until the user approves this plan and the
-threat-model update in P0.** Task record to create when P0 starts: `odd/tasks/staging-chains.md`.
+Status: **accepted and implemented at the D24 scope.** Task record: `odd/tasks/staging-chains.md`.
 
 ## Update 2026-11-05: D24 scope and P0 spike result
 

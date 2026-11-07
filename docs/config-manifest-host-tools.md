@@ -199,6 +199,7 @@ collapses that map to a single `deny`.
   `host_service_logs`, `host_tailscale_status`, `host_memory`,
   `host_disk_usage`, `host_network_listeners`, `host_process_list`,
   `host_docker_list`, `host_docker_logs` (`sandbox-permissions.jsonc:64-73`)
+- Host read-only git: `host_git_head` (`sandbox-permissions.jsonc`)
 - Host read-only review tools: `host_review_assess`,
   `host_review_mode_status`, `host_review_status`, `host_review_lens_context`
   (`sandbox-permissions.jsonc:79-82)
@@ -206,7 +207,7 @@ collapses that map to a single `deny`.
 ### ASK (mutations)
 
 - `sandbox_apply` (`sandbox-permissions.jsonc:62`)
-- Host mutations: `host_git_commit`, `host_git_clear_commit_intent`, `host_git_push`, `host_gh_issue_create`,
+- Host mutations: `host_git_commit`, `host_git_clear_commit_intent`, `host_git_push`, `host_git_branch`, `host_gh_issue_create`,
   `host_plan_append`, `host_register_project`, `host_review_start`,
   `host_review_capture_result`, `host_review_capture_unachievable`,
   `host_review_acknowledge_approved`, `host_review_capture_correction_plan`,
@@ -239,10 +240,12 @@ default.
 
 ## 5. Tool inventory + authority matrix
 
-By default, `opencode/plugins/sandbox-tools.ts` registers **33 tools**: **13
-`sandbox_*`** and **20 host tools**. Arithmetic from the former inventory:
-**33 host entries − 8 already-retired SDD tools − 5 legacy SDD tools dormant by
-default = 20 host tools**; **13 sandbox tools + 20 host tools = 33 total**.
+By default, `opencode/plugins/sandbox-tools.ts` registers **53 tools**: **13
+`sandbox_*`** and **40 host tools**, of which **25** call `ctx.ask` before they
+act. Both counts are pinned by `broker/tests/sandbox-tools-surface.test.ts`
+(tool count at `:53`, `ctx.ask` total at `:56-58`) and its fixture
+`broker/tests/fixtures/sandbox-tools-surface.json`; the tool count is also
+asserted by `broker/tests/sandbox-tools-call-sweep.test.ts:37`.
 The five remaining legacy tool definitions are in
 `opencode/plugins/lib/legacy-sdd-tools.ts` and are registered only when
 `OPENCODE_SANDBOX_LEGACY_SDD=1`. The broker's `broker/src/legacy-sdd.ts`
@@ -278,6 +281,8 @@ independently gates their operations.
 | `host_git_commit` | mutation | ask | `gentle-orchestrator` only (broker `readOnlyAgents`) | plugin `sandbox-tools.ts:931`; op `gitCommit` `service.ts:1826`; mutation list `validation.ts:767`; fragment `sandbox-permissions.jsonc:90` |
 | `host_git_clear_commit_intent` | mutation | ask | `gentle-orchestrator` only (broker `readOnlyAgents`) | plugin `sandbox-tools.ts`; op `gitClearCommitIntent` `service.ts`; mutation list `validation.ts`; permission fragment entry required |
 | `host_git_push` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:949`; op `gitPush` `service.ts:1874`; `validation.ts:768`; fragment `sandbox-permissions.jsonc:91` |
+| `host_git_branch` | mutation | ask | `gentle-orchestrator` only (broker `readOnlyAgents`) | plugin `tool-specs-host-ops.ts`; op `gitBranch` `service.ts`; mutation list `validation.ts`; fragment `sandbox-permissions.jsonc` |
+| `host_git_head` | read-only | allow | every agent (broker `HOST_READ_OPERATIONS`); tool admission `READ_PROJECT`, so pm-odd, pm-systematic and the orchestrator | plugin `tool-specs-host-ops.ts`; op `gitHead` `service.ts`; read list `validation.ts`; fragment `sandbox-permissions.jsonc` |
 
 ### 5b. host review
 
@@ -434,8 +439,8 @@ The approve, reject and apply tools are a later unit.
 
 ### 5h. Staging chains, decision half (`host_stage_approve`, `host_stage_reject`, `host_stage_apply`)
 
-Added with phase P2 (unit U2b) of `docs/staging/plan.md` (the table now registers 48 tools; 23
-`ctx.ask` call sites). NOT INSTALLED: S17 paths the owner reviews and installs.
+Added with phase P2 (unit U2b) of `docs/staging/plan.md` (that unit recorded 48 tools and 23
+`ctx.ask` call sites; the current counts are in section 5). NOT INSTALLED: S17 paths the owner reviews and installs.
 
 | Aspect | Value |
 |---|---|

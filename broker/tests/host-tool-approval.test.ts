@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildGhIssueCreateAsk,
+  buildGitBranchAsk,
   buildGitCommitAsk,
   buildReviewAcknowledgeApprovedAsk,
   buildReviewCaptureCorrectionPlanAsk,
@@ -153,6 +154,29 @@ describe("host tool ask metadata", () => {
       warning: "creates a new commit",
     });
     expect(() => buildGitPushAsk({ remote: "o", branch: "b", ahead: -1, upstream: null, setUpstream: false })).toThrow(HostToolAskError);
+  });
+
+  test("git branch ask carries name/base/switch and never auto-approves", () => {
+    const ask = buildGitBranchAsk({ name: "feature/x", base: "main", switch: true });
+    expect(ask.permission).toBe("host_git_branch");
+    expect(ask.metadata.hostOperation).toBe("gitBranch");
+    expect(ask.always).toEqual([]);
+    expect(ask.patterns).toEqual(["*"]);
+    expect(ask.metadata).toMatchObject({ name: "feature/x", base: "main", switch: true });
+    expect(ask.metadata.summary).toContain("feature/x");
+    expect(ask.metadata.summary).toContain("main");
+
+    // positive control: defaults are explicit in the approval metadata.
+    expect(buildGitBranchAsk({ name: "feature/y" }).metadata).toMatchObject({
+      name: "feature/y",
+      base: "HEAD",
+      switch: false,
+    });
+
+    expect(() => buildGitBranchAsk({ name: "" })).toThrow(HostToolAskError);
+    expect(() => buildGitBranchAsk({ name: "-x" })).toThrow(HostToolAskError);
+    expect(() => buildGitBranchAsk({ name: "a..b" })).toThrow(HostToolAskError);
+    expect(() => buildGitBranchAsk({ name: "feature/x", base: "-x" })).toThrow(HostToolAskError);
   });
 
   test("gh issue ask carries repo/title/body preview and byte count", () => {
@@ -416,5 +440,72 @@ describe("sandbox result install ask metadata", () => {
     expect(() =>
       buildSandboxResultInstallAsk({ resultRef: "", resultCommit: "x" }),
     ).toThrow(HostToolAskError);
+  });
+});
+
+async function runIsolatedGitBranchApprovalProbe(): Promise<{
+  deniedRequests: unknown[];
+  deniedMessage: string;
+  order: string[];
+  requests: unknown[];
+}> {
+  const source = `
+    import { mock } from "bun:test";
+    const schema = new Proxy({}, { get: () => () => schema });
+    mock.module("@opencode-ai/plugin", () => ({ tool: (definition) => definition }));
+    mock.module("zod", () => ({ z: new Proxy({}, { get: () => () => schema }) }));
+    const order = [];
+    let requests = [];
+    mock.module("./opencode/plugins/lib/broker-client.ts", () => ({
+      createBrokerClient: async () => ({
+        request: async (operation, sessionID, payload, agent) => {
+          order.push("dispatch:" + operation);
+          requests.push({ operation, sessionID, payload, agent });
+          return { created: true };
+        },
+        close: () => {},
+      }),
+      brokerSocketPath: () => "/tmp/unreachable-test.sock",
+    }));
+    const { default: plugin } = await import("./opencode/plugins/sandbox-tools.ts");
+    const tool = plugin().tool.host_git_branch;
+    let deniedMessage = "";
+    try {
+      await tool.execute({ name: "feature/x", switch: true }, {
+        sessionID: "session-denied", directory: "/work/project", agent: "gentle-orchestrator",
+        ask: async () => { order.push("ask:denied"); throw new Error("approval denied by the human"); },
+      });
+    } catch (error) { deniedMessage = error.message; }
+    const deniedRequests = requests.slice();
+    order.length = 0;
+    requests = [];
+    await tool.execute({ name: "feature/y", base: "main", switch: true }, {
+      sessionID: "session-approved", directory: "/work/project", agent: "gentle-orchestrator",
+      ask: async (request) => { order.push("ask:" + request.metadata.hostOperation); },
+    });
+    console.log(JSON.stringify({ deniedRequests, deniedMessage, order, requests }));
+  `;
+  const child = Bun.spawn(["bun", "-e", source], {
+    cwd: `${import.meta.dir}/../..`, stdout: "pipe", stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(`isolated git-branch approval probe failed: ${stderr}`);
+  return JSON.parse(stdout.trim().split(String.fromCharCode(10)).pop()!);
+}
+
+describe("host_git_branch approval ordering (behavioural)", () => {
+  test("a denied approval never dispatches gitBranch; an approved one asks before dispatching", async () => {
+    const probe = await runIsolatedGitBranchApprovalProbe();
+    expect(probe.deniedRequests).toEqual([]);
+    expect(probe.deniedMessage).toContain("approval denied");
+    expect(probe.order).toEqual(["ask:gitBranch", "dispatch:gitBranch"]);
+    expect(probe.requests).toEqual([{
+      operation: "gitBranch",
+      sessionID: "session-approved",
+      payload: { projectDir: "/work/project", name: "feature/y", base: "main", switch: true },
+      agent: "gentle-orchestrator",
+    }]);
   });
 });

@@ -7,16 +7,113 @@
  * `import.meta.main`, so importing the helpers registers nothing.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  canonicalRootForRegistration,
   ensureWorktreeProjectDir,
   planWorktreeTarget,
+  resolveWorktreeTarget,
   updateProfile,
+  worktreeFlagConflict,
 } from "../../scripts/register-project.ts";
 
 const HOME = "/home/tester";
+
+describe("resolveWorktreeTarget", () => {
+  let base: string;
+  let home: string;
+  beforeEach(() => {
+    base = mkdtempSync(join("/dev/shm", "wtresolve-"));
+    home = join(base, "home");
+    mkdirSync(home);
+  });
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  test("accepts a plain root under home", () => {
+    const root = join(home, "worktrees");
+    const result = resolveWorktreeTarget(join(root, "proj"), home);
+    expect(result).toEqual({ root, project: "proj", canonicalRoot: root });
+    expect(canonicalRootForRegistration(root)).toBe(root);
+  });
+
+  test("resolves a symlinked root and creates only under its canonical target", () => {
+    const real = join(base, "real");
+    mkdirSync(real);
+    const link = join(base, "link");
+    symlinkSync(real, link);
+    const result = resolveWorktreeTarget(join(link, "proj"), home);
+    expect("error" in result).toBe(false);
+    if ("error" in result) return;
+    expect(result.canonicalRoot).toBe(realpathSync(real));
+    expect(ensureWorktreeProjectDir({ root: result.canonicalRoot, project: result.project }, false)).toBe("created");
+    expect(existsSync(join(real, "proj"))).toBe(true);
+    expect(realpathSync(join(link, "proj"))).toBe(join(real, "proj"));
+  });
+
+  test("refuses a root symlink alias to a banned directory", () => {
+    const banned = join(home, ".config");
+    mkdirSync(banned);
+    const link = join(home, "wt");
+    symlinkSync(banned, link);
+    expect(resolveWorktreeTarget(join(link, "proj"), home)).toHaveProperty("error");
+  });
+
+  test("refuses an existing project symlink to a banned directory", () => {
+    const bannedProject = join(home, ".config", "x");
+    mkdirSync(bannedProject, { recursive: true });
+    const root = join(home, "wt");
+    mkdirSync(root);
+    symlinkSync(bannedProject, join(root, "proj"));
+    expect(resolveWorktreeTarget(join(root, "proj"), home)).toHaveProperty("error");
+  });
+
+  test("refuses a canonical target that resolves into a banned directory", () => {
+    const bannedProject = join(home, ".config", "x");
+    mkdirSync(bannedProject, { recursive: true });
+    const root = join(home, "wt");
+    mkdirSync(root);
+    symlinkSync(bannedProject, join(root, "proj"));
+    const rawTarget = join(root, "proj");
+    expect(resolveWorktreeTarget(rawTarget, home)).toHaveProperty("error");
+  });
+
+  test("refuses an existing dangling project symlink", () => {
+    const root = join(home, "wt");
+    mkdirSync(root);
+    symlinkSync(join(home, "missing"), join(root, "proj"));
+    expect(resolveWorktreeTarget(join(root, "proj"), home)).toHaveProperty("error");
+  });
+
+  test("rejects worktree mode combined with remote-creation flags", () => {
+    expect(worktreeFlagConflict(true, true, false)).toMatch(/worktree/i);
+    expect(worktreeFlagConflict(true, false, true)).toMatch(/worktree/i);
+    expect(worktreeFlagConflict(true, false, false)).toBeNull();
+    expect(worktreeFlagConflict(false, true, true)).toBeNull();
+  });
+
+  test("accepts a symlinked root when its canonical target is not banned", () => {
+    const real = join(base, "safe");
+    mkdirSync(real);
+    const link = join(base, "safe-link");
+    symlinkSync(real, link);
+    const result = resolveWorktreeTarget(join(link, "proj"), home);
+    expect("error" in result).toBe(false);
+    if (!("error" in result)) expect(result.canonicalRoot).toBe(real);
+  });
+});
 
 describe("planWorktreeTarget", () => {
   test("splits <root>/<project> into the root to register and the project folder", () => {
