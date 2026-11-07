@@ -46,15 +46,15 @@ Out of scope:
 
 ## Tasks
 
-- T1 — RED tests: linked worktree of a registered project accepted; unregistered
-  repo, symlinked path, and path-prefix lookalike refused; forged back-link and
-  forged `commondir` refused; existing relay tests unchanged.
-- T2 — implementation in `reviewer-relay-core.ts`: default
+- [x] T1 — RED tests: linked worktree of a registered project accepted;
+  unregistered repo, symlinked path, and path-prefix lookalike refused; forged
+  back-link and forged `commondir` refused; existing relay tests unchanged.
+- [x] T2 — implementation in `reviewer-relay-core.ts`: default
   `gitCommonDirectory` probe plus optional injection through
   `RootSelectionInput` and `SessionRootResolutionDeps`.
-- T3 — spec requirement/scenarios plus the module header comment.
-- T4 — checks: focused relay test file, full broker suite, reviewability
-  receipt.
+- [x] T3 — spec requirement/scenarios plus the module header comment.
+- [ ] T4 — closure: owner commit of the S17 bytes, then the committed-candidate
+  native review assessment.
 
 ## Acceptance criteria
 
@@ -73,10 +73,12 @@ Out of scope:
 ## Route / trigger
 
 ROUTE: small feature | intent: authorized change | route: ODD secure (pm-odd) |
-specialist: pm-odd (writer odd-apply) | basis: WORKFLOW.md
+specialist: pm-odd, writer odd-apply | basis: WORKFLOW.md
 Trigger: secure always-delegate (any mutation) plus the two-step substantial
 test (implementation + tests + normative spec).
-Actual dispatch: pending.
+Actual dispatch: pm-odd unit `q107-relay-roots-u1` (session
+`ses_e493c0d0bffeyutbM4t2uFfUEF`), writer `odd-apply` session
+`ses_e49399f23ffeFjdK88RXKmhzV3`.
 
 ## Authorized scope
 
@@ -84,9 +86,50 @@ Actual dispatch: pending.
 - `broker/tests/reviewer-relay-transport.test.ts`
 - `openspec/specs/reviewer-relay-transport/spec.md`
 
+## Observed evidence
+
+Writer checks (sandbox, foreground):
+
+- `bun --cwd broker test tests/reviewer-relay-transport.test.ts` before the
+  implementation: 89 pass, 2 fail — exactly the two new acceptance tests, with
+  `reviewer_relay_root_refused` from the old exact-match rule.
+- Same file after the implementation: 91 pass, 0 fail, 411 `expect()` calls.
+- `bun --cwd broker test` (full): 1934 pass, 10 skip, 4 fail across 107 files.
+  The four: `tests/v2-launch.test.ts:94` (the known owner nono-profile drift)
+  and three `EACCES mkdir /nonexistent` environmental failures in
+  `tests/staging-stage-ops.test.ts:229,251` and
+  `tests/gate-verdict-auto.test.ts:318`, files that do not import relay code.
+
+Reviewability receipt: 303 authored changed lines, 18,477 authored patch bytes,
+no generated or binary paths.
+
+Install: `host_sandbox_result_install` restored the three paths from result
+`ef912c34d54e9f1754fa864484fc06afc5755380`; the result preview was reviewed
+before install (`patchTruncated: false`).
+
+## Advisories and verification
+
+- Planner and `advisor-*-pre` / `advisor-*-post` are not in the PM subagent
+  catalog, so the pre-code and post-code advisory phases were recorded as
+  missing opinions, never approvals. `ce:review` was not selected on this
+  route.
+- `aft_inspect` scoped diagnostics reported PARTIAL (no workspace root marker);
+  the candidate is transpiled by `bun test` without typecheck.
+- Independent verifier: attempt 1 blocked on sandbox-git access (0 checks);
+  attempt 2 returned FAIL-incomplete on evidence availability plus inferred
+  F2/F3/F4. Adjudication: F2 (symlink-swap TOCTOU) refuted as an acceptance
+  bypass because acceptance still requires a registered project's common
+  directory; F3 (FIFO `openSync`) is DoS-only and out of the unauthorized-
+  acceptance threat model; F4 (forged-backlink fixture also fails the
+  common-dir check) is a valid test-hardening note. No correction round was
+  consumed; F2-F4 are non-blocking follow-ups.
+
 ## Progress
 
 - 2026-11-07: tracker created; exploration complete (design note below).
+- 2026-11-07: implemented and installed; checks observed. Bytes are uncommitted
+  in the worktree because `opencode/plugins/**` is S17 and `host_git_commit`
+  refuses protected paths. Owner commit is the next step.
 
 ## Design note
 
@@ -104,8 +147,11 @@ Verified linked-worktree probe (`gitCommonDirectory`):
 
 ## Next step
 
-Dispatch the implementation unit; fill in actual dispatch and check evidence.
+Owner reviews and commits the three installed S17 paths. Then assess the
+committed candidate with `base-ref` = the last reviewed boundary (`4d32ff7`,
+the branch point) and run the due native review; record the outcome here.
 
 
 ## Revisions
 - r1 2026-11-07T16:06:30Z gentle-orchestrator: Create Q107 tracker: reviewer relay accepts verified linked worktrees by git common dir
+- r2 2026-11-07T16:43:55Z gentle-orchestrator: Record Q107 dispatch, checks, receipt, install and advisories
