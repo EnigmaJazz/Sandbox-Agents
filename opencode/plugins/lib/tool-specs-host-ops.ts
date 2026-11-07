@@ -110,6 +110,22 @@ export const hostOpsToolSpecs = {
     },
   }),
 
+  host_git_head: defineTool({
+    description:
+      "Read the current branch name (null when HEAD is detached) and the HEAD commit SHA of the " +
+      "current project path, linked worktrees included (read-only; no approval). The broker binds " +
+      "the validated git directory into every fixed-argv git step and fails closed on unexpected or " +
+      "truncated output. Returns JSON.",
+    args: {},
+    execute: async (_args, ctx) => {
+      const c = await client();
+      const result = await c.request("gitHead", ctx.sessionID, {
+        projectDir: currentProjectDirectory(ctx.directory),
+      }, ctx.agent);
+      return JSON.stringify(result, null, 2);
+    },
+  }),
+
   host_git_clear_commit_intent: defineTool({
     description:
       "Clear only a pending host-commit intent for the current session or the selected delegated session (orchestrator-only; requires human approval). " +

@@ -38,8 +38,8 @@ const v1 = parseJsonc(resolve(V1_DIR, "sandbox-permissions.jsonc")).permission a
 const v2 = parseJsonc(resolve(V2_DIR, "sandbox-permissions.jsonc")).permission as Record<string, unknown>;
 
 describe("tool table scan (positive control: the checks below are not vacuous)", () => {
-  test("finds the 52 tools and the 25 that ask for approval", () => {
-    expect(tools.size).toBe(52);
+  test("finds the 53 tools and the 25 that ask for approval", () => {
+    expect(tools.size).toBe(53);
     expect([...tools.values()].filter(Boolean).length).toBe(25);
   });
   test("the V1 fragment is known to lack rules for three asking tools", () => {
@@ -52,6 +52,11 @@ describe("V2 permission fragment", () => {
   test("every tool has an explicit rule (no rule means silently allowed on V2)", () => {
     const missing = [...tools.keys()].filter((name) => !(name in v2));
     expect(missing).toEqual([]);
+  });
+
+  test("the git HEAD tool is allow in both fragments", () => {
+    expect(v1.host_git_head).toBe("allow");
+    expect(v2.host_git_head).toBe("allow");
   });
 
   test("the git branch tool is ask in both fragments", () => {

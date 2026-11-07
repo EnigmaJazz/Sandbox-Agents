@@ -2,15 +2,16 @@ import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config.ts";
 import { PolicyError } from "../src/policy.ts";
 import { authorizeHostDispatch } from "../src/service.ts";
-import { buildGhIssueCreateOp, buildGitBranchOp, buildGitCommitOp, buildGitPushOp, buildRegisterProjectOp } from "../src/service.ts";
+import { buildGhIssueCreateOp, buildGitBranchOp, buildGitHeadOp, buildGitCommitOp, buildGitPushOp, buildRegisterProjectOp } from "../src/service.ts";
 import { MsbError } from "../src/msb.ts";
 import { StateError } from "../src/state.ts";
-import { gitSubcommand } from "../src/gitguard.ts";
+import { GitGuardError, gitSubcommand } from "../src/gitguard.ts";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -40,7 +41,8 @@ import {
   buildSddTaskResultOp,
   type SddOpContext,
 } from "../src/sdd-service.ts";
-import { HOST_MUTATION_OPERATIONS, HOST_READ_OPERATIONS, ValidationError } from "../src/validation.ts";
+import { gitDirFor, HOST_MUTATION_OPERATIONS, HOST_READ_OPERATIONS, ValidationError } from "../src/validation.ts";
+import { GIT_HEAD_BRANCH_MAX_BYTES } from "../src/gitops.ts";
 import type { BrokerRequestEnvelope, SessionRecord } from "../src/types.ts";
 
 // Host mutations require a broker-bound session record carrying this agent.
@@ -551,6 +553,211 @@ describe("host git/GH handlers", () => {
     };
     return { calls, spawn };
   }
+
+  const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
+
+  function headProject(prefix = "git-head-"): { root: string; projectDir: string } {
+    const root = mkdtempSync(join(tmpdir(), prefix));
+    const projectDir = join(root, "project");
+    mkdirSync(projectDir, { recursive: true });
+    mkdirSync(join(projectDir, ".git"), { recursive: true });
+    return { root, projectDir };
+  }
+
+  function headSpawn(options: {
+    branch?: string;
+    branchStatus?: number;
+    branchStdout?: string;
+    head?: string;
+    headStatus?: number;
+    branchTruncated?: boolean;
+    headTruncated?: boolean;
+    branchTimedOut?: boolean;
+    branchStderrTruncated?: boolean;
+    headTimedOut?: boolean;
+    headStderrTruncated?: boolean;
+  } = {}) {
+    const calls: Array<{ argv: string[]; env?: Record<string, string> }> = [];
+    const spawn: SddOpContext["git"]["spawn"] = async (argv, opts) => {
+      calls.push({ argv, env: opts?.env });
+      if (argv[1] === "symbolic-ref") {
+        if (options.branchStatus !== undefined && options.branchStatus !== 0) {
+          return { status: options.branchStatus, stdout: options.branchStdout ?? "", stderr: "", timedOut: options.branchTimedOut === true };
+        }
+        return { status: 0, stdout: options.branchStdout ?? `${options.branch ?? "main"}\n`, stderr: "", timedOut: false, outputTruncated: options.branchTruncated === true, stderrTruncated: options.branchStderrTruncated === true };
+      }
+      if (argv[1] === "rev-parse") {
+        return { status: options.headStatus ?? 0, stdout: `${options.head ?? HEAD_SHA}\n`, stderr: "", timedOut: options.headTimedOut === true, outputTruncated: options.headTruncated === true, stderrTruncated: options.headStderrTruncated === true };
+      }
+      return { status: 0, stdout: "", stderr: "", timedOut: false };
+    };
+    return { calls, spawn };
+  }
+
+  test("gitHead returns branch and HEAD SHA using the fixed argv and validated GIT_DIR", async () => {
+    const { root, projectDir } = headProject();
+    try {
+      const { calls, spawn } = headSpawn();
+      const result = await buildGitHeadOp(makeGitCtx(spawn, projectDir))(request("gitHead", { projectDir }, ORCHESTRATOR));
+      expect(result).toEqual({ branch: "main", detached: false, head: HEAD_SHA });
+      expect(calls.map(({ argv }) => argv)).toEqual([
+        ["git", "symbolic-ref", "--short", "-q", "HEAD"],
+        ["git", "rev-parse", "--verify", "HEAD"],
+      ]);
+      for (const call of calls) expect(call.env?.GIT_DIR).toBe(join(projectDir, ".git"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("gitHead accepts branch names outside the creation allowlist", async () => {
+    const { root, projectDir } = headProject();
+    try {
+      for (const name of ["release+hotfix", "hotfix/修复-üñîçødé"]) {
+        const { spawn } = headSpawn({ branch: name });
+        const result = await buildGitHeadOp(makeGitCtx(spawn, projectDir))(request("gitHead", { projectDir }, ORCHESTRATOR));
+        expect(result).toEqual({ branch: name, detached: false, head: HEAD_SHA });
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("gitHead resolves a linked worktree git directory", async () => {
+    const root = mkdtempSync(join(tmpdir(), "git-head-worktree-"));
+    const mainGitDir = join(root, "main", ".git");
+    const worktreeGitDir = join(mainGitDir, "worktrees", "wt");
+    const wtPath = join(root, "wt");
+    mkdirSync(worktreeGitDir, { recursive: true });
+    mkdirSync(wtPath, { recursive: true });
+    writeFileSync(join(worktreeGitDir, "gitdir"), join(wtPath, ".git"));
+    writeFileSync(join(wtPath, ".git"), `gitdir: ${worktreeGitDir}`);
+    try {
+      const { calls, spawn } = headSpawn();
+      const result = await buildGitHeadOp(makeGitCtx(spawn, wtPath))(request("gitHead", { projectDir: wtPath }, ORCHESTRATOR));
+      expect(result).toEqual({ branch: "main", detached: false, head: HEAD_SHA });
+      for (const call of calls) expect(call.env?.GIT_DIR).toBe(gitDirFor(wtPath));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("gitHead returns a null branch for detached HEAD", async () => {
+    const { root, projectDir } = headProject();
+    try {
+      const { spawn } = headSpawn({ branchStatus: 1 });
+      const result = await buildGitHeadOp(makeGitCtx(spawn, projectDir))(request("gitHead", { projectDir }, ORCHESTRATOR));
+      expect(result).toEqual({ branch: null, detached: true, head: HEAD_SHA });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("gitHead rejects a forged .git pointer before spawning", async () => {
+    const { root, projectDir } = headProject();
+    try {
+      rmSync(join(projectDir, ".git"), { recursive: true, force: true });
+      writeFileSync(join(projectDir, ".git"), `gitdir: ${join(root, "elsewhere", ".git")}`);
+      mkdirSync(join(root, "elsewhere", ".git"), { recursive: true });
+      const { calls, spawn } = headSpawn();
+      await expect(buildGitHeadOp(makeGitCtx(spawn, projectDir))(request("gitHead", { projectDir }, ORCHESTRATOR)))
+        .rejects.toThrow(/does not point at its own linked git directory/);
+      expect(calls).toHaveLength(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("gitHead rejects unsafe repository-local filter config before spawning", async () => {
+    const { root, projectDir } = headProject();
+    try {
+      writeFileSync(join(projectDir, ".git", "config"), '[filter "evil"]\n\tclean = cat\n');
+      const { calls, spawn } = headSpawn();
+      await expect(buildGitHeadOp(makeGitCtx(spawn, projectDir))(request("gitHead", { projectDir }, ORCHESTRATOR)))
+        .rejects.toThrow(GitGuardError);
+      expect(calls).toHaveLength(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("gitHead rejects malformed branch output", async () => {
+    const { root, projectDir } = headProject();
+    try {
+      for (const options of [
+        { branchStdout: "main\nrelease\n" },
+        { branchStdout: `main${String.fromCharCode(7)}x\n` },
+        { branchStdout: `main${String.fromCharCode(0)}x\n` },
+        { branchStdout: `${"a".repeat(GIT_HEAD_BRANCH_MAX_BYTES + 1)}\n` },
+      ]) {
+        const { spawn } = headSpawn(options);
+        await expect(buildGitHeadOp(makeGitCtx(spawn, projectDir))(request("gitHead", { projectDir }, ORCHESTRATOR))).rejects.toThrow(StateError);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("gitHead rejects truncated branch or HEAD output", async () => {
+    const { root, projectDir } = headProject();
+    try {
+      const branch = headSpawn({ branchTruncated: true });
+      await expect(buildGitHeadOp(makeGitCtx(branch.spawn, projectDir))(request("gitHead", { projectDir }, ORCHESTRATOR))).rejects.toThrow(StateError);
+      const head = headSpawn({ headTruncated: true });
+      await expect(buildGitHeadOp(makeGitCtx(head.spawn, projectDir))(request("gitHead", { projectDir }, ORCHESTRATOR))).rejects.toThrow(StateError);
+      const headTimeout = headSpawn({ headTimedOut: true });
+      await expect(buildGitHeadOp(makeGitCtx(headTimeout.spawn, projectDir))(request("gitHead", { projectDir }, ORCHESTRATOR))).rejects.toThrow(StateError);
+      const headStderr = headSpawn({ headStderrTruncated: true });
+      await expect(buildGitHeadOp(makeGitCtx(headStderr.spawn, projectDir))(request("gitHead", { projectDir }, ORCHESTRATOR))).rejects.toThrow(StateError);
+      const branchStderr = headSpawn({ branchStderrTruncated: true });
+      await expect(buildGitHeadOp(makeGitCtx(branchStderr.spawn, projectDir))(request("gitHead", { projectDir }, ORCHESTRATOR))).rejects.toThrow(StateError);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("gitHead rejects malformed output, failed commands, and timeouts", async () => {
+    const { root, projectDir } = headProject();
+    try {
+      for (const options of [
+        { head: "not-a-sha" },
+        { branchStatus: 128 },
+        { headStatus: 128 },
+        { branchStatus: 1, branchTimedOut: true },
+      ]) {
+        const { spawn } = headSpawn(options);
+        await expect(buildGitHeadOp(makeGitCtx(spawn, projectDir))(request("gitHead", { projectDir }, ORCHESTRATOR))).rejects.toThrow(StateError);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("gitHead rejects unknown payload keys before spawning", async () => {
+    const { root, projectDir } = headProject();
+    try {
+      const { calls, spawn } = headSpawn();
+      await expect(buildGitHeadOp(makeGitCtx(spawn, projectDir))(request("gitHead", { projectDir, force: true }, ORCHESTRATOR)))
+        .rejects.toThrow(ValidationError);
+      expect(calls).toHaveLength(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("gitHead is available to read-open agents without orchestrator identity", async () => {
+    const { root, projectDir } = headProject();
+    try {
+      const ctx = makeCtx({ recordAgent: "general" });
+      ctx.config.projects = [{ id: "test", path: realpathSync(projectDir) }];
+      const { spawn } = headSpawn();
+      (ctx.git as SddOpContext["git"]).spawn = spawn;
+      const result = await buildGitHeadOp(ctx)(request("gitHead", { projectDir }, "general"));
+      expect(result).toEqual({ branch: "main", detached: false, head: HEAD_SHA });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
   test("gitCommit stages/commits exactly the derived B→C paths", async () => {
     const { calls, spawn } = spawnStub([[

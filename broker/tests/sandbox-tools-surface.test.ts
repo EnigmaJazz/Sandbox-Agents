@@ -47,10 +47,26 @@ test("positive control: the surface check can see a changed tool", async () => {
 
 test("the recorded baseline lists every expected tool group", () => {
   const names = JSON.parse(readFileSync(FIXTURE, "utf-8")).tools.map((t: { name: string }) => t.name);
-  for (const required of ["sandbox_read", "sandbox_apply", "host_git_commit", "host_git_branch", "host_review_start", "host_register_project", "host_orca_report", "host_stage_list", "host_stage_show", "host_stage_approve", "host_stage_reject", "host_stage_apply", "host_stage_reconcile", "host_gate_verdict_auto"]) {
+  for (const required of ["sandbox_read", "sandbox_apply", "host_git_commit", "host_git_branch", "host_git_head", "host_review_start", "host_register_project", "host_orca_report", "host_stage_list", "host_stage_show", "host_stage_approve", "host_stage_reject", "host_stage_apply", "host_stage_reconcile", "host_gate_verdict_auto"]) {
     expect(names).toContain(required);
   }
-  expect(names.length).toBe(52);
+  expect(names.length).toBe(53);
+  const fixture = JSON.parse(readFileSync(FIXTURE, "utf-8")).tools.find((t: { name: string }) => t.name === "host_git_head");
+  expect(fixture).toBeDefined();
+  expect(fixture.args).toEqual([]);
+  expect(fixture.asks).toBe(0);
+});
+
+test("host_git_head is registered allow-not-ask", () => {
+  const fixture = JSON.parse(readFileSync(FIXTURE, "utf-8")).tools.find((t: { name: string }) => t.name === "host_git_head");
+  expect(fixture.asks).toBe(0);
+  expect(fixture.args).toEqual([]);
+  for (const path of [
+    `${import.meta.dir}/../../opencode/config-fragments/sandbox-permissions.jsonc`,
+    `${import.meta.dir}/../../opencode/plugins-v2/config-fragments/sandbox-permissions.jsonc`,
+  ]) {
+    expect(readFileSync(path, "utf-8")).toContain('"host_git_head": "allow"');
+  }
 });
 
 test("approval prompts are preserved: 25 ctx.ask call sites (the 20 of the pre-P0 plugin, whose 21st grep hit was a header comment, plus the four stage decisions, plus host_git_branch)", () => {

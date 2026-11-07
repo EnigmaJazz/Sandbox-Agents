@@ -271,6 +271,13 @@
       "asks": 1
     },
     {
+      "name": "host_git_head",
+      "description": "Read the current branch name (null when HEAD is detached) and the HEAD commit SHA of the current project path, linked worktrees included (read-only; no approval). The broker binds the validated git directory into every fixed-argv git step and fails closed on unexpected or truncated output. Returns JSON.",
+      "args": [],
+      "execute": "function",
+      "asks": 0
+    },
+    {
       "name": "host_git_clear_commit_intent",
       "description": "Clear only a pending host-commit intent for the current session or the selected delegated session (orchestrator-only; requires human approval). Refuses when no intent exists, and reports the result commit and recorded parent that were cleared. Does not alter the session state, installed/committed markers, working tree, index, or refs. Returns JSON.",
       "args": [

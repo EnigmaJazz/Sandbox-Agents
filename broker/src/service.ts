@@ -31,7 +31,7 @@ import { RESULT_EXCLUDE_PATHS } from "./diff-spec.ts";
 import { collectStageTestEvidence, registerChainStage, stageShow } from "./staging-chain.ts";
 import { runDeterministicChecks, type GateCheck } from "./gate-checks.ts";
 import { CHECKPOINTS, routeGate } from "./gate-route.ts";
-import { gitSubcommand } from "./gitguard.ts";
+import { assertRepositoryLocalConfigSafe, gitSubcommand } from "./gitguard.ts";
 import type { SessionStore } from "./state.ts";
 import type { MsbAdapter } from "./msb.ts";
 import type { HostReadExecutor } from "./hostread.ts";
@@ -78,6 +78,8 @@ import {
   buildGitCommitArgv,
   buildGitPushArgv,
   buildGitBranchArgv,
+  buildGitHeadArgv,
+  isGitHeadBranchOutput,
   buildGhIssueCreateArgv,
   capAndRedact,
   capAndRedactWithFlag,
@@ -3597,6 +3599,58 @@ export function buildGitBranchOp(ctx: OpContext): OpHandler {
       stdout: capAndRedact(created.stdout),
       stderr: capAndRedact(created.stderr),
     };
+  };
+}
+
+/**
+ * Read-only host git HEAD tool: the current branch name (`null` when HEAD is
+ * detached) and the commit HEAD resolves to, for any approved project path,
+ * linked worktrees included.
+ *
+ * Authorization runs first, before payload validation. Every step binds the
+ * validated `gitDirFor(projectRoot)` as `GIT_DIR` (B2), so a worktree's `.git`
+ * pointer file is followed only through git's own verified back-link and the
+ * spawned git reads exactly the repository the guard inspected. The same
+ * repository-local-config refusal the execution-bearing git ops get runs
+ * before any spawn (B1), with the environment the child receives. Unexpected
+ * or truncated git output fails closed rather than being reported (B3).
+ */
+export function buildGitHeadOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    authorizeHostDispatch(ctx, "gitHead", req.sessionID, req.agent);
+    const payload = payloadOf(req) as { projectDir?: unknown };
+    const projectID = resolveProjectID(payload.projectDir, ctx.config.projects);
+    const project = findProject(ctx.config.projects, projectID);
+    if (!project) throw new ValidationError("project is not in the trusted allowlist");
+    let projectRoot: string;
+    try {
+      projectRoot = realpathSync(project.path);
+    } catch {
+      throw new ValidationError("project root does not resolve on the host");
+    }
+    const env = { GIT_DIR: gitDirFor(projectRoot) };
+    assertRepositoryLocalConfigSafe(projectRoot, env);
+    const run = (argv: string[]) => runHostStep(ctx, argv, projectRoot, 60_000, env);
+    const argv = buildGitHeadArgv();
+    const branchStep = await run(argv.branch);
+    if (branchStep.timedOut) throw new StateError("cannot read git HEAD: branch lookup timed out");
+    if (branchStep.stdoutTruncated || branchStep.stderrTruncated) throw new StateError("cannot read git HEAD: branch output is truncated");
+    let branch: string | null;
+    if (branchStep.status === 0) {
+      branch = branchStep.stdout.trim();
+      if (!isGitHeadBranchOutput(branch)) throw new StateError("cannot read git HEAD: unexpected branch output");
+    } else if (branchStep.status === 1) {
+      if (branchStep.stdout.trim().length > 0) throw new StateError("cannot read git HEAD: unexpected detached-HEAD output");
+      branch = null;
+    } else {
+      throw new StateError(`cannot read git HEAD: branch lookup failed (status ${branchStep.status}): ${branchStep.stderr.trim()}`);
+    }
+    const headStep = await run(argv.head);
+    if (headStep.timedOut) throw new StateError("cannot read git HEAD: HEAD lookup timed out");
+    if (headStep.stdoutTruncated || headStep.stderrTruncated) throw new StateError("cannot read git HEAD: HEAD output is truncated");
+    const head = headStep.stdout.trim().toLowerCase();
+    if (headStep.status !== 0 || !/^[0-9a-f]{40}$/.test(head)) throw new StateError(`cannot read git HEAD: HEAD does not resolve to a commit (status ${headStep.status})`);
+    return { branch, detached: branch === null, head };
   };
 }
 

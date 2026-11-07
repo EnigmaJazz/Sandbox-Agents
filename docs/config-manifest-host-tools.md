@@ -199,6 +199,7 @@ collapses that map to a single `deny`.
   `host_service_logs`, `host_tailscale_status`, `host_memory`,
   `host_disk_usage`, `host_network_listeners`, `host_process_list`,
   `host_docker_list`, `host_docker_logs` (`sandbox-permissions.jsonc:64-73`)
+- Host read-only git: `host_git_head` (`sandbox-permissions.jsonc`)
 - Host read-only review tools: `host_review_assess`,
   `host_review_mode_status`, `host_review_status`, `host_review_lens_context`
   (`sandbox-permissions.jsonc:79-82)
@@ -239,8 +240,8 @@ default.
 
 ## 5. Tool inventory + authority matrix
 
-By default, `opencode/plugins/sandbox-tools.ts` registers **52 tools**: **13
-`sandbox_*`** and **39 host tools**, of which **25** call `ctx.ask` before they
+By default, `opencode/plugins/sandbox-tools.ts` registers **53 tools**: **13
+`sandbox_*`** and **40 host tools**, of which **25** call `ctx.ask` before they
 act. Both counts are pinned by `broker/tests/sandbox-tools-surface.test.ts`
 (tool count at `:53`, `ctx.ask` total at `:56-58`) and its fixture
 `broker/tests/fixtures/sandbox-tools-surface.json`; the tool count is also
@@ -281,6 +282,7 @@ independently gates their operations.
 | `host_git_clear_commit_intent` | mutation | ask | `gentle-orchestrator` only (broker `readOnlyAgents`) | plugin `sandbox-tools.ts`; op `gitClearCommitIntent` `service.ts`; mutation list `validation.ts`; permission fragment entry required |
 | `host_git_push` | mutation | ask | `gentle-orchestrator` only | plugin `sandbox-tools.ts:949`; op `gitPush` `service.ts:1874`; `validation.ts:768`; fragment `sandbox-permissions.jsonc:91` |
 | `host_git_branch` | mutation | ask | `gentle-orchestrator` only (broker `readOnlyAgents`) | plugin `tool-specs-host-ops.ts`; op `gitBranch` `service.ts`; mutation list `validation.ts`; fragment `sandbox-permissions.jsonc` |
+| `host_git_head` | read-only | allow | every agent (broker `HOST_READ_OPERATIONS`); tool admission `READ_PROJECT`, so pm-odd, pm-systematic and the orchestrator | plugin `tool-specs-host-ops.ts`; op `gitHead` `service.ts`; read list `validation.ts`; fragment `sandbox-permissions.jsonc` |
 
 ### 5b. host review
 

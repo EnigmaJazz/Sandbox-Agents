@@ -987,6 +987,8 @@ export const HOST_READ_OPERATIONS: readonly string[] = [
   "reviewStatus",
   "reviewLensContext",
   "reviewDiffRead",
+  // Host git HEAD read: fixed argv, validated GIT_DIR, never mutation.
+  "gitHead",
   "reviewPersistPreflight",
   "sandboxResult",
   "advisorGet",
@@ -1236,6 +1238,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   reviewPersistPreflight: ["projectDir", "runId", "finalizeRef", "mode"],
   gitCommit: ["projectDir", "message", "sandboxSessionID"],
   gitBranch: ["projectDir", "name", "base", "switch"],
+  gitHead: ["projectDir"],
   gitClearCommitIntent: ["projectDir", "sandboxSessionID"],
   gitPush: ["projectDir", "remote", "setUpstream", "allowProtectedBranch"],
   ghIssueCreate: ["projectDir", "repo", "title", "body"],

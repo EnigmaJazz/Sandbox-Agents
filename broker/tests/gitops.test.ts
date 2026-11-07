@@ -23,6 +23,7 @@ import {
   buildGitCommitArgv,
   buildGitPushArgv,
   buildGitBranchArgv,
+  buildGitHeadArgv,
   buildGhIssueCreateArgv,
   capAndRedact,
   GIT_OUTPUT_MAX_BYTES,
@@ -361,6 +362,17 @@ describe("host git branch argv (§31) — create-only, fixed argv", () => {
         expect(element).not.toBe("--force");
       }
     }
+  });
+});
+
+describe("host git HEAD argv — fixed read-only vectors", () => {
+  test("returns exactly the fixed HEAD reads with no caller-controlled token", () => {
+    const argv = buildGitHeadArgv();
+    expect(argv).toEqual({
+      branch: ["git", "symbolic-ref", "--short", "-q", "HEAD"],
+      head: ["git", "rev-parse", "--verify", "HEAD"],
+    });
+    expect(Object.values(argv).flat()).not.toContain("revision");
   });
 });
 
