@@ -63,8 +63,8 @@ Out of scope:
   `scripts/register-project.ts` (separate commit from Q107).
 - [x] T6 — post-review docs: worktreeRoot payload and argv in
   `docs/threat-model.md`.
-- [ ] T7 — closure: owner commits the three S17 groups, then the
-  committed-candidate native review assessment.
+- [x] T7 — closure: owner committed the three groups (3a847ca, 35ac5cb,
+  5bc893c); native review of the committed range is APPROVED and acknowledged.
 
 ## Acceptance criteria
 
@@ -226,14 +226,79 @@ registration by the script, and the rejected flag combination. Result
 - `tests/register-worktree-root.test.ts`: 28 pass, 0 fail.
 - Full suite: the same four failures, no new ones.
 
+## Native review — committed range 4d32ff7..5bc893c
+
+- Mode: receipt-driven development `on`, decided by `global`.
+- Candidate: lineage `review-8c4dac912bf43c8b`, target
+  `sha256:dd4b20be3382e61ec3f2e9f89184ad0e7031781c9f8520f86971b3ea9f524e28`,
+  base tree `9daa38d5df4dcf481601619007202f20ee5cf2b2`, candidate tree
+  `3996e47d4cb1f061d7b973adb0426500861a57ae`, projection `workspace`,
+  committed-only, 9 changed files, 870 changed lines.
+- Consent: the provider returned `review-integration.consent/v3`; the exact
+  envelope was presented to the owner, who chose "Review this change". The
+  agent never granted, answered or bypassed consent.
+- Lenses: `review-risk`, `review-resilience`, `review-reliability`, dispatched
+  in one wave to the relay lanes `asi-review-risk`, `asi-review-resilience`,
+  `asi-review-reliability` with the provider-issued binding line forwarded
+  unchanged.
+- Outcome: **APPROVED**. Three lens captures admitted (risk
+  `rart1_b13deb72aa18b5678d430b247c42d00820996dbd7ec2070e4a4179c70205f10f`,
+  reliability
+  `rart1_c91b3ba5b18c397659b3edb7209830897effef1927fa73f24ad27d4156127d9a`,
+  resilience completed the set). Closure
+  `review-last-event-closure/v1` state `approved`; acknowledged with the
+  provider token as `review-acknowledged/v1`, consumed revision
+  `sha256:1a19d69d2d156c131755d35b0f6a81aef53a2f86a82cc9507de301c6a7491d2b`,
+  authority `burned`.
+- Risk lens: no findings.
+- Resilience lens (3, all non-blocking, `informational`):
+  - `R4-probe-cost` WARNING — worktree acceptance adds an un-memoized
+    O(allowlist) synchronous probe per selection, because the cached root is
+    revalidated through the full check and each probe does realpath plus lstat
+    plus bounded opens. Grows with `BROKER_PROJECTS` on a slow backing store.
+  - `R4-error-class-blend` SUGGESTION — `resolveWorktreeTarget` returns
+    unexpected filesystem errors in the same `{error}` shape as policy
+    refusals, so a transient I/O failure reads like a banned-root refusal.
+  - `R4-fifo-boundary` SUGGESTION — a first line spanning the 4096-byte read
+    window, or a multi-byte character split at the edge, fails closed as null;
+    no realistic git file reaches it today.
+- Reliability lens (6, all non-blocking, `informational`):
+  - `R3-001` WARNING — the FIFO fixtures ignore `makeFifo`'s boolean, so a
+    failed `mkfifo` makes the test pass on ENOENT without a FIFO.
+  - `R3-002` WARNING — the new worktree-root test block hard-wires `/dev/shm`
+    as its base, a Linux-only dependency, although `tmpdir()` is already
+    imported.
+  - `R3-003` WARNING — acceptance does not require the session root to be a
+    linked worktree, so a plain checkout can be accepted when an allowlisted
+    linked worktree of the same repository exists; no test refuses that case.
+  - `R3-004` WARNING — `canonicalRootForRegistration` uses `existsSync`, which
+    is false for a dangling symlink, so the walk can treat the symlink name as
+    a missing segment and return a lexical root.
+  - `R3-005` WARNING — the canonical ban check passes the lexical `home`;
+    `home` is never canonicalised, so a symlinked `$HOME` weakens the canonical
+    ban.
+  - `R3-006` SUGGESTION — the "canonical target into a banned directory" test
+    reuses the previous fixture and adds no independent coverage.
+- No refuter or validator was part of the provider's plan, so none was
+  dispatched; no correction was opened, and none of the above may reopen this
+  candidate. Claims are recorded as the lenses reported them; they were not
+  re-verified after acknowledgement, because the candidate is frozen and the
+  authority is burned.
+- Follow-ups for later work (never a re-run of this candidate): `R3-003` and
+  `R3-004` deserve a real check before the guard is relied on outside this
+  repository; `R3-001`, `R3-002` and `R3-006` are test-quality fixes;
+  `R4-probe-cost` needs a cache or short-circuit if `BROKER_PROJECTS` grows.
+
 ## Progress
 
 - 2026-11-07: tracker created; exploration complete (design note below).
 - 2026-11-07: initial implementation installed; checks observed.
 - 2026-11-07: Tier 4 corrections F1 and F2 implemented, installed and checked;
   docs updated; base-commit evidence collected.
-- 2026-11-07: all six changed files remain uncommitted because every group
-  contains an S17 path. Owner commits.
+- 2026-11-07: owner committed the three groups (3a847ca relay, 35ac5cb
+  registration, 5bc893c docs).
+- 2026-11-07: native review of `4d32ff7..5bc893c` APPROVED and acknowledged;
+  advisory findings recorded above.
 
 ## Design note
 
@@ -253,20 +318,14 @@ Verified linked-worktree probe (`gitCommonDirectory`):
 
 ## Next step
 
-Owner commits, in three separate commits:
-
-1. Q107 relay: `opencode/plugins/lib/reviewer-relay-core.ts`,
-   `broker/tests/reviewer-relay-transport.test.ts`,
-   `openspec/specs/reviewer-relay-transport/spec.md`.
-2. F2 registration: `scripts/register-project.ts`,
-   `broker/tests/register-worktree-root.test.ts`.
-3. Docs: `docs/threat-model.md`, `docs/staging/plan.md`.
-
-Then assess the committed candidate with `base-ref` = `4d32ff7` (the branch
-point) and run the due native review; record the outcome here.
+The reviewed candidate is approved and its authority burned. Delivery is
+owner-owned: push, PR and merge are separate decisions. Later, non-blocking
+follow-ups are the reliability and resilience advisories listed above; none of
+them reopens this candidate.
 
 
 ## Revisions
 - r1 2026-11-07T16:06:30Z gentle-orchestrator: Create Q107 tracker: reviewer relay accepts verified linked worktrees by git common dir
 - r2 2026-11-07T16:43:55Z gentle-orchestrator: Record Q107 dispatch, checks, receipt, install and advisories
 - r3 2026-11-07T17:55:08Z gentle-orchestrator: Record Tier 4 corrections F1 (O_NONBLOCK/FIFO), F2 (canonical worktree root), docs, base-commit evidence and the seam check
+- r4 2026-11-07T21:38:54Z gentle-orchestrator: Record the native review outcome for 4d32ff7..5bc893c: APPROVED, acknowledged, with advisory findings
