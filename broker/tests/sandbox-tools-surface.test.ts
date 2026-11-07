@@ -47,17 +47,17 @@ test("positive control: the surface check can see a changed tool", async () => {
 
 test("the recorded baseline lists every expected tool group", () => {
   const names = JSON.parse(readFileSync(FIXTURE, "utf-8")).tools.map((t: { name: string }) => t.name);
-  for (const required of ["sandbox_read", "sandbox_apply", "host_git_commit", "host_review_start", "host_register_project", "host_orca_report", "host_stage_list", "host_stage_show", "host_stage_approve", "host_stage_reject", "host_stage_apply", "host_stage_reconcile", "host_gate_verdict_auto"]) {
+  for (const required of ["sandbox_read", "sandbox_apply", "host_git_commit", "host_git_branch", "host_review_start", "host_register_project", "host_orca_report", "host_stage_list", "host_stage_show", "host_stage_approve", "host_stage_reject", "host_stage_apply", "host_stage_reconcile", "host_gate_verdict_auto"]) {
     expect(names).toContain(required);
   }
-  expect(names.length).toBe(51);
+  expect(names.length).toBe(52);
 });
 
-test("approval prompts are preserved: 24 ctx.ask call sites (the 20 of the pre-P0 plugin, whose 21st grep hit was a header comment, plus the four stage decisions)", () => {
+test("approval prompts are preserved: 25 ctx.ask call sites (the 20 of the pre-P0 plugin, whose 21st grep hit was a header comment, plus the four stage decisions, plus host_git_branch)", () => {
   const tools = JSON.parse(readFileSync(FIXTURE, "utf-8")).tools as { name: string; asks: number }[];
-  expect(tools.reduce((sum, t) => sum + t.asks, 0)).toBe(24);
+  expect(tools.reduce((sum, t) => sum + t.asks, 0)).toBe(25);
   const gated = tools.filter((t) => t.asks > 0).map((t) => t.name);
-  for (const required of ["sandbox_apply", "sandbox_copy_out", "sandbox_copy_in", "host_git_commit", "host_git_push", "host_register_project"]) {
+  for (const required of ["sandbox_apply", "sandbox_copy_out", "sandbox_copy_in", "host_git_commit", "host_git_push", "host_git_branch", "host_register_project"]) {
     expect(gated).toContain(required);
   }
 });

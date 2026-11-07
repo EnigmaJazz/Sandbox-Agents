@@ -481,6 +481,27 @@ export function buildGitPushArgv(input: GitPushArgvInput): string[] {
   return argv;
 }
 
+export interface GitBranchArgvInput {
+  name: string;
+  /** Broker-resolved commit SHA (never a caller-supplied raw revision). */
+  base: string;
+  /** When true, create and check out with `git switch -c` in one step. */
+  switchBranch: boolean;
+}
+
+/**
+ * The ONLY permitted branch-creation argv: create `name` at the resolved base
+ * commit, or `git switch -c` to create and check it out in one step. Never
+ * `--force`, `-f`, a delete, a rename, a remote, or a tracking setup.
+ */
+export function buildGitBranchArgv(input: GitBranchArgvInput): string[] {
+  assertGitBranch(input.name);
+  assertGitBranch(input.base);
+  return input.switchBranch
+    ? ["git", "switch", "-c", input.name, input.base]
+    : ["git", "branch", input.name, input.base];
+}
+
 export interface GhIssueCreateArgvInput {
   repo: string;
   title: string;

@@ -22,6 +22,7 @@ import {
   checkProtectedPaths,
   buildGitCommitArgv,
   buildGitPushArgv,
+  buildGitBranchArgv,
   buildGhIssueCreateArgv,
   capAndRedact,
   GIT_OUTPUT_MAX_BYTES,
@@ -287,6 +288,78 @@ describe("host git push argv (§31) — guarded", () => {
     }
     for (const branch of ["--force-with-lease", "--delete", "+main", ":main", "a..b"]) {
       expect(() => buildGitPushArgv({ ...base, branch })).toThrow(ValidationError);
+    }
+  });
+});
+
+describe("host git branch argv (§31) — create-only, fixed argv", () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+
+  test("emits exactly `git branch <name> <sha>` by default", () => {
+    expect(buildGitBranchArgv({ name: "feature/x", base: sha, switchBranch: false })).toEqual([
+      "git",
+      "branch",
+      "feature/x",
+      sha,
+    ]);
+  });
+
+  test("emits exactly `git switch -c <name> <sha>` when switching", () => {
+    expect(buildGitBranchArgv({ name: "feature/x", base: sha, switchBranch: true })).toEqual([
+      "git",
+      "switch",
+      "-c",
+      "feature/x",
+      sha,
+    ]);
+  });
+
+  test("positive control: a fresh branch name still builds a create argv", () => {
+    const argv = buildGitBranchArgv({ name: "feature/fresh", base: sha, switchBranch: false });
+    expect(argv).toEqual(["git", "branch", "feature/fresh", sha]);
+    expect(argv).toContain("feature/fresh");
+  });
+
+  test("rejects empty/flag-shaped/traversal names and flag-shaped bases", () => {
+    for (const name of ["", "-x", "--force", "a..b", "-f"]) {
+      expect(() => buildGitBranchArgv({ name, base: sha, switchBranch: false })).toThrow(
+        ValidationError,
+      );
+    }
+    for (const base of ["", "-x", "--force", "a..b"]) {
+      expect(() =>
+        buildGitBranchArgv({ name: "feature/x", base, switchBranch: false }),
+      ).toThrow(ValidationError);
+    }
+  });
+
+  test("rejects whitespace, control-character and refspec branch names", () => {
+    for (const name of [
+      "feature x",
+      `feature${String.fromCharCode(9)}x`,
+      `a${String.fromCharCode(1)}b`,
+      "feature:main",
+      "+main",
+      "feature~1",
+      "feature^",
+      "feature?",
+      "feature*",
+      "feature[",
+      "@{upstream}",
+    ]) {
+      expect(() => buildGitBranchArgv({ name, base: sha, switchBranch: false })).toThrow(ValidationError);
+      expect(() => buildGitBranchArgv({ name, base: sha, switchBranch: true })).toThrow(ValidationError);
+    }
+  });
+
+  test("no argv element is a shell metacharacter or a force flag", () => {
+    for (const switchBranch of [false, true]) {
+      const argv = buildGitBranchArgv({ name: "feature/x", base: sha, switchBranch });
+      for (const element of argv) {
+        expect(element).not.toMatch(/[;&|<>$`'"\\\n\r]/);
+        expect(element).not.toBe("-f");
+        expect(element).not.toBe("--force");
+      }
     }
   });
 });

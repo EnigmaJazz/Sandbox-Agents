@@ -92,6 +92,7 @@ export type Operation =
   | "reviewPersistPreflight"
   // Host git/GH mutations: fixed argv, orchestrator-only (§31).
   | "gitCommit"
+  | "gitBranch"
   | "gitClearCommitIntent"
   | "gitPush"
   | "ghIssueCreate"
@@ -197,6 +198,7 @@ export const SANDBOX_GUARD_CLASS = {
   reviewPersist: "exempt-from-sandbox-guard",
   reviewPersistPreflight: "exempt-from-sandbox-guard",
   gitCommit: "exempt-from-sandbox-guard",
+  gitBranch: "exempt-from-sandbox-guard",
   gitClearCommitIntent: "exempt-from-sandbox-guard",
   gitPush: "exempt-from-sandbox-guard",
   ghIssueCreate: "exempt-from-sandbox-guard",
@@ -292,6 +294,7 @@ export const OPERATIONS: readonly Operation[] = [
   "reviewPersist",
   "reviewPersistPreflight",
   "gitCommit",
+  "gitBranch",
   "gitClearCommitIntent",
   "gitPush",
   "ghIssueCreate",

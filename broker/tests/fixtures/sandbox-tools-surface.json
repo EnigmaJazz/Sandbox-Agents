@@ -260,6 +260,17 @@
       "asks": 1
     },
     {
+      "name": "host_git_branch",
+      "description": "Create a new local branch at a base commit (default HEAD), optionally switching to it (orchestrator-only mutation; requires human approval). The broker resolves the base to a commit, refuses an existing branch, an invalid name, a flag-shaped or unresolvable base, and verifies the created ref. Never overwrites, deletes, force-moves or pushes a branch. Returns JSON.",
+      "args": [
+        "name",
+        "base",
+        "switch"
+      ],
+      "execute": "function",
+      "asks": 1
+    },
+    {
       "name": "host_git_clear_commit_intent",
       "description": "Clear only a pending host-commit intent for the current session or the selected delegated session (orchestrator-only; requires human approval). Refuses when no intent exists, and reports the result commit and recorded parent that were cleared. Does not alter the session state, installed/committed markers, working tree, index, or refs. Returns JSON.",
       "args": [

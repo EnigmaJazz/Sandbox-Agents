@@ -1018,6 +1018,7 @@ export const STAGE_REVIEW_OPERATIONS: readonly string[] = ["stageList", "stageSh
 export const HOST_MUTATION_OPERATIONS: readonly string[] = [
   "sddArchiveCompose",
   "gitCommit",
+  "gitBranch",
   "gitClearCommitIntent",
   "gitPush",
   "ghIssueCreate",
@@ -1234,6 +1235,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   reviewPersist: ["projectDir", "runId", "finalizeRef", "mode"],
   reviewPersistPreflight: ["projectDir", "runId", "finalizeRef", "mode"],
   gitCommit: ["projectDir", "message", "sandboxSessionID"],
+  gitBranch: ["projectDir", "name", "base", "switch"],
   gitClearCommitIntent: ["projectDir", "sandboxSessionID"],
   gitPush: ["projectDir", "remote", "setUpstream", "allowProtectedBranch"],
   ghIssueCreate: ["projectDir", "repo", "title", "body"],

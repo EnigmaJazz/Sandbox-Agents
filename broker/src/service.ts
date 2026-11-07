@@ -43,6 +43,7 @@ import {
   assertContent,
   assertExpectedResultCommit,
   assertExternalCopyTarget,
+  assertGitBranch,
   assertGrepQuery,
   assertOrcaDispatchId,
   assertOrcaTaskId,
@@ -76,6 +77,7 @@ import {
   checkProtectedPaths,
   buildGitCommitArgv,
   buildGitPushArgv,
+  buildGitBranchArgv,
   buildGhIssueCreateArgv,
   capAndRedact,
   capAndRedactWithFlag,
@@ -3473,6 +3475,127 @@ export function buildGitPushOp(ctx: OpContext): OpHandler {
       stdout: pushed.stdout,
       stderr: pushed.stderr,
       status: pushed.status,
+    };
+  };
+}
+
+/**
+ * Create one new local branch at a broker-resolved base commit (fixed argv,
+ * orchestrator-only). Authorization runs BEFORE payload validation, so an
+ * unauthorized caller cannot even probe the payload surface. An existing
+ * branch, an invalid name, an unresolvable or flag-shaped base, and an unknown
+ * payload key are refused before any branch mutation; the created ref is then
+ * verified against the resolved base commit. Every step runs with the validated
+ * GIT_DIR, and a switch onto a protected-path base is refused.
+ */
+export function buildGitBranchOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    authorizeHostDispatch(ctx, "gitBranch", req.sessionID, req.agent);
+    const payload = payloadOf(req) as {
+      projectDir?: unknown;
+      name?: unknown;
+      base?: unknown;
+      switch?: unknown;
+    };
+    const { projectRoot } = resolveCanonicalProjectRoot(ctx, payload.projectDir);
+    // The same validated git dir every other host git handler binds: a `.git`
+    // FILE (linked worktree) is trusted only when git's own back-link agrees, so
+    // a pointer forged at another repository is refused here, before any spawn.
+    const env = { GIT_DIR: gitDirFor(projectRoot) };
+    const run = (argv: string[]) => runHostStep(ctx, argv, projectRoot, 60_000, env);
+    const name = payload.name;
+    assertGitBranch(name);
+    const baseRaw = payload.base;
+    if (baseRaw !== undefined) {
+      if (typeof baseRaw !== "string") {
+        throw new ValidationError("base must be a string");
+      }
+      if (baseRaw.startsWith("-")) {
+        throw new ValidationError("base must not start with '-'");
+      }
+    }
+    const switchRaw = payload.switch;
+    if (switchRaw !== undefined && typeof switchRaw !== "boolean") {
+      throw new ValidationError("switch must be a boolean");
+    }
+    const switchBranch = switchRaw === true;
+    const baseRef = baseRaw === undefined ? "HEAD" : baseRaw;
+    const resolved = await run(["git", "rev-parse", "--verify", "--quiet", `${baseRef}^{commit}`]);
+    const baseCommit = resolved.stdout.trim().toLowerCase();
+    if (resolved.status !== 0 || !/^[0-9a-f]{40}$/.test(baseCommit)) {
+      throw new StateError("cannot create branch: base does not resolve to a commit");
+    }
+    const exists = await run(["git", "show-ref", "--verify", "--quiet", `refs/heads/${name}`]);
+    if (exists.status === 0) {
+      throw new StateError(`cannot create branch: '${name}' already exists`);
+    }
+    if (exists.status !== 1) {
+      throw new StateError(
+        `cannot create branch: branch existence check failed (${capAndRedact(exists.stderr).trim()})`,
+      );
+    }
+    // A switch rewrites the working tree to `base`. Refuse when that transition
+    // changes an S7/S17 protected path: the switch would write those bytes with
+    // no review, exactly what commit and apply already refuse to do.
+    if (switchBranch) {
+      const baseDiff = await run(buildChangedPathsArgv("HEAD", baseCommit));
+      if (baseDiff.status !== 0) {
+        throw new StateError(
+          `cannot create branch: base diff failed (${capAndRedact(baseDiff.stderr).trim()})`,
+        );
+      }
+      // The changed-path list is the authority for the protected-path refusal.
+      // A byte-capped diff can end exactly on a NUL path boundary and still
+      // parse as "complete", hiding every path beyond the cap — including a
+      // protected one. Refuse before parsing or any branch/switch mutation.
+      if (baseDiff.stdoutTruncated) {
+        throw new StateError(
+          `cannot create branch: base diff path metadata is truncated (exceeds ${GIT_OUTPUT_MAX_BYTES} bytes)`,
+        );
+      }
+      const changedInBase = parseNulDelimitedPaths(baseDiff.stdout);
+      if (!changedInBase.complete) {
+        throw new StateError("cannot create branch: base diff path metadata is incomplete");
+      }
+      const rejected = checkProtectedPaths(changedInBase.paths, [
+        ...ctx.config.protectedPaths,
+        ...ctx.config.protectedSecurityFiles,
+      ]);
+      if (rejected.length > 0) {
+        throw new StateError(
+          `refusing to switch branch onto protected paths (S7/S17): ${rejected.join(", ")}`,
+        );
+      }
+    }
+    const argv = buildGitBranchArgv({ name, base: baseCommit, switchBranch });
+    const created = await run(argv);
+    if (created.status !== 0) {
+      throw new MsbError(
+        `git branch failed (${gitSubcommand(argv) ?? argv[1]}): ${capAndRedact(created.stderr).trim()}`,
+      );
+    }
+    const verified = await run(["git", "rev-parse", "--verify", `refs/heads/${name}^{commit}`]);
+    const verifiedCommit = verified.stdout.trim().toLowerCase();
+    if (verified.status !== 0 || verifiedCommit !== baseCommit) {
+      throw new StateError(
+        "cannot create branch: the created ref does not match the resolved base commit",
+      );
+    }
+    const head = await run(["git", "symbolic-ref", "--short", "-q", "HEAD"]);
+    const currentBranch = head.status === 0 ? head.stdout.trim() : null;
+    if (switchBranch && currentBranch !== name) {
+      throw new StateError(
+        "cannot create branch: switch succeeded but HEAD is not on the new branch",
+      );
+    }
+    return {
+      created: true,
+      name,
+      base: baseCommit,
+      switched: switchBranch,
+      currentBranch,
+      stdout: capAndRedact(created.stdout),
+      stderr: capAndRedact(created.stderr),
     };
   };
 }

@@ -34,7 +34,7 @@ async function sweep(): Promise<{ count: number; referenceErrors: string[] }> {
 
 test("every tool body resolves its helpers (no ReferenceError)", async () => {
   const result = await sweep();
-  expect(result.count).toBe(51);
+  expect(result.count).toBe(52);
   expect(result.referenceErrors).toEqual([]);
 });
 

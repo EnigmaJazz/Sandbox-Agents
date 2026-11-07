@@ -109,6 +109,10 @@ const GIT_REMOTE_SUBCOMMANDS: ReadonlySet<string> = new Set(["push", "fetch"]);
 /**
  * Subcommands that can execute a repository-local command (hooks, filters,
  * diff drivers, ssh/proxy commands). Read-only plumbing needs no guard.
+ * `switch` is execution-bearing for the same reason as `checkout`: checking a
+ * branch out rewrites the working tree and therefore runs the repository's
+ * smudge/process filters. `branch` alone changes no working-tree content and
+ * stays unguarded.
  */
 const GIT_EXECUTION_SUBCOMMANDS: ReadonlySet<string> = new Set([
   "add",
@@ -116,6 +120,7 @@ const GIT_EXECUTION_SUBCOMMANDS: ReadonlySet<string> = new Set([
   "push",
   "restore",
   "checkout",
+  "switch",
   "diff",
   "fetch",
   "update-ref",
