@@ -9,6 +9,7 @@
  * agent fragment plus Task-name mapping.
  */
 import { afterAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -17,6 +18,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -69,6 +71,98 @@ const canonicalRepo = realpathSync(repoRoot);
 const canonicalOther = realpathSync(otherRoot);
 const symlinkRoot = join(fixtureRoot, "repo-link");
 symlinkSync(canonicalRepo, symlinkRoot);
+
+// Git-shaped fixtures (hand-built with mkdirSync/writeFileSync, no git process).
+
+/** Write the `.git` pointer plus git's `gitdir`/`commondir` files for a worktree. */
+function writeWorktreeFiles(
+  worktree: string,
+  gitDir: string,
+  backlink: string,
+  commondir: string,
+): void {
+  mkdirSync(worktree, { recursive: true });
+  mkdirSync(gitDir, { recursive: true });
+  writeFileSync(join(worktree, ".git"), `gitdir: ${gitDir}\n`);
+  writeFileSync(join(gitDir, "gitdir"), `${backlink}\n`);
+  writeFileSync(join(gitDir, "commondir"), `${commondir}\n`);
+}
+
+function makeFifo(path: string): boolean {
+  return spawnSync("mkfifo", [path]).status === 0;
+}
+
+const mkfifoAvailable = spawnSync("mkfifo", ["--version"]).status === 0;
+
+/** A plain git-shaped checkout: `<root>/.git` is a real directory. */
+function shapeCheckout(root: string): void {
+  mkdirSync(join(root, ".git"), { recursive: true });
+}
+
+/** A verified linked worktree of `repo` with git's own back-link and commondir. */
+function shapeLinkedWorktree(worktree: string, repo: string, name: string): void {
+  writeWorktreeFiles(worktree, join(repo, ".git", "worktrees", name), join(worktree, ".git"), "../..");
+}
+
+const gitProjectRoot = join(fixtureRoot, "git-project");
+shapeCheckout(gitProjectRoot);
+const linkedWorktreeRoot = join(fixtureRoot, "git-project-wt");
+shapeLinkedWorktree(linkedWorktreeRoot, gitProjectRoot, "wt");
+const worktreeAlias = join(fixtureRoot, "git-project-wt-link");
+symlinkSync(linkedWorktreeRoot, worktreeAlias);
+
+const unregisteredRepoRoot = join(fixtureRoot, "unregistered-repo");
+shapeCheckout(unregisteredRepoRoot);
+const unregisteredWorktreeRoot = join(fixtureRoot, "unregistered-wt");
+shapeLinkedWorktree(unregisteredWorktreeRoot, unregisteredRepoRoot, "uwt");
+
+// A real linked worktree of an UNREGISTERED repo whose path begins with the
+// registered root: the path-prefix trap the common-directory rule must not fall for.
+const lookalikeRoot = `${gitProjectRoot}-lookalike`;
+shapeLinkedWorktree(lookalikeRoot, unregisteredRepoRoot, "lookalike");
+
+const forgedBacklinkWorktree = join(fixtureRoot, "forged-backlink-wt");
+writeWorktreeFiles(
+  forgedBacklinkWorktree,
+  join(gitProjectRoot, ".git", "worktrees", "forged-backlink"),
+  join(linkedWorktreeRoot, ".git"),
+  "../..",
+);
+
+const controlWorktree = join(fixtureRoot, "control-wt");
+shapeLinkedWorktree(controlWorktree, gitProjectRoot, "control");
+
+const fifoBacklinkWorktree = join(fixtureRoot, "fifo-backlink-wt");
+const fifoBacklinkGitDir = join(gitProjectRoot, ".git", "worktrees", "fifo-backlink");
+const fifoCommonWorktree = join(fixtureRoot, "fifo-common-wt");
+const fifoCommonGitDir = join(gitProjectRoot, ".git", "worktrees", "fifo-common");
+if (mkfifoAvailable) {
+  mkdirSync(fifoBacklinkWorktree, { recursive: true });
+  mkdirSync(fifoBacklinkGitDir, { recursive: true });
+  writeFileSync(join(fifoBacklinkWorktree, ".git"), `gitdir: ${fifoBacklinkGitDir}\n`);
+  writeFileSync(join(fifoBacklinkGitDir, "commondir"), "../..\n");
+  makeFifo(join(fifoBacklinkGitDir, "gitdir"));
+
+  mkdirSync(fifoCommonWorktree, { recursive: true });
+  mkdirSync(fifoCommonGitDir, { recursive: true });
+  writeFileSync(join(fifoCommonWorktree, ".git"), `gitdir: ${fifoCommonGitDir}\n`);
+  writeFileSync(join(fifoCommonGitDir, "gitdir"), `${join(fifoCommonWorktree, ".git")}\n`);
+  makeFifo(join(fifoCommonGitDir, "commondir"));
+}
+
+const forgedCommonWorktree = join(fixtureRoot, "forged-common-wt");
+writeWorktreeFiles(
+  forgedCommonWorktree,
+  join(unregisteredRepoRoot, ".git", "worktrees", "fc"),
+  join(forgedCommonWorktree, ".git"),
+  join(gitProjectRoot, ".git"),
+);
+
+const symlinkGitRoot = join(fixtureRoot, "git-symlink-project");
+mkdirSync(symlinkGitRoot);
+symlinkSync(join(gitProjectRoot, ".git"), join(symlinkGitRoot, ".git"));
+const plainSubdirectory = join(gitProjectRoot, "subdir");
+mkdirSync(plainSubdirectory);
 
 afterAll(() => {
   rmSync(fixtureRoot, { recursive: true, force: true });
@@ -435,6 +529,85 @@ describe("reviewer relay session root selection", () => {
     });
     const refusal = await refusalOf(() => resolve("session-3"));
     expect(refusal.code).toBe("reviewer_relay_policy_refused");
+  });
+});
+
+describe("reviewer relay linked worktree root selection", () => {
+  const select = (sessionDirectory: unknown) =>
+    selectCanonicalSessionRoot({
+      sessionDirectory,
+      serverRoot: canonicalOther,
+      projectPaths: [projectPath(gitProjectRoot)],
+      realpath: realpathSync,
+    });
+
+  test("accepts a linked worktree of a registered project", () => {
+    expect(select(linkedWorktreeRoot)).toBe(linkedWorktreeRoot);
+  });
+
+  test("refuses a linked worktree of an unregistered repository", () => {
+    expect(() => select(unregisteredWorktreeRoot)).toThrow("reviewer_relay_root_refused");
+  });
+
+  test("refuses a symlinked alias of an accepted linked worktree", () => {
+    const refusal = () => select(worktreeAlias);
+    expect(refusal).toThrow("reviewer_relay_root_refused");
+    expect(refusal).toThrow("canonical");
+  });
+
+  test("refuses a path-prefix lookalike linked worktree of an unregistered repo", () => {
+    expect(lookalikeRoot.startsWith(gitProjectRoot)).toBe(true);
+    expect(() => select(lookalikeRoot)).toThrow("reviewer_relay_root_refused");
+  });
+
+  test("refuses a forged gitdir back-link", () => {
+    expect(() => select(forgedBacklinkWorktree)).toThrow("reviewer_relay_root_refused");
+  });
+
+  test("accepts a verified second worktree of a registered project", () => {
+    expect(select(controlWorktree)).toBe(controlWorktree);
+  });
+
+  test.skipIf(!mkfifoAvailable)("refuses a FIFO gitdir back-link without blocking", () => {
+    expect(() => select(fifoBacklinkWorktree)).toThrow("reviewer_relay_root_refused");
+  });
+
+  test.skipIf(!mkfifoAvailable)("refuses a FIFO commondir without blocking", () => {
+    expect(() => select(fifoCommonWorktree)).toThrow("reviewer_relay_root_refused");
+  });
+
+  test("refuses a forged commondir pointing at the registered repository", () => {
+    expect(() => select(forgedCommonWorktree)).toThrow("reviewer_relay_root_refused");
+  });
+
+  test("refuses a .git symlink and a plain subdirectory of a registered project", () => {
+    expect(() => select(symlinkGitRoot)).toThrow("reviewer_relay_root_refused");
+    expect(() => select(plainSubdirectory)).toThrow("reviewer_relay_root_refused");
+  });
+
+  test("resolver accepts and caches a linked worktree root", async () => {
+    const cache = new Map<string, string>();
+    let sessionLookups = 0;
+    let policyLookups = 0;
+    const resolve = createSessionRootResolver({
+      lookupSessionDirectory: async () => {
+        sessionLookups += 1;
+        return linkedWorktreeRoot;
+      },
+      loadAllowlistedPaths: async () => {
+        policyLookups += 1;
+        return [gitProjectRoot];
+      },
+      realpath: realpathSync,
+      serverRoot: canonicalOther,
+      cache,
+    });
+
+    expect(await resolve("session-wt")).toBe(linkedWorktreeRoot);
+    expect(await resolve("session-wt")).toBe(linkedWorktreeRoot);
+    expect(sessionLookups).toBe(1);
+    expect(policyLookups).toBe(2);
+    expect(cache.get("session-wt")).toBe(linkedWorktreeRoot);
   });
 });
 

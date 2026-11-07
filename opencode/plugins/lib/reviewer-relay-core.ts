@@ -10,12 +10,16 @@
  * `opencode_review_transport_binding_invalid`.
  *
  * Boundaries enforced here, all fail closed with typed refusals:
- * - root: the session's resolved repository is canonical and absolute, and
- *   exactly equals one broker-allowlisted project root. A failed or unusable
- *   session lookup refuses as `reviewer_relay_session_lookup_failed`. Equality
- *   with the plugin server root is permitted when that root is allowlisted.
- *   Refusal happens BEFORE any child spawn; there is no fallback to `directory`,
- *   `worktree`, `process.cwd()`, or a handler registry.
+ * - root: the session's resolved repository is canonical and absolute, and either
+ *   exactly equals one broker-allowlisted project root or is a verified linked
+ *   git worktree whose git common directory equals a registered project's.
+ *   Linked worktrees are matched by git common directory, never by path prefix,
+ *   and only when git's own `gitdir` back-link and `commondir` agree. A failed
+ *   or unusable session lookup refuses as
+ *   `reviewer_relay_session_lookup_failed`. Equality with the plugin server
+ *   root is permitted when that root is allowlisted. Refusal happens BEFORE any
+ *   child spawn; there is no fallback to `directory`, `worktree`,
+ *   `process.cwd()`, or a handler registry.
  * - hooks: only the dedicated `asi-review-*` names. The installed
  *   `REVIEW_AGENTS` names are disjoint and pass through untouched.
  * - spawn: fixed binary + argv vector, `shell: false`, piped stdio, and a
@@ -35,8 +39,17 @@
  * and installs the exact bytes by hand. Agents never apply or certify it.
  */
 import { spawn } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute } from "node:path";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  realpathSync,
+} from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Provider transport constants
@@ -220,6 +233,98 @@ export function requireCanonicalAbsoluteRoot(value: unknown, realpath: (path: st
   return canonical;
 }
 
+/** Bound for a `.git` pointer, `gitdir`, or `commondir` file read. */
+const GIT_DIRECTORY_FILE_MAX_BYTES = 4096;
+/** A linked-worktree `.git` file carries exactly one `gitdir:` pointer line. */
+const GITDIR_POINTER_PATTERN = /^gitdir:\s*(.+)$/;
+/** Read-only, never follow a symlink at the final path component, and never block on a FIFO. */
+const GIT_DIRECTORY_FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+
+/**
+ * Read the first line of a small git control file through a bounded, no-follow
+ * reader. Anything that is not a regular file, or is not valid UTF-8, fails.
+ */
+function readBoundedFirstLine(path: string): string | null {
+  let descriptor: number | null = null;
+  try {
+    descriptor = openSync(path, GIT_DIRECTORY_FILE_FLAGS);
+    if (!fstatSync(descriptor).isFile()) return null;
+    const buffer = Buffer.alloc(GIT_DIRECTORY_FILE_MAX_BYTES);
+    const bytesRead = readSync(descriptor, buffer, 0, buffer.length, 0);
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, bytesRead));
+    const newline = text.indexOf("\n");
+    return newline === -1 ? text : text.slice(0, newline);
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== null) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // A close failure cannot un-read the bytes; the caller fails closed on them.
+      }
+    }
+  }
+}
+
+/** True when `target` is strictly below `root` (never when equal to it). */
+function isStrictlyInside(root: string, target: string): boolean {
+  return target !== root && target.startsWith(`${root}${sep}`);
+}
+
+/**
+ * Canonical git common directory of a checkout or verified linked worktree, or
+ * null. A plain checkout returns `<root>/.git`. A linked worktree is trusted
+ * only when git's own files agree: its `.git` file names
+ * `<repo>/.git/worktrees/<name>` outside the worktree, that git directory's
+ * `gitdir` names this worktree's `.git`, and its `commondir` is the
+ * repository's `.git`. Every failure returns null: no throw, no fallback.
+ */
+export function readGitCommonDirectory(
+  root: string,
+  realpath: (path: string) => string,
+): string | null {
+  try {
+    const canonicalRoot = realpath(root);
+    const dotGit = join(canonicalRoot, ".git");
+    const dotGitStats = lstatSync(dotGit);
+    if (dotGitStats.isDirectory()) {
+      return realpath(dotGit);
+    }
+    if (!dotGitStats.isFile()) {
+      return null;
+    }
+    const pointerLine = readBoundedFirstLine(dotGit);
+    if (pointerLine === null) return null;
+    const pointerMatch = GITDIR_POINTER_PATTERN.exec(pointerLine);
+    if (pointerMatch === null) return null;
+    const pointer = pointerMatch[1]!.trim();
+    if (pointer.length === 0) return null;
+    const gitDir = realpath(isAbsolute(pointer) ? pointer : resolve(canonicalRoot, pointer));
+    if (basename(dirname(gitDir)) !== "worktrees") return null;
+    if (basename(dirname(dirname(gitDir))) !== ".git") return null;
+    if (isStrictlyInside(canonicalRoot, gitDir)) return null;
+    const canonicalDotGit = realpath(dotGit);
+    const backlinkLine = readBoundedFirstLine(join(gitDir, "gitdir"));
+    if (backlinkLine === null) return null;
+    const backlink = backlinkLine.trim();
+    if (backlink.length === 0) return null;
+    const backlinkTarget = realpath(isAbsolute(backlink) ? backlink : resolve(gitDir, backlink));
+    if (backlinkTarget !== canonicalDotGit) return null;
+    const commonLine = readBoundedFirstLine(join(gitDir, "commondir"));
+    if (commonLine === null) return null;
+    const commonPointer = commonLine.trim();
+    if (commonPointer.length === 0) return null;
+    const commonDir = realpath(
+      isAbsolute(commonPointer) ? commonPointer : resolve(gitDir, commonPointer),
+    );
+    const expectedCommon = dirname(dirname(gitDir));
+    return commonDir === expectedCommon ? commonDir : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface RootSelectionInput {
   /** The Task session's repository directory, as reported by `client.session.get`. */
   sessionDirectory: unknown;
@@ -228,14 +333,18 @@ export interface RootSelectionInput {
   /** Broker `policy.projects` entries (objects with `path`, or raw path strings). */
   projectPaths: readonly unknown[];
   realpath: (path: string) => string;
+  /** Injected git common-directory probe; defaults to `readGitCommonDirectory`. */
+  gitCommonDirectory?: (root: string) => string | null;
 }
 
 /**
  * Select the reviewer Task's canonical repository root.
  *
- * The session repository must be a canonical absolute path exactly equal to
- * one broker-allowlisted project root. Every failure refuses before any child
- * process exists.
+ * The session repository must be a canonical absolute path that either exactly
+ * equals one broker-allowlisted project root or is a verified linked git
+ * worktree whose git common directory equals a registered project's. Linked
+ * worktrees are matched by git common directory, never by path prefix. Every
+ * failure refuses before any child process exists.
  */
 export function selectCanonicalSessionRoot(input: RootSelectionInput): string {
   const sessionRoot = requireCanonicalAbsoluteRoot(input.sessionDirectory, input.realpath);
@@ -252,7 +361,23 @@ export function selectCanonicalSessionRoot(input: RootSelectionInput): string {
     allowlist.push(requireCanonicalAbsoluteRoot(candidate, input.realpath));
   }
   if (!allowlist.includes(sessionRoot)) {
-    throw rootRefused("session repository is not an exact allowlisted project root");
+    const probe =
+      input.gitCommonDirectory ?? ((root: string) => readGitCommonDirectory(root, input.realpath));
+    const sessionCommonDirectory = probe(sessionRoot);
+    if (sessionCommonDirectory === null) {
+      throw rootRefused(
+        "session repository is not an exact allowlisted project root and exposes no git common directory",
+      );
+    }
+    const isRegisteredWorktree = allowlist.some((root) => {
+      const commonDirectory = probe(root);
+      return commonDirectory !== null && commonDirectory === sessionCommonDirectory;
+    });
+    if (!isRegisteredWorktree) {
+      throw rootRefused(
+        "session repository git common directory is not a registered project's",
+      );
+    }
   }
   // Deliberately removed inequality guard: allowlisted server-root equality is permitted; allowlist validation and fail-closed lookup refusal replace it.
   const serverRoot = requireCanonicalAbsoluteRoot(input.serverRoot, input.realpath);
@@ -278,6 +403,8 @@ export interface SessionRootResolutionDeps {
   loadAllowlistedPaths: () => Promise<readonly unknown[]>;
   realpath: (path: string) => string;
   serverRoot: unknown;
+  /** Injected git common-directory probe; defaults to `readGitCommonDirectory`. */
+  gitCommonDirectory?: (root: string) => string | null;
   cache?: Map<string, string>;
 }
 
@@ -293,7 +420,7 @@ export function createSessionRootResolver(
     const cached = cache.get(sessionID);
     if (cached !== undefined) {
       const projectPaths = await deps.loadAllowlistedPaths().catch((cause) => { throw refusalOr(cause, policyRefused); });
-      selectCanonicalSessionRoot({ sessionDirectory: cached, serverRoot: deps.serverRoot, projectPaths, realpath: deps.realpath });
+      selectCanonicalSessionRoot({ sessionDirectory: cached, serverRoot: deps.serverRoot, projectPaths, realpath: deps.realpath, gitCommonDirectory: deps.gitCommonDirectory });
       return cached;
     }
     let sessionDirectory: unknown;
@@ -316,6 +443,7 @@ export function createSessionRootResolver(
       serverRoot: deps.serverRoot,
       projectPaths,
       realpath: deps.realpath,
+      gitCommonDirectory: deps.gitCommonDirectory,
     });
     cache.set(sessionID, root);
     return root;
