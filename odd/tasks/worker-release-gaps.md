@@ -365,33 +365,73 @@ the parked request's queue timer bounds the pass and each adapter call carries i
 high_risk` is outstanding owner work; native review was explicitly out of scope and was neither
 started nor acknowledged.
 
-**Owner landing steps (S17 — the owner reviews and commits, then restarts).** Uncommitted on
-`fix/q114-worker-release`, current HEAD `43867d7` (tracker metadata only):
-- `broker/src/config.ts`
-- `broker/src/policy.ts`
-- `broker/src/reaper.ts`
-- `broker/src/server.ts`
-- `broker/src/service.ts`
-- `broker/src/state.ts`
-- `broker/tests/config.test.ts`
-- `broker/tests/fixtures/sandbox-tools-surface.json`
-- `broker/tests/gate-test-evidence.test.ts`
-- `broker/tests/lifecycle-claim.test.ts` (new, untracked — needs `git add`)
-- `broker/tests/queue.test.ts`
-- `broker/tests/reaper.test.ts`
-- `broker/tests/retained-apply.test.ts` (new, untracked — needs `git add`)
-- `broker/tests/server-reaper-log-seam.test.ts`
-- `broker/tests/service-apply.test.ts`
-- `broker/tests/service-diff.test.ts`
-- `broker/tests/service-git-commit-session.test.ts`
-- `broker/tests/staging-chain.test.ts`
-- `broker/tests/state-artifacts.test.ts`
-- `broker/tests/worker-release-outcome.test.ts`
-- `opencode/plugins/lib/tool-specs-sandbox.ts`
+## T11 — final correction (second and last round): F4, F5, new P1  [Phase A landed]
 
-Split into coherent commits (by F seam and by source-versus-tests) or record a `review-size-
-exception` with its reason, then restart the broker for the change to take effect. The two new
-test files must be staged before `host_sandbox_result_install` can be replayed for them.
+**Trigger.** Codex's bounded recheck CLOSED F1, F2 and F3 and left exactly three items open:
+F4 (`gitCommit` releases the target session's worker without that session's lifecycle claim),
+F5 (the claimed absolute response deadline is not absolute: `parkAndWait` awaits the whole
+pressure scan before returning `pending`, so a 400 ms scan delays a 40 ms deadline's error),
+and one P1 the first correction INTRODUCED (the rehydration failure path swallows a failed
+stop/remove, releases the reservation and clears `workerName`/`workerState`, leaving an
+untracked VM that later admission does not count). No third round: anything still open goes to
+the owner.
+
+**Route.** ROUTE: bug investigation | intent: authorized change | route: ODD secure |
+specialist: pm-odd `ses_e45a26b3fffeViIcGnokjSGtlF` → Planner `ses_e451186f3ffeUkdZaLzM4HP8d7`
+→ writer `odd-apply` (deferred to Phase B) | basis: WORKFLOW.md. Risk high: lifecycle-claim
+coverage and data-loss accounting.
+
+**Advisor dispatches.** `advisor-gemini-pre` | `ses_e450ce730ffeB6erhfsLDUV7Br` | model reported
+`google/gemini-4-argon` | compulsory specification advice, read RAW: incorporated
+stale-transition protection, exact-entry deadline checks, nested accounting and real cleanup for
+the named failed bootstrap. `advisor-integration-pre` (the required concurrency/lifecycle
+surface) was first cancelled at `ses_e450ce765ffehAEH7GmAexJkpf`; `.atl/rate-limit-fallback.log`
+does not exist in this worktree, so no replay was in flight and no terminal chain-exhausted
+marker existed. Owner-authorized single retry at `ses_e44f1b9f0ffeajeciuBhErymkT` completed on
+`opencode-go/MiMo-V2.6-Flash` and was read RAW: incorporated fresh-state finalisation, overlap
+coverage, failed-worker paths, pre-admission refusal, nested reservation and prompt drain. No
+missing-opinion exception applies. Skips: design, additional security/testing/maintainability
+(one shared lifecycle surface), `advisor-spec-pre` (single spec carrier), subscription Gemini
+(lane inactive), `planner-evidence` (AFT/reads).
+
+**Observed evidence for the three defects.** Unclaimed target-session commit cleanup
+(`service.ts:3798-3803` plus the release helpers at `4912-4929`), an awaited pressure scan on the
+caller's critical path (`service.ts:1106-1113`), and the rehydration cleanup that releases the
+reservation and clears identity while swallowing the removal failure
+(`service.ts:818-842`). `MsbAdapter.run` throws on timeout (`broker/src/msb.ts:301-310`), which
+disproves the premise that a timed-out remove may have silently succeeded.
+
+**Decisions.**
+- **C1 / F4.** Every worker release takes the same per-session lifecycle claim, on the record
+  being released, not the caller's session. `gitCommit` claims `resultSessionID` before the
+  proof and holds it through removal and bookkeeping. On contention it does NOT fail: the commit
+  already landed, so it persists its markers through a fresh synchronous record update (never a
+  stale-state transition), skips probe/stop/remove/accounting cleanup, logs
+  `release_retained_worker_skipped_busy`, and leaves the worker for the next sweep. Cleanup
+  contention can never undo a landed HEAD, and it never overwrites concurrent lifecycle state.
+- **C2 / F5.** The pressure scan leaves the caller's promise: dedup, cap check, deadline,
+  timer and enqueue stay synchronous, `pending` is returned immediately, and the scan runs in a
+  caught detached continuation whose drain happens only when `queue.find(sessionID)` is that
+  exact entry, not cancelled or settled, still queued, and before the original deadline. FIFO
+  and creation-time revalidation are kept; there is no deadline reset, no direct-create
+  shortcut and no late resurrection. The existing `tests/lifecycle-claim.test.ts:334-371`
+  must additionally assert elapsed time against the deadline, not only the error class.
+- **C3 / new P1.** A failed stop/remove never drops allocation or identity: the record keeps the
+  actual `workerName` with `workerState: "FAILED"` (replacing `undefined`), keeps its refs and
+  snapshot identity, and keeps a counted held allocation. `stop` and `remove` are attempted
+  independently; sweeps retry such a worker under the lifecycle claim before the ordinary FAILED
+  exclusion; a narrow cleanup predicate for a bootstrap that never created a Git worktree uses
+  stop/remove without the export proof, while an ordinary live removal keeps it. Reuse and
+  recreation are refused while a cleanup is pending, `keep`/`discard`/`destroy` never fabricate
+  `released: true`, and only a confirmed adapter removal clears identity, writes `DESTROYED`,
+  releases the allocation once and drains. The rollback to `RESULT_READY` with unchanged refs
+  and the original error still happens. Tradeoff accepted: a possibly nonexistent VM holds a
+  slot fail-closed until the removal is confirmed or the owner recovers it.
+
+**Gate 1** PASS `sha256:60cb8d6625a4ac0e0defdf60044bb64bf0b142c93a883e3cca7eaf789b745ef1`
+(metadata commit `ab8bed2`, tracker-only, one path, risk `passive`, verified with
+`host_review_assess --committed-only` from `bc50ae4`). Gate 2 follows the writer, independent
+verification and `advisor-gemini-post`. The human approval-binding race stays out of scope.
 
 
 ## Revisions
@@ -399,6 +439,7 @@ test files must be staged before `host_sandbox_result_install` can be replayed f
 - r2 2026-11-08T08:48:06Z gentle-orchestrator: Record T6-T9 installed candidates, the independent broker-unit run, residual findings and owner landing steps
 - r3 2026-11-08T09:30:59Z gentle-orchestrator: Land T10 Phase A advice record: advisor availability correction, scope B, three advisor dispatches, Gate 1 hash, design D1-D5
 - r4 2026-11-08T11:17:41Z gentle-orchestrator: Land T10 closure: scope B F1-F5 installed, three results, Gate 1/2 hashes, amended D3, follow-ups and owner landing steps
+- r5 2026-11-08T12:32:27Z gentle-orchestrator: Land T11 Phase A advice record: F4/F5/new-P1 decisions, advisor dispatches incl. cancelled-then-retried integration advisor, Gate 1 hash
 
 ## Gates
 - T10 PASS 2026-11-08T09:26:33Z planner ref=q114-correction-u4 pre: ses_e4597e692ffeYAzD8jOqqLf5qy; ses_e4597e69affeNrjTkDhw92ThFx; ses_e4597e699ffeIpEkRsjz4sMNvq
