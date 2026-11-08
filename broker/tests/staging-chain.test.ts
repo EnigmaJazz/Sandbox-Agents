@@ -69,7 +69,12 @@ function harness(): Harness {
       exec: async (name: string, argv: string[], opts?: { env?: Record<string, string>; timeoutMs?: number }) =>
         spawnArgv(argv.map(map(name)), { cwd: dirOf(name), env: opts?.env, timeoutMs: opts?.timeoutMs }),
       stop: async () => undefined,
-      remove: async () => undefined,
+      // `msb remove` destroys the VM, so a released worker's directory is gone
+      // and a later re-ensure creates a fresh one. Modelling a no-op removal
+      // would let a re-ensure reuse the old repo (and its `work` branch).
+      remove: async (name: string) => {
+        rmSync(dirOf(name), { recursive: true, force: true });
+      },
     },
     budget: {
       perWorkerCpu: 2,
@@ -246,9 +251,16 @@ describe("broker-derived baselines (refusals)", () => {
     await finish(h, "pin");
     const pinned = git(h.repo, "rev-parse", `${prefix(chain.id)}/stage/1`);
 
+    // The finish released the worker (T5), so a re-finish needs one again: the
+    // re-ensure restores the worker from its own result, which keeps the
+    // unchanged re-finish a real export (not the RESULT_READY fast path).
+    await ensure(h, "pin", { resultRef: "refs/opencode-sandbox/result/pin" });
     await finish(h, "pin"); // nothing new -> same commit -> no-op
     expect(git(h.repo, "rev-parse", `${prefix(chain.id)}/stage/1`)).toBe(pinned);
 
+    // Same for the changed-content case: without a live worker the edits could
+    // not be exported, so the `already pinned` refusal must stay exercised.
+    await ensure(h, "pin", { resultRef: "refs/opencode-sandbox/result/pin" });
     work(h, "pin", "b.txt", "changed after registration\n");
     await expect(finish(h, "pin")).rejects.toThrow(/already pinned/);
     expect(git(h.repo, "rev-parse", `${prefix(chain.id)}/stage/1`)).toBe(pinned);

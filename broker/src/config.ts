@@ -523,7 +523,9 @@ export function defaultConfig(
       perWorkerMemBytes: 2 * GiB,
       maxPerWorkerCpu: 4,
       maxPerWorkerMemBytes: 4 * GiB,
-      maxWorkers: 4,
+      // Operator-settable (T8): the pool cap. It only helps while the
+      // aggregate caps below also admit the extra worker; see the config doc.
+      maxWorkers: positiveIntEnv("BROKER_MAX_WORKERS", 4),
       maxAggregateCpu: 8,
       maxAggregateMemBytes: 8 * GiB,
       maxApplyDiffLines: 200,

@@ -66,7 +66,7 @@ import { isRole, normalizeRoleKey } from "./role-policy.ts";
 import { PolicyError } from "./policy.ts";
 import { PendingQueue, QueuedTimedOutError } from "./queue.ts";
 import { reapOnDisconnect, startReaper, toReaperLogEntry, type ReaperHandle } from "./reaper.ts";
-import { drainQueue } from "./service.ts";
+import { cancelQueuedEntry, drainQueue, sandboxLifecycleKindForOperation, withLifecycleClaim } from "./service.ts";
 import { buildChainAttachOp, buildChainCreateOp, buildChainStatusOp, buildStageApplyOp, buildStageApproveOp, buildStageListOp, buildStageReconcileOp, buildStageRejectOp, buildStageShowOp } from "./staging-chain.ts";
 import { SANDBOX_OPERATIONS } from "./types.ts";
 import {
@@ -830,7 +830,13 @@ export class BrokerServer {
     const sessions = this.sessionsBySocket.get(socket);
     if (!sessions) return;
     for (const sessionID of sessions) {
-      const cancelled = this.ctx.queue.cancel(sessionID, "client disconnected while queued for a worker slot");
+      // D5: mark the side metadata first, then cancel: a drain that is already
+      // in flight can never create a worker for a disconnected requester.
+      const cancelled = cancelQueuedEntry(
+        this.ctx,
+        sessionID,
+        "client disconnected while queued for a worker slot",
+      );
       if (cancelled) {
         try {
           drainQueue(this.ctx);
@@ -911,6 +917,26 @@ export class BrokerServer {
       }
       refuseStageReviewWorker(this.ctx.config, agent, undefined);
     }
+    // D4: every worker-using operation runs under the SAME per-session
+    // lifecycle claim as the finish and every release path, so no write, exec
+    // or read can interleave with a stop/remove (and a reaper release is a
+    // quiet skip while a client operation owns the session). Operations that
+    // own the claim themselves (finish/apply/keep/discard/destroy) are absent
+    // from the map: reentrancy is never implicit.
+    const claimKind = sandboxLifecycleKindForOperation(op);
+    if (claimKind) {
+      return withLifecycleClaim(this.ctx, req.sessionID, claimKind, () =>
+        this.dispatchOp(op, req, sendProgress),
+      );
+    }
+    return this.dispatchOp(op, req, sendProgress);
+  }
+
+  private async dispatchOp(
+    op: Operation,
+    req: BrokerRequestEnvelope,
+    sendProgress?: (position: number) => void,
+  ): Promise<unknown> {
     switch (op) {
       case "ensureWorker":
         return buildEnsureWorkerOp(this.ctx)(req, sendProgress);

@@ -793,7 +793,7 @@ describe("finish guard limits and log retention (H2)", () => {
     expect(await buildDestroyWorkerOp(h.ctx)(h.req("destroyWorker", "s1", {}))).toMatchObject({ destroyed: true });
   }, 60_000);
 
-  test("a finish that never settles loses the guard at its deadline; the late settle cannot drop a newer claim", async () => {
+  test("a finish that never settles loses its caller at the deadline but KEEPS ownership until it settles", async () => {
     const h = harness();
     (h.ctx.config as { finishGuardGraceMs?: number }).finishGuardGraceMs = 50;
     let settleFirst!: () => void;
@@ -801,12 +801,19 @@ describe("finish guard limits and log retention (H2)", () => {
     const hungResult = hung.then(() => "ok", (e: Error) => e.message);
     expect(isFinishing(h.ctx, "sx")).toBe(true);
     expect(await hungResult).toMatch(/deadline/);
-    expect(isFinishing(h.ctx, "sx")).toBe(false);
-    // A newer finish takes the guard; the first one settling late must leave it alone.
-    let settleSecond!: () => void;
-    const second = withFinishGuard(h.ctx, "sx", () => new Promise<void>((resolve) => { settleSecond = resolve; }));
+    // The caller stopped waiting, but the callback never settled: ownership is
+    // RETAINED, so nothing can run concurrently with it and a late settle can
+    // never release a newer claim.
+    expect(isFinishing(h.ctx, "sx")).toBe(true);
+    await expect(withFinishGuard(h.ctx, "sx", async () => "second")).rejects.toThrow(/already in flight/);
+    // Only the settlement of the underlying operation releases the claim.
     settleFirst();
     await sleep(10);
+    expect(isFinishing(h.ctx, "sx")).toBe(false);
+    // Positive control: a fresh finish after the retained one settled is admitted.
+    let settleSecond!: () => void;
+    const second = withFinishGuard(h.ctx, "sx", () => new Promise<void>((resolve) => { settleSecond = resolve; }));
+    await sleep(0); // the callback starts on a microtask
     expect(isFinishing(h.ctx, "sx")).toBe(true);
     settleSecond();
     await second;

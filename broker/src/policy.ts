@@ -26,6 +26,14 @@ export interface WorkerAllocation {
    * equal-sized allocation (Tier 2 item 15).
    */
   sessionID?: string;
+  /**
+   * True while this allocation is a synchronous RESERVATION for a creation that
+   * has been admitted but has not yet produced a running worker. Reservations
+   * count against the budget exactly like a real worker (so two concurrent
+   * direct creations can never oversubscribe the pool) and are converted in
+   * place, or removed exactly once, when the creation settles.
+   */
+  reserved?: boolean;
 }
 
 export interface WorkerPool {

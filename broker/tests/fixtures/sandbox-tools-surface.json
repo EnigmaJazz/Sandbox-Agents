@@ -76,21 +76,21 @@
     },
     {
       "name": "sandbox_diff",
-      "description": "Show the active worker diff, including uncommitted changes, or the prepared/retained result diff. Active mode requires a live worker; retained mode reads the exported result.",
+      "description": "Show the diff of the session's work: the ACTIVE worker diff (including uncommitted changes) when a worker is live, otherwise the RETAINED exported result diff. The mode is selected from the live-worker status; inspection never creates a worker.",
       "args": [],
       "execute": "function",
       "asks": 0
     },
     {
       "name": "sandbox_finish",
-      "description": "Prepare and export the sandbox result bundle. The host working tree stays unchanged and no approval is required. Host ref import occurs only in real Git mode. Transitions to RESULT_READY and retains the worker until sandbox_apply, sandbox_discard, or keep.",
+      "description": "Prepare and export the sandbox result bundle. The host working tree stays unchanged and no approval is required. Host ref import occurs only in real Git mode. Transitions to RESULT_READY and retains the result; the transient worker may be released immediately and is re-created on demand for later operations.",
       "args": [],
       "execute": "function",
       "asks": 0
     },
     {
       "name": "sandbox_apply",
-      "description": "Ask the user to approve applying the finished sandbox result (B->C delta) to the host project; requires explicit human approval (S15, §19). The result is prepared automatically when needed and previewed first. On approval, the broker re-checks host divergence (S16) and protected paths before applying. Success is APPLIED, releases the worker, and ends this session's worker lifecycle; denial or failure retains the result.",
+      "description": "Ask the user to approve applying the finished sandbox result (B->C delta) to the host project; requires explicit human approval (S15, §19). The current result is prepared only while a worker is live; a released result is previewed in RETAINED mode (bounded preview plus the complete plain/ANSI artifacts) and no worker is activated. On approval, the broker re-checks host divergence (S16) and protected paths before applying. Success is APPLIED, releases the worker, and ends this session's worker lifecycle; denial or failure retains the result.",
       "args": [],
       "execute": "function",
       "asks": 1

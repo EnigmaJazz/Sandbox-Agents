@@ -8,14 +8,19 @@
  * unapplied" workers.
  *
  * Sweep semantics (per record, per sweep):
- * - RESULT_READY  + stale -> release worker + allocation, CLEAR workerName,
- *   record reapedAt. State stays RESULT_READY: the result is already on the
- *   host side (git ref + bundle), so apply/preview/retain/discard still work.
- *   A later ensureWorker re-creates the worker on demand.
- * - SANDBOX_ACTIVE + stale -> release worker + allocation, keep the session
- *   resumable. This is the last resort after sweepUnfinished has had an hour
- *   to export the edits, so nothing is exported here; it logs
- *   `reaped_active_unsaved` so the loss is visible (crash-leak recovery).
+ * - RESULT_READY -> release worker + allocation immediately (no age gate)
+ *   through the SAME export-before-release policy as finishOrReleaseActive:
+ *   a clean worktree is released, a dirty one is re-exported first, and an
+ *   unreadable status (or a failed export) keeps the worker. State stays
+ *   RESULT_READY and resultRef is kept: the result is already on the host side
+ *   (git ref + bundle), so apply/preview/retain/discard still work. This is the
+ *   safety net for a finish path that failed to release its own worker. A
+ *   later ensureWorker re-creates it on demand.
+ * - SANDBOX_ACTIVE + stale -> export-before-release through the same
+ *   finishOrReleaseActive policy as sweepUnfinished: a clean worker is
+ *   released (`reaped_active`), a dirty or unreadable one is exported to
+ *   RESULT_READY first (`auto_finished`), and a failed export keeps the
+ *   worker. No reaper path discards unexported edits.
  * - Terminal state (APPLIED/REJECTED/RETAINED/FAILED_CLOSED) still holding a
  *   live worker -> release it at once. Every path into those states should
  *   release its own worker; this catches the one that did not.
@@ -51,8 +56,8 @@ import {
   type ArtifactRemoval,
 } from "./artifacts.ts";
 import type { LogEntry } from "./logging.ts";
-import { isFinishing, releaseWorker, runPrepare, withFinishGuard, type OpContext } from "./service.ts";
-import { isTerminalState } from "./state.ts";
+import { describePoolOccupancy, FAILED_CLEANUP_STATES, hasPendingFailedCleanup, isFinishing, removeWorkerVerified, runPrepare, withFinishGuard, type OpContext, type PoolOccupancySnapshot } from "./service.ts";
+import { isTerminalState, StateError } from "./state.ts";
 import type { SessionRecord } from "./types.ts";
 
 export interface ReaperLogEntry {
@@ -60,10 +65,12 @@ export interface ReaperLogEntry {
   action:
     | "reaped_result_ready"
     | "reaped_active"
-    | "reaped_active_unsaved"
     | "reaped_terminal"
+    | "reaped_failed_cleanup"
     | "auto_finished"
     | "auto_finished_retained"
+    | "release_skipped_dirty"
+    | "release_skipped_busy"
     | "swept_artifact"
     | "error";
   detail?: string;
@@ -96,6 +103,12 @@ export interface ReaperOptions {
    * (or file mtime, for orphans) is older than this, in ms. Default 1h.
    */
   artifactGraceMs?: number;
+  /**
+   * Test seam: the export step used by every export-before-release path
+   * (defaults to runPrepare). Threaded into sweepUnfinished and sweepIdle so a
+   * sweep never needs a real worker to exercise its policy.
+   */
+  prepare?: PrepareResult;
   onLog?: (entry: ReaperLogEntry) => void;
   onDrop?: () => void;
 }
@@ -356,12 +369,12 @@ export async function runReaperSweeps(
     logError(err);
   }
   try {
-    await sweepUnfinished(ctx, 60_000, opts.onLog, opts.onDrop);
+    await sweepUnfinished(ctx, 60_000, opts.onLog, opts.onDrop, opts.prepare);
   } catch (err) {
     logError(err);
   }
   try {
-    await sweepIdle(ctx, opts.idleMs, opts.onLog, opts.onDrop);
+    await sweepIdle(ctx, opts.idleMs, opts.onLog, opts.onDrop, opts.prepare);
   } catch (err) {
     logError(err);
   }
@@ -376,6 +389,7 @@ export async function sweepIdle(
   idleMs: number,
   onLog?: (entry: ReaperLogEntry) => void,
   onDrop?: ReaperOptions["onDrop"],
+  prepare: PrepareResult = runPrepare,
 ): Promise<{ reaped: number }> {
   const now = Date.now();
   let reaped = 0;
@@ -386,56 +400,70 @@ export async function sweepIdle(
       if (record.state === "APPLY_PENDING") continue;
       if ((ctx.activeLocks?.get(record.sessionID) ?? 0) > 0) continue;
       if (isFinishing(ctx, record.sessionID)) continue;
+      // A worker whose cleanup was never CONFIRMED still owns its name and its
+      // slot. Retry it FIRST — under the same lifecycle claim, with a fresh
+      // revalidation — before the ordinary FAILED exclusion below; the narrow
+      // predicate covers APPLIED/RETAINED (a landed commit/apply), not only
+      // RESULT_READY. A failed retry keeps identity and accounting for the next
+      // sweep; only a CONFIRMED removal clears them.
+      if (
+        hasPendingFailedCleanup(record) &&
+        FAILED_CLEANUP_STATES.includes(record.state)
+      ) {
+        const entry = await releaseFailedCleanupWorker(ctx, record);
+        safeLog(onLog, entry, onDrop);
+        if (entry.action === "reaped_failed_cleanup") reaped++;
+        continue;
+      }
       // No worker -> nothing to release (includes sessions parked in the pool
       // queue: they never transitioned past HOST_READ_ONLY). DESTROYED/FAILED
       // workers were already released.
       if (!record.workerName) continue;
       if (record.workerState === "DESTROYED" || record.workerState === "FAILED") continue;
       if (isTerminalState(record.state)) {
-        // The session is finished, so there is no idle period to wait out.
-        const outcome = await releaseWorker(ctx, record);
-        // A failed removal keeps the record for the next sweep; releaseWorker
-        // already logged it. Never record DESTROYED without a confirmed release.
-        if (!outcome.released) continue;
-        ctx.store.touch(record.sessionID, {
-          workerName: undefined,
-          workerState: "DESTROYED",
-          reapedAt: new Date(now).toISOString(),
-        });
-        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_terminal" }, onDrop);
+        // The session is finished, so there is no idle period to wait out. The
+        // release still takes the finish guard: a terminal record can be left
+        // behind by a finish that is exporting right now, and two release
+        // paths must never stop/remove the same worker twice.
+        const entry = await releaseTerminalWorker(ctx, record);
+        safeLog(onLog, entry, onDrop);
+        if (entry.action !== "reaped_terminal") continue;
         reaped++;
         continue;
       }
+      if (record.state === "RESULT_READY") {
+        // The result lives on the host (ref + bundle) as soon as the export
+        // finished, so there is no idle period to wait out. A live worker is
+        // still released through the SAME export-before-release policy as
+        // finishOrReleaseActive: clean -> release, dirty -> re-export then
+        // release, unreadable or failed export -> keep the worker. This is the
+        // safety net for a finish path that did not release its own worker.
+        const entry = await releaseResultReadyWorker(
+          ctx,
+          record,
+          "result already host-side",
+          prepare,
+        );
+        safeLog(onLog, entry, onDrop);
+        if (entry.action !== "reaped_result_ready" && entry.action !== "auto_finished") continue;
+        reaped++;
+        continue;
+      }
+
       const age = now - Date.parse(record.updatedAt);
       // NaN-safe: an unparseable timestamp is never "stale enough" to reap.
       if (!(age > idleMs)) continue;
 
-      if (record.state === "RESULT_READY") {
-        // The result lives on the host (ref + bundle): release the transient
-        // worker but KEEP the state so apply/preview/retain/discard work.
-        const outcome = await releaseWorker(ctx, record);
-        if (!outcome.released) continue;
-        ctx.store.touch(record.sessionID, {
-          workerName: undefined,
-          workerState: "DESTROYED",
-          reapedAt: new Date(now).toISOString(),
-        });
-        safeLog(onLog, { sessionID: record.sessionID, action: "reaped_result_ready" }, onDrop);
-        reaped++;
-      } else if (record.state === "SANDBOX_ACTIVE") {
-        const outcome = await releaseWorker(ctx, record);
-        if (!outcome.released) continue;
-        ctx.store.touch(record.sessionID, {
-          workerName: undefined,
-          workerState: "DESTROYED",
-          reapedAt: new Date(now).toISOString(),
-        });
-        safeLog(onLog, {
-          sessionID: record.sessionID,
-          action: "reaped_active_unsaved",
-          detail: "idle limit reached; worker released without an export",
-        }, onDrop);
-        reaped++;
+      if (record.state === "SANDBOX_ACTIVE") {
+        // Export-before-release (T7): an idle worker that still holds edits is
+        // exported to RESULT_READY first; only a clean worker is released
+        // outright. No reaper path discards unexported edits.
+        const entry = await finishOrReleaseActive(ctx, record, "idle clean worker released", prepare);
+        safeLog(onLog, entry, onDrop);
+        // A failed release (action "error") keeps the worker for the next
+        // sweep; a retained worker (export landed, removal did not) is not a
+        // release either and must not be counted as one.
+        if (entry.action !== "error" && entry.action !== "auto_finished_retained") reaped++;
       }
       // Any other state: skip. CREATING_SANDBOX is mid-creation and must
       // never be reaped.
@@ -454,57 +482,86 @@ export async function sweepIdle(
 /** Test seam: the export step (runPrepare in production). */
 export type PrepareResult = (ctx: OpContext, sessionID: string) => Promise<string>;
 
-/**
- * Take a SANDBOX_ACTIVE worker away without losing its edits. A clean worker
- * is released and the session stays resumable. A dirty worker, or one whose
- * status cannot be read, is exported to RESULT_READY first and then released.
- * If the export throws, this throws before any release: the worker is kept so
- * the edits survive for a later attempt.
- */
-function finishOrReleaseActive(
-  ctx: OpContext,
-  record: SessionRecord,
-  cleanDetail: string,
-  prepare: PrepareResult,
-): Promise<ReaperLogEntry> {
-  // One finish per session: the export can block for the evidence runners, and a second sweep must not
-  // release the worker (or export again) under them.
-  return withFinishGuard(ctx, record.sessionID, () => finishOrReleaseActiveGuarded(ctx, record, cleanDetail, prepare));
+/** Which state the live worker is released from; selects the post-export transition. */
+type ReleaseFromState = "SANDBOX_ACTIVE" | "RESULT_READY";
+
+/** A guard rejection is a quiet skip: another operation owns this session. */
+function skippedBusy(sessionID: string, detail: string): ReaperLogEntry {
+  return { sessionID, action: "release_skipped_busy", detail };
 }
 
-async function finishOrReleaseActiveGuarded(
+/**
+ * Run one live-worker release decision under the finish guard. A guard
+ * rejection ("another operation owns this session") is a skip, never a throw:
+ * the interval sweep and the parking-pressure pass must each stay best-effort.
+ */
+async function guardedRelease(
+  ctx: OpContext,
+  sessionID: string,
+  decide: () => Promise<ReaperLogEntry>,
+): Promise<ReaperLogEntry> {
+  // This check and withFinishGuard's claim have no await between them, so the
+  // pre-check cannot lose a race inside this call. The check after an awaited
+  // status probe is the one that lets a concurrent client finish win.
+  if (isFinishing(ctx, sessionID)) {
+    return skippedBusy(sessionID, "another operation owns this session");
+  }
+  try {
+    return await withFinishGuard(ctx, sessionID, decide);
+  } catch (err) {
+    // The claim is synchronous, so a StateError here is a rejected claim (or
+    // the finish deadline): the session is owned elsewhere, so skip quietly.
+    if (err instanceof StateError) {
+      return skippedBusy(sessionID, err.message);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Re-read the record under the finish claim. Returns null when another
+ * operation changed the ownership or state that this decision was built on -
+ * re-checked after acquiring the claim and after the status probe, before any
+ * release.
+ */
+function releasableRecord(ctx: OpContext, record: SessionRecord): SessionRecord | null {
+  if ((ctx.activeLocks?.get(record.sessionID) ?? 0) > 0) return null;
+  const fresh = ctx.store.get(record.sessionID);
+  if (!fresh) return null;
+  if (fresh.state !== record.state) return null;
+  if (fresh.workerName !== record.workerName) return null;
+  if (fresh.workerState === "DESTROYED" || fresh.workerState === "FAILED") return null;
+  return fresh;
+}
+
+/**
+ * Release the worker of a terminal record (APPLIED/REJECTED/RETAINED/
+ * FAILED_CLOSED). The session is finished, so there is no export to run; the
+ * removal still takes the lifecycle claim AND the export proof (D3): the
+ * worker's HEAD must equal the durable result tip and its tree must be clean.
+ * A terminal state is never a licence to remove unexported edits - a worker
+ * that cannot prove the export is KEPT for owner recovery.
+ */
+function releaseTerminalWorker(
   ctx: OpContext,
   record: SessionRecord,
-  cleanDetail: string,
-  prepare: PrepareResult,
 ): Promise<ReaperLogEntry> {
-  const workerName = record.workerName as string;
-  let hasChanges = true;
-  try {
-    const status = await ctx.adapter.exec(workerName, ["git", "status", "--porcelain", "--", ".", ":(exclude).broker-tmp", ":(exclude)*.bundle"], {
-      cwd: "/work",
-      timeoutMs: 30_000,
-      env: {
-        GIT_CONFIG_COUNT: "1",
-        GIT_CONFIG_KEY_0: "safe.directory",
-        GIT_CONFIG_VALUE_0: "/work",
-      },
-    });
-    if (status.status === 0) {
-      hasChanges = status.stdout.trim().length > 0;
+  return guardedRelease(ctx, record.sessionID, async () => {
+    const fresh = releasableRecord(ctx, record);
+    if (!fresh || !isTerminalState(fresh.state)) {
+      return skippedBusy(record.sessionID, "another operation owns this session");
     }
-  } catch {
-    hasChanges = true;
-  }
-  if (!hasChanges) {
-    const outcome = await releaseWorker(ctx, record);
-    // Only a confirmed removal clears the worker. A failure keeps it (and
-    // releaseWorker already logged) for the next sweep.
+    const outcome = await removeWorkerVerified(ctx, fresh);
+    // A failed removal keeps the record for the next sweep; releaseWorker
+    // already logged it. Never record DESTROYED without a confirmed release.
     if (!outcome.released) {
+      if (outcome.proof.reason === "identity-changed" || outcome.proof.reason === "no-live-worker") {
+        return skippedBusy(record.sessionID, "worker identity changed");
+      }
       return {
         sessionID: record.sessionID,
-        action: "error",
-        detail: "worker release failed; retained for the next sweep",
+        action: outcome.reason === "remove-failed" ? "error" : "release_skipped_dirty",
+        detail: `${outcome.error ?? "removal not proven safe"}; worker retained`,
       };
     }
     ctx.store.touch(record.sessionID, {
@@ -512,29 +569,362 @@ async function finishOrReleaseActiveGuarded(
       workerState: "DESTROYED",
       reapedAt: new Date().toISOString(),
     });
-    return { sessionID: record.sessionID, action: "reaped_active", detail: cleanDetail };
-  }
-  const ref = await prepare(ctx, record.sessionID);
-  const outcome = await releaseWorker(ctx, record);
-  // The edits are safe in the result ref either way; keep workerName + ACTIVE
-  // when removal did not succeed so a later sweep retries it.
-  ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", {
-    resultRef: ref,
-    ...(outcome.released
-      ? { workerName: undefined, workerState: "DESTROYED" as const }
-      : {}),
+    return { sessionID: record.sessionID, action: "reaped_terminal" };
   });
-  // A distinct action when the export landed but the worker could not be
-  // removed: the session is auto-finished, but a worker is still retained and
-  // must not be reported as a fully-released worker (auto_finished).
-  if (!outcome.released) {
+}
+
+/**
+ * Retry the removal of a worker whose bootstrap cleanup was never confirmed
+ * (T11 / C3). The narrow failed-bootstrap predicate needs no export proof (the
+ * bootstrap never reached Git), but it still takes the lifecycle claim and
+ * re-reads the record INSIDE it, so a concurrent finish/apply wins and this
+ * pass skips. Identity and accounting stay owned until a CONFIRMED removal.
+ */
+function releaseFailedCleanupWorker(
+  ctx: OpContext,
+  record: SessionRecord,
+): Promise<ReaperLogEntry> {
+  return guardedRelease(ctx, record.sessionID, async () => {
+    const fresh = ctx.store.get(record.sessionID);
+    if (!fresh) return skippedBusy(record.sessionID, "session record disappeared");
+    if (
+      fresh.workerName !== record.workerName ||
+      fresh.workerState !== "FAILED" ||
+      fresh.state !== record.state
+    ) {
+      return skippedBusy(record.sessionID, "worker identity changed");
+    }
+    const outcome = await removeWorkerVerified(ctx, fresh);
+    if (!outcome.released) {
+      return {
+        sessionID: record.sessionID,
+        action: "error",
+        detail: `${outcome.error ?? "worker removal failed"}; failed-cleanup worker retained`,
+      };
+    }
+    ctx.store.touch(record.sessionID, {
+      workerName: undefined,
+      workerState: "DESTROYED",
+      reapedAt: new Date().toISOString(),
+    });
+    return { sessionID: record.sessionID, action: "reaped_failed_cleanup" };
+  });
+}
+
+/**
+ * Release a live RESULT_READY worker through the SAME export-before-release
+ * policy as finishOrReleaseActive. The status probe runs INSIDE the lifecycle
+ * claim (D3/F3): a write that completes between a pre-claim probe and the claim
+ * can no longer be released on a stale `clean` answer, and a client finish that
+ * is exporting right now owns the claim, so this pass loses the race and skips.
+ */
+function releaseResultReadyWorker(
+  ctx: OpContext,
+  record: SessionRecord,
+  cleanDetail: string,
+  prepare: PrepareResult,
+): Promise<ReaperLogEntry> {
+  return guardedRelease(ctx, record.sessionID, () =>
+    finishOrReleaseGuarded(ctx, record, cleanDetail, prepare, "RESULT_READY"),
+  );
+}
+
+/**
+ * Take a SANDBOX_ACTIVE worker away without losing its edits: every removal
+ * goes through removeWorkerVerified, which exports once and re-proves, and
+ * keeps the worker when the proof or the export fails.
+ */
+function finishOrReleaseActive(
+  ctx: OpContext,
+  record: SessionRecord,
+  cleanDetail: string,
+  prepare: PrepareResult,
+): Promise<ReaperLogEntry> {
+  // One lifecycle owner per session: the claim is taken before the status probe
+  // and held through export, stop/remove and the state write.
+  return guardedRelease(ctx, record.sessionID, () =>
+    finishOrReleaseGuarded(ctx, record, cleanDetail, prepare, "SANDBOX_ACTIVE"),
+  );
+}
+
+/**
+ * The single export-before-release policy, run while the caller holds the
+ * lifecycle claim. `fromState` only selects the reported action: the transition
+ * to RESULT_READY (and the refreshed resultRef) is performed by
+ * removeWorkerVerified when it exports. A result is never discarded on a guess.
+ */
+async function finishOrReleaseGuarded(
+  ctx: OpContext,
+  record: SessionRecord,
+  cleanDetail: string,
+  prepare: PrepareResult,
+  fromState: ReleaseFromState,
+): Promise<ReaperLogEntry> {
+  const sessionID = record.sessionID;
+  // Re-check AFTER the claim: the record may have moved while an await elapsed.
+  const fresh = releasableRecord(ctx, record);
+  if (!fresh) {
+    return skippedBusy(sessionID, "another operation owns this session");
+  }
+  // Proof first: a worker whose HEAD already equals the durable exported tip and
+  // whose tree is clean is released without touching it. Anything else from a
+  // live ACTIVE/RESULT_READY session is exported once and re-proven; if the
+  // export or the re-proof fails, the worker is KEPT (edits and allocation).
+  const removal = await removeWorkerVerified(ctx, fresh, { exportFirst: true, prepare });
+  if (removal.released) {
+    ctx.store.touch(sessionID, {
+      workerName: undefined,
+      workerState: "DESTROYED",
+      reapedAt: new Date().toISOString(),
+    });
+    if (removal.exported) {
+      const ref = ctx.store.get(sessionID)?.resultRef ?? removal.proof.exportedCommit ?? "";
+      return { sessionID, action: "auto_finished", detail: ref };
+    }
     return {
-      sessionID: record.sessionID,
+      sessionID,
+      action: fromState === "RESULT_READY" ? "reaped_result_ready" : "reaped_active",
+      detail: cleanDetail,
+    };
+  }
+  if (removal.exported) {
+    // The edits are host-side (ref + bundle) and the record was updated, but
+    // the worker survived: report it distinctly so it is never mistaken for a
+    // fully-released worker.
+    const ref = ctx.store.get(sessionID)?.resultRef ?? removal.proof.exportedCommit ?? "";
+    return {
+      sessionID,
       action: "auto_finished_retained",
       detail: `${ref} (worker retained for the next sweep)`,
     };
   }
-  return { sessionID: record.sessionID, action: "auto_finished", detail: ref };
+  if (removal.reason === "remove-failed") {
+    return {
+      sessionID,
+      action: "error",
+      detail: "worker release failed; retained for the next sweep",
+    };
+  }
+  if (removal.error?.startsWith("export before release failed")) {
+    // The export itself failed: the worker is kept so the edits survive.
+    return { sessionID, action: "error", detail: removal.error };
+  }
+  return {
+    sessionID,
+    action: "release_skipped_dirty",
+    detail: `worker ${fresh.workerName} is not provably exported (${removal.proof.reason}); not released`,
+  };
+}
+
+/**
+ * Is the worker's /work tree clean? `true` = clean, `false` = dirty,
+ * `undefined` = the status could not be read. Every caller treats anything but
+ * `true` as dirty, so an unreadable worker is never released before its edits
+ * are exported. The excludes are the broker's transfer artifacts; they are not
+ * the session's edits. The single implementation now lives in service.ts so
+ * the removal proof and the reaper can never disagree about cleanliness.
+ */
+
+/** Pressure telemetry; a logging failure must never change release or admission. */
+function logPressure(
+  ctx: OpContext,
+  event: {
+    action:
+      | "pressure_occupancy"
+      | "pressure_release"
+      | "pressure_skipped"
+      | "pressure_skipped_dirty"
+      | "error";
+    sessionID?: string;
+    state?: SessionRecord["state"];
+    detail?: string;
+    phase?: "before" | "after";
+    occupancy?: PoolOccupancySnapshot;
+  },
+): void {
+  try {
+    // Assign first: the snapshot carries fields beyond LogEntry, and these
+    // structured extras are intentionally serialized into the JSONL entry.
+    const entry = {
+      operation: "reaper",
+      result: event.action === "error" ? "error" : "ok",
+      ...(event.occupancy ?? {}),
+      action: event.action,
+      sessionID: event.sessionID,
+      state: event.state,
+      detail: event.detail,
+      phase: event.phase,
+    };
+    ctx.logger?.log?.(entry);
+  } catch {
+    // Telemetry must not change an admission or release outcome.
+  }
+}
+
+/** The occupancy snapshot, or undefined when this context cannot describe it. */
+function safeOccupancy(ctx: OpContext): PoolOccupancySnapshot | undefined {
+  try {
+    return describePoolOccupancy(ctx);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Pressure release (T7): a request is about to park because the pool is full.
+ * Give a slot back when that is provably safe. It never blind-releases
+ * unexported edits:
+ * - RESULT_READY with a live worker: released through the same
+ *   export-before-release policy as finishOrReleaseActive - a clean worktree is
+ *   released at once, a dirty one is re-exported first, and an unreadable
+ *   status or a failed export keeps the worker. State and resultRef stay, so
+ *   apply/preview/retain/discard keep working.
+ * - SANDBOX_ACTIVE with a live worker: the same export-before-release policy
+ *   as finishOrReleaseActive, under the lifecycle claim. A dirty ACTIVE worker
+ *   is exported and re-verified BEFORE release, so its slot is given back only
+ *   once the edits are host-side (D3 invariant 1); the export runs inside the
+ *   pressure scan and is bounded by the adapter's own exec timeouts. An
+ *   unreadable status is never exported blind, and a failed export or a failed
+ *   re-proof keeps the worker, its edits and its allocation
+ *   (`pressure_skipped_dirty`). A worker whose lifecycle claim is already held
+ *   is skipped (`release_skipped_busy`).
+ * Every live-worker release takes the finish guard, so the interval sweep and a
+ * client finish of the same session can never stop/remove the same worker twice
+ * or tear one down mid-export; the losing pass skips and logs.
+ * Never touched: the requesting session, APPLY_PENDING, CREATING_SANDBOX,
+ * sessions parked in the pool queue, sessions with an operation in flight and
+ * sessions whose finish is running.
+ *
+ * The occupancy snapshot is logged before and after the pass, plus one line
+ * per released or skipped session. Best-effort by construction: it returns
+ * counts and never throws into an admission path.
+ */
+export async function releaseUnderPressure(
+  ctx: OpContext,
+  exceptSessionID?: string,
+  prepare: PrepareResult = runPrepare,
+): Promise<{ released: number; skipped: number }> {
+  let released = 0;
+  let skipped = 0;
+  logPressure(ctx, {
+    action: "pressure_occupancy",
+    phase: "before",
+    occupancy: safeOccupancy(ctx),
+  });
+  for (const record of ctx.store.list()) {
+    try {
+      const sessionID = record.sessionID;
+      const skip = (detail: string, dirty = false): void => {
+        skipped++;
+        logPressure(ctx, {
+          action: dirty ? "pressure_skipped_dirty" : "pressure_skipped",
+          sessionID,
+          state: record.state,
+          detail,
+        });
+      };
+      const hasLiveWorker =
+        !!record.workerName &&
+        record.workerState !== "DESTROYED" &&
+        record.workerState !== "FAILED";
+      // No worker -> not a candidate; a parked session is normal, not a skip.
+      if (!hasLiveWorker) continue;
+      if (sessionID === exceptSessionID) {
+        skip("requesting session");
+        continue;
+      }
+      if (record.state === "APPLY_PENDING") {
+        skip("APPLY_PENDING (waiting on the user)");
+        continue;
+      }
+      if (record.state === "CREATING_SANDBOX") {
+        skip("CREATING_SANDBOX (mid-creation)");
+        continue;
+      }
+      if (record.state !== "RESULT_READY" && record.state !== "SANDBOX_ACTIVE") {
+        skip(`state ${record.state} is not releasable under pressure`);
+        continue;
+      }
+      if (ctx.queue?.find(sessionID)) {
+        skip("parked in the pool queue");
+        continue;
+      }
+      if ((ctx.activeLocks?.get(sessionID) ?? 0) > 0) {
+        skip("an operation is in flight");
+        continue;
+      }
+      if (isFinishing(ctx, sessionID)) {
+        skip("a finish is in flight");
+        continue;
+      }
+      if (record.state === "RESULT_READY") {
+        // Same export-before-release policy as finishOrReleaseActive: a dirty
+        // live RESULT_READY is re-exported before its worker is given back, and
+        // an unreadable status or a failed export keeps the worker. The release
+        // takes the finish guard, so a client finish that is exporting right
+        // now always wins and this pass never removes a worker mid-export.
+        const entry = await releaseResultReadyWorker(
+          ctx,
+          record,
+          "result already host-side",
+          prepare,
+        );
+        if (entry.action === "reaped_result_ready" || entry.action === "auto_finished") {
+          released++;
+          logPressure(ctx, {
+            action: "pressure_release",
+            sessionID,
+            state: "RESULT_READY",
+            detail: entry.detail ?? "result already host-side",
+          });
+        } else {
+          skip(
+            entry.detail ?? "worker retained",
+            entry.action === "release_skipped_dirty",
+          );
+        }
+        continue;
+      }
+      // SANDBOX_ACTIVE: the same export-before-release policy as
+      // finishOrReleaseActive, under the lifecycle claim. A dirty or unreadable
+      // worker is exported and re-proven first; if the proof or the export
+      // fails the worker is KEPT (`pressure_skipped_dirty`).
+      const entry = await finishOrReleaseActive(
+        ctx,
+        record,
+        "clean worktree",
+        prepare,
+      );
+      if (entry.action === "reaped_active" || entry.action === "auto_finished") {
+        released++;
+        logPressure(ctx, {
+          action: "pressure_release",
+          sessionID,
+          state: "SANDBOX_ACTIVE",
+          detail: entry.action === "auto_finished" ? "exported before release" : "clean worktree",
+        });
+      } else {
+        skip(
+          entry.detail ?? "worker retained",
+          entry.action === "release_skipped_dirty" ||
+            /export before release failed/.test(entry.detail ?? ""),
+        );
+      }
+    } catch (err) {
+      skipped++;
+      logPressure(ctx, {
+        action: "error",
+        sessionID: record.sessionID,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  logPressure(ctx, {
+    action: "pressure_occupancy",
+    phase: "after",
+    occupancy: safeOccupancy(ctx),
+  });
+  return { released, skipped };
 }
 
 /**
@@ -572,7 +962,9 @@ export async function sweepUnfinished(
       const entry = await finishOrReleaseActive(ctx, record, "idle clean worker released", prepare);
       safeLog(onLog, entry, onDrop);
       // A failed release (action "error") must NOT count as finished: the
-      // session still holds its worker and the sweep must retry it.
+      // session still holds its worker and the sweep must retry it. An export
+      // that landed DOES finish the session (RESULT_READY), even when the
+      // worker could not be removed yet (auto_finished_retained).
       if (entry.action !== "error") finished++;
     } catch (err) {
       safeLog(onLog, {
@@ -608,14 +1000,19 @@ export async function reapOnDisconnect(
   if ((ctx.activeLocks?.get(sessionID) ?? 0) > 0) return false;
   if (isFinishing(ctx, sessionID)) return false;
   if (record.state !== "SANDBOX_ACTIVE") return false;
-  if (record.resultRef) return false;
+  // A resultRef no longer excludes the reap: a clean worker whose HEAD equals
+  // the durable exported tip is provably safe to give back, and anything else
+  // is exported (or kept) by the shared policy below.
   if (!record.workerName) return false;
   if (record.workerState === "DESTROYED" || record.workerState === "FAILED") return false;
   const age = Date.now() - Date.parse(record.updatedAt);
   if (!(age > disconnectIdleMs)) return false;
   try {
-    safeLog(onLog, await finishOrReleaseActive(ctx, record, "client disconnected", prepare), onDrop);
-    return true;
+    const entry = await finishOrReleaseActive(ctx, record, "client disconnected", prepare);
+    safeLog(onLog, entry, onDrop);
+    // True only when the worker was actually given back: an export that landed
+    // but kept the worker (auto_finished_retained) or a failed proof is false.
+    return entry.action === "reaped_active" || entry.action === "auto_finished";
   } catch (err) {
     safeLog(onLog, {
       sessionID,

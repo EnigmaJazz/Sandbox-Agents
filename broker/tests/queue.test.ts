@@ -62,6 +62,10 @@ function makeHarness(
     stderr: "",
     timedOut: false,
   });
+  // The removal proof is MODELLED, not bypassed: one stable 40-hex identity is
+  // both the worker HEAD and the host-side exported commit, so a clean worker
+  // whose export is durable is provably releasable.
+  const PROOF = "a".repeat(40);
   const ctx = {
     config,
     store,
@@ -71,7 +75,8 @@ function makeHarness(
         created.push(spec.name);
       },
       copyIn: async () => undefined,
-      exec: async () => ok(),
+      exec: async (_worker: string, argv: string[] = []) =>
+        argv[0] === "git" && argv[1] === "rev-parse" ? ok(`${PROOF}\n`) : ok(),
       stop: async () => undefined,
       remove: async () => undefined,
     },
@@ -92,7 +97,7 @@ function makeHarness(
     git: {
       runnerMode: "planned" as const,
       spawn: async (argv: string[]) => {
-        if (argv.includes("rev-parse")) return ok("headhash\n");
+        if (argv.includes("rev-parse")) return ok(`${PROOF}\n`);
         if (argv.includes("write-tree")) return ok("treehash\n");
         if (argv.includes("commit-tree")) return ok("commithash\n");
         if (argv.includes("bundle")) {
@@ -394,4 +399,129 @@ test("a reaped RESULT_READY session can re-ensure a fresh worker", async () => {
   expect(result.worker).toBe("worker-rr");
   expect(h.ctx.store.get("rr")!.state).toBe("SANDBOX_ACTIVE");
   expect(h.created).toEqual(["worker-rr", "worker-rr"]); // created, reaped, re-created
+});
+
+// T5: pool-occupancy telemetry on park and timeout, and a blocked report that
+// names the held sessions instead of a bare "timed out".
+test("parkAndWait logs occupancy on wait and timeout; the timeout names the blocked snapshot", async () => {
+  const h = makeHarness({ queueTimeoutMs: 50 });
+  const logs: Array<Record<string, unknown>> = [];
+  Object.assign(h.ctx, {
+    logger: {
+      log: (entry: Record<string, unknown>) => logs.push(entry),
+    },
+  });
+  // One held session has a record so the report can name a real state and age.
+  h.ctx.store.touch("victim", {
+    state: "SANDBOX_ACTIVE",
+    workerName: "worker-victim",
+    workerState: "ACTIVE",
+  });
+  // Keep the pool blocked: a held active worker with an unexported edit is
+  // skipped by the parking pressure pass (T7), so this request really parks and
+  // the timeout path is what the assertions below observe.
+  h.ctx.adapter.exec = async () => ({
+    status: 0,
+    stdout: " M src/a.ts\n",
+    stderr: "",
+    timedOut: false,
+  });
+
+  let parkedError: unknown;
+  const parked = h.ensureWorker("blocked");
+  parked.catch((err) => {
+    parkedError = err;
+  });
+  await new Promise((r) => setTimeout(r, 10));
+
+  const wait = logs.find((entry) => entry.action === "queue_wait");
+  expect(wait).toBeDefined();
+  expect(wait).toMatchObject({
+    sessionID: "blocked",
+    operation: "ensureWorker",
+    result: "ok",
+    queueDepth: 1,
+    cap: 4,
+  });
+  expect((wait!.held as unknown[]).length).toBe(4);
+
+  await new Promise((r) => setTimeout(r, 90));
+
+  const timeout = logs.find((entry) => entry.action === "queue_timeout");
+  expect(timeout).toBeDefined();
+  expect(timeout).toMatchObject({
+    sessionID: "blocked",
+    result: "error",
+    queueDepth: 1,
+  });
+  const held = timeout!.held as Array<{
+    sessionID: string;
+    state: string;
+    ageMs: number;
+  }>;
+  expect(held.map((s) => s.sessionID).sort()).toEqual(["victim", "x", "y", "z"]);
+  for (const session of held) {
+    expect(typeof session.state).toBe("string");
+    expect(typeof session.ageMs).toBe("number");
+  }
+
+  const message = String((parkedError as Error).message);
+  expect(message).toContain("timed out");
+  expect(message).toContain("worker pool is blocked");
+  expect(message).toContain("queue depth 1");
+  expect(message).toContain("victim (SANDBOX_ACTIVE/ACTIVE");
+  for (const sessionID of ["victim", "x", "y", "z"]) {
+    expect(message).toContain(sessionID);
+  }
+  expect(message).toContain("Report blocked to your coordinator");
+});
+
+// T7 acceptance: a parking request first gives back a slot that is provably
+// safe (a RESULT_READY worker, whose result is already host-side), so it is
+// admitted instead of waiting out the queue timeout.
+test("pool full + queue empty: parking releases a RESULT_READY worker and admits the request", async () => {
+  const h = makeHarness();
+  h.ctx.pool.allocations = ["done", "x", "y", "z"].map((sessionID) => ({
+    cpu: 2,
+    memBytes: 2 * GiB,
+    sessionID,
+  }));
+  h.ctx.store.touch("done", {
+    projectID: "repo",
+    state: "RESULT_READY",
+    workerName: "worker-done",
+    workerState: "ACTIVE",
+    resultRef: "refs/opencode-sandbox/result/done",
+  });
+  const logs: Array<Record<string, unknown>> = [];
+  Object.assign(h.ctx, {
+    logger: { log: (entry: Record<string, unknown>) => logs.push(entry) },
+  });
+  const removed: string[] = [];
+  h.ctx.adapter.remove = async (name: string) => {
+    removed.push(name);
+  };
+
+  const result = (await h.ensureWorker("waiting")) as Record<string, unknown>;
+
+  expect(result.worker).toBe("worker-waiting");
+  // D5: the request is RESERVED and visible before the pressure scan runs, so
+  // it is admitted by the FIFO drain that follows the scan - never by a
+  // post-scan direct-create shortcut. It therefore reports `queued: true`.
+  expect(result.queued).toBe(true);
+  expect(result.queuePosition).toBe(1);
+  expect(h.ctx.queue.length).toBe(0);
+  expect(h.created).toEqual(["worker-waiting"]);
+  expect(removed).toEqual(["worker-done"]); // the host-side result's worker went away
+  const done = h.ctx.store.get("done")!;
+  expect(done.state).toBe("RESULT_READY"); // apply/preview/retain still work
+  expect(done.resultRef).toBe("refs/opencode-sandbox/result/done");
+  expect(done.workerName).toBeUndefined();
+  expect(
+    logs.filter((entry) => entry.action === "pressure_occupancy").map((entry) => entry.phase),
+  ).toEqual(["before", "after"]);
+  expect(logs.find((entry) => entry.action === "pressure_release")).toMatchObject({
+    sessionID: "done",
+    state: "RESULT_READY",
+  });
 });
