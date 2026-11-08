@@ -461,35 +461,40 @@ no explicit pressure-deadline parameter; the queue timer and per-adapter timeout
 The preview-to-apply approval-binding race stays a separate Tier 2 item and was not touched. (7)
 `review_due: high_risk` remains outstanding.
 
-**Owner landing steps (S17 — the owner reviews and commits, then restarts).** Installed and
-uncommitted on `fix/q114-worker-release`, current HEAD `9952ccaf` (gate metadata only). The two
-new test files `broker/tests/lifecycle-claim.test.ts` and `broker/tests/retained-apply.test.ts`
-are now staged in the index. Paths:
-- `broker/src/config.ts`
-- `broker/src/policy.ts`
-- `broker/src/reaper.ts`
-- `broker/src/server.ts`
-- `broker/src/service.ts`
-- `broker/src/state.ts`
-- `broker/tests/config.test.ts`
-- `broker/tests/fixtures/sandbox-tools-surface.json`
-- `broker/tests/gate-test-evidence.test.ts`
-- `broker/tests/lifecycle-claim.test.ts`
-- `broker/tests/queue.test.ts`
-- `broker/tests/reaper.test.ts`
-- `broker/tests/retained-apply.test.ts`
-- `broker/tests/server-reaper-log-seam.test.ts`
-- `broker/tests/service-apply.test.ts`
-- `broker/tests/service-diff.test.ts`
-- `broker/tests/service-git-commit-session.test.ts`
-- `broker/tests/staging-chain.test.ts`
-- `broker/tests/state-artifacts.test.ts`
-- `broker/tests/worker-release-outcome.test.ts`
-- `opencode/plugins/lib/tool-specs-sandbox.ts`
+## T11a — confirmed-cleanup allocation release (C3 follow-up P2)  [installed, uncommitted]
 
-Split into coherent commits (by seam and by source-versus-tests) or record a `review-size-
-exception` with its reason, commit, restart the broker, then send Codex the final F4/F5/new-P1
-recheck. Anything still open after that recheck is owner work: there is no further agent round.
+**Trigger.** Codex's recheck of the T11 batch found one NEW P2 in the C3 implementation:
+`broker/src/service.ts:855` converts the session's plain reservation into a held allocation
+before the state persistence at `:856`, so when `CREATING_SANDBOX → SANDBOX_ACTIVE` throws and
+the cleanup removal is CONFIRMED, the branch at `:895-898` called `releaseReservation`, whose
+predicate at `:4994-4996` frees only `reserved === true`. The rollback at `:892-893` cleared
+`workerName` anyway, so the held allocation leaked permanently, neither the direct `catch` nor
+the queued `finally` could free it, and `broker/src/reaper.ts:420` skips a nameless record.
+
+**Fix (result `ses_e4452e847ffe1AHFMdU6fpCdyM`, commit `b950d99`).** `broker/src/service.ts`
++15/−4: the rehydration flow records that it created or converted the allocation, and the
+CONFIRMED-removal branch releases that allocation whether it is still a plain reservation or has
+already been converted to held. `releaseReservation` keeps its strict plain-reservation
+semantic for the `catch`/`finally` callers that must not undercount live capacity, and an
+allocation this cleanup does not own is never freed.
+
+**Regression (test-first, `broker/tests/lifecycle-claim.test.ts` +41/−0).** A single injected
+`CREATING_SANDBOX → SANDBOX_ACTIVE` persistence failure with a successful removal must leave
+`RESULT_READY`, a cleared `workerName`, preserved refs, the original error, and ZERO allocations
+for the session. A positive control in the same test runs the same flow without the injection,
+reaches `SANDBOX_ACTIVE` and holds exactly one allocation.
+
+**Observed checks.** Writer-observed RED before the fix: `expected false / received true` at the
+zero-allocation assertion, `1 fail`. GREEN: the regression passes, the focused command reports
+93 pass / 0 fail, and `bun build --target=bun src/main.ts` succeeds. The writer's full `bun test`
+showed only the two `v2-launch` profile-drift failures. Independent `host_test_run
+runner=broker-unit` on the installed tree at `gitHead 52b9777`: `2003 pass, 9 skip, 2 fail, 9304
+expect() calls, 2014 tests across 109 files`, exit 1 — the same two pre-existing `v2-launch`
+failures, no candidate-attributable failure.
+
+**Still open for the owner.** The candidate is ~5053 lines across 21 paths, unchanged in shape
+by this fix; the size split or exception, the S17 commit and the broker restart are still owed,
+as is the outstanding `review_due: high_risk`. The approval-binding race remains out of scope.
 
 
 ## Revisions
@@ -499,6 +504,7 @@ recheck. Anything still open after that recheck is owner work: there is no furth
 - r4 2026-11-08T11:17:41Z gentle-orchestrator: Land T10 closure: scope B F1-F5 installed, three results, Gate 1/2 hashes, amended D3, follow-ups and owner landing steps
 - r5 2026-11-08T12:32:27Z gentle-orchestrator: Land T11 Phase A advice record: F4/F5/new-P1 decisions, advisor dispatches incl. cancelled-then-retried integration advisor, Gate 1 hash
 - r6 2026-11-08T14:52:06Z gentle-orchestrator: Land T11 closure: C1-C3 installed, result cb3897e, Gate 2 hash, observed checks, follow-ups and owner landing steps
+- r7 2026-11-08T15:11:33Z gentle-orchestrator: Record T11a: confirmed cleanup frees a held allocation, regression RED/GREEN, independent broker-unit result
 
 ## Gates
 - T10 PASS 2026-11-08T09:26:33Z planner ref=q114-correction-u4 pre: ses_e4597e692ffeYAzD8jOqqLf5qy; ses_e4597e69affeNrjTkDhw92ThFx; ses_e4597e699ffeIpEkRsjz4sMNvq
