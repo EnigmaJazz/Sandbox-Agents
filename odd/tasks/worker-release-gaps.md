@@ -128,48 +128,115 @@ runners is unmeasured.
 **Route / trigger.** ROUTE: bug investigation + bounded behaviour change | intent: authorized
 change | route: ODD secure | specialist: pm-odd, writer odd-apply | basis: WORKFLOW.md.
 Trigger: secure always-delegate (every mutation); S17 review by the owner.
-Dispatch: pm-odd unit `q114-worker-release-u1` (PM session `ses_e46079d08ffeCJOJP3V3wC76Z7`),
-writer `odd-apply` session `ses_e4606fc85ffe3Nh0FeDfaR2qes`, result commit `ac2df8c`
-(installed into the worktree, not committed).
+Units: `q114-worker-release-u1` (PM `ses_e46079d08ffeCJOJP3V3wC76Z7`, writer `odd-apply`
+`ses_e4606fc85ffe3Nh0FeDfaR2qes`, result `ac2df8c`); `u2` (PM `ses_e45ec8c94ffe5QnmLuWJ9poOun`,
+writer `ses_e45ebb83cffe5uJcmCUo1CvNEO`, result `6c6a82f`); `u3` correction (PM
+`ses_e45ba63bcffevvDF1wX58M7zit`, writer `ses_e45b9e365ffeeNTGQ1SYuTfBrY`, result `82ed211`).
 
 ### T5 — release at `RESULT_READY` + pool-occupancy observability  [installed, uncommitted]
-- `buildPrepareResultOp` releases the worker after a successful export: `releaseWorker`, then
-  clear `workerName` and set `workerState: DESTROYED`, keeping state `RESULT_READY` and
-  `resultRef`, so apply/preview/retain/discard are unaffected.
+- `buildPrepareResultOp` releases the worker after a successful export, keeping state
+  `RESULT_READY` and `resultRef`, so apply/preview/retain/discard are unaffected (in u1; u2
+  corrected the re-finish shape to `imported: false`).
 - `sweepIdle` releases a `RESULT_READY` record without the `idleMs` age gate (safety net).
 - `describePoolOccupancy` logs `queue_wait` / `queue_timeout` with queue depth, pool allocations
   and every held session's `sessionID`, state, `workerState`, age and `workerName`; the
   `QueuedTimedOutError` message carries the same snapshot and tells the delegating session to
   report blocked to its coordinator.
-- Observed: focused `bun --cwd broker test tests/reaper.test.ts tests/queue.test.ts
-  tests/service-apply.test.ts` — 48 pass, 0 fail, 274 `expect()` calls. Full suite: 1963 tests,
-  6 failures — 1 new (`staging-chain.test.ts` immutability test, see T6) and 5 pre-existing
-  environment/drift failures (`v2-launch` ×2 nono-profile drift, `staging-stage-ops` ×2 and
-  `gate-verdict-auto` ×1 EACCES `mkdir /nonexistent`). Build `bun build --target=bun src/main.ts`
-  from `broker` succeeded.
-- Deviation, recorded: the writer's tracker edit was refused with `PLAN_ROOT_PROTECTED`
-  (`BROKER_PLAN_ROOT_PROTECTION`), so this section was landed by the orchestrator through
-  `host_plan_write` after the candidate was produced, not before the first source edit.
-- Reviewability: 495 authored changed lines, 25,879 authored patch bytes (broker-observed).
-  Exceeds the local 400-line per-commit guard; the owner splits source and tests at commit
-  time or records a `review-size-exception`.
+- Observed (u1 writer): focused `tests/reaper.test.ts tests/queue.test.ts
+  tests/service-apply.test.ts` — 48 pass, 0 fail, 274 `expect()` calls.
 
-### T6 — correction: keep `sandbox_finish` idempotent after release; fix the staging test
-`staging-chain.test.ts` re-finishes a session after the first finish released its worker, so the
-test no longer models a reachable flow. Correction: return the existing `resultRef` unchanged
-when a re-finish arrives on `RESULT_READY` with no live worker, and re-ensure a worker in the
-test before the changed-content scenario so the `already pinned` refusal stays exercised.
+### T6 — `sandbox_finish` idempotency + staging test  [installed, uncommitted]
+- A re-finish on `RESULT_READY` with no live worker returns the existing `resultRef` with
+  `imported: false` and makes no adapter call; a live worker still re-exports.
+- `broker/tests/staging-chain.test.ts` re-ensures a worker before the second finish and before
+  the changed-content write, keeping the same-stage-commit, `already pinned` and
+  `nextSnapshot === null` assertions.
+- Observed (u2 writer): focused 70 pass, 0 fail, 403 `expect()`; full suite 1974 tests, 5
+  failures, all the pre-existing set; build succeeded.
 
-### T7 — pressure-aware sweep
-When the pool queue is non-empty, release idle `RESULT_READY` workers at once and
-export-then-release idle `SANDBOX_ACTIVE` workers; never a blind release of unexported edits.
+### T7 — pressure-aware release  [installed, uncommitted]
+- `releaseUnderPressure(ctx, exceptSessionID?)` runs best-effort from `parkAndWait` before
+  parking. `RESULT_READY` and clean `SANDBOX_ACTIVE` workers are released; a dirty or unreadable
+  status is skipped as `pressure_skipped_dirty`. Skips the requester, `APPLY_PENDING`,
+  `CREATING_SANDBOX`, queued, locked and finishing records.
+- `sweepIdle`'s blind `reaped_active_unsaved` branch is gone: `SANDBOX_ACTIVE` goes through the
+  export-first policy, with a `prepare` seam threaded from `runReaperSweeps`.
 
-### T8 — size `maxWorkers` from measurement
-Record per-worker peak CPU and RSS under `bun --cwd broker test` and a build, then set
-`BROKER_MAX_WORKERS` from free RAM at peak, cores and parallel PM sessions. Note that
-`maxAggregateCpu: 8` and `maxAggregateMemBytes: 8 GiB` with 2 vCPU / 2 GiB per worker also cap
-the pool at 4, so raising `maxWorkers` alone changes nothing.
+### T8 — sizing input
+- `BROKER_MAX_WORKERS` added as `positiveIntEnv("BROKER_MAX_WORKERS", 4)`; aggregates untouched.
+- Per-worker peak: NOT MEASURED. `/usr/bin/time`, `/bin/time`, busybox `time` and `gtime` are
+  all absent inside the worker, so no figure exists and none was invented.
+- Recommendation: keep 4. `computeBudget` takes the minimum of `maxWorkers` and the CPU/RAM
+  caps, so `maxWorkers` alone cannot raise the effective pool; with `perWorkerCpu: 2` and
+  `perWorkerMemBytes: 2 GiB` against `maxAggregateCpu: 8` / `maxAggregateMemBytes: 8 GiB`, the
+  effective cap is 4. Raising it needs the aggregates raised in step (5 → 10/10 GiB,
+  6 → 12/12 GiB) plus at least 12 GiB genuinely free at peak; the 2026-11-07 sample had 6.5 GiB.
+
+### T9 — correction: no release without an export decision, and mutual exclusion  [installed]
+Findings came from an independent verifier pass (static only: its own worker was queued out
+after 600 s, the defect under repair).
+- Every live-worker release in `sweepIdle` and `releaseUnderPressure` runs through
+  `guardedRelease`, which takes `withFinishGuard` and re-checks `releasableRecord` after the
+  claim; a rejected claim or a changed record is a quiet `release_skipped_busy`, never a throw.
+- A live `RESULT_READY` worker is released only through the export-before-release policy
+  (`finishOrReleaseGuarded` with `fromState: "RESULT_READY"`): clean → release, dirty →
+  `runPrepare` re-export then release, unreadable status or failed export →
+  `release_skipped_dirty` and the worker is kept.
+- `opencode/plugins/lib/tool-specs-sandbox.ts`: the `sandbox_finish` description no longer
+  promises to retain the worker until apply/discard/keep; it retains the result and may release
+  the transient worker, re-created on demand. `broker/tests/fixtures/sandbox-tools-surface.json`
+  was regenerated through the sanctioned `SANDBOX_TOOLS_SURFACE_WRITE=1` path (one line).
+- Observed (u3 writer): focused 75 pass, 0 fail, 445 `expect()`; full suite 1979 tests, 5
+  failures (the known set); build succeeded.
+
+### Independent check of the installed candidate (`host_test_run runner=broker-unit`)
+Observed 2026-11-08T08:46Z against `gitHead b4ec8f1` with the ten dirty paths listed below:
+`1968 pass, 9 skip, 2 fail, 9023 expect() calls, 1979 tests across 107 files`, exit code 1.
+Both failures are `tests/v2-launch.test.ts` profile drift, pre-existing at base `4d32ff7`:
+- `grants write access to the same project .git directories as V1` — V2 profile has the extra
+  `$HOME/ai-workspace/worktrees/*/*/.git` grant.
+- `reaches the same hosts and project roots as V1` — V2 profile has the extra
+  `platform.claude.com` host.
+The three EACCES `mkdir /nonexistent` failures recorded earlier did not reproduce in this
+runner. No candidate-attributable failure was observed. `bun build --target=bun src/main.ts`
+was reported green by all three writers; this orchestrator could not re-run it (no build
+runner is registered for `host_test_run`).
+
+### Residual findings, not fixed (next unit)
+1. **Stale clean probe.** `releaseResultReadyWorker` takes the `git status` probe before
+   acquiring the finish claim (deliberate: a client finish already holding the claim wins). A
+   write that completes between the probe and the claim can leave unexported edits that a
+   `clean === true` decision then releases. Closing it needs the probe inside the claim plus a
+   write-generation check, or an exported-tip comparison; size it as its own unit.
+2. **Clean status does not prove export durability.** A worker-side `git commit` leaves a clean
+   status while the host result ref lacks that commit (pre-existing in `finishOrReleaseActive`
+   since `d65518b`). A committed-tip comparison would be required.
+3. **Direct-admission TOCTOU.** Allocations are inserted only after creation, so two concurrent
+   direct `ensureWorker` creations can briefly oversubscribe the pool. Pre-existing; the queue's
+   `inFlight` reservation covers drained creations only.
+4. **Silent remove failure.** `releaseWorker` returns `released: false` but callers historically
+   cleared `workerName` anyway; the current paths check the outcome. The `releaseRetainedWorker`
+   variant noted above still needs its own unit.
+
+### Owner landing steps (S17 — the owner reviews and commits, then restarts)
+The installed candidate touches these paths, all uncommitted on `fix/q114-worker-release` at
+HEAD `b4ec8f1`:
+- `broker/src/config.ts`
+- `broker/src/reaper.ts`
+- `broker/src/service.ts`
+- `broker/tests/config.test.ts`
+- `broker/tests/fixtures/sandbox-tools-surface.json`
+- `broker/tests/queue.test.ts`
+- `broker/tests/reaper.test.ts`
+- `broker/tests/service-apply.test.ts`
+- `broker/tests/staging-chain.test.ts`
+- `opencode/plugins/lib/tool-specs-sandbox.ts`
+
+Reviewability: 495 + 668 + 571 authored changed lines across the three results, over the local
+400-line per-commit guard. Split into coherent commits (source vs tests, and by unit) or record
+a `review-size-exception` with its reason. Then restart the broker for the change to take effect.
 
 
 ## Revisions
 - r1 2026-11-08T07:32:38Z gentle-orchestrator: Record Q114 T5 installed candidate, T6-T8 plan and route evidence
+- r2 2026-11-08T08:48:06Z gentle-orchestrator: Record T6-T9 installed candidates, the independent broker-unit run, residual findings and owner landing steps
