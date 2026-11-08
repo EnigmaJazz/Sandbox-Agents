@@ -403,3 +403,4 @@ test files must be staged before `host_sandbox_result_install` can be replayed f
 ## Gates
 - T10 PASS 2026-11-08T09:26:33Z planner ref=q114-correction-u4 pre: ses_e4597e692ffeYAzD8jOqqLf5qy; ses_e4597e69affeNrjTkDhw92ThFx; ses_e4597e699ffeIpEkRsjz4sMNvq
 - T10 PASS 2026-11-08T11:16:36Z planner ref=q114-correction-u4 Gate2 revised candidate: HEAD 59d30508d024e6c6347b236291c36eca2bba1050; RAW post ses_e455baad1ffens5zVc7Lzgx8X5; B.2+B.3 dispositions; host 1985pass/9skip/2base-fail
+- T11 PASS 2026-11-08T12:28:54Z planner ref=q114-final-u5 Gate1; RAW spec ses_e450ce730ffeB6erhfsLDUV7Br; integration retry ses_e44f1b9f0ffeajeciuBhErymkT; corrected timeout premise msb.ts:301-310
