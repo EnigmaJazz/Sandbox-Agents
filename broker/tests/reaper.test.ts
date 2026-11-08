@@ -982,7 +982,7 @@ describe("pressure release (T7)", () => {
     });
   });
 
-  test("skips a dirty SANDBOX_ACTIVE (edits survive) and releases a clean one", async () => {
+  test("keeps a dirty SANDBOX_ACTIVE when export cannot be proven and releases a clean one", async () => {
     const h = makeHarness([
       record({ sessionID: "dirty", state: "SANDBOX_ACTIVE" }),
       // The clean one already has a durable result (a resumed session), so its
@@ -1212,19 +1212,61 @@ describe("pressure release (T7)", () => {
     ).toMatchObject({ sessionID: "mid-export" });
   });
 
-  test("skips a session whose finish is in flight", async () => {
+  test("logs release_skipped_busy when the record disappears during revalidation, then releases it on retry", async () => {
+    const h = makeHarness([record({ sessionID: "revalidating", resultRef: "refs/opencode-sandbox/result/revalidating" })]);
+    const get = h.ctx.store.get.bind(h.ctx.store);
+    let disappearOnce = true;
+    h.ctx.store.get = ((sessionID: string) => {
+      if (sessionID === "revalidating" && disappearOnce) {
+        disappearOnce = false;
+        return undefined;
+      }
+      return get(sessionID);
+    }) as typeof h.ctx.store.get;
+
+    const first = await sweepIdle(h.ctx, 3_600_000, (entry) => h.logs.push(entry));
+
+    expect(first.reaped).toBe(0);
+    expect(h.logs.find((entry) => entry.action === "release_skipped_busy")).toMatchObject({
+      sessionID: "revalidating",
+    });
+    expect(h.stopped).toEqual([]);
+    expect(h.removed).toEqual([]);
+    expect(h.ctx.pool.allocations.map((allocation) => allocation.sessionID)).toEqual(["revalidating"]);
+    expect(h.records.get("revalidating")!.workerName).toBe("worker-revalidating");
+
+    // Positive control: the same record is released when the transient revalidation failure is gone.
+    const second = await sweepIdle(h.ctx, 3_600_000, (entry) => h.logs.push(entry));
+    expect(second.reaped).toBe(1);
+    expect(h.stopped).toEqual(["worker-revalidating"]);
+    expect(h.removed).toEqual(["worker-revalidating"]);
+    expect(h.ctx.pool.allocations).toEqual([]);
+    expect(h.records.get("revalidating")!.workerName).toBeUndefined();
+  });
+
+  test("a busy claim is skipped before release and the same record is reaped after it clears", async () => {
     const h = makeHarness([record({ sessionID: "finishing", resultRef: "refs/opencode-sandbox/result/finishing" })]);
 
-    const { released } = await withFinishGuard(h.ctx, "finishing", () =>
-      releaseUnderPressure(h.ctx),
+    const { reaped } = await withFinishGuard(h.ctx, "finishing", () =>
+      sweepIdle(h.ctx, 3_600_000, (entry) => h.logs.push(entry)),
     );
 
-    expect(released).toBe(0);
+    expect(reaped).toBe(0);
+    expect(h.stopped).toEqual([]);
+    expect(h.removed).toEqual([]);
+    expect(h.ctx.pool.allocations.map((allocation) => allocation.sessionID)).toEqual(["finishing"]);
     expect(h.records.get("finishing")!.workerName).toBe("worker-finishing");
-    expect(h.pressureLogs.find((e) => e.action === "pressure_skipped")).toMatchObject({
-      sessionID: "finishing",
-      detail: "a finish is in flight",
-    });
+    // sweepIdle filters a held lifecycle claim before its guarded release helper;
+    // the release_skipped_busy event is therefore not emitted for this entry path.
+    expect(h.logs).toEqual([]);
+
+    // Positive control: after the other operation releases its claim, this same record is reaped.
+    const control = await sweepIdle(h.ctx, 3_600_000, (entry) => h.logs.push(entry));
+    expect(control.reaped).toBe(1);
+    expect(h.stopped).toEqual(["worker-finishing"]);
+    expect(h.removed).toEqual(["worker-finishing"]);
+    expect(h.ctx.pool.allocations).toEqual([]);
+    expect(h.records.get("finishing")!.workerName).toBeUndefined();
   });
 });
 

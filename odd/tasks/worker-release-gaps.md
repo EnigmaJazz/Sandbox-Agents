@@ -496,6 +496,59 @@ failures, no candidate-attributable failure.
 by this fix; the size split or exception, the S17 commit and the broker restart are still owed,
 as is the outstanding `review_due: high_risk`. The approval-binding race remains out of scope.
 
+## T12 — follow-ups unit (branch `fix/q114-followups`, cut from master `b2d904e`)  [installed, uncommitted]
+
+**Route.** ROUTE: bug investigation (follow-up batches) | intent: authorized change | route:
+Tiny-fix delegation (one writer, no PM/Planner: tests and comments only, no design choice) |
+specialist: sandbox writer `ses_e4376eebbffeKNgnaOe2wJ4rAY` | basis: WORKFLOW.md.
+Trigger: secure always-delegate. Risk: low — tests and comments only.
+
+**Done (result `ses_e4376eebbffeKNgnaOe2wJ4rAY`, commit `21d6e8a`; three paths, +125/−16).**
+1. `broker/tests/lifecycle-claim.test.ts` +64: the `release_rehydration_rollback_failed` fault
+   test — the rollback `CREATING_SANDBOX → RESULT_READY` write throws once while the cleanup
+   removal is confirmed; the original `ensureWorker` error still propagates, exactly one
+   `release_rehydration_rollback_failed` entry carries the persistence error, no allocation is
+   left for the session, and a positive control with a successful rollback shows that log is
+   absent.
+2. `broker/tests/reaper.test.ts` +51/−9: action-level coverage for the sweep's
+   `release_skipped_busy` path, with a positive control that the same record IS released once
+   the claim is free. The writer found that `sweepIdle` filters an already-held claim BEFORE its
+   guarded-release path, so `release_skipped_busy` is emitted by the later guard/revalidation
+   sites (worker identity changed, record disappeared) — the test asserts the branch that
+   actually emits it, and that finding is recorded here because it corrects the follow-up's
+   premise.
+3. The stale title at `broker/tests/reaper.test.ts:985` now describes what the body asserts
+   (export-then-verify, keep on failed export) instead of the old "edits survive" rule.
+4. `broker/src/reaper.ts` +10/−7, COMMENTS ONLY: the header blocks now state that an unreadable
+   status is never exported blind and the worker is kept.
+
+**Observed checks.** Writer-observed: the rollback fault test passed against unmodified
+production code, i.e. the branch is already reachable and handled, so no behaviour-changing RED
+was available — stated rather than faked. The reaper test's first run failed because it expected
+`release_skipped_busy` at the claim-held site; the premise was corrected from source, not by
+weakening the assertion. Final focused run `bun test tests/lifecycle-claim.test.ts
+tests/reaper.test.ts` from `broker/`: 59 pass, 0 fail. `bun build --target=bun src/main.ts`
+succeeded; `git diff --check` clean. Independent `host_test_run runner=broker-unit` on the
+installed tree at `gitHead b2d904e`: `2005 pass, 9 skip, 2 fail, 9338 expect() calls, 2016 tests
+across 109 files`, exit 1 — the same two pre-existing `v2-launch` profile-drift failures, no
+candidate-attributable failure.
+
+**Declined in this unit, with reasons.**
+- **Explicit pressure-deadline parameter** (follow-up 5 from T11): declined. Threading a deadline
+  into `releaseUnderPressure` is not a one-place change — it alters the signature of an exported
+  function, needs a per-record monotonic check, and requires `parkAndWait` to pass its
+  `deadlineAt` through; it also changes what the scan may do once the deadline is exhausted.
+  That is a contract change, not a comment or a test, so it stays owner/Planner work.
+- **Preview-to-apply approval-binding race**: out of scope by instruction (needs a Planner and a
+  security advisor).
+- **Rollback-write double fault at `service.ts:916-926`**: out of scope; the owner accepted it as
+  a residual. Only its logging branch was covered by a test, with no behaviour change.
+- **Size split / size exception and `review_due: high_risk`**: owner work, unchanged.
+
+**Still open for the owner.** `broker/src/reaper.ts` is S17 but the diff is comments only; the
+three paths are installed and uncommitted on `fix/q114-followups` (HEAD still `b2d904e`), the two
+touched test files are already tracked on this branch, and the commit is the owner's.
+
 
 ## Revisions
 - r1 2026-11-08T07:32:38Z gentle-orchestrator: Record Q114 T5 installed candidate, T6-T8 plan and route evidence
@@ -505,6 +558,7 @@ as is the outstanding `review_due: high_risk`. The approval-binding race remains
 - r5 2026-11-08T12:32:27Z gentle-orchestrator: Land T11 Phase A advice record: F4/F5/new-P1 decisions, advisor dispatches incl. cancelled-then-retried integration advisor, Gate 1 hash
 - r6 2026-11-08T14:52:06Z gentle-orchestrator: Land T11 closure: C1-C3 installed, result cb3897e, Gate 2 hash, observed checks, follow-ups and owner landing steps
 - r7 2026-11-08T15:11:33Z gentle-orchestrator: Record T11a: confirmed cleanup frees a held allocation, regression RED/GREEN, independent broker-unit result
+- r8 2026-11-08T19:21:27Z gentle-orchestrator: Record T12 follow-ups unit: two fault tests, retitled pressure test, reaper comment fixes, declined items and observed checks
 
 ## Gates
 - T10 PASS 2026-11-08T09:26:33Z planner ref=q114-correction-u4 pre: ses_e4597e692ffeYAzD8jOqqLf5qy; ses_e4597e69affeNrjTkDhw92ThFx; ses_e4597e699ffeIpEkRsjz4sMNvq
