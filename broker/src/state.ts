@@ -42,7 +42,11 @@ export class StateCorruptionError extends StateError {
 /** Legal transition graph (§10). */
 export const LEGAL_TRANSITIONS: Record<SessionState, readonly SessionState[]> = {
   HOST_READ_ONLY: ["CREATING_SANDBOX"],
-  CREATING_SANDBOX: ["SANDBOX_ACTIVE", "FAILED_CLOSED", "HOST_READ_ONLY"],
+  // CREATING_SANDBOX -> RESULT_READY: a rehydration of a released result that
+  // fails part-way must roll back to the durable result it started from. The
+  // result ref, baseline ref and snapshot identity survive the round trip, so
+  // the session is exactly as resumable as it was before the attempt.
+  CREATING_SANDBOX: ["SANDBOX_ACTIVE", "FAILED_CLOSED", "HOST_READ_ONLY", "RESULT_READY"],
   SANDBOX_ACTIVE: ["CREATING_SANDBOX", "RESULT_READY", "FAILED_CLOSED", "RETAINED"],
   // RESULT_READY -> CREATING_SANDBOX: the idle reaper releases the worker of
   // a finished-but-unapplied session; ensureWorker must be able to rebuild it

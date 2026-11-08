@@ -35,7 +35,7 @@ import { assertRepositoryLocalConfigSafe, gitSubcommand } from "./gitguard.ts";
 import type { SessionStore } from "./state.ts";
 import type { MsbAdapter } from "./msb.ts";
 import type { HostReadExecutor } from "./hostread.ts";
-import type { Logger } from "./logging.ts";
+import type { Logger, LogEntry } from "./logging.ts";
 import type { Budget, HostResources, WorkerPool } from "./policy.ts";
 import type { SpawnFn, SpawnResult } from "./msb.ts";
 import {
@@ -117,7 +117,7 @@ import {
   isSourceCodeTarget,
 } from "./copy-review.ts";
 import { MsbError } from "./msb.ts";
-import { StateError } from "./state.ts";
+import { LEGAL_TRANSITIONS, StateError } from "./state.ts";
 import { ReviewRunStore, readRunArtifact, reviewRunStoreOptions } from "./review-run.ts";
 import { createReviewDiffStore, materializeReviewRange, readReviewDiff } from "./review-materialize.ts";
 import { runReviewPipeline } from "./review-pipeline.ts";
@@ -131,6 +131,11 @@ import {
   shouldRemoveSessionArtifacts,
 } from "./artifacts.ts";
 import { PolicyError, checkAdmission, type Admission } from "./policy.ts";
+// Intentional module cycle: reaper.ts imports the release/finish primitives
+// from here, and parkAndWait asks the reaper for a pressure release before it
+// parks. Both modules only call each other's functions at runtime (no
+// module-init dependency), which ESM/Bun resolve through live bindings.
+import { releaseUnderPressure } from "./reaper.ts";
 import { classifyAft, classifyOperation, decide, decideGateRouter, decideStageReview, isGateRouterAgent, isRole, isStageReviewAgent, normalizeRoleKey } from "./role-policy.ts";
 import {
   PendingQueue,
@@ -373,6 +378,41 @@ function recordOr404(store: SessionStore, sessionID: string): SessionRecord {
   return record;
 }
 
+/**
+ * A named worker whose cleanup was never CONFIRMED (a failed bootstrap or
+ * rehydration kept it fail-closed). Such a worker still owns its name and its
+ * pool capacity: the sweeps retry the removal under the lifecycle claim, and
+ * reuse/re-creation is refused until a confirmed adapter removal clears it.
+ */
+export function hasPendingFailedCleanup(
+  record: Pick<SessionRecord, "workerName" | "workerState">,
+): boolean {
+  return !!record.workerName && record.workerState === "FAILED";
+}
+
+/**
+ * The states in which a kept failed-cleanup worker is retried by the sweeps.
+ * Deliberately wider than RESULT_READY: a commit/apply that landed while the
+ * cleanup was pending leaves the worker on an APPLIED/RETAINED record.
+ */
+export const FAILED_CLEANUP_STATES: readonly SessionState[] = [
+  "RESULT_READY",
+  "APPLIED",
+  "RETAINED",
+];
+
+/** Log without letting telemetry break a release or a rollback. */
+function safeLogEntry(
+  ctx: Pick<OpContext, "logger">,
+  entry: Omit<LogEntry, "ts">,
+): void {
+  try {
+    ctx.logger?.log?.(entry);
+  } catch {
+    // Telemetry is best-effort; it never changes a lifecycle outcome.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // ensureWorker — lazy creation (§4, §11, §13) + pool queue (Feature 2)
 // ---------------------------------------------------------------------------
@@ -416,6 +456,15 @@ export function buildEnsureWorkerOp(ctx: OpContext): (req: BrokerRequestEnvelope
       workerLifecycleEntered: true,
       lastOperation: "ensureWorker",
     }, "ensureWorker");
+
+    // A worker whose cleanup was never confirmed still owns its name and its
+    // pool slot. Reusing or re-creating over it would orphan the VM and could
+    // double-count capacity: refuse BEFORE admission and before any parking.
+    if (hasPendingFailedCleanup(record)) {
+      throw new StateError(
+        `session ${req.sessionID} still owns worker ${record.workerName} awaiting a confirmed cleanup; reuse and re-creation are refused until a sweep removes it`,
+      );
+    }
 
     // Fast paths. State gates run BEFORE admission so FAILED_CLOSED and
     // mid-creation sessions never park in the pool queue.
@@ -472,7 +521,27 @@ export function buildEnsureWorkerOp(ctx: OpContext): (req: BrokerRequestEnvelope
       return parkAndWait(ctx, req, projectID, sendProgress);
     }
 
-    return createWorkerForSession(ctx, req, req.sessionID, projectID);
+    // D5: take the slot synchronously, atomically with the admission check, so
+    // two concurrent direct creations can never both pass and oversubscribe.
+    const reservation = tryReserveAllocation(ctx, req.sessionID);
+    if (!reservation.reserved) {
+      // Another creation took the slot in between: park under the FIFO queue.
+      return parkAndWait(ctx, req, projectID, sendProgress);
+    }
+    try {
+      return await withLifecycleClaim(ctx, req.sessionID, "create", async () => {
+        // D2/F2: a released result is REHYDRATED from its immutable identities,
+        // never re-snapshotted (which would repoint the baseline and drop the
+        // result). Only the result-bearing states take this path.
+        if (record.state === "RESULT_READY" && record.resultRef) {
+          return await rehydrateReleasedWorker(ctx, req, req.sessionID, projectID, record);
+        }
+        return await createWorkerForSession(ctx, req, req.sessionID, projectID);
+      });
+    } catch (err) {
+      releaseReservation(ctx, req.sessionID);
+      throw err;
+    }
   };
 }
 
@@ -501,6 +570,13 @@ async function createWorkerForSession(
   }
   const store = ctx.store;
   const record = recordOr404(store, sessionID);
+  // Queued creations reach this path too: a worker still awaiting a confirmed
+  // cleanup is never re-created underneath (its VM and slot stay owned).
+  if (hasPendingFailedCleanup(record)) {
+    throw new StateError(
+      `session ${sessionID} still owns worker ${record.workerName} awaiting a confirmed cleanup; creation is refused until a sweep removes it`,
+    );
+  }
   switch (record.state) {
     case "SANDBOX_ACTIVE":
     case "RESULT_READY":
@@ -597,11 +673,9 @@ async function createWorkerForSession(
       }
     }
 
-    ctx.pool.allocations.push({
-      cpu: ctx.budget.perWorkerCpu,
-      memBytes: ctx.budget.perWorkerMemBytes,
-      sessionID,
-    });
+    // The slot was reserved synchronously before creation (D5); convert the
+    // reservation into the real allocation (or add one for the queued path).
+    ensureAllocationForSession(ctx, sessionID);
     const next = store.transition(
       sessionID,
       "CREATING_SANDBOX",
@@ -632,6 +706,10 @@ async function createWorkerForSession(
         /* cleanup is best-effort; the session is closed regardless */
       }
     }
+    // The reserved slot is released exactly once: a failed creation must not
+    // hold capacity, and the freed slot is offered to the FIFO queue.
+    releaseReservation(ctx, sessionID);
+    drainQueue(ctx);
     try {
       store.transition(sessionID, "CREATING_SANDBOX", "FAILED_CLOSED", {
         error: err instanceof Error ? err.message : String(err),
@@ -648,11 +726,418 @@ async function createWorkerForSession(
 }
 
 /**
- * Park a pool-exhausted ensureWorker in the FIFO queue. The request stays
- * open on the socket until a slot frees (drain), the bounded timeout fires
- * (queued_timed_out with the real position), or the client disconnects.
+ * Rehydrate a released result (T10 / D2). A session that finished keeps a
+ * durable result but no worker; a later operation re-creates the worker from
+ * the RESULT TIP, with a mirror of the ORIGINAL baseline, so:
+ *   - the baseline is never repointed (`runSnapshot` is deliberately not used),
+ *   - `baselineRef`, the baseline commit, `resultRef` and `snapshotIdentity`
+ *     survive the round trip,
+ *   - guest diffs keep using the original baseline, and
+ *   - a continuation result contains the old result plus the new edits.
+ *
+ * Identities are resolved BEFORE any mutation. Missing or conflicting
+ * identities are typed refusals; a failure after the transition rolls the
+ * record back to RESULT_READY (a legal transition) and keeps every ref, so the
+ * prior result is never lost.
  */
-function parkAndWait(
+async function rehydrateReleasedWorker(
+  ctx: OpContext,
+  req: BrokerRequestEnvelope,
+  sessionID: string,
+  projectID: string,
+  record: SessionRecord,
+): Promise<unknown> {
+  const store = ctx.store;
+  const resultRefName = record.resultRef;
+  if (!resultRefName) throw new StateError("cannot rehydrate: the session has no result ref");
+  const baselineRefName = record.baselineRef ?? baselineRef(sessionID);
+  const repoDir = projectDirFor(ctx, projectID);
+  const preserved = (record as SessionRecordWithSnapshotIdentity).snapshotIdentity;
+  let ownsAllocation = false;
+
+  // Validate a caller-supplied snapshot selection BEFORE any mutation: a
+  // rehydration must never repoint the baseline to the current worktree.
+  assertRehydrationSnapshotCompatible(payloadOf(req)?.snapshot, resultRefName, preserved);
+
+  const resolveHost = async (name: string): Promise<string | undefined> => {
+    const res = await ctx.git.spawn(["git", "rev-parse", "--verify", "--quiet", `${name}^{commit}`], {
+      cwd: repoDir,
+      timeoutMs: 30_000,
+    });
+    const sha = res.status === 0 ? res.stdout.trim() : "";
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+  };
+  const baselineCommit = await resolveHost(baselineRefName);
+  const resultCommit = await resolveHost(resultRefName);
+  if (!baselineCommit || !resultCommit) {
+    throw new StateError(
+      `cannot rehydrate session ${sessionID}: the retained result identity does not resolve ` +
+        `(baseline ${baselineRefName}=${baselineCommit ?? "missing"}, result ${resultRefName}=${resultCommit ?? "missing"}); ` +
+        "the prior result is kept and nothing was re-created",
+    );
+  }
+  const ancestry = await ctx.git.spawn(
+    ["git", "merge-base", "--is-ancestor", baselineCommit, resultCommit],
+    { cwd: repoDir, timeoutMs: 30_000 },
+  );
+  if (ancestry.status !== 0) {
+    throw new StateError(
+      `cannot rehydrate session ${sessionID}: result ${resultCommit} is not a descendant of baseline ${baselineCommit}; ` +
+        "the retained history is unrelated and is never overwritten",
+    );
+  }
+
+  // The bundle is the transport the worker is built from. Keep the existing
+  // durable one; regenerate it from the host-side result ref only when a GC
+  // legitimately removed it after the import.
+  const bundle = bundlePathFor(ctx.config.stateDir, sessionID);
+  if (!existsSync(bundle)) {
+    mkdirSync(join(ctx.config.stateDir, "bundles"), { recursive: true, mode: 0o700 });
+    const created = await ctx.git.spawn(["git", "bundle", "create", bundle, resultRefName], {
+      cwd: repoDir,
+      timeoutMs: 120_000,
+    });
+    if (created.status !== 0) {
+      throw new StateError(
+        `cannot rehydrate session ${sessionID}: the retained result bundle could not be rebuilt (${trimErr(created.stderr)})`,
+      );
+    }
+    chmodSync(bundle, 0o644);
+  }
+
+  store.transition(sessionID, "RESULT_READY", "CREATING_SANDBOX", {
+    projectID,
+    agent: req.agent,
+    error: undefined,
+    // Preserved verbatim: the baseline the guest diffs use, the durable result
+    // and the pinned snapshot identity all survive the rehydration.
+    baselineRef: baselineRefName,
+    resultRef: resultRefName,
+    ...(preserved ? { snapshotIdentity: preserved } : {}),
+  } as Partial<SessionRecord>);
+
+  const workerName = ctx.adapter.workerNameFor(sessionID);
+  try {
+    await ctx.adapter.createWorker({
+      name: workerName,
+      cpu: ctx.budget.perWorkerCpu,
+      memBytes: ctx.budget.perWorkerMemBytes,
+      image: ctx.config.workerImage,
+      configDir: join(ctx.config.stateDir, "workers", workerName),
+      networkMode: "deny-by-default",
+    });
+    await ctx.adapter.copyIn(workerName, bundle, `/work/${sessionID}.bundle`);
+    // Bootstrap at the RESULT TIP, with the ORIGINAL baseline mirrored under
+    // both its canonical ref name and the legacy branch the first creation used.
+    const prep = [
+      ["sync"],
+      ["git", "init", "-q"],
+      ["git", "config", "user.name", "opencode-sandbox"],
+      ["git", "config", "user.email", "sandbox@local"],
+      ["git", "fetch", `/work/${sessionID}.bundle`, `${resultRefName}:refs/heads/work`],
+      ["git", "update-ref", baselineRefName, baselineCommit],
+      ["git", "update-ref", "refs/heads/baseline", baselineCommit],
+      ["git", "update-ref", resultRefName, resultCommit],
+      ["git", "checkout", "-q", "work"],
+    ] as const;
+    for (const argv of prep) {
+      let res: Awaited<ReturnType<typeof ctx.adapter.exec>> | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        res = await ctx.adapter.exec(workerName, [...argv], { cwd: "/work", timeoutMs: 120_000 });
+        if (res.status === 0) break;
+        await new Promise((r) => setTimeout(r, 400));
+      }
+      if (!res || res.status !== 0) {
+        throw new MsbError(
+          `worker rehydration prep failed (${argv[1]}): ${trimErr(res?.stderr || res?.stdout || "")}`,
+        );
+      }
+    }
+    ownsAllocation = ensureAllocationForSession(ctx, sessionID);
+    const next = store.transition(sessionID, "CREATING_SANDBOX", "SANDBOX_ACTIVE", {
+      workerName,
+      workerState: "ACTIVE",
+      baselineRef: baselineRefName,
+      resultRef: resultRefName,
+      ...(preserved ? { snapshotIdentity: preserved } : {}),
+      error: undefined,
+      resources: {
+        cpu: ctx.budget.perWorkerCpu,
+        memBytes: ctx.budget.perWorkerMemBytes,
+      },
+    } as Partial<SessionRecord>);
+    return { worker: workerName, state: next.state, reused: false, rehydrated: true, snapshot: preserved };
+  } catch (err) {
+    // A failed bootstrap may still own a VM (`createWorker` can reject after
+    // the container exists). stop and remove are attempted INDEPENDENTLY: a
+    // failing stop must never hide a removal that would prove the VM gone.
+    let removeError: string | undefined;
+    try {
+      await ctx.adapter.stop(workerName);
+    } catch {
+      /* the removal below is the proof, not the stop */
+    }
+    try {
+      await ctx.adapter.remove(workerName);
+    } catch (cleanupErr) {
+      removeError = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+    }
+    const confirmedRemoval = removeError === undefined;
+    const rollback: Partial<SessionRecord> = {
+      error: err instanceof Error ? err.message : String(err),
+      baselineRef: baselineRefName,
+      resultRef: resultRefName,
+      ...(preserved ? { snapshotIdentity: preserved } : {}),
+      // Only a CONFIRMED adapter removal clears identity; an unconfirmed VM is
+      // kept (name + FAILED) so the sweeps retry it instead of orphaning it.
+      workerName: confirmedRemoval ? undefined : workerName,
+      workerState: confirmedRemoval ? "DESTROYED" : "FAILED",
+    } as Partial<SessionRecord>;
+    if (confirmedRemoval) {
+      // Confirmed: the reservation is freed exactly once and the slot offered
+      // to the FIFO queue.
+      if (ownsAllocation) releaseAllocationForSession(ctx, sessionID);
+      else releaseReservation(ctx, sessionID);
+    } else {
+      // Unconfirmed: KEEP the slot as a counted held allocation (never a plain
+      // reservation) so neither the direct catch nor the queued `finally` can
+      // drop capacity for a VM that may still be running.
+      ensureAllocationForSession(ctx, sessionID);
+      safeLogEntry(ctx, {
+        sessionID,
+        operation: "ensureWorker",
+        action: "release_rehydration_worker_failed",
+        result: "error",
+        error: removeError,
+        detail: `worker ${workerName} retained for the next sweep`,
+      });
+    }
+    try {
+      store.transition(sessionID, "CREATING_SANDBOX", "RESULT_READY", rollback);
+    } catch (persistErr) {
+      // The rollback write failed: identity/accounting already reflect the
+      // best-known state and the ORIGINAL error still wins.
+      safeLogEntry(ctx, {
+        sessionID,
+        operation: "ensureWorker",
+        action: "release_rehydration_rollback_failed",
+        result: "error",
+        error: persistErr instanceof Error ? persistErr.message : String(persistErr),
+      });
+    }
+    if (confirmedRemoval) drainQueue(ctx);
+    throw err;
+  }
+}
+
+/**
+ * A rehydration may pin the SAME result identity, but it must never repoint the
+ * baseline: a worktree selection would silently change what the guest diffs
+ * against, and a different result/commit selection would fork the session.
+ */
+function assertRehydrationSnapshotCompatible(
+  raw: unknown,
+  resultRefName: string,
+  preserved: SnapshotIdentity | undefined,
+): void {
+  if (raw === undefined) return;
+  const selection = snapshotFromPayload(raw);
+  if ("worktree" in selection) {
+    throw new ValidationError(
+      "cannot rehydrate with a worktree snapshot: it would repoint the session baseline away from the retained result",
+    );
+  }
+  const wanted = "resultRef" in selection ? selection.resultRef : selection.commit;
+  if ("resultRef" in selection && wanted !== resultRefName) {
+    throw new ValidationError("cannot rehydrate: the requested resultRef is not this session's retained result");
+  }
+  if (preserved && "commit" in selection && selection.commit !== preserved.commit) {
+    throw new ValidationError("cannot rehydrate: the requested commit is not the retained snapshot identity");
+  }
+}
+
+/** One worker-holding pool allocation in a pool-occupancy snapshot (T5). */
+export interface PoolHeldSession {
+  sessionID: string;
+  state: SessionRecord["state"] | "unknown";
+  workerState?: SessionRecord["workerState"];
+  ageMs: number;
+  workerName?: string;
+}
+
+/** Structured occupancy snapshot shared by queue telemetry and the timeout report. */
+export interface PoolOccupancySnapshot {
+  queueDepth: number;
+  allocations: number;
+  cap: number;
+  inFlight: number;
+  held: PoolHeldSession[];
+  summary: string;
+}
+
+/**
+ * Describe why an `ensureWorker` request cannot be admitted: the pool
+ * allocations actually held and the FIFO queue. ONE helper feeds both the
+ * structured `queue_wait`/`queue_timeout` log entry and the blocked report in
+ * `QueuedTimedOutError`, so the log and the error can never disagree.
+ *
+ * Occupancy is derived from `pool.allocations`, not from session records: an
+ * allocation is the resource actually reserved, and a record can lag behind a
+ * release. A session record is joined when present so the report can name the
+ * session's state, worker state and age; an allocation without a record (or
+ * without an owning session) is still reported rather than silently dropped.
+ * Never throws: telemetry must not change an admission outcome.
+ */
+export function describePoolOccupancy(ctx: OpContext): PoolOccupancySnapshot {
+  const now = Date.now();
+  const held: PoolHeldSession[] = ctx.pool.allocations.map((allocation) => {
+    let record: SessionRecord | undefined;
+    if (allocation.sessionID) {
+      try {
+        record = ctx.store.get(allocation.sessionID);
+      } catch {
+        record = undefined;
+      }
+    }
+    const updated = record ? Date.parse(record.updatedAt) : Number.NaN;
+    return {
+      sessionID: allocation.sessionID ?? "(unattributed)",
+      state: record?.state ?? "unknown",
+      workerState: record?.workerState,
+      ageMs: Number.isFinite(updated) ? Math.max(0, now - updated) : 0,
+      workerName: record?.workerName,
+    };
+  });
+  const queueDepth = ctx.queue?.length ?? 0;
+  const allocations = ctx.pool.allocations.length;
+  const cap = ctx.budget.maxWorkers;
+  const inFlight = ctx.queue?.inFlight ?? 0;
+  const heldText =
+    held.length === 0
+      ? "none"
+      : held
+          .map(
+            (h) =>
+              `${h.sessionID} (${h.state}/${h.workerState ?? "unknown"}, ${h.ageMs}ms)`,
+          )
+          .join(", ");
+  const summary =
+    `${allocations}/${cap} pool allocations held, queue depth ${queueDepth}` +
+    (inFlight > 0 ? `, ${inFlight} creation(s) in flight` : "") +
+    `; held sessions: ${heldText}`;
+  return { queueDepth, allocations, cap, inFlight, held, summary };
+}
+
+/** Structured queue telemetry; a logging failure must never unpark a request. */
+function logQueueOccupancy(
+  ctx: OpContext,
+  req: BrokerRequestEnvelope,
+  action: "queue_wait" | "queue_timeout",
+  snapshot: PoolOccupancySnapshot,
+): void {
+  try {
+    // Assign first: the snapshot carries fields beyond LogEntry, and these
+    // structured extras are intentionally serialized into the JSONL entry.
+    const entry = {
+      sessionID: req.sessionID,
+      operation: "ensureWorker",
+      action,
+      result: action === "queue_timeout" ? "error" : "ok",
+      ...snapshot,
+    };
+    ctx.logger?.log?.(entry);
+  } catch {
+    // Telemetry must not change the admission outcome.
+  }
+}
+
+/** The blocked report a delegating session receives when the queue times out. */
+function queuedTimeoutMessage(
+  sessionID: string,
+  timeoutMs: number,
+  snapshot: PoolOccupancySnapshot,
+): string {
+  return (
+    `ensureWorker queued for session ${sessionID} timed out after ${timeoutMs}ms: the worker pool is blocked. ` +
+    `Occupancy: ${snapshot.summary}. ` +
+    "Report blocked to your coordinator; do not retry with a longer timeout or a new session."
+  );
+}
+
+/**
+ * Side metadata for a parked entry (T10 / D5). It lives next to the queue, in
+ * this allowed module, so the absolute deadline and the cancellation flag are
+ * never lost when the entry leaves and re-enters the FIFO ring.
+ */
+interface QueueEntryMeta {
+  deadlineAt: number;
+  cancelled: boolean;
+}
+
+const queueEntryMeta = new WeakMap<object, QueueEntryMeta>();
+
+function metaOf(ctx: OpContext, entry: QueuedEntry): QueueEntryMeta {
+  let meta = queueEntryMeta.get(entry);
+  if (!meta) {
+    meta = {
+      deadlineAt: Date.now() + (ctx.config?.queueTimeoutMs ?? 600_000),
+      cancelled: false,
+    };
+    queueEntryMeta.set(entry, meta);
+  }
+  return meta;
+}
+
+/**
+ * Cancel a parked entry (disconnect, explicit removal). Marks the side metadata
+ * FIRST so a drain that is already in flight can never create a worker for a
+ * requester that is gone.
+ */
+export function cancelQueuedEntry(
+  ctx: OpContext,
+  sessionID: string,
+  message: string,
+): QueuedEntry | undefined {
+  const entry = ctx.queue?.find(sessionID);
+  if (!entry) return undefined;
+  metaOf(ctx, entry).cancelled = true;
+  return ctx.queue?.cancel(sessionID, message);
+}
+
+/** Reject a parked entry at its ABSOLUTE deadline (scan latency included). */
+function expireQueuedEntry(ctx: OpContext, entry: QueuedEntry): void {
+  const meta = metaOf(ctx, entry);
+  if (meta.cancelled) return;
+  meta.cancelled = true;
+  if (entry.timer) clearTimeout(entry.timer);
+  const queue = ctx.queue;
+  // Snapshot BEFORE removing the entry so the report names the request that
+  // just timed out as well as every held worker.
+  const occupancy = describePoolOccupancy(ctx);
+  if (queue?.find(entry.sessionID)) queue.remove(entry.sessionID);
+  logQueueOccupancy(ctx, entry.request, "queue_timeout", occupancy);
+  entry.reject(
+    new QueuedTimedOutError(
+      queuedTimeoutMessage(entry.sessionID, ctx.config.queueTimeoutMs, occupancy),
+    ),
+  );
+}
+
+/**
+ * Park a pool-exhausted ensureWorker in the FIFO queue.
+ *
+ * Ordering (T10 / D5) matters as much as the behaviour:
+ *   1. a duplicate request SHARES the pending outcome (no second slot, no
+ *      second deadline);
+ *   2. the queue cap is enforced BEFORE the pressure scan;
+ *   3. the entry becomes visible (and counted) with an ABSOLUTE deadline before
+ *      the scan awaits — so a hung scan cannot extend the client's wait, and a
+ *      disconnect can cancel an entry that is about to be created;
+ *   4. the pressure pass may free a slot, but it never creates this request
+ *      directly: the drain hands slots out FIFO only, revalidating identity,
+ *      cancellation and deadline first.
+ */
+async function parkAndWait(
   ctx: OpContext,
   req: BrokerRequestEnvelope,
   projectID: string,
@@ -674,7 +1159,7 @@ function parkAndWait(
       `worker queue full (${ctx.config.queueMaxLength}); retry later`,
     );
   }
-  const timeoutMs = ctx.config.queueTimeoutMs;
+  const deadlineAt = Date.now() + ctx.config.queueTimeoutMs;
   let resolve!: (v: unknown) => void;
   let reject!: (e: unknown) => void;
   const pending = new Promise<unknown>((res, rej) => {
@@ -691,20 +1176,41 @@ function parkAndWait(
     resolve,
     reject,
   };
-  const timer = setTimeout(() => {
-    queue.remove(req.sessionID);
-    reject(
-      new QueuedTimedOutError(
-        `ensureWorker queued for session ${req.sessionID} timed out after ${timeoutMs}ms (queue position ${entry.position})`,
-      ),
-    );
-  }, timeoutMs);
+  queueEntryMeta.set(entry, { deadlineAt, cancelled: false });
+  const timer = setTimeout(
+    () => expireQueuedEntry(ctx, entry),
+    Math.max(0, deadlineAt - Date.now()),
+  );
   if (typeof (timer as { unref?: () => void }).unref === "function") {
     (timer as { unref: () => void }).unref();
   }
   entry.timer = timer;
   queue.enqueue(entry);
+  logQueueOccupancy(ctx, req, "queue_wait", describePoolOccupancy(ctx));
   sendProgress?.(entry.position);
+  // The pressure scan is DETACHED from the caller's promise: dedup, cap,
+  // deadline, timer and enqueue are already synchronous, so a slow or hanging
+  // scan can never extend this request's absolute deadline. Every failure in
+  // the detached continuation is swallowed (parking is already correct).
+  void (async () => {
+    try {
+      await releaseUnderPressure(ctx, req.sessionID);
+    } catch {
+      // The pressure pass is best-effort; parking is still correct.
+    }
+    try {
+      const current = queue.find(req.sessionID);
+      const meta = metaOf(ctx, entry);
+      // Drain ONLY for this exact, still-live entry: never for a cancelled,
+      // settled or expired request, never for a replacement parked under the
+      // same session id, and never after the original deadline.
+      if (current === entry && !meta.cancelled && Date.now() < meta.deadlineAt) {
+        drainQueue(ctx);
+      }
+    } catch {
+      // A continuation failure must not leak into the parked promise.
+    }
+  })();
   return pending;
 }
 
@@ -736,6 +1242,12 @@ export function drainQueue(ctx: OpContext): void {
   while (true) {
     const entry = queue.head();
     if (!entry) return;
+    const meta = metaOf(ctx, entry);
+    if (meta.cancelled) {
+      // A settled entry can linger in the ring; it never consumes a slot.
+      queue.remove(entry.sessionID);
+      continue;
+    }
     if (!admissionFor(ctx).allowed) return; // head cannot fit yet — FIFO, leave the rest parked
     queue.remove(entry.sessionID);
     if (entry.timer) clearTimeout(entry.timer);
@@ -744,27 +1256,90 @@ export function drainQueue(ctx: OpContext): void {
   }
 }
 
+/**
+ * Re-park an entry that lost a race (lifecycle claim held, or capacity taken by
+ * another creator) under its ORIGINAL absolute deadline — never a fresh one.
+ */
+function requeueEntry(ctx: OpContext, entry: QueuedEntry): void {
+  const queue = ctx.queue;
+  const meta = metaOf(ctx, entry);
+  if (!queue || meta.cancelled) return;
+  const remaining = meta.deadlineAt - Date.now();
+  if (remaining <= 0) {
+    expireQueuedEntry(ctx, entry);
+    return;
+  }
+  if (queue.find(entry.sessionID)) return;
+  const timer = setTimeout(() => expireQueuedEntry(ctx, entry), remaining);
+  if (typeof (timer as { unref?: () => void }).unref === "function") {
+    (timer as { unref: () => void }).unref();
+  }
+  entry.timer = timer;
+  queue.enqueue(entry);
+}
+
 async function runQueuedCreation(
   ctx: OpContext,
   entry: QueuedEntry,
 ): Promise<void> {
+  const queue = ctx.queue;
+  const meta = metaOf(ctx, entry);
+  // The drain's promise accounting is converted into the entry's synchronous
+  // reservation below; it is never counted twice.
+  if (queue) queue.inFlight = Math.max(0, queue.inFlight - 1);
   try {
-    const result = await createWorkerForSession(
-      ctx,
-      entry.request,
-      entry.sessionID,
-      entry.projectID,
-    );
-    entry.resolve({
-      ...(result as Record<string, unknown>),
-      queued: true,
-      queuePosition: entry.position,
-    });
+    if (meta.cancelled) return;
+    if (Date.now() >= meta.deadlineAt) {
+      expireQueuedEntry(ctx, entry);
+      return;
+    }
+    if (!tryReserveAllocation(ctx, entry.sessionID).reserved) {
+      requeueEntry(ctx, entry);
+      return;
+    }
+    let reserved = true;
+    try {
+      const result = await withLifecycleClaim(ctx, entry.sessionID, "create", async () => {
+        // Revalidate INSIDE the claim: a timeout or disconnect that happened
+        // while this entry waited for ownership must not create a worker.
+        const current = metaOf(ctx, entry);
+        if (current.cancelled) {
+          throw new StateError("the queued worker request was cancelled before it was admitted");
+        }
+        if (Date.now() >= current.deadlineAt) {
+          throw new QueuedTimedOutError(
+            queuedTimeoutMessage(entry.sessionID, ctx.config.queueTimeoutMs, describePoolOccupancy(ctx)),
+          );
+        }
+        const fresh = ctx.store.get(entry.sessionID);
+        if (fresh && hasPendingFailedCleanup(fresh)) {
+          throw new StateError(
+            `session ${entry.sessionID} still owns worker ${fresh.workerName} awaiting a confirmed cleanup; queued creation is refused until a sweep removes it`,
+          );
+        }
+        if (fresh?.state === "RESULT_READY" && fresh.resultRef) {
+          return await rehydrateReleasedWorker(ctx, entry.request, entry.sessionID, entry.projectID, fresh);
+        }
+        return await createWorkerForSession(ctx, entry.request, entry.sessionID, entry.projectID);
+      });
+      reserved = false; // converted into the real allocation
+      entry.resolve({
+        ...(result as Record<string, unknown>),
+        queued: true,
+        queuePosition: entry.position,
+      });
+    } finally {
+      if (reserved) releaseReservation(ctx, entry.sessionID);
+    }
   } catch (err) {
-    entry.reject(err);
+    // Contention is not a failure of the request: keep it queued under its
+    // original deadline so the next settlement can admit it.
+    if (err instanceof StateError && /already in flight/.test(err.message)) {
+      requeueEntry(ctx, entry);
+    } else {
+      entry.reject(err);
+    }
   } finally {
-    const queue = ctx.queue;
-    if (queue) queue.inFlight = Math.max(0, queue.inFlight - 1);
     // The freed slot is now consumed (success) or still free (failure): admit
     // the next parked request promptly instead of waiting for another release.
     drainQueue(ctx);
@@ -1714,6 +2289,21 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
       throw new ValidationError("diff mode must be active or retained");
     const record = recordOr404(ctx.store, req.sessionID);
     if (mode === "retained") return buildRetainedDiff(ctx, record);
+    // F1: active mode is only legal with a live worker. A released result has
+    // no active diff, and a stranded session without a durable result fails
+    // closed here instead of being accidentally re-created by an inspection.
+    const liveWorker =
+      !!record.workerName &&
+      record.workerState !== "DESTROYED" &&
+      record.workerState !== "FAILED";
+    if (!liveWorker) {
+      throw new StateError(
+        `cannot read the active diff for session ${req.sessionID}: no live worker. ` +
+          (record.resultRef
+            ? "The result is retained; inspect it in retained mode."
+            : "Stranded session without a valid durable result: failing closed."),
+      );
+    }
     const worker = requireActiveWorker(record);
     const ref = record.baselineRef ?? baselineRef(record.sessionID);
     const tmpIndex = `/work/.broker-tmp/diff-${randomUUID()}.index`;
@@ -1883,50 +2473,195 @@ export function buildDiffOp(ctx: OpContext): OpHandler {
 // ---------------------------------------------------------------------------
 
 /**
- * Sessions whose result is being finished right now. Keyed on the store so that the `{ ...ctx }` copies
- * the server and the tests make all see one set. A finish blocks for the evidence runners' timeouts, and
- * the reaper's skip checks (idle age, no resultRef) stay true for all of it: without this, a second sweep
- * runs the finish again, or releases the worker under a running runner.
+ * The ONE per-session lifecycle claim (T10 / D4).
+ *
+ * Every operation that mutates or uses a session's worker, creates it, mutates
+ * its result, or releases it runs under this claim. Keyed on the store so that
+ * the `{ ...ctx }` copies the server and the tests make all see one set.
+ *
+ * The claim is NON-BLOCKING: a second operation is refused with a typed
+ * StateError instead of queueing behind the first (the client re-reads the
+ * record and retries; the reaper skips quietly). It is acquired before any
+ * freshness probe, status read or export decision and held through the adapter
+ * call, the stop/remove, the state write and the cleanup.
+ *
+ * Internal helpers that are already called under a claim must NOT take it
+ * again: reentrancy is explicit in the call graph (the release helpers take a
+ * `claim` argument) and never implicit in the map.
  */
-const finishing = new WeakMap<object, Map<string, symbol>>();
+type LifecycleClaimKind = "finish" | "mutation" | "read" | "create" | "release";
 
-/** True while a finish (prepareResult, keepResult, idle auto-finish, disconnect reap) of this session is in flight. */
-export function isFinishing(ctx: OpContext, sessionID: string): boolean {
-  return finishing.get(ctx.store)?.has(sessionID) === true;
+interface LifecycleClaim {
+  token: symbol;
+  kind: LifecycleClaimKind;
+}
+
+const lifecycleClaims = new WeakMap<object, Map<string, LifecycleClaim>>();
+
+function lifecycleClaimMap(ctx: OpContext): Map<string, LifecycleClaim> {
+  let claims = lifecycleClaims.get(ctx.store);
+  if (!claims) lifecycleClaims.set(ctx.store, (claims = new Map()));
+  return claims;
+}
+
+/** The kind of operation currently owning this sandbox session, if any. */
+export function lifecycleClaimKind(
+  ctx: Pick<OpContext, "store">,
+  sessionID: string,
+): LifecycleClaimKind | undefined {
+  return lifecycleClaims.get(ctx.store)?.get(sessionID)?.kind;
 }
 
 /**
- * Run one finish of a session exclusively. A finish already in flight is refused (never queued behind: the
- * caller re-reads the session afterwards), so the evidence runners can never run twice at once. The check and
- * the claim have no await between them, and the claim is released in `finally`, so a throw cannot leak it.
- * It is separate from the server's per-session operation lock on purpose: the reaper does not take that
- * lock, and a finish inside the lock must not wait for it again.
- *
- * A finish whose promise never settles (the adapter kills a runner at its timeout, so this means the exec
- * call itself hung) loses the guard at a deadline: the configured runners' timeouts plus a grace period. The
- * claim is an identity token, so that finish settling late cannot release a newer claim.
+ * True while any lifecycle operation (finish, worker mutation or read, or a
+ * release) of this session is in flight. A finish blocks for the evidence
+ * runners' timeouts, and the reaper's skip checks (idle age, no resultRef) stay
+ * true for all of it: without this, a second sweep runs the finish again, or a
+ * release tears the worker down under a running runner or a client write.
  */
-export async function withFinishGuard<T>(ctx: OpContext, sessionID: string, fn: () => Promise<T>): Promise<T> {
-  let claims = finishing.get(ctx.store);
-  if (!claims) finishing.set(ctx.store, (claims = new Map()));
-  if (claims.has(sessionID)) throw new StateError("a result export is already in flight for this session; retry after it finishes");
-  const claim = Symbol(sessionID);
+export function isFinishing(ctx: Pick<OpContext, "store">, sessionID: string): boolean {
+  return lifecycleClaims.get(ctx.store)?.has(sessionID) === true;
+}
+
+/** Alias with the name the new call sites use: the same single claim. */
+export const isLifecycleClaimed = isFinishing;
+
+/**
+ * The lifecycle claim each PUBLIC sandbox operation takes at dispatch (D4).
+ * Operations that already own the claim internally (finish/apply/keep/discard/
+ * destroy) are deliberately absent: reentrancy is never implicit.
+ */
+const SANDBOX_OPERATION_CLAIMS: Partial<Record<Operation, LifecycleClaimKind>> = {
+  exec: "mutation",
+  writeFile: "mutation",
+  applyPatch: "mutation",
+  copyIn: "mutation",
+  copyOut: "mutation",
+  readFile: "read",
+  listDir: "read",
+  grep: "read",
+  diff: "read",
+  copyInInfo: "read",
+  copyOutInfo: "read",
+};
+
+/** The claim a public operation must take, or undefined when it owns it itself. */
+export function sandboxLifecycleKindForOperation(
+  operation: Operation,
+): LifecycleClaimKind | undefined {
+  return SANDBOX_OPERATION_CLAIMS[operation];
+}
+
+/** Acquire the claim synchronously, or refuse (never queue behind the owner). */
+function acquireLifecycleClaim(
+  ctx: OpContext,
+  sessionID: string,
+  kind: LifecycleClaimKind,
+): LifecycleClaim {
+  const claims = lifecycleClaimMap(ctx);
+  const existing = claims.get(sessionID);
+  if (existing) {
+    throw new StateError(
+      `another sandbox lifecycle operation (${existing.kind}) is already in flight for this session; retry after it finishes`,
+    );
+  }
+  const claim: LifecycleClaim = { token: Symbol(sessionID), kind };
   claims.set(sessionID, claim);
-  const config = (ctx.config ?? {}) as { testRunners?: { timeoutMs: number }[]; finishGuardGraceMs?: number };
-  const deadlineMs = (config.testRunners ?? []).reduce((total, runner) => total + runner.timeoutMs, 0) + (config.finishGuardGraceMs ?? 300_000);
+  return claim;
+}
+
+/** Release only the claim this caller owns: a newer claim is never dropped. */
+function releaseLifecycleClaim(
+  ctx: Pick<OpContext, "store">,
+  sessionID: string,
+  claim: LifecycleClaim,
+): void {
+  const claims = lifecycleClaims.get(ctx.store);
+  if (claims?.get(sessionID)?.token === claim.token) claims.delete(sessionID);
+}
+
+/** The finish deadline: the runners' timeouts plus a grace period. */
+export function finishGuardDeadlineMs(ctx: Pick<OpContext, "config">): number {
+  const config = (ctx.config ?? {}) as {
+    testRunners?: { timeoutMs: number }[];
+    finishGuardGraceMs?: number;
+  };
+  return (
+    (config.testRunners ?? []).reduce((total, runner) => total + runner.timeoutMs, 0) +
+    (config.finishGuardGraceMs ?? 300_000)
+  );
+}
+
+/**
+ * Run one lifecycle operation exclusively. The claim is acquired before the
+ * first await and released when the operation SETTLES - never by the deadline
+ * wrapper alone: a callback that outlives its caller's deadline keeps ownership
+ * until it actually finishes, so a late settle can neither run concurrently
+ * with a newer operation nor drop a newer claim.
+ *
+ * With a `deadlineMs`, the caller stops waiting at the deadline (the configured
+ * adapter timeouts are preserved) but ownership survives until settlement.
+ */
+export async function withLifecycleClaim<T>(
+  ctx: OpContext,
+  sessionID: string,
+  kind: LifecycleClaimKind,
+  fn: () => Promise<T>,
+  opts: { deadlineMs?: number } = {},
+): Promise<T> {
+  const claim = acquireLifecycleClaim(ctx, sessionID, kind);
+  const settled = Promise.resolve()
+    .then(fn)
+    .then(
+      (value) => {
+        releaseLifecycleClaim(ctx, sessionID, claim);
+        return value;
+      },
+      (err) => {
+        releaseLifecycleClaim(ctx, sessionID, claim);
+        throw err;
+      },
+    );
+  if (opts.deadlineMs === undefined) return settled;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      fn(),
+      settled,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new StateError("the result export exceeded its deadline; the guard was released")), deadlineMs);
+        timer = setTimeout(
+          () =>
+            reject(
+              new StateError(
+                "the result export exceeded its deadline; the guard was released",
+              ),
+            ),
+          opts.deadlineMs as number,
+        );
         timer.unref?.();
       }),
     ]);
   } finally {
     if (timer) clearTimeout(timer);
-    if (claims.get(sessionID) === claim) claims.delete(sessionID);
   }
+}
+
+/**
+ * Run one finish of a session exclusively. A finish already in flight is
+ * refused (never queued behind: the caller re-reads the session afterwards), so
+ * the evidence runners can never run twice at once. It is the "finish" flavour
+ * of the single lifecycle claim (D4): separate from the server's per-session
+ * operation lock on purpose, because the reaper does not take that lock.
+ *
+ * A finish whose promise never settles (the adapter kills a runner at its
+ * timeout, so this means the exec call itself hung) loses the caller at its
+ * deadline - the configured runners' timeouts plus a grace period - but keeps
+ * ownership until the callback actually settles. The claim is an identity
+ * token, so a late settle cannot release a newer claim.
+ */
+export async function withFinishGuard<T>(ctx: OpContext, sessionID: string, fn: () => Promise<T>): Promise<T> {
+  return withLifecycleClaim(ctx, sessionID, "finish", fn, {
+    deadlineMs: finishGuardDeadlineMs(ctx),
+  });
 }
 
 export function buildPrepareResultOp(ctx: OpContext): OpHandler {
@@ -1939,6 +2674,19 @@ export function buildPrepareResultOp(ctx: OpContext): OpHandler {
     // Always re-export: runPrepare commits only new changes, so a retained
     // result after a failed apply is refreshed, not frozen (Gate 6 finding).
     return withFinishGuard(ctx, req.sessionID, async () => {
+      // A finish releases its worker once the result is host-side (T5). A
+      // re-finish of that RESULT_READY record has no worker to export from and
+      // nothing new to export: the result ref is the durable copy. Return it
+      // unchanged - no adapter call, and `imported: false` because this call
+      // imported nothing. Without a result ref there is nothing to return, so
+      // runPrepare must fail closed.
+      const hasLiveWorker =
+        !!record.workerName &&
+        record.workerState !== "DESTROYED" &&
+        record.workerState !== "FAILED";
+      if (record.state === "RESULT_READY" && record.resultRef && !hasLiveWorker) {
+        return { resultRef: record.resultRef, state: record.state, imported: false };
+      }
       const ref = await runPrepare(ctx, req.sessionID);
       if (record.state === "SANDBOX_ACTIVE") {
         record = ctx.store.transition(
@@ -1948,7 +2696,19 @@ export function buildPrepareResultOp(ctx: OpContext): OpHandler {
           { resultRef: ref },
         );
       }
-      return { resultRef: ref, state: record.state, imported: true };
+      // The result is host-side now (ref + bundle), so the transient worker has
+      // nothing left to give: release it immediately instead of holding a pool
+      // slot until the idle sweep. State and resultRef stay so
+      // apply/preview/retain/discard still work; the sweep is the safety net
+      // for a failed removal.
+      await releaseResultWorker(
+        ctx,
+        req.sessionID,
+        "prepareResult",
+        "release_result_worker",
+      );
+      const current = ctx.store.get(req.sessionID) ?? record;
+      return { resultRef: ref, state: current.state, imported: true };
     });
   };
 }
@@ -2082,15 +2842,55 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
   if (record.projectID === undefined)
     throw new StateError("project not in allowlist");
   const projectID: string = record.projectID;
-  const imported = await ctx.git.spawn(
-    ["git", "fetch", "--no-tags", hostBundle, `+${ref}:${ref}`],
+  // D2/F2: publish the result only after ancestry verification, using an
+  // expected-old-tip update. NEVER a force fetch into the durable ref: an
+  // unrelated retained result is never overwritten, and a concurrent update
+  // makes this fail closed instead of clobbering someone else's tip.
+  const hostRepoDir = projectDirFor(ctx, projectID);
+  const advertised = await ctx.git.spawn(["git", "ls-remote", hostBundle, ref], {
+    cwd: hostRepoDir,
+    timeoutMs: 60_000,
+  });
+  const advertisedTip = advertised.status === 0 ? (advertised.stdout.trim().split(/\s+/)[0] ?? "") : "";
+  if (!/^[0-9a-f]{40}$/.test(advertisedTip)) {
+    throw new MsbError(`result import failed: the bundle does not advertise ${ref}`);
+  }
+  const fetched = await ctx.git.spawn(
+    ["git", "fetch", "--no-tags", "--no-write-fetch-head", hostBundle, ref],
     {
-      cwd: projectDirFor(ctx, projectID),
+      cwd: hostRepoDir,
       timeoutMs: 120_000,
     },
   );
-  if (imported.status !== 0) {
-    throw new MsbError(`result import failed: ${imported.stderr.trim()}`);
+  if (fetched.status !== 0) {
+    throw new MsbError(`result import failed: ${fetched.stderr.trim()}`);
+  }
+  const current = await ctx.git.spawn(
+    ["git", "rev-parse", "--verify", "--quiet", `${ref}^{commit}`],
+    { cwd: hostRepoDir, timeoutMs: 30_000 },
+  );
+  const oldTip = current.status === 0 ? current.stdout.trim() : "";
+  if (oldTip && oldTip !== advertisedTip) {
+    const ancestor = await ctx.git.spawn(
+      ["git", "merge-base", "--is-ancestor", oldTip, advertisedTip],
+      { cwd: hostRepoDir, timeoutMs: 30_000 },
+    );
+    if (ancestor.status !== 0) {
+      throw new StateError(
+        `result import refused: ${ref} already points at ${oldTip}, which is not an ancestor of ${advertisedTip}; ` +
+          "the retained history is unrelated and is never overwritten",
+      );
+    }
+  }
+  // Expected-old-tip update: "" means "must not exist yet".
+  const published = await ctx.git.spawn(
+    ["git", "update-ref", ref, advertisedTip, oldTip],
+    { cwd: hostRepoDir, timeoutMs: 30_000 },
+  );
+  if (published.status !== 0) {
+    throw new StateError(
+      `result import refused: ${ref} changed while the result was published; retry`,
+    );
   }
   // The result ref is now the durable copy on the host git side; the on-disk
   // transport bundle + temp index are redundant. Best effort: a GC failure
@@ -2103,7 +2903,15 @@ export async function runPrepare(ctx: OpContext, sessionID: string): Promise<str
 }
 
 export function buildApplyResultOp(ctx: OpContext): OpHandler {
-  return async (req) => {
+  // D4: the whole apply (divergence, protected paths, preview, git apply and
+  // the worker release) is one lifecycle operation: no reaper release, write,
+  // exec or other apply can interleave with it.
+  return async (req) =>
+    withLifecycleClaim(ctx, req.sessionID, "release", () => applyResultOp(ctx, req));
+}
+
+/** The apply body; ALWAYS runs under the caller's lifecycle claim. */
+async function applyResultOp(ctx: OpContext, req: BrokerRequestEnvelope): Promise<unknown> {
     const payload = payloadOf(req) as { confirm?: unknown };
     if (payload.confirm !== "APPLY") {
       throw new ValidationError('applyResult requires confirm: "APPLY"');
@@ -2258,7 +3066,9 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
     // them until an explicit stop/cleanup (pool exhaustion after demos).
     // A landed apply must never fail because of worker cleanup: on a failed
     // release the record keeps its worker and the idle sweep retries it later.
-    const outcome = await releaseWorker(ctx, record);
+    // D3: the release still requires the export proof (HEAD == the exported
+    // result tip, clean tree); a failure keeps ownership and accounting.
+    const outcome = await removeWorkerVerified(ctx, record);
     if (outcome.released) {
       record = ctx.store.touch(req.sessionID, {
         workerName: undefined,
@@ -2274,7 +3084,6 @@ export function buildApplyResultOp(ctx: OpContext): OpHandler {
       applyPreview: buildApplyPreview(patch.stdout),
       applyPreviewFiles,
     };
-  };
 }
 
 /** S16: compare current host tree with the baseline tree. */
@@ -2394,10 +3203,25 @@ async function buildRetainedDiff(
     changedPathResult.status === 0
       ? parseNulDelimitedPaths(changedPathResult.stdout)
       : { paths: [], complete: false };
+  // F1: the retained result must be exactly as approvable as an active one.
+  // Emit the SAME bounded `applyPreview` plus the complete plain/ANSI
+  // artifacts through the existing completeness check, so the approval guard
+  // (truncated preview => complete artifact required) is satisfied, and the
+  // apply path caps, prompts and refuses identically.
+  const applyPreviewFiles = writeApplyPreviewFiles(
+    ctx.config.stateDir,
+    record.sessionID,
+    diff.stdout,
+  );
   return {
+    mode: "retained",
     stat: stat.stdout,
     diff: diff.stdout,
     compare: "",
+    applyPreview: buildApplyPreview(diff.stdout),
+    applyPreviewFiles,
+    resultRef: result,
+    baselineRef: baseline,
     changedPaths: parsedChangedPaths.paths,
     changedPathsComplete:
       changedPathResult.status === 0 && parsedChangedPaths.complete,
@@ -2442,7 +3266,12 @@ export async function rawChangesBetween(
 }
 
 export function buildKeepResultOp(ctx: OpContext): OpHandler {
-  return async (req) => {
+  return async (req) =>
+    withLifecycleClaim(ctx, req.sessionID, "release", () => keepResultOp(ctx, req));
+}
+
+/** The keep body; ALWAYS runs under the caller's lifecycle claim. */
+async function keepResultOp(ctx: OpContext, req: BrokerRequestEnvelope): Promise<unknown> {
     const payload = payloadOf(req) as { confirm?: unknown };
     if (payload.confirm !== "KEEP") {
       throw new ValidationError('keepResult requires confirm: "KEEP"');
@@ -2450,19 +3279,18 @@ export function buildKeepResultOp(ctx: OpContext): OpHandler {
     let record = recordOr404(ctx.store, req.sessionID);
     if (record.state === "SANDBOX_ACTIVE") {
       // §20 KEEP: prepare the result first, then retire the transient worker.
-      record = await withFinishGuard(ctx, req.sessionID, async () => {
-        const ref = await runPrepare(ctx, req.sessionID);
-        return ctx.store.transition(req.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", { resultRef: ref });
-      });
+      // The lifecycle claim is already held by this operation (no reentrancy).
+      const ref = await runPrepare(ctx, req.sessionID);
+      record = ctx.store.transition(req.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", { resultRef: ref });
     }
     if (record.state !== "RESULT_READY" && record.state !== "APPLIED") {
       throw new StateError(`cannot keep result from state ${record.state}`);
     }
     // Release any NAMED worker, not only an ACTIVE one: a PAUSED worker is
-    // still a live VM. Destruction derives from a CONFIRMED removal; on
-    // failure both workerName and workerState stay for the next sweep.
+    // still a live VM. D3: the release requires the export proof, and a dirty
+    // RESULT_READY worker is exported first; a failed proof keeps it.
     if (record.workerName) {
-      const outcome = await releaseWorker(ctx, record);
+      const outcome = await removeWorkerVerified(ctx, record, { exportFirst: true });
       if (outcome.released) {
         record = ctx.store.touch(req.sessionID, {
           workerName: undefined,
@@ -2481,11 +3309,15 @@ export function buildKeepResultOp(ctx: OpContext): OpHandler {
       resultRef: record.resultRef ?? resultRef(req.sessionID),
       retained: true,
     };
-  };
 }
 
 export function buildDiscardResultOp(ctx: OpContext): OpHandler {
-  return async (req) => {
+  return async (req) =>
+    withLifecycleClaim(ctx, req.sessionID, "release", () => discardResultOp(ctx, req));
+}
+
+/** The discard body; ALWAYS runs under the caller's lifecycle claim. */
+async function discardResultOp(ctx: OpContext, req: BrokerRequestEnvelope): Promise<unknown> {
     const payload = payloadOf(req) as { confirm?: unknown };
     if (payload.confirm !== "REJECT") {
       throw new ValidationError('discardResult requires confirm: "REJECT"');
@@ -2497,8 +3329,22 @@ export function buildDiscardResultOp(ctx: OpContext): OpHandler {
     if (record.state !== "RESULT_READY") {
       throw new StateError(`cannot discard result from state ${record.state}`);
     }
-    // Delete the result ref first and check the status: a failed deletion must
-    // fail closed, never be acknowledged as a discard that removed the ref.
+    // D3 / F3: no discard bypass. A discard is a removal path, so the export
+    // proof must hold BEFORE anything is deleted: the worker's HEAD equals the
+    // durable result tip and its tree is clean. A worker that cannot prove it
+    // is refused (never destroyed) and the result is kept for recovery.
+    const removal = await removeWorkerVerified(ctx, record);
+    if (!removal.released) {
+      throw removalRefused(req.sessionID, removal);
+    }
+    // The safe removal landed: record it BEFORE touching the durable result, so
+    // a failed ref deletion never leaves a record pointing at a gone worker.
+    if (record.workerName) {
+      ctx.store.touch(req.sessionID, {
+        workerName: undefined,
+        workerState: "DESTROYED",
+      });
+    }
     const ref = record.resultRef ?? resultRef(req.sessionID);
     if (ctx.git.runnerMode === "real") {
       const deleted = await ctx.git.spawn(["git", "update-ref", "-d", ref], {
@@ -2510,56 +3356,48 @@ export function buildDiscardResultOp(ctx: OpContext): OpHandler {
         );
       }
     }
-    // Route the worker removal through releaseWorker (stop-first + bounded
-    // retry + typed outcome). `DESTROYED` is recorded ONLY on a confirmed
-    // removal; a failed release keeps workerName + workerState so the sweep
-    // retries, while the discard still completes.
-    const outcome = await releaseWorker(ctx, record);
     const patch: Partial<SessionRecord> = { error: undefined };
-    if (outcome.released) {
-      patch.workerName = undefined;
-      patch.workerState = record.workerName ? "DESTROYED" : undefined;
-    } else {
-      patch.workerName = record.workerName;
-      patch.workerState = record.workerState;
-    }
+    patch.workerName = undefined;
+    patch.workerState = record.workerName ? "DESTROYED" : undefined;
     ctx.store.transition(req.sessionID, "RESULT_READY", "REJECTED", patch);
     // REJECTED is terminal: the transport artifacts are consumed.
     await gcSessionArtifacts(ctx, req.sessionID, "discardResult");
     return { state: "REJECTED" };
-  };
 }
 
 export function buildDestroyWorkerOp(ctx: OpContext): OpHandler {
   return async (req) => {
     payloadOf(req);
-    const record = recordOr404(ctx.store, req.sessionID);
-    // The runners run in this worker: never remove it under them.
-    if (isFinishing(ctx, req.sessionID)) throw new StateError("a result export is already in flight for this session; retry after it finishes");
-    if (!record.workerName) {
-      return { destroyed: true, worker: null };
+    // Explicit pre-check for the clearer refusal message; the claim acquisition
+    // below is what actually serializes it with a finish or a release.
+    if (isFinishing(ctx, req.sessionID)) {
+      throw new StateError("a result export is already in flight for this session; retry after it finishes");
     }
-    if (record.workerState === "DESTROYED" || record.workerState === "FAILED") {
-      // The VM is already gone, but a leaked pool allocation for this session
-      // must still be reconciled. releaseWorker's no-live-worker path frees the
-      // identity-keyed allocation (and drains the queue); without this an
-      // orphaned allocation would escape every release path.
-      await releaseWorker(ctx, record);
+    return withLifecycleClaim(ctx, req.sessionID, "release", async () => {
+      const record = recordOr404(ctx.store, req.sessionID);
+      if (!record.workerName) {
+        return { destroyed: true, worker: null };
+      }
+      if (record.workerState === "DESTROYED") {
+        // The VM is already gone, but a leaked pool allocation for this session
+        // must still be reconciled. releaseWorker's no-live-worker path frees the
+        // identity-keyed allocation (and drains the queue); without this an
+        // orphaned allocation would escape every release path.
+        await releaseWorker(ctx, record);
+        return { destroyed: true, worker: record.workerName };
+      }
+      // D3: an explicit destroy is still a removal and takes the same proof.
+      // A worker holding unexported edits is refused, not silently destroyed.
+      const outcome = await removeWorkerVerified(ctx, record);
+      if (!outcome.released) {
+        throw removalRefused(req.sessionID, outcome);
+      }
+      ctx.store.touch(req.sessionID, {
+        workerName: undefined,
+        workerState: "DESTROYED",
+      });
       return { destroyed: true, worker: record.workerName };
-    }
-    // Explicit client operation: surface a failed removal instead of pretending
-    // the worker is gone. The record keeps workerName until removal confirms.
-    const outcome = await releaseWorker(ctx, record);
-    if (!outcome.released) {
-      throw new MsbError(
-        `worker removal failed for ${record.workerName}: ${outcome.error ?? "unknown error"}`,
-      );
-    }
-    ctx.store.touch(req.sessionID, {
-      workerName: undefined,
-      workerState: "DESTROYED",
     });
-    return { destroyed: true, worker: record.workerName };
   };
 }
 
@@ -3020,12 +3858,7 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
             "cannot commit: HEAD does not carry the pending result; stop the broker and follow the pendingCommit recovery procedure in docs/TODO.md",
           );
         }
-        ctx.store.transition(resultSessionID, resultRecord.state, "RETAINED", {
-          installedCommit: resultCommit,
-          committedCommit: head,
-          pendingCommit: undefined,
-        });
-        await releaseRetainedWorker(ctx, resultSessionID);
+        await finalizeLandedCommit(ctx, resultSessionID, resultCommit, head);
         return {
           committed: false,
           alreadyCommitted: true,
@@ -3063,12 +3896,7 @@ export function buildGitCommitOp(ctx: OpContext): OpHandler {
     if (committedHead.status !== 0 || !/^[0-9a-f]{40}$/.test(committedCommit)) {
       throw new StateError("git commit succeeded but its committed HEAD could not be recorded");
     }
-    ctx.store.transition(resultSessionID, resultRecord.state, "RETAINED", {
-      installedCommit: resultCommit,
-      committedCommit,
-      pendingCommit: undefined,
-    });
-    await releaseRetainedWorker(ctx, resultSessionID);
+    await finalizeLandedCommit(ctx, resultSessionID, resultCommit, committedCommit);
     return {
       committed: true,
       alreadyCommitted: false,
@@ -3802,7 +4630,7 @@ function removePoolAllocation(ctx: OpContext, record: SessionRecord): void {
 /** Outcome of a worker release attempt (Tier 2 item 15). */
 export interface WorkerReleaseOutcome {
   released: boolean;
-  reason: "removed" | "no-worker" | "remove-failed";
+  reason: "removed" | "no-worker" | "remove-failed" | "proof-failed";
   error?: string;
 }
 
@@ -3823,10 +4651,9 @@ export async function releaseWorker(
   ctx: OpContext,
   record: SessionRecord,
 ): Promise<WorkerReleaseOutcome> {
-  const hasLiveWorker =
-    !!record.workerName &&
-    record.workerState !== "DESTROYED" &&
-    record.workerState !== "FAILED";
+  // A named FAILED worker is still OWNED (its cleanup was never confirmed).
+  // Only DESTROYED — or no name at all — proves there is no VM to remove.
+  const hasLiveWorker = !!record.workerName && record.workerState !== "DESTROYED";
   if (!hasLiveWorker) {
     // No VM to remove, but a leaked allocation for this session must still be
     // reconciled (identity-keyed, idempotent), and a freed slot is drained.
@@ -3874,6 +4701,370 @@ export async function releaseWorker(
   return { released: true, reason: "removed" };
 }
 
+// ---------------------------------------------------------------------------
+// Verified release (T10 / D3): no worker removal without proven durable export
+// ---------------------------------------------------------------------------
+
+/** True = clean, false = dirty, undefined = the status could not be read. */
+export type WorktreeStatus = boolean | undefined;
+
+/**
+ * The worker's /work cleanliness. The excludes are the broker's transfer
+ * artifacts; they are not the session's edits. Anything but `true` is treated
+ * as "not provably clean" by every removal decision.
+ */
+export async function workerWorktreeStatus(
+  ctx: Pick<OpContext, "adapter">,
+  workerName: string,
+): Promise<WorktreeStatus> {
+  try {
+    const status = await ctx.adapter.exec(
+      workerName,
+      ["git", "status", "--porcelain", "--", ".", ":(exclude).broker-tmp", ":(exclude)*.bundle"],
+      {
+        cwd: "/work",
+        timeoutMs: 30_000,
+        env: {
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "safe.directory",
+          GIT_CONFIG_VALUE_0: "/work",
+        },
+      },
+    );
+    if (status.status !== 0) return undefined;
+    return status.stdout.trim().length === 0;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The worker's own HEAD commit, or undefined when it cannot be resolved. */
+export async function workerHeadCommit(
+  ctx: Pick<OpContext, "adapter">,
+  workerName: string,
+): Promise<string | undefined> {
+  try {
+    const res = await ctx.adapter.exec(workerName, ["git", "rev-parse", "--verify", "HEAD"], {
+      cwd: "/work",
+      timeoutMs: 30_000,
+      env: {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "safe.directory",
+        GIT_CONFIG_VALUE_0: "/work",
+      },
+    });
+    const sha = res.status === 0 ? res.stdout.trim() : "";
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve the HOST-side commit the session's result ref points at. This is the
+ * only accepted definition of "the export is durable":
+ *   - the imported host ref (real Git mode), resolved with `rev-parse`; or
+ *   - the host-side result bundle's own ref (planned mode, where no import
+ *     happens), resolved with `ls-remote` against the durable bundle file.
+ * A record field, a baseline ref or a matching ref NAME is never proof.
+ * Never throws: an unresolvable identity is simply not proof.
+ */
+export async function resolveExportedCommit(
+  ctx: Pick<OpContext, "config" | "git">,
+  record: Pick<SessionRecord, "sessionID" | "projectID" | "resultRef">,
+): Promise<string | undefined> {
+  const refName = record.resultRef;
+  if (!refName) return undefined;
+  const git = ctx.git;
+  if (!git || typeof git.spawn !== "function") return undefined;
+  const projects = ctx.config?.projects ?? [];
+  const project = record.projectID ? findProject(projects, record.projectID) : undefined;
+  if (!project) return undefined;
+  const hex = (value: string | undefined): string | undefined => {
+    const sha = (value ?? "").trim().split(/\s+/)[0] ?? "";
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+  };
+  try {
+    const ref = await git.spawn(
+      ["git", "rev-parse", "--verify", "--quiet", `${refName}^{commit}`],
+      { cwd: project.path, timeoutMs: 30_000 },
+    );
+    if (ref.status === 0) {
+      const sha = hex(ref.stdout);
+      if (sha) return sha;
+    }
+  } catch {
+    /* fall through to the durable bundle */
+  }
+  try {
+    const stateDir = ctx.config?.stateDir;
+    if (!stateDir) return undefined;
+    const bundle = bundlePathFor(stateDir, record.sessionID);
+    if (!existsSync(bundle)) return undefined;
+    const listed = await git.spawn(["git", "ls-remote", bundle, refName], {
+      cwd: project.path,
+      timeoutMs: 30_000,
+    });
+    return listed.status === 0 ? hex(listed.stdout) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Why a removal proof did or did not hold. Typed so callers never guess. */
+export type RemovalProofReason =
+  | "ok"
+  | "no-live-worker"
+  | "identity-changed"
+  | "dirty"
+  | "status-unreadable"
+  | "no-worker-head"
+  | "no-exported-commit"
+  | "tip-mismatch"
+  | "failed-bootstrap";
+
+export interface WorkerExportProof {
+  ok: boolean;
+  reason: RemovalProofReason;
+  workerName?: string;
+  clean?: WorktreeStatus;
+  workerHead?: string;
+  exportedCommit?: string;
+}
+
+/**
+ * The single removal-safety proof (D3). Re-reads the record (fresh identity),
+ * reads the EFFECTIVE clean status and the worker HEAD, resolves the host-side
+ * exported commit, and requires valid IDs, a clean tree and `HEAD === exported`.
+ * Nothing here removes anything; a false proof only ever KEEPS the worker.
+ */
+export async function verifyWorkerExport(
+  ctx: OpContext,
+  expected: Pick<SessionRecord, "sessionID" | "workerName">,
+): Promise<WorkerExportProof> {
+  const fresh = ctx.store.get(expected.sessionID);
+  if (!fresh) return { ok: false, reason: "identity-changed" };
+  const workerName = fresh.workerName;
+  if (!workerName || fresh.workerState === "DESTROYED" || fresh.workerState === "FAILED") {
+    return { ok: false, reason: "no-live-worker" };
+  }
+  if (expected.workerName !== undefined && expected.workerName !== workerName) {
+    return { ok: false, reason: "identity-changed", workerName };
+  }
+  const clean = await workerWorktreeStatus(ctx, workerName);
+  const workerHead = await workerHeadCommit(ctx, workerName);
+  const exportedCommit = await resolveExportedCommit(ctx, fresh);
+  const base = { workerName, clean, workerHead, exportedCommit };
+  if (clean === undefined) return { ok: false, reason: "status-unreadable", ...base };
+  if (clean === false) return { ok: false, reason: "dirty", ...base };
+  if (!workerHead) return { ok: false, reason: "no-worker-head", ...base };
+  if (!exportedCommit) return { ok: false, reason: "no-exported-commit", ...base };
+  if (workerHead !== exportedCommit) return { ok: false, reason: "tip-mismatch", ...base };
+  return { ok: true, reason: "ok", ...base };
+}
+
+/** Outcome of a verified removal: a failed proof keeps ownership and accounting. */
+export interface VerifiedRemovalOutcome extends WorkerReleaseOutcome {
+  proof: WorkerExportProof;
+  exported?: boolean;
+}
+
+/**
+ * Remove a worker only after the export proof holds (D3), under the caller's
+ * lifecycle claim. With `exportFirst`, a worker that is not provably exported
+ * from an ACTIVE/RESULT_READY session is exported once and re-proven; if the
+ * export or the re-proof fails the worker is KEPT (edits and allocation stay).
+ * Never throws for a failed proof or a failed removal: both are typed outcomes.
+ */
+export async function removeWorkerVerified(
+  ctx: OpContext,
+  record: SessionRecord,
+  opts: { exportFirst?: boolean; prepare?: (ctx: OpContext, sessionID: string) => Promise<string> } = {},
+): Promise<VerifiedRemovalOutcome> {
+  const named = !!record.workerName && record.workerState !== "DESTROYED";
+  if (!named) {
+    const outcome = await releaseWorker(ctx, record);
+    return { ...outcome, proof: { ok: true, reason: "no-live-worker" } };
+  }
+  if (record.workerState === "FAILED") {
+    // Narrow failed-bootstrap cleanup: the bootstrap never completed, so no
+    // export proof can exist. stop+remove is the whole cleanup here; an
+    // ordinary live removal still requires the proof below.
+    const outcome = await releaseWorker(ctx, record);
+    return {
+      ...outcome,
+      proof: {
+        ok: outcome.released,
+        reason: "failed-bootstrap",
+        workerName: record.workerName,
+      },
+      exported: false,
+    };
+  }
+  let proof = await verifyWorkerExport(ctx, record);
+  let exported = false;
+  if (!proof.ok && opts.exportFirst === true) {
+    const exportable =
+      (record.state === "SANDBOX_ACTIVE" || record.state === "RESULT_READY") &&
+      proof.reason !== "no-live-worker" &&
+      proof.reason !== "identity-changed" &&
+      // An unreadable status is never exported blind: the worker may be gone,
+      // and a blind export could publish a result nobody can prove.
+      proof.reason !== "status-unreadable";
+    if (exportable) {
+      try {
+        const ref = await (opts.prepare ?? runPrepare)(ctx, record.sessionID);
+        if (record.state === "SANDBOX_ACTIVE") {
+          ctx.store.transition(record.sessionID, "SANDBOX_ACTIVE", "RESULT_READY", {
+            resultRef: ref,
+          });
+        } else {
+          ctx.store.touch(record.sessionID, { resultRef: ref });
+        }
+        exported = true;
+      } catch (err) {
+        // The export failed: keep the worker so the edits survive.
+        return {
+          released: false,
+          reason: "proof-failed",
+          error: `export before release failed: ${err instanceof Error ? err.message : String(err)}; worker retained`,
+          proof,
+          exported,
+        };
+      }
+      proof = await verifyWorkerExport(ctx, record);
+    }
+  }
+  if (!proof.ok) {
+    return {
+      released: false,
+      reason: "proof-failed",
+      error: `removal not proven safe (${proof.reason}); worker retained`,
+      proof,
+      exported,
+    };
+  }
+  const outcome = await releaseWorker(ctx, record);
+  return { ...outcome, proof, exported };
+}
+
+/** A typed refusal-to-remove error for explicit client operations. */
+function removalRefused(sessionID: string, outcome: VerifiedRemovalOutcome): MsbError {
+  return new MsbError(
+    `worker removal refused for session ${sessionID}: ${outcome.error ?? outcome.proof.reason}. ` +
+      "No worker is removed without a verified durable export of its HEAD and tree; " +
+      "finish the session, or recover it as the owner.",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Pool reservations (T10 / D5): synchronous capacity accounting
+// ---------------------------------------------------------------------------
+
+/**
+ * Reserve this session's slot synchronously. The admission check and the push
+ * have no await between them, so two concurrent direct creations can never both
+ * pass the check and oversubscribe the pool. A reservation counts exactly like
+ * a worker for admission and occupancy and is converted in place (or removed
+ * exactly once) when the creation settles.
+ */
+export function tryReserveAllocation(
+  ctx: OpContext,
+  sessionID: string,
+): { reserved: true } | { reserved: false; admission: Admission } {
+  const admission = admissionFor(ctx);
+  if (!admission.allowed) return { reserved: false, admission };
+  const existing = ctx.pool.allocations.find((a) => a.sessionID === sessionID);
+  if (existing) {
+    existing.reserved = true;
+    return { reserved: true };
+  }
+  ctx.pool.allocations.push({
+    cpu: ctx.budget.perWorkerCpu,
+    memBytes: ctx.budget.perWorkerMemBytes,
+    sessionID,
+    reserved: true,
+  });
+  return { reserved: true };
+}
+
+/** Drop a plain reservation for this session exactly once (idempotent). */
+export function releaseReservation(ctx: OpContext, sessionID: string): void {
+  // ONLY a plain reservation is dropped here. A held allocation (reserved
+  // unset) belongs to a worker whose removal was never confirmed; releasing it
+  // from a caller's `catch`/`finally` would undercount live capacity.
+  const idx = ctx.pool.allocations.findIndex(
+    (a) => a.sessionID === sessionID && a.reserved === true,
+  );
+  if (idx !== -1) ctx.pool.allocations.splice(idx, 1);
+}
+
+/** Convert a reservation into the real allocation, or add one (idempotent). */
+function ensureAllocationForSession(ctx: OpContext, sessionID: string): boolean {
+  const existing = ctx.pool.allocations.find((a) => a.sessionID === sessionID);
+  if (existing) {
+    const ownsAllocation = existing.reserved === true;
+    existing.reserved = false;
+    return ownsAllocation;
+  }
+  ctx.pool.allocations.push({
+    cpu: ctx.budget.perWorkerCpu,
+    memBytes: ctx.budget.perWorkerMemBytes,
+    sessionID,
+  });
+  return true;
+}
+
+/** Drop any reservation or held allocation owned by this confirmed cleanup. */
+function releaseAllocationForSession(ctx: OpContext, sessionID: string): void {
+  const idx = ctx.pool.allocations.findIndex((a) => a.sessionID === sessionID);
+  if (idx !== -1) ctx.pool.allocations.splice(idx, 1);
+}
+
+/**
+ * Release a result's worker once the result is host-side: the result ref (and,
+ * after a commit, HEAD) is the durable copy, so the transient VM has nothing
+ * left to give. Never throws: a failed release must not fail an export or a
+ * commit that already landed. On failure `releaseWorker` logs
+ * `release_worker_failed` and the record keeps `workerName`, so the next sweep
+ * retries instead of orphaning the VM. Destruction derives only from a
+ * CONFIRMED removal.
+ */
+async function releaseResultWorker(
+  ctx: OpContext,
+  sessionID: string,
+  operation: string,
+  action: string,
+): Promise<void> {
+  const record = ctx.store.get(sessionID);
+  if (!record?.workerName) return;
+  if (record.workerState === "DESTROYED" || record.workerState === "FAILED") return;
+  try {
+    // D3: the export proof is required here too (the result was just exported,
+    // so HEAD equals the durable tip and the tree is clean).
+    const outcome = await removeWorkerVerified(ctx, record);
+    if (!outcome.released) return;
+    ctx.store.touch(sessionID, {
+      workerName: undefined,
+      workerState: "DESTROYED",
+    });
+  } catch (err) {
+    // Not fatal, but not silent either: the state write itself can fail after
+    // a successful removal, and the idle sweep recovers that orphaned worker.
+    try {
+      ctx.logger?.log?.({
+        sessionID,
+        operation,
+        action,
+        result: "error",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } catch {
+      // Logging must not fail work that has already landed.
+    }
+  }
+}
+
 /**
  * Release the worker of a result that was just committed and retained: the
  * result is durable in its ref and in HEAD, so the worker has nothing left to
@@ -3886,33 +5077,72 @@ async function releaseRetainedWorker(
   ctx: OpContext,
   sessionID: string,
 ): Promise<void> {
-  const record = ctx.store.get(sessionID);
-  if (!record?.workerName) return;
-  if (record.workerState === "DESTROYED" || record.workerState === "FAILED") return;
-  try {
-    // Destruction derives from a CONFIRMED removal. On failure releaseWorker
-    // already logged `release_worker_failed`; the record keeps workerName so
-    // the idle sweep retries, and the landed commit still succeeds.
-    const outcome = await releaseWorker(ctx, record);
-    if (!outcome.released) return;
-    ctx.store.touch(sessionID, {
-      workerName: undefined,
-      workerState: "DESTROYED",
-    });
-  } catch (err) {
-    // Not fatal, but not silent either: the state write itself can fail after
-    // a successful removal, and the idle sweep recovers that orphaned worker.
-    try {
-      ctx.logger?.log?.({
-        sessionID,
-        operation: "gitCommit",
-        action: "release_retained_worker",
-        result: "error",
-        error: err instanceof Error ? err.message : String(err),
-      });
-    } catch {
-      // Logging must not fail a commit that has already landed.
+  await releaseResultWorker(ctx, sessionID, "gitCommit", "release_retained_worker");
+}
+
+/**
+ * Finalize a commit that has ALREADY landed on the host (T11 / C1).
+ *
+ * The markers are persisted from a FRESH record read — never from the snapshot
+ * taken before the host commit — and the durable result's worker is released
+ * under that TARGET session's lifecycle claim (never the caller's).
+ *
+ * Contention is NEVER a commit failure: the landed outcome is still reported,
+ * the markers are written synchronously without touching the concurrent
+ * lifecycle state, no probe/stop/remove/accounting cleanup runs, a distinct log
+ * line records the skip, and the worker stays owned for the next sweep.
+ */
+async function finalizeLandedCommit(
+  ctx: OpContext,
+  resultSessionID: string,
+  installedCommit: string,
+  committedCommit: string,
+): Promise<void> {
+  const markers: Partial<SessionRecord> = {
+    installedCommit,
+    committedCommit,
+    pendingCommit: undefined,
+  };
+  // RETAINED only when the CURRENT state allows it: a concurrent rehydration or
+  // apply may have moved the record (CREATING_SANDBOX -> RETAINED is illegal)
+  // and a landed commit must never force an illegal transition. The markers are
+  // written either way, so a landed commit is never forgotten.
+  const writeMarkers = (fresh: SessionRecord): void => {
+    if (LEGAL_TRANSITIONS[fresh.state]?.includes("RETAINED")) {
+      ctx.store.transition(resultSessionID, fresh.state, "RETAINED", markers);
+    } else {
+      ctx.store.touch(resultSessionID, markers);
     }
+  };
+
+  let claim: LifecycleClaim;
+  try {
+    claim = acquireLifecycleClaim(ctx, resultSessionID, "release");
+  } catch (err) {
+    if (!(err instanceof StateError) || !/already in flight/.test(err.message)) throw err;
+    // Ownership unavailable: preserve the concurrent lifecycle state exactly
+    // (a synchronous touch only, never a stale-state transition) and leave the
+    // worker for a sweep. The commit itself has landed and is reported as such.
+    const fresh = ctx.store.get(resultSessionID);
+    if (fresh) ctx.store.touch(resultSessionID, markers);
+    safeLogEntry(ctx, {
+      sessionID: resultSessionID,
+      operation: "gitCommit",
+      action: "release_retained_worker_skipped_busy",
+      result: "ok",
+      detail:
+        "worker retained for the next sweep; another lifecycle operation owns the session",
+    });
+    return;
+  }
+  try {
+    const fresh = ctx.store.get(resultSessionID);
+    if (fresh) writeMarkers(fresh);
+    // Re-read the worker identity INSIDE ownership: releaseRetainedWorker reads
+    // the record again and never trusts the pre-commit snapshot.
+    await releaseRetainedWorker(ctx, resultSessionID);
+  } finally {
+    releaseLifecycleClaim(ctx, resultSessionID, claim);
   }
 }
 

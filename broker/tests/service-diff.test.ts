@@ -82,7 +82,10 @@ function makeRetainedDiffContext(calls: string[]): OpContext {
     };
   };
   return {
-    config: defaultConfig({ projects: [{ id: "repo", path: "/repo" }] }),
+    config: defaultConfig({
+      stateDir: mkdtempSync(join(tmpdir(), "service-diff-retained-")),
+      projects: [{ id: "repo", path: "/repo" }],
+    }),
     store: { get: () => record },
     git: {
       spawn: async (argv: string[], opts?: { maxOutputBytes?: number }) => {

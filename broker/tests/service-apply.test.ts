@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { divergenceIndexPathFor } from "../src/artifacts.ts";
 import { defaultConfig } from "../src/config.ts";
-import { buildApplyResultOp, type OpContext } from "../src/service.ts";
+import { buildApplyResultOp, buildKeepResultOp, buildPrepareResultOp, type OpContext } from "../src/service.ts";
 import type { BrokerRequestEnvelope, SessionRecord, SessionState } from "../src/types.ts";
 
 function makeApplyContext(
@@ -263,6 +263,231 @@ describe("hostDivergence stale temp index", () => {
       expect(existsSync(stale)).toBe(false);
     } finally {
       rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T5: a successful export releases the worker while the result stays usable
+// ---------------------------------------------------------------------------
+
+function makePrepareReleaseContext(): {
+  ctx: OpContext;
+  record: () => SessionRecord;
+  stopped: string[];
+  removed: string[];
+  stateDir: string;
+  sessionID: string;
+} {
+  const stateDir = mkdtempSync(join(tmpdir(), "prepare-release-"));
+  const sessionID = "prepare-release";
+  let record: SessionRecord = {
+    sessionID,
+    projectID: "repo",
+    state: "SANDBOX_ACTIVE",
+    workerName: `worker-${sessionID}`,
+    workerState: "ACTIVE",
+    baselineRef: `refs/opencode-sandbox/baseline/${sessionID}`,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  const stopped: string[] = [];
+  const removed: string[] = [];
+  const ok = (stdout = "") => ({ status: 0, stdout, stderr: "", timedOut: false });
+  // One stable 40-hex identity is both the worker HEAD and the exported commit.
+  const PROOF = "a".repeat(40);
+
+  const ctx = {
+    config: defaultConfig({ stateDir, projects: [{ id: "repo", path: "/repo" }] }),
+    store: {
+      get: () => record,
+      list: () => [record],
+      touch: (_id: string, patch: Partial<SessionRecord> = {}) => {
+        record = { ...record, ...patch };
+        return record;
+      },
+      transition: (
+        _id: string,
+        from: SessionState,
+        to: SessionState,
+        patch: Partial<SessionRecord> = {},
+      ) => {
+        if (record.state !== from) {
+          throw new Error(`unexpected state ${record.state}, expected ${from}`);
+        }
+        record = { ...record, ...patch, state: to };
+        return record;
+      },
+    },
+    adapter: {
+      // The removal proof is modelled: the worker HEAD and the host-side
+      // exported commit are the same stable identity for a just-exported result.
+      exec: async (_worker: string, argv: string[] = []) =>
+        argv[0] === "git" && argv[1] === "rev-parse" ? ok(`${PROOF}\n`) : ok(),
+      copyOut: async () => undefined,
+      stop: async (name: string) => {
+        stopped.push(name);
+      },
+      remove: async (name: string) => {
+        removed.push(name);
+      },
+    },
+    budget: {
+      perWorkerCpu: 2,
+      perWorkerMemBytes: 2 * 1024 * 1024 * 1024,
+      maxAggregateCpu: 8,
+      maxAggregateMemBytes: 8 * 1024 * 1024 * 1024,
+      maxWorkers: 4,
+      hostReservedCpu: 4,
+      hostReservedMemBytes: 8 * 1024 * 1024 * 1024,
+    },
+    resources: { cpuCount: 16, totalMemBytes: 32 * 1024 * 1024 * 1024 },
+    pool: {
+      allocations: [{ cpu: 2, memBytes: 2 * 1024 * 1024 * 1024, sessionID }],
+    },
+    hostRead: { has: () => false },
+    logger: {},
+    git: {
+      runnerMode: "planned",
+      // A result ref resolves to the exported commit the worker HEAD reports.
+      spawn: async (argv: string[]) =>
+        argv.includes("rev-parse") ? ok(`${PROOF}\n`) : ok(),
+    },
+  } as unknown as OpContext;
+
+  return { ctx, record: () => record, stopped, removed, stateDir, sessionID };
+}
+
+describe("prepareResult releases the host-side result's worker", () => {
+  test("a successful export releases the worker, keeps RESULT_READY, and retain still works", async () => {
+    const h = makePrepareReleaseContext();
+    try {
+      const prepared = (await buildPrepareResultOp(h.ctx)({
+        version: 1,
+        id: "prepare-release",
+        operation: "prepareResult",
+        sessionID: h.sessionID,
+        payload: {},
+      } as BrokerRequestEnvelope)) as { resultRef: string; state: string };
+
+      expect(prepared.state).toBe("RESULT_READY");
+      expect(h.stopped).toEqual([`worker-${h.sessionID}`]);
+      expect(h.removed).toEqual([`worker-${h.sessionID}`]);
+      expect(h.ctx.pool.allocations).toEqual([]);
+
+      const released = h.record();
+      expect(released.state).toBe("RESULT_READY");
+      expect(released.resultRef).toBe(prepared.resultRef);
+      expect(released.workerName).toBeUndefined();
+      expect(released.workerState).toBe("DESTROYED");
+
+      // Positive control: the retained result is still usable after release.
+      // `keepResult` is absent from ALLOWED_PAYLOAD_KEYS (pre-existing gap), so
+      // label the confirm-gated envelope `applyResult` to admit the payload and
+      // exercise the keep branch, as worker-release-outcome.test.ts does.
+      const kept = (await buildKeepResultOp(h.ctx)({
+        version: 1,
+        id: "keep-after-prepare",
+        operation: "applyResult",
+        sessionID: h.sessionID,
+        payload: { confirm: "KEEP" },
+      } as BrokerRequestEnvelope)) as { retained?: boolean; resultRef?: string };
+
+      expect(kept.retained).toBe(true);
+      expect(kept.resultRef).toBe(prepared.resultRef);
+      expect(h.record().state).toBe("RETAINED");
+    } finally {
+      rmSync(h.stateDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a re-finish of RESULT_READY without a worker reuses the durable result", () => {
+  const request = (sessionID: string): BrokerRequestEnvelope => ({
+    version: 1,
+    id: `prepare-again-${sessionID}`,
+    operation: "prepareResult",
+    sessionID,
+    payload: {},
+  } as BrokerRequestEnvelope);
+
+  test("returns the existing result ref with no adapter call (imported: false)", async () => {
+    const h = makePrepareReleaseContext();
+    try {
+      const first = (await buildPrepareResultOp(h.ctx)(request(h.sessionID))) as {
+        resultRef: string;
+        state: string;
+        imported: boolean;
+      };
+      // Positive control for the state this test depends on: the export landed
+      // and its worker was released, so the record has no live worker.
+      expect(first.imported).toBe(true);
+      expect(h.record().state).toBe("RESULT_READY");
+      expect(h.record().workerName).toBeUndefined();
+
+      let execCalls = 0;
+      h.ctx.adapter.exec = async () => {
+        execCalls++;
+        return { status: 0, stdout: "", stderr: "", timedOut: false };
+      };
+      const again = (await buildPrepareResultOp(h.ctx)(request(h.sessionID))) as {
+        resultRef: string;
+        state: string;
+        imported: boolean;
+      };
+
+      expect(again).toEqual({
+        resultRef: first.resultRef,
+        state: "RESULT_READY",
+        imported: false,
+      });
+      // The absence assertion above is only meaningful with this control: a
+      // re-export would have issued adapter calls.
+      expect(execCalls).toBe(0);
+      expect(h.stopped).toEqual([`worker-${h.sessionID}`]);
+    } finally {
+      rmSync(h.stateDir, { recursive: true, force: true });
+    }
+  });
+
+  test("positive control: a re-finish with a live worker still re-exports", async () => {
+    const h = makePrepareReleaseContext();
+    try {
+      await buildPrepareResultOp(h.ctx)(request(h.sessionID));
+      // Model the ensureWorker that re-creates a worker on demand.
+      h.ctx.store.touch(h.sessionID, {
+        workerName: `worker-${h.sessionID}`,
+        workerState: "ACTIVE",
+      });
+
+      let execCalls = 0;
+      const PROOF = "a".repeat(40);
+      h.ctx.adapter.exec = async (_worker: string, argv: string[] = []) => {
+        execCalls++;
+        // Keep the removal proof truthful: HEAD still equals the exported tip.
+        return argv[0] === "git" && argv[1] === "rev-parse"
+          ? { status: 0, stdout: `${PROOF}\n`, stderr: "", timedOut: false }
+          : { status: 0, stdout: "", stderr: "", timedOut: false };
+      };
+      const again = (await buildPrepareResultOp(h.ctx)(request(h.sessionID))) as {
+        resultRef: string;
+        state: string;
+        imported: boolean;
+      };
+
+      expect(again).toEqual({
+        resultRef: "refs/opencode-sandbox/result/prepare-release",
+        state: "RESULT_READY",
+        imported: true,
+      });
+      expect(execCalls).toBeGreaterThan(0);
+      // The re-export released the worker it just used.
+      expect(h.stopped).toEqual([
+        `worker-${h.sessionID}`,
+        `worker-${h.sessionID}`,
+      ]);
+    } finally {
+      rmSync(h.stateDir, { recursive: true, force: true });
     }
   });
 });

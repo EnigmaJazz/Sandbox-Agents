@@ -56,12 +56,21 @@ function setup() {
     logger,
   );
   const internals = server as unknown as ServerInternals;
-  // The disconnect path must not touch a real msb binary in this test.
-  // The worker reports a clean tree, so the reap releases without an export.
+  // The disconnect path must not touch a real msb binary in this test. The
+  // worker reports a clean tree AND a durable exported identity (the removal
+  // proof is modelled, not bypassed), so the reap releases without an export.
+  const PROOF = "d".repeat(40);
+  const proofOk = (stdout = "") => ({ status: 0, stdout, stderr: "", timedOut: false });
   internals.ctx.adapter = {
     stop: async () => undefined,
     remove: async () => undefined,
-    exec: async () => ({ status: 0, stdout: "", stderr: "", timedOut: false }),
+    exec: async (_name: string, argv: string[]) =>
+      argv[0] === "git" && argv[1] === "rev-parse" ? proofOk(`${PROOF}\n`) : proofOk(),
+  };
+  (internals.ctx as unknown as { git: unknown }).git = {
+    runnerMode: "real",
+    spawn: async (argv: string[]) =>
+      argv.includes("rev-parse") ? proofOk(`${PROOF}\n`) : proofOk(),
   };
   return { internals, logged, stateDir };
 }
@@ -83,8 +92,12 @@ describe("BrokerServer disconnect reaper log seam", () => {
     const { internals, logged } = setup();
     internals.ctx.store.touch("disconnected", {
       state: "SANDBOX_ACTIVE",
+      projectID: "repo",
       workerName: "worker-disconnected",
       workerState: "ACTIVE",
+      // A resumed session: the current tree is already exported, so a clean
+      // worker is provably safe to give back.
+      resultRef: "refs/opencode-sandbox/result/disconnected",
       resources: { cpu: 2, memBytes: 2 * GiB },
       updatedAt: OLD_UPDATED_AT,
     });

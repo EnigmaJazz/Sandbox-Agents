@@ -446,19 +446,60 @@ describe("runPrepare bundle retention", () => {
     expect(show.stdout).toBe("changed\n");
   });
 
-  test("second prepare force-updates an existing non-fast-forward result ref", async () => {
+  test("a fast-forward successor result is published only after the ancestry check", async () => {
     const h = makePrepareHarness("real");
     const ref = `refs/opencode-sandbox/result/${h.sessionID}`;
     await runPrepare(h.ctx, h.sessionID);
+    const firstTip = spawnSync("git", ["rev-parse", "--verify", `${ref}^{commit}`], {
+      cwd: h.hostDir,
+      encoding: "utf8",
+    }).stdout.trim();
 
-    git(h.workerDir, ["reset", "--hard", "HEAD~1"]);
+    // A CONTINUATION: the new result is a descendant of the retained one.
     writeFileSync(join(h.workerDir, "a.txt"), "second\n");
     git(h.workerDir, ["add", "a.txt"]);
     git(h.workerDir, ["commit", "-q", "-m", "second result"]);
     const second = await runPrepare(h.ctx, h.sessionID);
 
     expect(second).toBe(ref);
-    expect(h.calls.some((c) => c === `git fetch --no-tags ${h.hostBundle} +${ref}:${ref}`)).toBe(true);
+    const secondTip = spawnSync("git", ["rev-parse", "--verify", `${ref}^{commit}`], {
+      cwd: h.hostDir,
+      encoding: "utf8",
+    }).stdout.trim();
+    expect(secondTip).not.toBe(firstTip);
+    const ancestor = spawnSync("git", ["merge-base", "--is-ancestor", firstTip, secondTip], {
+      cwd: h.hostDir,
+      encoding: "utf8",
+    });
+    expect(ancestor.status).toBe(0);
+    // Published with an expected-old-tip update, never a force fetch.
+    expect(h.calls.some((c) => c === `git fetch --no-tags ${h.hostBundle} +${ref}:${ref}`)).toBe(false);
+    expect(h.calls.some((c) => c.startsWith(`git update-ref ${ref}`))).toBe(true);
+  });
+
+  test("a second prepare refuses to overwrite an unrelated retained result ref", async () => {
+    const h = makePrepareHarness("real");
+    const ref = `refs/opencode-sandbox/result/${h.sessionID}`;
+    await runPrepare(h.ctx, h.sessionID);
+    const firstTip = spawnSync("git", ["rev-parse", "--verify", `${ref}^{commit}`], {
+      cwd: h.hostDir,
+      encoding: "utf8",
+    }).stdout.trim();
+
+    // A DIFFERENT history: the worker rewound and committed elsewhere, so the
+    // new tip is not a descendant of the retained one.
+    git(h.workerDir, ["reset", "--hard", "HEAD~1"]);
+    writeFileSync(join(h.workerDir, "a.txt"), "second\n");
+    git(h.workerDir, ["add", "a.txt"]);
+    git(h.workerDir, ["commit", "-q", "-m", "unrelated result"]);
+
+    await expect(runPrepare(h.ctx, h.sessionID)).rejects.toThrow(/unrelated|not an ancestor/);
+    const afterTip = spawnSync("git", ["rev-parse", "--verify", `${ref}^{commit}`], {
+      cwd: h.hostDir,
+      encoding: "utf8",
+    }).stdout.trim();
+    expect(afterTip).toBe(firstTip); // the retained history is intact
+    expect(h.calls.some((c) => c === `git fetch --no-tags ${h.hostBundle} +${ref}:${ref}`)).toBe(false);
   });
 
   test("bundle creation failure is surfaced before any result ref import", async () => {

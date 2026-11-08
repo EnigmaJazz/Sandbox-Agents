@@ -95,6 +95,32 @@ function makeHarness(opts: {
   exec?: OpContext["adapter"]["exec"];
   withQueue?: boolean;
 }): Harness {
+  // The removal proof is MODELLED, not bypassed: every identity probe (worker
+  // HEAD and host-side exported commit) answers the same stable 40-hex value,
+  // so these tests exercise removal-FAILURE paths, not the proof itself.
+  const PROOF = "c".repeat(40);
+  const proofOk = (stdout: string) => ({ status: 0, stdout, stderr: "", timedOut: false });
+  const isIdentityProbe = (argv: string[]) =>
+    argv.includes("rev-parse") &&
+    (argv[argv.length - 1] ?? "").includes("opencode-sandbox/");
+  const proofAnswers = (
+    base: OpContext["adapter"]["exec"] | undefined,
+  ): OpContext["adapter"]["exec"] =>
+    (async (worker: string, argv: string[], o?: Record<string, unknown>) => {
+      if (argv[0] === "git" && argv[1] === "rev-parse" && argv.includes("HEAD")) {
+        return proofOk(`${PROOF}\n`);
+      }
+      if (base) return base(worker, argv, o as never);
+      return { status: 0, stdout: "", stderr: "", timedOut: false };
+    }) as OpContext["adapter"]["exec"];
+  const proofSpawn = (
+    base: OpContext["git"]["spawn"] | undefined,
+  ): OpContext["git"]["spawn"] =>
+    (async (argv, o) => {
+      if (isIdentityProbe(argv)) return proofOk(`${PROOF}\n`);
+      if (base) return base(argv, o);
+      return { status: 0, stdout: "", stderr: "", timedOut: false };
+    }) as OpContext["git"]["spawn"];
   const records: Record<string, SessionRecord> = {};
   for (const r of opts.initial) records[r.sessionID] = r;
   const stopped: string[] = [];
@@ -145,9 +171,7 @@ function makeHarness(opts: {
     removeConfigDir: async () => {
       if (opts.removeConfigDirThrows) throw new Error("config dir removal failed");
     },
-    exec:
-      opts.exec ??
-      (async () => ({ status: 0, stdout: "", stderr: "", timedOut: false })),
+    exec: proofAnswers(opts.exec),
   };
 
   // A minimal queue whose only observable behavior is whether the release path
@@ -193,9 +217,7 @@ function makeHarness(opts: {
     },
     git: {
       runnerMode: opts.runnerMode ?? "planned",
-      spawn:
-        opts.spawn ??
-        (async () => ({ status: 0, stdout: "", stderr: "", timedOut: false })),
+      spawn: proofSpawn(opts.spawn),
     },
   } as unknown as OpContext;
 
@@ -348,16 +370,21 @@ describe("releaseWorker typed outcome", () => {
 });
 
 describe("failed release retains ownership on every path", () => {
-  test("discard from RESULT_READY completes but keeps the worker", async () => {
+  test("discard refuses to delete the durable result when the worker cannot be removed", async () => {
     const h = makeHarness({ initial: [workerRecord("d1")], removeThrows: true });
 
-    const result = await buildDiscardResultOp(h.ctx)(
-      request("discardResult", "d1", { confirm: "REJECT" }),
-    );
+    // D3: discard is a removal path with no bypass. The durable result is
+    // deleted ONLY after a safe, verified removal, so a failed removal aborts
+    // the discard and keeps the state, the ref and the allocation truthful.
+    await expect(
+      buildDiscardResultOp(h.ctx)(
+        request("discardResult", "d1", { confirm: "REJECT" }),
+      ),
+    ).rejects.toThrow(MsbError);
 
-    expect(result).toEqual({ state: "REJECTED" });
     const rec = h.records["d1"]!;
-    expect(rec.state).toBe("REJECTED");
+    expect(rec.state).toBe("RESULT_READY");
+    expect(rec.resultRef).toBe("refs/opencode-sandbox/result/d1");
     expect(rec.workerName).toBe("worker-d1");
     expect(rec.workerState).toBe("ACTIVE");
     expect(h.ctx.pool.allocations).toEqual([alloc("d1")]);
@@ -403,8 +430,12 @@ describe("failed release retains ownership on every path", () => {
 
     expect(h.records["u1"]!.state).toBe("RESULT_READY");
     expect(h.records["u1"]!.resultRef).toBe("refs/opencode-sandbox/result/u1");
-    expect(h.removed).toEqual([]);
-    expect(h.ctx.pool.allocations).toEqual([alloc("u1")]);
+    // D3: the safe removal ran FIRST; the failed ref deletion aborts the
+    // discard and the record truthfully no longer names a live worker.
+    expect(h.removed).toEqual(["worker-u1"]);
+    expect(h.records["u1"]!.workerName).toBeUndefined();
+    expect(h.records["u1"]!.workerState).toBe("DESTROYED");
+    expect(h.ctx.pool.allocations).toEqual([]);
   });
 
   test("keepResult retains the worker when remove fails", async () => {
@@ -673,5 +704,166 @@ describe("failed release retains ownership on every path", () => {
     expect(h.ctx.pool.allocations).toEqual([alloc("c1")]);
     expect(entries.map((entry) => entry.action)).toEqual(["error"]);
     expect(h.headCalls()).toBe(0);
+  });
+});
+
+/**
+ * T11 / C3: a named worker whose bootstrap cleanup was never CONFIRMED is still
+ * OWNED. No consumer may fabricate a no-worker success, clear identity or drop
+ * capacity before a CONFIRMED adapter removal; the sweeps retry it under the
+ * lifecycle claim across APPLIED/RETAINED as well as RESULT_READY.
+ */
+describe("failed cleanup keeps identity and accounting (T11/C3)", () => {
+  test("a named FAILED worker is still removed; a failed cleanup keeps name, FAILED and the slot", async () => {
+    const failed = makeHarness({
+      initial: [workerRecord("fc1", { workerState: "FAILED" })],
+      removeThrows: true,
+    });
+    const outcome = await releaseWorker(failed.ctx, failed.records["fc1"]!);
+    expect(outcome).toEqual({
+      released: false,
+      reason: "remove-failed",
+      error: "msb remove failed (status 1)",
+    });
+    expect(failed.stopped).toEqual(["worker-fc1"]);
+    expect(failed.removed).toHaveLength(2);
+    expect(failed.records["fc1"]!.workerName).toBe("worker-fc1");
+    expect(failed.records["fc1"]!.workerState).toBe("FAILED");
+    expect(failed.ctx.pool.allocations).toEqual([alloc("fc1")]);
+
+    const confirmed = makeHarness({
+      initial: [workerRecord("fc2", { workerState: "FAILED" })],
+    });
+    expect(await releaseWorker(confirmed.ctx, confirmed.records["fc2"]!)).toEqual({
+      released: true,
+      reason: "removed",
+    });
+    expect(confirmed.ctx.pool.allocations).toEqual([]);
+  });
+
+  test("a FAILED worker without a name stays a no-worker path (no stop/remove, slot reconciled)", async () => {
+    const h = makeHarness({
+      initial: [record({ sessionID: "fn", workerName: undefined, workerState: "FAILED" })],
+      allocations: [alloc("fn")],
+    });
+    expect(await releaseWorker(h.ctx, h.records["fn"]!)).toEqual({
+      released: true,
+      reason: "no-worker",
+    });
+    expect(h.stopped).toEqual([]);
+    expect(h.removed).toEqual([]);
+    expect(h.ctx.pool.allocations).toEqual([]);
+  });
+
+  test("sweepIdle retries a kept failed-cleanup worker across RESULT_READY, APPLIED and RETAINED", async () => {
+    const h = makeHarness({
+      initial: [
+        workerRecord("fr", { state: "RESULT_READY", workerState: "FAILED" }),
+        workerRecord("fa", { state: "APPLIED", workerState: "FAILED" }),
+        workerRecord("ft", { state: "RETAINED", workerState: "FAILED" }),
+      ],
+      removeFailures: 6,
+      withQueue: true,
+    });
+    const entries: Array<{ sessionID: string; action: string }> = [];
+    const first = await sweepIdle(h.ctx, 3_600_000, (entry) => entries.push(entry));
+    expect(first.reaped).toBe(0);
+    for (const id of ["fr", "fa", "ft"]) {
+      expect(h.records[id]!.workerName).toBe(`worker-${id}`);
+      expect(h.records[id]!.workerState).toBe("FAILED");
+    }
+    expect(h.ctx.pool.allocations).toHaveLength(3);
+    expect(h.headCalls()).toBe(0); // a kept worker never drains
+
+    // Later success: the sweep clears identity, frees each slot and drains.
+    const second = await sweepIdle(h.ctx, 3_600_000, (entry) => entries.push(entry));
+    expect(second.reaped).toBe(3);
+    for (const id of ["fr", "fa", "ft"]) {
+      expect(h.records[id]!.workerName).toBeUndefined();
+      expect(h.records[id]!.workerState).toBe("DESTROYED");
+    }
+    expect(h.ctx.pool.allocations).toEqual([]);
+    expect(h.headCalls()).toBeGreaterThanOrEqual(1);
+    expect(entries.filter((entry) => entry.action === "reaped_failed_cleanup")).toHaveLength(3);
+  });
+
+  test("destroyWorker does not fabricate success while a failed cleanup is unconfirmed", async () => {
+    const failed = makeHarness({
+      initial: [workerRecord("d2", { workerState: "FAILED" })],
+      removeThrows: true,
+    });
+    await expect(
+      buildDestroyWorkerOp(failed.ctx)(request("destroyWorker", "d2", {})),
+    ).rejects.toThrow(MsbError);
+    expect(failed.records["d2"]!.workerName).toBe("worker-d2");
+    expect(failed.records["d2"]!.workerState).toBe("FAILED");
+    expect(failed.ctx.pool.allocations).toEqual([alloc("d2")]);
+
+    const confirmed = makeHarness({
+      initial: [workerRecord("d3", { workerState: "FAILED" })],
+    });
+    expect(
+      await buildDestroyWorkerOp(confirmed.ctx)(request("destroyWorker", "d3", {})),
+    ).toEqual({ destroyed: true, worker: "worker-d3" });
+    expect(confirmed.records["d3"]!.workerName).toBeUndefined();
+    expect(confirmed.records["d3"]!.workerState).toBe("DESTROYED");
+    expect(confirmed.ctx.pool.allocations).toEqual([]);
+  });
+
+  test("keep and discard keep the durable result and accounting for a failed-cleanup worker", async () => {
+    const keepH = makeHarness({
+      initial: [workerRecord("k2", { workerState: "FAILED" })],
+      removeThrows: true,
+    });
+    const kept = (await buildKeepResultOp(keepH.ctx)(
+      request("applyResult", "k2", { confirm: "KEEP" }),
+    )) as { retained?: boolean };
+    expect(kept.retained).toBe(true);
+    expect(keepH.records["k2"]!.state).toBe("RETAINED");
+    expect(keepH.records["k2"]!.workerName).toBe("worker-k2");
+    expect(keepH.records["k2"]!.workerState).toBe("FAILED");
+    expect(keepH.ctx.pool.allocations).toEqual([alloc("k2")]);
+
+    const discardH = makeHarness({
+      initial: [workerRecord("d4", { workerState: "FAILED" })],
+      removeThrows: true,
+    });
+    await expect(
+      buildDiscardResultOp(discardH.ctx)(
+        request("discardResult", "d4", { confirm: "REJECT" }),
+      ),
+    ).rejects.toThrow(MsbError);
+    const rec = discardH.records["d4"]!;
+    expect(rec.state).toBe("RESULT_READY");
+    expect(rec.resultRef).toBe("refs/opencode-sandbox/result/d4"); // durable result kept
+    expect(rec.workerName).toBe("worker-d4");
+    expect(rec.workerState).toBe("FAILED");
+    expect(discardH.ctx.pool.allocations).toEqual([alloc("d4")]);
+  });
+
+  test("a landed apply keeps a failed-cleanup worker and its allocation", async () => {
+    const spawn: OpContext["git"]["spawn"] = async (argv) => {
+      const ok = (stdout = "") => ({ status: 0, stdout, stderr: "", timedOut: false });
+      if (argv.includes("ls-files")) return ok("100644 base 0\tf.txt\n");
+      if (argv.includes("ls-tree")) return ok("100644 blob base\tf.txt\n");
+      if (argv.includes("--name-only")) return ok("f.txt\u0000");
+      if (argv.includes("--raw")) return ok("");
+      if (argv.includes("diff")) return ok("+added\n");
+      return ok();
+    };
+    const h = makeHarness({
+      initial: [workerRecord("a2", { workerState: "FAILED" })],
+      removeThrows: true,
+      runnerMode: "real",
+      spawn,
+    });
+    const result = (await buildApplyResultOp(h.ctx)(
+      request("applyResult", "a2", { confirm: "APPLY" }),
+    )) as { applied?: boolean };
+    expect(result.applied).toBe(true);
+    expect(h.records["a2"]!.state).toBe("APPLIED");
+    expect(h.records["a2"]!.workerName).toBe("worker-a2");
+    expect(h.records["a2"]!.workerState).toBe("FAILED");
+    expect(h.ctx.pool.allocations).toEqual([alloc("a2")]);
   });
 });

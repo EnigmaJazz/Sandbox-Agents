@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config.ts";
-import { buildGitClearCommitIntentOp, buildGitCommitOp, type OpContext } from "../src/service.ts";
+import { buildGitClearCommitIntentOp, buildGitCommitOp, withLifecycleClaim, type OpContext } from "../src/service.ts";
+import { sweepIdle } from "../src/reaper.ts";
 import { ADVISOR_ALLOWED_OPERATIONS } from "../src/advisor-socket.ts";
 import { StateError } from "../src/state.ts";
 import { ALLOWED_PAYLOAD_KEYS, HOST_MUTATION_OPERATIONS, HostToolPolicy, ValidationError } from "../src/validation.ts";
@@ -552,6 +553,12 @@ describe("gitCommit releases the committed result's worker", () => {
       adapter: {
         stop: async (name: string) => { stopped.push(name); },
         remove: async (name: string) => { removed.push(name); },
+        // The removal proof is modelled: the worker HEAD equals the commit the
+        // host-side result ref resolves to, and the tree is clean.
+        exec: async (_name: string, argv: string[]) =>
+          argv[0] === "git" && argv[1] === "rev-parse"
+            ? { status: 0, stdout: `${installedCommit}\n`, stderr: "", timedOut: false }
+            : { status: 0, stdout: "", stderr: "", timedOut: false },
       },
       pool: { allocations: [{ cpu: 2, memBytes: 2 * GiB, sessionID: "worker-7" }] },
     });
@@ -693,5 +700,228 @@ describe("gitCommit without an explicit identifier", () => {
       buildGitCommitOp(ctx)(request({ projectDir: projectRoot, message: "m" })),
     ).rejects.toThrow("cannot commit: no applied B→C result for this session");
     expect(calls).toHaveLength(0);
+  });
+});
+
+/**
+ * T11 / C1: the release that follows a landed commit belongs to the TARGET
+ * result session, not the caller. It must take that session's own non-blocking
+ * lifecycle claim, never fabricate a state transition from a pre-commit
+ * snapshot, and never turn contention into a failed commit.
+ */
+describe("gitCommit owns the target session's release (T11/C1)", () => {
+  const GiB = 1024 * 1024 * 1024;
+  const installedCommit = "0123456789abcdef0123456789abcdef01234567";
+  const committedCommit = "abcdef0123456789abcdef0123456789abcdef01";
+  const baseCommit = "1111111111111111111111111111111111111111";
+
+  function claimHarness(overrides: Partial<SessionRecord> = {}) {
+    const stopped: string[] = [];
+    const removed: string[] = [];
+    const logs: Array<Record<string, unknown>> = [];
+    const { calls, spawn } = spawnStub([
+      [NAME_ONLY, { status: 0, stdout: "a.ts\u0000", stderr: "" }],
+      [/rev-parse --verify.*result/, { status: 0, stdout: `${installedCommit}\n`, stderr: "" }],
+    ]);
+    const records: Record<string, SessionRecord> = {
+      "session-1": orchestratorRecord,
+      "worker-7": appliedResultRecord("worker-7", {
+        state: "RESULT_READY",
+        installedCommit,
+        workerName: "oc-sandbox-worker-7",
+        workerState: "ACTIVE",
+        resources: { cpu: 2, memBytes: 2 * GiB },
+        ...overrides,
+      }),
+    };
+    const ctx = makeCtx(spawn, records);
+    (ctx.store as unknown as { list: () => SessionRecord[] }).list = () =>
+      Object.values(records);
+    Object.assign(ctx, {
+      adapter: {
+        stop: async (name: string) => {
+          stopped.push(name);
+        },
+        remove: async (name: string) => {
+          removed.push(name);
+        },
+        // The removal proof is modelled: worker HEAD == the exported result tip.
+        exec: async (_name: string, argv: string[]) =>
+          argv[0] === "git" && argv[1] === "rev-parse"
+            ? { status: 0, stdout: `${installedCommit}\n`, stderr: "", timedOut: false }
+            : { status: 0, stdout: "", stderr: "", timedOut: false },
+      },
+      pool: { allocations: [{ cpu: 2, memBytes: 2 * GiB, sessionID: "worker-7" }] },
+      logger: { log: (entry: Record<string, unknown>) => logs.push(entry) },
+    });
+    const req = request({
+      projectDir: projectRoot,
+      message: "fix: delegated",
+      sandboxSessionID: "worker-7",
+    });
+    return { calls, ctx, records, removed, req, stopped, logs };
+  }
+
+  test("a target claim held across the commit keeps the landed markers, skips cleanup, keeps the slot and lets the next sweep release", async () => {
+    const h = claimHarness();
+    let release!: () => void;
+    const held = withLifecycleClaim(
+      h.ctx,
+      "worker-7",
+      "mutation",
+      () => new Promise<void>((resolve) => { release = resolve; }),
+    );
+
+    const result = (await buildGitCommitOp(h.ctx)(h.req)) as { committed?: boolean };
+    expect(result.committed).toBe(true);
+    // No probe/stop/remove/accounting cleanup ran under someone else's claim.
+    expect(h.stopped).toEqual([]);
+    expect(h.removed).toEqual([]);
+    const rec = h.records["worker-7"]!;
+    // The concurrent lifecycle state is preserved, not forced to RETAINED.
+    expect(rec.state).toBe("RESULT_READY");
+    expect(rec.installedCommit).toBe(installedCommit);
+    expect(rec.committedCommit).toBe(committedCommit);
+    expect(rec.pendingCommit).toBeUndefined();
+    expect(rec.workerName).toBe("oc-sandbox-worker-7");
+    expect(h.ctx.pool.allocations).toHaveLength(1);
+    expect(h.logs).toContainEqual(
+      expect.objectContaining({
+        sessionID: "worker-7",
+        operation: "gitCommit",
+        action: "release_retained_worker_skipped_busy",
+      }),
+    );
+
+    release();
+    await held;
+    // The retained worker is released by the sweep once ownership is free.
+    const { reaped } = await sweepIdle(h.ctx, 3_600_000);
+    expect(reaped).toBe(1);
+    expect(h.removed).toEqual(["oc-sandbox-worker-7"]);
+    expect(h.records["worker-7"]!.workerName).toBeUndefined();
+    expect(h.records["worker-7"]!.workerState).toBe("DESTROYED");
+    expect(h.ctx.pool.allocations).toEqual([]);
+  });
+
+  test("the pending-commit recovery path also finalizes under the target claim and skips cleanup when busy", async () => {
+    const h = claimHarness({
+      pendingCommit: { resultCommit: installedCommit, parentCommit: baseCommit },
+    });
+    h.ctx.git.spawn = async (argv) => {
+      let stdout = "";
+      if (argv.includes("--name-only")) stdout = "a.ts\0";
+      else if (argv[1] === "rev-parse" && argv[2] === "--verify") stdout = `${installedCommit}\n`;
+      else if (argv[1] === "rev-parse" && argv[2] === "HEAD^") stdout = `${baseCommit}\n`;
+      else if (argv[1] === "rev-parse" && argv[2] === "HEAD") stdout = `${committedCommit}\n`;
+      return { status: 0, stdout, stderr: "", timedOut: false };
+    };
+    let release!: () => void;
+    const held = withLifecycleClaim(
+      h.ctx,
+      "worker-7",
+      "mutation",
+      () => new Promise<void>((resolve) => { release = resolve; }),
+    );
+
+    const result = (await buildGitCommitOp(h.ctx)(h.req)) as { alreadyCommitted?: boolean };
+    expect(result.alreadyCommitted).toBe(true);
+    expect(h.stopped).toEqual([]);
+    expect(h.removed).toEqual([]);
+    const rec = h.records["worker-7"]!;
+    expect(rec.state).toBe("RESULT_READY");
+    expect(rec.installedCommit).toBe(installedCommit);
+    expect(rec.committedCommit).toBe(committedCommit);
+    expect(rec.pendingCommit).toBeUndefined();
+    expect(h.ctx.pool.allocations).toHaveLength(1);
+    expect(h.logs).toContainEqual(
+      expect.objectContaining({ action: "release_retained_worker_skipped_busy" }),
+    );
+    release();
+    await held;
+  });
+
+  test("a state change during the commit is read fresh: markers land without a stale transition", async () => {
+    const h = claimHarness();
+    const realSpawn = h.ctx.git.spawn;
+    let moved = false;
+    h.ctx.git.spawn = async (argv, opts) => {
+      if (!moved && argv.includes("--name-only")) {
+        moved = true;
+        // A concurrent keep retained the record while the host commit ran.
+        h.records["worker-7"]!.state = "RETAINED";
+      }
+      return realSpawn(argv, opts);
+    };
+
+    const result = (await buildGitCommitOp(h.ctx)(h.req)) as { committed?: boolean };
+    expect(result.committed).toBe(true);
+    const rec = h.records["worker-7"]!;
+    expect(rec.state).toBe("RETAINED");
+    expect(rec.installedCommit).toBe(installedCommit);
+    expect(rec.committedCommit).toBe(committedCommit);
+    expect(rec.pendingCommit).toBeUndefined();
+    // Ownership WAS available, so the release still runs under the claim.
+    expect(h.removed).toEqual(["oc-sandbox-worker-7"]);
+    expect(h.records["worker-7"]!.workerState).toBe("DESTROYED");
+    expect(h.ctx.pool.allocations).toEqual([]);
+  });
+
+  test("the target claim is held through the removal: a concurrent mutation is refused until the commit finishes", async () => {
+    const h = claimHarness();
+    const originalStop = h.ctx.adapter.stop;
+    let stopSeen!: () => void;
+    const stoppedAt = new Promise<void>((resolve) => { stopSeen = resolve; });
+    h.ctx.adapter.stop = async (name: string) => {
+      stopSeen();
+      await originalStop(name);
+    };
+    const originalRemove = h.ctx.adapter.remove;
+    let releaseRemove!: () => void;
+    const removeGate = new Promise<void>((resolve) => { releaseRemove = resolve; });
+    h.ctx.adapter.remove = async (name: string) => {
+      await removeGate;
+      await originalRemove(name);
+    };
+
+    const commit = buildGitCommitOp(h.ctx)(h.req);
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      stoppedAt,
+      new Promise<never>((_, reject) => {
+        watchdog = setTimeout(() => reject(new Error("commit never reached removal")), 2_000);
+      }),
+    ]);
+    if (watchdog) clearTimeout(watchdog);
+
+    // Ownership is on the TARGET session, held through proof/removal/bookkeeping.
+    await expect(
+      withLifecycleClaim(h.ctx, "worker-7", "mutation", async () => "second"),
+    ).rejects.toThrow(/already in flight/);
+    releaseRemove();
+    await expect(commit).resolves.toMatchObject({ committed: true });
+    // Positive control: the claim is free once the commit settles.
+    await expect(
+      withLifecycleClaim(h.ctx, "worker-7", "mutation", async () => "ok"),
+    ).resolves.toBe("ok");
+  });
+
+  test("an unrelated session's claim does not block the target release (positive control)", async () => {
+    const h = claimHarness();
+    let release!: () => void;
+    const held = withLifecycleClaim(
+      h.ctx,
+      "another-session",
+      "mutation",
+      () => new Promise<void>((resolve) => { release = resolve; }),
+    );
+    const result = (await buildGitCommitOp(h.ctx)(h.req)) as { committed?: boolean };
+    expect(result.committed).toBe(true);
+    expect(h.stopped).toEqual(["oc-sandbox-worker-7"]);
+    expect(h.removed).toEqual(["oc-sandbox-worker-7"]);
+    expect(h.records["worker-7"]!.state).toBe("RETAINED");
+    expect(h.ctx.pool.allocations).toEqual([]);
+    release();
+    await held;
   });
 });

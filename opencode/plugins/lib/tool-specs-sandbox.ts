@@ -20,6 +20,37 @@ import {
   formatResult,
 } from "./tool-runtime.ts";
 
+/**
+ * F1: ask the broker for the session diff in the mode its LIVE-WORKER status
+ * selects. Read-only, and with exactly ONE narrow retry: if a finish released
+ * the worker between the status read and the diff, the same read is repeated in
+ * retained mode. It is never used to retry a policy refusal or a mutation.
+ */
+async function requestSessionDiff(
+  c: Awaited<ReturnType<typeof client>>,
+  sessionID: string,
+  agent: string | undefined,
+): Promise<unknown> {
+  const liveOf = (s: { worker?: string | null; workerState?: string | null }) =>
+    !!s.worker && s.workerState !== "DESTROYED" && s.workerState !== "FAILED";
+  const isLive = async () =>
+    liveOf(
+      (await c.request("workerStatus", sessionID, {}, agent)) as {
+        worker?: string | null;
+        workerState?: string | null;
+      },
+    );
+  const mode = (await isLive()) ? "active" : "retained";
+  try {
+    return await c.request("diff", sessionID, { mode }, agent);
+  } catch (err) {
+    if (mode === "active" && !(await isLive())) {
+      return c.request("diff", sessionID, { mode: "retained" }, agent);
+    }
+    throw err;
+  }
+}
+
 export const sandboxToolSpecs = {
   sandbox_read: defineTool({
     description:
@@ -168,13 +199,16 @@ export const sandboxToolSpecs = {
 
   sandbox_diff: defineTool({
     description:
-      "Show the active worker diff, including uncommitted changes, or the prepared/retained " +
-      "result diff. Active mode requires a live worker; retained mode reads the exported result.",
+      "Show the diff of the session's work: the ACTIVE worker diff (including uncommitted changes) " +
+      "when a worker is live, otherwise the RETAINED exported result diff. The mode is selected " +
+      "from the live-worker status; inspection never creates a worker.",
     args: {},
     execute: async (_args, ctx) => {
       assertNotOrchestrator(ctx.agent, "sandbox_diff");
       const c = await client();
-      return formatResult("diff", await c.request("diff", ctx.sessionID, {}, ctx.agent));
+      // F1: the mode comes from the LIVE-WORKER status; a released result is
+      // read as the retained export and a diff never activates a worker.
+      return formatResult("diff", await requestSessionDiff(c, ctx.sessionID, ctx.agent));
     },
   }),
 
@@ -182,7 +216,8 @@ export const sandboxToolSpecs = {
     description:
       "Prepare and export the sandbox result bundle. The host working tree stays unchanged and " +
       "no approval is required. Host ref import occurs only in real Git mode. Transitions to " +
-      "RESULT_READY and retains the worker until sandbox_apply, sandbox_discard, or keep.",
+      "RESULT_READY and retains the result; the transient worker may be released immediately " +
+      "and is re-created on demand for later operations.",
     args: {},
     execute: async (_args, ctx) => {
       assertNotOrchestrator(ctx.agent, "sandbox_finish");
@@ -194,19 +229,34 @@ export const sandboxToolSpecs = {
   sandbox_apply: defineTool({
     description:
       "Ask the user to approve applying the finished sandbox result (B->C delta) to the host " +
-      "project; requires explicit human approval (S15, §19). The result is prepared automatically " +
-      "when needed and previewed first. On approval, the broker re-checks host divergence (S16) " +
-      "and protected paths before applying. Success is APPLIED, releases the worker, and ends " +
-      "this session's worker lifecycle; denial or failure retains the result.",
+      "project; requires explicit human approval (S15, §19). The current result is prepared only " +
+      "while a worker is live; a released result is previewed in RETAINED mode (bounded preview " +
+      "plus the complete plain/ANSI artifacts) and no worker is activated. On approval, the broker " +
+      "re-checks host divergence (S16) and protected paths before applying. Success is APPLIED, " +
+      "releases the worker, and ends this session's worker lifecycle; denial or failure retains " +
+      "the result.",
     args: {},
     execute: async (_args, ctx) => {
       assertNotOrchestrator(ctx.agent, "sandbox_apply");
       const c = await client();
-      const workerStatus = (await c.request("workerStatus", ctx.sessionID, {}, ctx.agent)) as { state?: string };
-      if (workerStatus.state !== "RESULT_READY") {
+      const liveOf = (s: { worker?: string | null; workerState?: string | null }) =>
+        !!s.worker && s.workerState !== "DESTROYED" && s.workerState !== "FAILED";
+      const before = (await c.request("workerStatus", ctx.sessionID, {}, ctx.agent)) as {
+        state?: string;
+        worker?: string | null;
+        workerState?: string | null;
+      };
+      // F1: prepare the CURRENT result only when it can still be exported. A
+      // released result needs no finish (a re-finish without a worker returns
+      // the durable ref), and a stranded ACTIVE session without a live worker
+      // fails closed here instead of being silently re-created.
+      if (before.state !== "RESULT_READY" || liveOf(before)) {
         await c.request("prepareResult", ctx.sessionID, {}, ctx.agent);
       }
-      const diff = await c.request("diff", ctx.sessionID, { mode: "active" }, ctx.agent);
+      // Refresh AFTER preparing: the finish may have released the worker. The
+      // mode is then selected from the live status, with the one narrow retry
+      // for a release that lands between the status read and the diff.
+      const diff = await requestSessionDiff(c, ctx.sessionID, ctx.agent);
       const summary = (diff as { stat?: string }).stat ?? "";
       const diffRes = diff as {
         stat?: string;
