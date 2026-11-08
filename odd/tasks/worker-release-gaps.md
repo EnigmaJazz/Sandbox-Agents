@@ -220,7 +220,7 @@ runner is registered for `host_test_run`).
 
 ### Owner landing steps (S17 — the owner reviews and commits, then restarts)
 The installed candidate touches these paths, all uncommitted on `fix/q114-worker-release` at
-HEAD `b4ec8f1`:
+HEAD `b731bbe`:
 - `broker/src/config.ts`
 - `broker/src/reaper.ts`
 - `broker/src/service.ts`
@@ -236,10 +236,112 @@ Reviewability: 495 + 668 + 571 authored changed lines across the three results, 
 400-line per-commit guard. Split into coherent commits (source vs tests, and by unit) or record
 a `review-size-exception` with its reason. Then restart the broker for the change to take effect.
 
+## Q114 correction U4 (T10) — Phase A: plan, advisors, scope decision
+
+**Route.** ROUTE: bug investigation | intent: authorized change | route: ODD secure, PM-driven
+with the Planner and its pre-code advisors | specialist: pm-odd `ses_e45a26b3fffeViIcGnokjSGtlF`
+→ Planner `ses_e45a1e8a9ffeLd4W5EUKr1hgez` → writer `odd-apply` (held) | basis: WORKFLOW.md.
+Trigger: secure always-delegate; S17 review by the owner; Codex (Tier 4) returned
+FLAWS_FOUND on `git diff 0479721`.
+
+**Advisor availability correction.** The Planner first returned BLOCKED claiming the advisor
+carriers were unavailable because its subagent enumeration listed only `explore`. Verified as a
+false premise: `advisor-gemini-pre` is registered in the deployed config
+(`/home/james/.local/share/opencode-v2/config/opencode/opencode.json:2464`, `hidden: true`,
+`mode: subagent`) and allowed to the planner by name at line 617, exactly as `planner` itself is
+hidden yet dispatchable by name. Retried with literal-name dispatch: all three advisors ran.
+
+**Scope decision: B — fix all F1-F5.** No scope-A deviation, so no Tier 2 escalation is
+required. Reasons recorded by the Planner: deferring the pressure release of ACTIVE workers
+would narrow the Q114 promise while still requiring the shared claim, export proof, continuation
+repair and queue correction elsewhere; one shared lifecycle/durability implementation is
+preferable to different safety rules per path. Pressure release may still keep a worker when
+proof, export or the deadline prevents a safe release: pressure-aware never means unconditional
+removal.
+
+**Advisor dispatches (independent first pass; the Planner read raw answers).**
+- `advisor-gemini-pre` | `ses_e4597e692ffeYAzD8jOqqLf5qy` | model reported `google/gemini-4-argon` | question: does scope B fulfil the F1-F5 spec and invariants within the allowed surfaces and a single correction batch; name blocking gaps, edge cases and the minimum necessary changes | incorporated: retained-preview parity, failed-rehydration rollback, result identity preserved in a resumed ACTIVE session, timeout-safe claim ownership, queue deduplication, direct-admission reservations; rejected the baseline-only durability shortcut.
+- `advisor-integration-pre` | `ses_e4597e69affeNrjTkDhw92ThFx` | model reported `opencode-go/MiMo-V2.6-Flash` | question: does scope B correctly serialize per-session lifecycle and pool admission, including stop/remove vs write/exec/ensure, queue reservation before pressure, and an absolute queue deadline without late creation or deadlock | incorporated: non-blocking claims; no post-scan direct-create shortcut; reconcile queue deadline metadata on cancellation; reserve direct creations; define rehydration bundle/checkout/exit/ancestry explicitly; `tests/gate-test-evidence.test.ts` guard-expiry assertions must change.
+- `advisor-security-pre` | `ses_e4597e699ffeIpEkRsjz4sMNvq` | model reported `google/gemini-4-argon` | question: does scope B prevent data loss for clean-but-unexported HEAD, post-finish continuation, every release route, and retained-mode apply/diff without weakening approval or protected-path guarantees | incorporated: rehydration rollback; never force-overwrite an unrelated prior result; verify imported commit identity; retain claims until an operation settles; rejected `discard`/baseline exceptions; retired the claim that a mutable preview comparison binds human approval. **Separate follow-up for Tier 2:** the preview-to-apply binding race spans the human prompt and is not solved by F1-F5.
+- Skips recorded: `advisor-spec-pre` (only one spec carrier per position; `advisor-gemini-pre` carries it), design (no UI surface), testing/maintainability (covered by the three above), `planner-evidence` (facts available through AFT and `explore` `ses_e459fad8cffeB6CeJUwO6Z5OYr`).
+- `advisor-gemini-post` is required after the writer and verifier evidence and before Gate 2.
+
+**Advice record — evidence and limitations.** Observed through AFT/reads: the plugin's diff
+defaults to active mode; the retained diff lacks approval-preview fields; recreation calls
+`runSnapshot`, changing the baseline and clearing `resultRef`; cleanliness-only release omits
+tip verification; two release paths probe before the claim; write/exec/ensure lack the finish
+claim; the guard wrapper releases the claim on timeout while the callback may still run; queue
+reservation and timeout follow the pressure scan; direct creations have no synchronous
+reservation. CodeGraph failed twice with `attempt to write a readonly database`; AFT and reads
+were used instead. Not re-executed by the Planner: candidate and base identities, branch, the
+Codex diff and findings, and RDD state. `mode-status` returned `ROLE_DENIED_FOR_AFT_READ` for
+the advisor read path. Gate 1: PASS,
+`sha256:c2ae4c3777d285abba325b6d467ef2d07d9987cade515ae5992998ce8a8c6201`. The gate act also
+committed tracker metadata `bb21e5c` (one path, +3 lines, passive, verified by
+`host_review_assess` from `b731bbe`); that commit contains no source, so the S17 boundary holds.
+
+**Resolved design (D1-D5).**
+- **D1 / F1.** `sandbox_diff` queries worker status and selects active mode when a worker is
+  live, retained otherwise; inspection and apply never activate a worker. `sandbox_apply`
+  prepares the current result when live and then refreshes status. The retained path must emit
+  the bounded `applyPreview` plus the complete plain/ANSI artifacts through the existing
+  completeness check, cap and approval prompt. One narrow retry for the status-to-diff
+  disappearance race, never for policy refusals or already-executed commands. Auto-release
+  leaves a durable `RESULT_READY`; a stranded ACTIVE session without a valid durable result
+  fails closed. Approval, divergence, protected-path, plan-root, symlink and truncation checks
+  are preserved.
+- **D2 / F2.** Rehydrate (typed refusal only on failure): resolve the retained result and the
+  original baseline to immutable IDs under the shared claim; bundle without `runSnapshot`
+  repointing the baseline; bootstrap the guest work branch at the result tip with a baseline
+  mirror at the original baseline; preserve `baselineRef`, baseline commit, `resultRef` and
+  snapshot identity. Success moves to `SANDBOX_ACTIVE`, then `RESULT_READY` via prepare.
+  Validate snapshot selections before any mutation, permit and test
+  `CREATING_SANDBOX → RESULT_READY` rollback; on failure keep the refs and identity, account
+  for a partial VM, never blind-remove. Ancestry is checked before publishing a replacement,
+  using a trusted temp ref and an expected-old-tip update; never a force overwrite.
+- **D3 / F3.** A mandatory verified export before removal, under the same removal claim: re-read
+  identity and state, verify effective cleanliness excluding broker transport artifacts, resolve
+  the worker HEAD and the host exported commit, then require valid IDs, a clean tree and
+  `HEAD == exported commit`; otherwise export and re-verify, or keep the worker. Applies to
+  `sweepIdle`, `sweepUnfinished`, `reapOnDisconnect`, `releaseUnderPressure` and every other
+  removal path. Baseline equality or a matching ref string is not proof. Pressure keeps a
+  dirty or unreadable ACTIVE worker; a clean ACTIVE worker without a matching exported tip is
+  verified before any release; an exhausted deadline starts no new pressure work; a failure
+  retains ownership and accounting. `discard` deletes the durable result only after a safe
+  removal. A broken, unverifiable worker needs owner recovery, never a silent destroy.
+- **D4 / F4.** Extend `withFinishGuard`/`isFinishing` into one non-blocking per-sandbox-session
+  claim, acquired before any freshness, status or export decision and held through the adapter
+  call, stop/remove, state write and cleanup. It covers write, exec, ensure (direct and queued),
+  patch, copy-in, finish, apply, keep/discard/destroy, every release path, worker-using reads and
+  diff, and the affected cross-session operations. Policy refusals stay before side effects;
+  existing helpers are explicitly already-owned with no implicit reentrancy; a client conflict
+  is a typed pre-effect refusal and a reaper conflict a quiet skip; the claim is released on
+  settlement or quiescence, not by the timeout wrapper alone; a requester never holds the claim
+  while parked; a queued creation acquires it before dequeue and admission, and contention
+  leaves the entry queued under its original deadline.
+- **D5 / F5.** Perform deduplication, capacity check, visible reservation and absolute deadline
+  atomically before the pressure await; duplicates share the pending promise; the scan and the
+  wait consume the same deadline so a hung scan cannot block a timely rejection; revalidate
+  identity, cancellation, deadline and admission after the scan and drain FIFO only; remove the
+  post-scan direct-create shortcut; a late completion cannot resurrect a timed-out or
+  disconnected requester; direct and queued creations take a synchronous reservation counted
+  once; metadata is cleaned on timeout, drain, disconnect, success and failure; the queue
+  deadline covers admission, and creation/adapter deadlines start after it.
+
+**Phase B.** The PM holds a ready writer brief for `odd-apply` implementing D1-D5 in one batch
+with the seven required test scenarios (public apply after finish; continuation A and B against
+the baseline; clean-but-unexported HEAD across all four routes; a write between status and
+claim; a write after the claim including timeout-retained claim and no double remove; bounded
+pressure latency; simultaneous capacity including a direct creation) plus the FIFO, disconnect,
+non-descendant, failed-removal, policy-ordering and retained-preview negatives. Gate 2 follows
+the writer, the verifier, `advisor-gemini-post` and the pre-commit assessment; T10 is not
+ticked before Gate 2.
+
 
 ## Revisions
 - r1 2026-11-08T07:32:38Z gentle-orchestrator: Record Q114 T5 installed candidate, T6-T8 plan and route evidence
 - r2 2026-11-08T08:48:06Z gentle-orchestrator: Record T6-T9 installed candidates, the independent broker-unit run, residual findings and owner landing steps
+- r3 2026-11-08T09:30:59Z gentle-orchestrator: Land T10 Phase A advice record: advisor availability correction, scope B, three advisor dispatches, Gate 1 hash, design D1-D5
 
 ## Gates
 - T10 PASS 2026-11-08T09:26:33Z planner ref=q114-correction-u4 pre: ses_e4597e692ffeYAzD8jOqqLf5qy; ses_e4597e69affeNrjTkDhw92ThFx; ses_e4597e699ffeIpEkRsjz4sMNvq
