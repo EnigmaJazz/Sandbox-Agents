@@ -79,7 +79,8 @@
       "$HOME/mem-opt/.git",
       "/mnt/ai_storage/kinver-hub/proxy/.git",
       "$HOME/.nanobot/workspace/.git",
-      "$HOME/ai-workspace/worktrees/*/*/.git"
+      "$HOME/ai-workspace/worktrees/*/*/.git",
+      "$HOME/ai-workspace/worktrees/*/*/.codegraph"
     ],
     "allow_file": [
       "$HOME/.auto-update-history.json",
