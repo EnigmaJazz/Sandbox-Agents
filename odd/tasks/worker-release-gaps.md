@@ -365,21 +365,20 @@ the parked request's queue timer bounds the pass and each adapter call carries i
 high_risk` is outstanding owner work; native review was explicitly out of scope and was neither
 started nor acknowledged.
 
-## T11 — final correction (second and last round): F4, F5, new P1  [Phase A landed]
+## T11 — final correction (second and last round): F4, F5, new P1  [installed, uncommitted]
 
 **Trigger.** Codex's bounded recheck CLOSED F1, F2 and F3 and left exactly three items open:
 F4 (`gitCommit` releases the target session's worker without that session's lifecycle claim),
-F5 (the claimed absolute response deadline is not absolute: `parkAndWait` awaits the whole
-pressure scan before returning `pending`, so a 400 ms scan delays a 40 ms deadline's error),
-and one P1 the first correction INTRODUCED (the rehydration failure path swallows a failed
-stop/remove, releases the reservation and clears `workerName`/`workerState`, leaving an
-untracked VM that later admission does not count). No third round: anything still open goes to
-the owner.
+F5 (the claimed absolute response deadline is not absolute: `parkAndWait` awaited the whole
+pressure scan before returning `pending`, so a long scan delayed a short deadline's error), and
+one P1 the first correction INTRODUCED (the rehydration failure path swallowed a failed
+stop/remove, released the reservation and cleared `workerName`/`workerState`, leaving an
+untracked VM that later admission did not count). No third round.
 
 **Route.** ROUTE: bug investigation | intent: authorized change | route: ODD secure |
 specialist: pm-odd `ses_e45a26b3fffeViIcGnokjSGtlF` → Planner `ses_e451186f3ffeUkdZaLzM4HP8d7`
-→ writer `odd-apply` (deferred to Phase B) | basis: WORKFLOW.md. Risk high: lifecycle-claim
-coverage and data-loss accounting.
+→ writer `odd-apply` | basis: WORKFLOW.md. Risk high: lifecycle-claim coverage and data-loss
+accounting.
 
 **Advisor dispatches.** `advisor-gemini-pre` | `ses_e450ce730ffeB6erhfsLDUV7Br` | model reported
 `google/gemini-4-argon` | compulsory specification advice, read RAW: incorporated
@@ -387,51 +386,110 @@ stale-transition protection, exact-entry deadline checks, nested accounting and 
 the named failed bootstrap. `advisor-integration-pre` (the required concurrency/lifecycle
 surface) was first cancelled at `ses_e450ce765ffehAEH7GmAexJkpf`; `.atl/rate-limit-fallback.log`
 does not exist in this worktree, so no replay was in flight and no terminal chain-exhausted
-marker existed. Owner-authorized single retry at `ses_e44f1b9f0ffeajeciuBhErymkT` completed on
+marker existed. Single retry at `ses_e44f1b9f0ffeajeciuBhErymkT` completed on
 `opencode-go/MiMo-V2.6-Flash` and was read RAW: incorporated fresh-state finalisation, overlap
 coverage, failed-worker paths, pre-admission refusal, nested reservation and prompt drain. No
-missing-opinion exception applies. Skips: design, additional security/testing/maintainability
-(one shared lifecycle surface), `advisor-spec-pre` (single spec carrier), subscription Gemini
-(lane inactive), `planner-evidence` (AFT/reads).
+missing-opinion exception applies. `advisor-gemini-post` ran after the writer at
+`ses_e44baccb8ffey4cVgCgjkok7Hx` and returned PASS with two non-blocking untested defensive
+branches. Skips: design, additional security/testing/maintainability (one shared lifecycle
+surface), `advisor-spec-pre` (single spec carrier), subscription Gemini (lane inactive),
+`planner-evidence` (AFT/reads).
 
 **Observed evidence for the three defects.** Unclaimed target-session commit cleanup
 (`service.ts:3798-3803` plus the release helpers at `4912-4929`), an awaited pressure scan on the
-caller's critical path (`service.ts:1106-1113`), and the rehydration cleanup that releases the
-reservation and clears identity while swallowing the removal failure
+caller's critical path (`service.ts:1106-1113`), and the rehydration cleanup that released the
+reservation and cleared identity while swallowing the removal failure
 (`service.ts:818-842`). `MsbAdapter.run` throws on timeout (`broker/src/msb.ts:301-310`), which
 disproves the premise that a timed-out remove may have silently succeeded.
 
-**Decisions.**
+**Decisions and implementation (result `ses_e44da4557ffeN4lpBLSbB6Xwx7`, commit `cb3897e`,
+five paths: `broker/src/service.ts`, `broker/src/reaper.ts`, `broker/tests/lifecycle-claim.test.ts`,
+`broker/tests/service-git-commit-session.test.ts`, `broker/tests/worker-release-outcome.test.ts`).**
 - **C1 / F4.** Every worker release takes the same per-session lifecycle claim, on the record
-  being released, not the caller's session. `gitCommit` claims `resultSessionID` before the
+  being released, never on the caller's session. `gitCommit` claims `resultSessionID` before the
   proof and holds it through removal and bookkeeping. On contention it does NOT fail: the commit
-  already landed, so it persists its markers through a fresh synchronous record update (never a
-  stale-state transition), skips probe/stop/remove/accounting cleanup, logs
-  `release_retained_worker_skipped_busy`, and leaves the worker for the next sweep. Cleanup
-  contention can never undo a landed HEAD, and it never overwrites concurrent lifecycle state.
-- **C2 / F5.** The pressure scan leaves the caller's promise: dedup, cap check, deadline,
-  timer and enqueue stay synchronous, `pending` is returned immediately, and the scan runs in a
-  caught detached continuation whose drain happens only when `queue.find(sessionID)` is that
-  exact entry, not cancelled or settled, still queued, and before the original deadline. FIFO
-  and creation-time revalidation are kept; there is no deadline reset, no direct-create
-  shortcut and no late resurrection. The existing `tests/lifecycle-claim.test.ts:334-371`
-  must additionally assert elapsed time against the deadline, not only the error class.
+  already landed, so it persists its markers through a fresh synchronous re-read (legal
+  `RETAINED`, otherwise a touch — never a stale-state transition), skips
+  probe/stop/remove/accounting cleanup, logs `release_retained_worker_skipped_busy`, and leaves
+  the worker for the next sweep.
+- **C2 / F5.** The pressure scan left the caller's promise: dedup, cap check, deadline, timer and
+  enqueue stay synchronous, `pending` is returned immediately, and the scan runs in a caught
+  detached continuation whose drain happens only when `queue.find(sessionID)` is that exact
+  entry, not cancelled or settled, still queued, and before the original deadline. FIFO and
+  creation-time revalidation are kept; no deadline reset, no direct-create shortcut, no late
+  resurrection. `tests/lifecycle-claim.test.ts` now asserts GENUINE elapsed time against the
+  deadline (30 ms ≤ elapsed < 250 ms bound with a blocked scan), not only the error class.
 - **C3 / new P1.** A failed stop/remove never drops allocation or identity: the record keeps the
   actual `workerName` with `workerState: "FAILED"` (replacing `undefined`), keeps its refs and
   snapshot identity, and keeps a counted held allocation. `stop` and `remove` are attempted
   independently; sweeps retry such a worker under the lifecycle claim before the ordinary FAILED
-  exclusion; a narrow cleanup predicate for a bootstrap that never created a Git worktree uses
+  exclusion; a narrow failure path for a bootstrap that never created a Git worktree uses
   stop/remove without the export proof, while an ordinary live removal keeps it. Reuse and
   recreation are refused while a cleanup is pending, `keep`/`discard`/`destroy` never fabricate
   `released: true`, and only a confirmed adapter removal clears identity, writes `DESTROYED`,
-  releases the allocation once and drains. The rollback to `RESULT_READY` with unchanged refs
-  and the original error still happens. Tradeoff accepted: a possibly nonexistent VM holds a
-  slot fail-closed until the removal is confirmed or the owner recovers it.
+  releases the allocation once and drains. The rollback to `RESULT_READY` with unchanged refs and
+  the original error still happens. Tradeoff accepted: a possibly nonexistent VM holds a slot
+  fail-closed until the removal is confirmed or the owner recovers it.
 
-**Gate 1** PASS `sha256:60cb8d6625a4ac0e0defdf60044bb64bf0b142c93a883e3cca7eaf789b745ef1`
-(metadata commit `ab8bed2`, tracker-only, one path, risk `passive`, verified with
-`host_review_assess --committed-only` from `bc50ae4`). Gate 2 follows the writer, independent
-verification and `advisor-gemini-post`. The human approval-binding race stays out of scope.
+**Gates.** Gate 1 PASS `sha256:60cb8d6625a4ac0e0defdf60044bb64bf0b142c93a883e3cca7eaf789b745ef1`
+(metadata commit `ab8bed2`). Gate 2 PASS
+`sha256:610be6b7c69d52ebd72b2f36a70ac941265dcd2d6bc47169da4c982b465c1821` (metadata commit
+`9952ccaf`). Both verified tracker-only with `host_review_assess --committed-only` from their
+parents (one path, one line, risk `passive`), so the S17 boundary held: no source is committed.
+Gate 2 is technical closure only; it is not delivery, merge, deployment or restart approval.
+
+**Observed checks.** Writer-observed RED against the old code: C1 `expected [] received
+[oc-sandbox-worker-7]`; C2 `elapsed 1505 ms, expected < 250`; C3 `workerName expected worker-s1
+received undefined`; sweep `second.reaped expected 3 received 0`. Writer-observed GREEN:
+focused `lifecycle-claim + service-git-commit-session + service-apply + reaper +
+worker-release-outcome` — 124 pass, 0 fail, 740 `expect()`, 34.28 s; `bun build --target=bun
+src/main.ts` bundled 37 modules. Independent `host_test_run runner=broker-unit` on the installed
+tree at `gitHead 3a86a23`: `2002 pass, 9 skip, 2 fail, 9291 expect() calls, 2013 tests across 109
+files`, exit 1; both failures are the `v2-launch` profile drift above, pre-existing at base
+`4d32ff7`; no candidate-attributable failure. Independent `host_review_assess` (workspace): risk
+`high`, 21 paths, 5038 changed lines, `process_boundary` on `broker/src/service.ts`,
+`review_due: high_risk` — outstanding owner work; native review was out of scope and was neither
+started nor acknowledged. No `tsc` offline (bun compile only).
+
+**Follow-ups recorded, not blockers.** (1) The candidate is now ~5038 lines across 21 paths, far
+over the 400-line / 100 KiB commit budget: the owner splits by seam or records a size exception.
+(2) Two minor defensive branches have no dedicated fault test (rollback-persistence logging and
+the sweep's `skippedBusy` branch; the `guardedRelease`/`safeLog` paths are covered indirectly).
+(3) `tests/reaper.test.ts` still carries an older title for the pressure rule. (4)
+`broker/src/reaper.ts` header comments still describe unreadable status as exported. (5) There is
+no explicit pressure-deadline parameter; the queue timer and per-adapter timeouts bound it. (6)
+The preview-to-apply approval-binding race stays a separate Tier 2 item and was not touched. (7)
+`review_due: high_risk` remains outstanding.
+
+**Owner landing steps (S17 — the owner reviews and commits, then restarts).** Installed and
+uncommitted on `fix/q114-worker-release`, current HEAD `9952ccaf` (gate metadata only). The two
+new test files `broker/tests/lifecycle-claim.test.ts` and `broker/tests/retained-apply.test.ts`
+are now staged in the index. Paths:
+- `broker/src/config.ts`
+- `broker/src/policy.ts`
+- `broker/src/reaper.ts`
+- `broker/src/server.ts`
+- `broker/src/service.ts`
+- `broker/src/state.ts`
+- `broker/tests/config.test.ts`
+- `broker/tests/fixtures/sandbox-tools-surface.json`
+- `broker/tests/gate-test-evidence.test.ts`
+- `broker/tests/lifecycle-claim.test.ts`
+- `broker/tests/queue.test.ts`
+- `broker/tests/reaper.test.ts`
+- `broker/tests/retained-apply.test.ts`
+- `broker/tests/server-reaper-log-seam.test.ts`
+- `broker/tests/service-apply.test.ts`
+- `broker/tests/service-diff.test.ts`
+- `broker/tests/service-git-commit-session.test.ts`
+- `broker/tests/staging-chain.test.ts`
+- `broker/tests/state-artifacts.test.ts`
+- `broker/tests/worker-release-outcome.test.ts`
+- `opencode/plugins/lib/tool-specs-sandbox.ts`
+
+Split into coherent commits (by seam and by source-versus-tests) or record a `review-size-
+exception` with its reason, commit, restart the broker, then send Codex the final F4/F5/new-P1
+recheck. Anything still open after that recheck is owner work: there is no further agent round.
 
 
 ## Revisions
@@ -440,6 +498,7 @@ verification and `advisor-gemini-post`. The human approval-binding race stays ou
 - r3 2026-11-08T09:30:59Z gentle-orchestrator: Land T10 Phase A advice record: advisor availability correction, scope B, three advisor dispatches, Gate 1 hash, design D1-D5
 - r4 2026-11-08T11:17:41Z gentle-orchestrator: Land T10 closure: scope B F1-F5 installed, three results, Gate 1/2 hashes, amended D3, follow-ups and owner landing steps
 - r5 2026-11-08T12:32:27Z gentle-orchestrator: Land T11 Phase A advice record: F4/F5/new-P1 decisions, advisor dispatches incl. cancelled-then-retried integration advisor, Gate 1 hash
+- r6 2026-11-08T14:52:06Z gentle-orchestrator: Land T11 closure: C1-C3 installed, result cb3897e, Gate 2 hash, observed checks, follow-ups and owner landing steps
 
 ## Gates
 - T10 PASS 2026-11-08T09:26:33Z planner ref=q114-correction-u4 pre: ses_e4597e692ffeYAzD8jOqqLf5qy; ses_e4597e69affeNrjTkDhw92ThFx; ses_e4597e699ffeIpEkRsjz4sMNvq
