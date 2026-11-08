@@ -218,29 +218,11 @@ runner is registered for `host_test_run`).
    cleared `workerName` anyway; the current paths check the outcome. The `releaseRetainedWorker`
    variant noted above still needs its own unit.
 
-### Owner landing steps (S17 — the owner reviews and commits, then restarts)
-The installed candidate touches these paths, all uncommitted on `fix/q114-worker-release` at
-HEAD `b731bbe`:
-- `broker/src/config.ts`
-- `broker/src/reaper.ts`
-- `broker/src/service.ts`
-- `broker/tests/config.test.ts`
-- `broker/tests/fixtures/sandbox-tools-surface.json`
-- `broker/tests/queue.test.ts`
-- `broker/tests/reaper.test.ts`
-- `broker/tests/service-apply.test.ts`
-- `broker/tests/staging-chain.test.ts`
-- `opencode/plugins/lib/tool-specs-sandbox.ts`
-
-Reviewability: 495 + 668 + 571 authored changed lines across the three results, over the local
-400-line per-commit guard. Split into coherent commits (source vs tests, and by unit) or record
-a `review-size-exception` with its reason. Then restart the broker for the change to take effect.
-
 ## Q114 correction U4 (T10) — Phase A: plan, advisors, scope decision
 
 **Route.** ROUTE: bug investigation | intent: authorized change | route: ODD secure, PM-driven
 with the Planner and its pre-code advisors | specialist: pm-odd `ses_e45a26b3fffeViIcGnokjSGtlF`
-→ Planner `ses_e45a1e8a9ffeLd4W5EUKr1hgez` → writer `odd-apply` (held) | basis: WORKFLOW.md.
+→ Planner `ses_e45a1e8a9ffeLd4W5EUKr1hgez` → writer `odd-apply` | basis: WORKFLOW.md.
 Trigger: secure always-delegate; S17 review by the owner; Codex (Tier 4) returned
 FLAWS_FOUND on `git diff 0479721`.
 
@@ -251,45 +233,38 @@ false premise: `advisor-gemini-pre` is registered in the deployed config
 `mode: subagent`) and allowed to the planner by name at line 617, exactly as `planner` itself is
 hidden yet dispatchable by name. Retried with literal-name dispatch: all three advisors ran.
 
-**Scope decision: B — fix all F1-F5.** No scope-A deviation, so no Tier 2 escalation is
+**Scope decision: B — fix all F1-F5.** No scope-A deviation, so no Tier 2 escalation was
 required. Reasons recorded by the Planner: deferring the pressure release of ACTIVE workers
 would narrow the Q114 promise while still requiring the shared claim, export proof, continuation
 repair and queue correction elsewhere; one shared lifecycle/durability implementation is
-preferable to different safety rules per path. Pressure release may still keep a worker when
-proof, export or the deadline prevents a safe release: pressure-aware never means unconditional
-removal.
+preferable to different safety rules per path.
 
 **Advisor dispatches (independent first pass; the Planner read raw answers).**
 - `advisor-gemini-pre` | `ses_e4597e692ffeYAzD8jOqqLf5qy` | model reported `google/gemini-4-argon` | question: does scope B fulfil the F1-F5 spec and invariants within the allowed surfaces and a single correction batch; name blocking gaps, edge cases and the minimum necessary changes | incorporated: retained-preview parity, failed-rehydration rollback, result identity preserved in a resumed ACTIVE session, timeout-safe claim ownership, queue deduplication, direct-admission reservations; rejected the baseline-only durability shortcut.
 - `advisor-integration-pre` | `ses_e4597e69affeNrjTkDhw92ThFx` | model reported `opencode-go/MiMo-V2.6-Flash` | question: does scope B correctly serialize per-session lifecycle and pool admission, including stop/remove vs write/exec/ensure, queue reservation before pressure, and an absolute queue deadline without late creation or deadlock | incorporated: non-blocking claims; no post-scan direct-create shortcut; reconcile queue deadline metadata on cancellation; reserve direct creations; define rehydration bundle/checkout/exit/ancestry explicitly; `tests/gate-test-evidence.test.ts` guard-expiry assertions must change.
 - `advisor-security-pre` | `ses_e4597e699ffeIpEkRsjz4sMNvq` | model reported `google/gemini-4-argon` | question: does scope B prevent data loss for clean-but-unexported HEAD, post-finish continuation, every release route, and retained-mode apply/diff without weakening approval or protected-path guarantees | incorporated: rehydration rollback; never force-overwrite an unrelated prior result; verify imported commit identity; retain claims until an operation settles; rejected `discard`/baseline exceptions; retired the claim that a mutable preview comparison binds human approval. **Separate follow-up for Tier 2:** the preview-to-apply binding race spans the human prompt and is not solved by F1-F5.
 - Skips recorded: `advisor-spec-pre` (only one spec carrier per position; `advisor-gemini-pre` carries it), design (no UI surface), testing/maintainability (covered by the three above), `planner-evidence` (facts available through AFT and `explore` `ses_e459fad8cffeB6CeJUwO6Z5OYr`).
-- `advisor-gemini-post` is required after the writer and verifier evidence and before Gate 2.
+- `advisor-gemini-post` ran after the writer at `ses_e455baad1ffens5zVc7Lzgx8X5` and returned REFINE; its findings were closed by the targeted refinement below.
 
 **Advice record — evidence and limitations.** Observed through AFT/reads: the plugin's diff
-defaults to active mode; the retained diff lacks approval-preview fields; recreation calls
-`runSnapshot`, changing the baseline and clearing `resultRef`; cleanliness-only release omits
-tip verification; two release paths probe before the claim; write/exec/ensure lack the finish
-claim; the guard wrapper releases the claim on timeout while the callback may still run; queue
-reservation and timeout follow the pressure scan; direct creations have no synchronous
+defaults to active mode; the retained diff lacked approval-preview fields; recreation called
+`runSnapshot`, changing the baseline and clearing `resultRef`; cleanliness-only release omitted
+tip verification; two release paths probed before the claim; write/exec/ensure lacked the finish
+claim; the guard wrapper released the claim on timeout while the callback could still run; queue
+reservation and timeout followed the pressure scan; direct creations had no synchronous
 reservation. CodeGraph failed twice with `attempt to write a readonly database`; AFT and reads
 were used instead. Not re-executed by the Planner: candidate and base identities, branch, the
-Codex diff and findings, and RDD state. `mode-status` returned `ROLE_DENIED_FOR_AFT_READ` for
-the advisor read path. Gate 1: PASS,
-`sha256:c2ae4c3777d285abba325b6d467ef2d07d9987cade515ae5992998ce8a8c6201`. The gate act also
-committed tracker metadata `bb21e5c` (one path, +3 lines, passive, verified by
-`host_review_assess` from `b731bbe`); that commit contains no source, so the S17 boundary holds.
+Codex diff and findings, and RDD state. Gate 1: PASS,
+`sha256:c2ae4c3777d285abba325b6d467ef2d07d9987cade515ae5992998ce8a8c6201`.
 
 **Resolved design (D1-D5).**
 - **D1 / F1.** `sandbox_diff` queries worker status and selects active mode when a worker is
   live, retained otherwise; inspection and apply never activate a worker. `sandbox_apply`
-  prepares the current result when live and then refreshes status. The retained path must emit
-  the bounded `applyPreview` plus the complete plain/ANSI artifacts through the existing
+  prepares the current result when live and then refreshes status. The retained path emits the
+  bounded `applyPreview` plus the complete plain/ANSI artifacts through the existing
   completeness check, cap and approval prompt. One narrow retry for the status-to-diff
-  disappearance race, never for policy refusals or already-executed commands. Auto-release
-  leaves a durable `RESULT_READY`; a stranded ACTIVE session without a valid durable result
-  fails closed. Approval, divergence, protected-path, plan-root, symlink and truncation checks
-  are preserved.
+  disappearance race, never for policy refusals or already-executed commands. Approval,
+  divergence, protected-path, plan-root, symlink and truncation checks are preserved.
 - **D2 / F2.** Rehydrate (typed refusal only on failure): resolve the retained result and the
   original baseline to immutable IDs under the shared claim; bundle without `runSnapshot`
   repointing the baseline; bootstrap the guest work branch at the result tip with a baseline
@@ -304,11 +279,17 @@ committed tracker metadata `bb21e5c` (one path, +3 lines, passive, verified by
   the worker HEAD and the host exported commit, then require valid IDs, a clean tree and
   `HEAD == exported commit`; otherwise export and re-verify, or keep the worker. Applies to
   `sweepIdle`, `sweepUnfinished`, `reapOnDisconnect`, `releaseUnderPressure` and every other
-  removal path. Baseline equality or a matching ref string is not proof. Pressure keeps a
-  dirty or unreadable ACTIVE worker; a clean ACTIVE worker without a matching exported tip is
-  verified before any release; an exhausted deadline starts no new pressure work; a failure
-  retains ownership and accounting. `discard` deletes the durable result only after a safe
-  removal. A broken, unverifiable worker needs owner recovery, never a silent destroy.
+  removal path. Baseline equality or a matching ref string is not proof. `discard` deletes the
+  durable result only after a safe removal. A broken, unverifiable worker needs owner recovery,
+  never a silent destroy. **Pressure, amended in T10:** pressure releases a dirty, idle,
+  unclaimed `SANDBOX_ACTIVE` worker only after the export proof: it is exported and re-verified
+  before the slot is given back (the same snapshot `sweepUnfinished` takes at the 60 s idle
+  threshold), so invariant 1 holds and the session remains continuable by rehydration (D2). An
+  unreadable ACTIVE worker is never exported blind and is kept; a failed export or a failed
+  re-proof keeps the worker, its edits and its accounting; a worker whose lifecycle claim is
+  already held is skipped (`release_skipped_busy`). A clean ACTIVE worker without a matching
+  exported tip is verified (and exported) before any release; an exhausted deadline starts no
+  new pressure work; a failure retains ownership and accounting.
 - **D4 / F4.** Extend `withFinishGuard`/`isFinishing` into one non-blocking per-sandbox-session
   claim, acquired before any freshness, status or export decision and held through the adapter
   call, stop/remove, state write and cleanup. It covers write, exec, ensure (direct and queued),
@@ -319,29 +300,105 @@ committed tracker metadata `bb21e5c` (one path, +3 lines, passive, verified by
   settlement or quiescence, not by the timeout wrapper alone; a requester never holds the claim
   while parked; a queued creation acquires it before dequeue and admission, and contention
   leaves the entry queued under its original deadline.
-- **D5 / F5.** Perform deduplication, capacity check, visible reservation and absolute deadline
+- **D5 / F5.** Deduplication, capacity check, visible reservation and absolute deadline happen
   atomically before the pressure await; duplicates share the pending promise; the scan and the
-  wait consume the same deadline so a hung scan cannot block a timely rejection; revalidate
-  identity, cancellation, deadline and admission after the scan and drain FIFO only; remove the
-  post-scan direct-create shortcut; a late completion cannot resurrect a timed-out or
+  wait consume the same deadline so a hung scan cannot block a timely rejection; identity,
+  cancellation, deadline and admission are revalidated after the scan and FIFO drains only; the
+  post-scan direct-create shortcut is gone; a late completion cannot resurrect a timed-out or
   disconnected requester; direct and queued creations take a synchronous reservation counted
   once; metadata is cleaned on timeout, drain, disconnect, success and failure; the queue
   deadline covers admission, and creation/adapter deadlines start after it.
 
-**Phase B.** The PM holds a ready writer brief for `odd-apply` implementing D1-D5 in one batch
-with the seven required test scenarios (public apply after finish; continuation A and B against
-the baseline; clean-but-unexported HEAD across all four routes; a write between status and
-claim; a write after the claim including timeout-retained claim and no double remove; bounded
-pressure latency; simultaneous capacity including a direct creation) plus the FIFO, disconnect,
-non-descendant, failed-removal, policy-ordering and retained-preview negatives. Gate 2 follows
-the writer, the verifier, `advisor-gemini-post` and the pre-commit assessment; T10 is not
-ticked before Gate 2.
+## T10 — correction after Codex review (scope B: F1-F5)  [installed, uncommitted]
+
+**Route / trigger.** ROUTE: bug investigation | intent: authorized change | route: ODD secure |
+specialist: pm-odd `ses_e45a26b3fffeViIcGnokjSGtlF` → Planner → `odd-apply` | basis:
+WORKFLOW.md. Trigger: Tier 4 (Codex) returned FLAWS_FOUND on `git diff 0479721`, with F1-F5
+P1/P2 findings, three of them data loss. One correction batch; no native review, no commit of
+S17 paths, no restart.
+
+**B.1 — implementation (result `ses_e45805fe5ffeTjFbtZKsjZsIFf`, commit `141571d`).**
+F1 retained/active selection with retained preview and artifacts plus one narrow retry; F2
+rehydrate from the result tip with the original baseline mirror, ancestry-checked publish and
+`CREATING_SANDBOX → RESULT_READY` rollback; F3 `verifyWorkerExport`/`removeWorkerVerified`
+(head equality) across every removal path; F4 `withLifecycleClaim` per session, non-blocking,
+held past the caller deadline, with server-dispatch coverage and typed refusal versus quiet
+skip; F5 synchronous reservation before enqueue, shared duplicate pending, cap and deadline
+before the scan, post-scan revalidation, single release, disconnect metadata cleanup. New tests
+`broker/tests/retained-apply.test.ts` and `broker/tests/lifecycle-claim.test.ts`.
+
+**B.2 — test-only refinement (result `ses_e45415447ffeP8RVM1kn9edKuG`).** Closed the
+`advisor-gemini-post` REFINE gaps: the deterministic scenario-4 interleave barrier (a claim
+outliving the caller deadline keeps ownership; sweep and pressure skip; a second dispatch is a
+typed refusal; settlement alone releases it), retained truncation and retained-S17 negatives,
+rehydration CAS/rollback assertions, and the F5 pressure reconciliation.
+
+**B.3 — comment + test (result `ses_e4530ffd9ffeSRDvWHhou2WKnw`, commit `b6f77b3`).** The
+writer found that the code exports-then-releases a dirty idle ACTIVE worker under pressure while
+the recorded D3 prose said pressure keeps it. Owner decision: the code is right and the prose
+was wrong, because export-then-verify preserves invariant 1 and rehydration keeps the session
+continuable. The `releaseUnderPressure` comment and a bidirectional test were corrected; no
+production logic changed.
+
+**Gates.** Gate 1 PASS `sha256:c2ae4c3777d285abba325b6d467ef2d07d9987cade515ae5992998ce8a8c6201`
+(metadata commit `bb21e5c`). Gate 2 PASS
+`sha256:7bdfdfeca4a4d2229edd18acc6143f2a3b0fab2bc707dda2af1e66ad261fc234` (metadata commit
+`43867d7`). Both metadata commits are tracker-only (`host_review_assess --committed-only`,
+risk `passive`, one path), so the S17 boundary held: no source is committed.
+
+**Observed checks (independent).** `host_test_run runner=broker-unit` on the installed tree at
+`gitHead 59d3050`: `1985 pass, 9 skip, 2 fail, 9133 expect() calls, 1996 tests across 109 files`,
+exit code 1. The two failures are the `tests/v2-launch.test.ts` profile drift documented above,
+pre-existing at base `4d32ff7`. The sandbox-only EACCES `mkdir /nonexistent` failures did not
+reproduce on the host runner. `host_review_assess` (workspace, two intended untracked files
+declared): risk `high`, 21 paths, 4154 changed lines, reason `process_boundary` on
+`broker/src/service.ts`, `review_due: high_risk`. Writer-observed build: `bun build
+--target=bun src/main.ts`, 37 modules, 0.62 MB.
+
+**Follow-ups recorded, not blockers.** (1) The candidate is ~4154 lines / 170 KiB, far over the
+400-line and 100 KiB commit budget: the owner splits by seam or records a one-off size
+exception. (2) `tests/reaper.test.ts` still carries an older title for the pressure rule; its
+assertions pass via the failed-export path. (3) `broker/src/reaper.ts` header comments still
+describe unreadable status as exported. (4) There is no explicit pressure-deadline parameter:
+the parked request's queue timer bounds the pass and each adapter call carries its own timeout.
+(5) The preview-to-apply approval-binding race is a separate Tier 2 item. (6) `review_due:
+high_risk` is outstanding owner work; native review was explicitly out of scope and was neither
+started nor acknowledged.
+
+**Owner landing steps (S17 — the owner reviews and commits, then restarts).** Uncommitted on
+`fix/q114-worker-release`, current HEAD `43867d7` (tracker metadata only):
+- `broker/src/config.ts`
+- `broker/src/policy.ts`
+- `broker/src/reaper.ts`
+- `broker/src/server.ts`
+- `broker/src/service.ts`
+- `broker/src/state.ts`
+- `broker/tests/config.test.ts`
+- `broker/tests/fixtures/sandbox-tools-surface.json`
+- `broker/tests/gate-test-evidence.test.ts`
+- `broker/tests/lifecycle-claim.test.ts` (new, untracked — needs `git add`)
+- `broker/tests/queue.test.ts`
+- `broker/tests/reaper.test.ts`
+- `broker/tests/retained-apply.test.ts` (new, untracked — needs `git add`)
+- `broker/tests/server-reaper-log-seam.test.ts`
+- `broker/tests/service-apply.test.ts`
+- `broker/tests/service-diff.test.ts`
+- `broker/tests/service-git-commit-session.test.ts`
+- `broker/tests/staging-chain.test.ts`
+- `broker/tests/state-artifacts.test.ts`
+- `broker/tests/worker-release-outcome.test.ts`
+- `opencode/plugins/lib/tool-specs-sandbox.ts`
+
+Split into coherent commits (by F seam and by source-versus-tests) or record a `review-size-
+exception` with its reason, then restart the broker for the change to take effect. The two new
+test files must be staged before `host_sandbox_result_install` can be replayed for them.
 
 
 ## Revisions
 - r1 2026-11-08T07:32:38Z gentle-orchestrator: Record Q114 T5 installed candidate, T6-T8 plan and route evidence
 - r2 2026-11-08T08:48:06Z gentle-orchestrator: Record T6-T9 installed candidates, the independent broker-unit run, residual findings and owner landing steps
 - r3 2026-11-08T09:30:59Z gentle-orchestrator: Land T10 Phase A advice record: advisor availability correction, scope B, three advisor dispatches, Gate 1 hash, design D1-D5
+- r4 2026-11-08T11:17:41Z gentle-orchestrator: Land T10 closure: scope B F1-F5 installed, three results, Gate 1/2 hashes, amended D3, follow-ups and owner landing steps
 
 ## Gates
 - T10 PASS 2026-11-08T09:26:33Z planner ref=q114-correction-u4 pre: ses_e4597e692ffeYAzD8jOqqLf5qy; ses_e4597e69affeNrjTkDhw92ThFx; ses_e4597e699ffeIpEkRsjz4sMNvq
