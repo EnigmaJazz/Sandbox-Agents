@@ -111,3 +111,65 @@ the record no longer points at it, so neither this path nor `sweepIdle` will fin
 new log line covers only a throw from the bookkeeping, not a silent remove failure. Not fixed
 here: the same pattern is in every release path, so it needs its own unit (report the remove
 failure from `releaseWorker`, keep `workerName` when it fails).
+
+## 2026-11-08 — Q114: prompt slot release, pressure sweep, occupancy visibility
+
+**Problem (observed).** Broker journal 2026-11-07 15:00–17:46 with `maxWorkers: 4`: three
+`ensureWorker` calls failed with `queued ... timed out after 600000ms` (17:29, 17:39, 17:41);
+two more waited 576 s and 77 s. Each wait ended only when the reaper logged
+`reaped_result_ready`. `sweepIdle` released a `RESULT_READY` worker only after `reapIdleMs`
+(default 3,600,000 ms, `broker/src/config.ts:510`), although the result was already host-side.
+With `sandbox_apply` unused, a finished worker held a slot for up to an hour. `d65518b` already
+releases on terminal states, so this is a different path; which states held the slots was not
+confirmed, so the occupancy log now records it. Host sample 17:45: 16 cores, load 1.4, 29 GiB
+RAM with 6.5 GiB available, live sandbox VMs 139–458 MiB each; per-worker peak under test
+runners is unmeasured.
+
+**Route / trigger.** ROUTE: bug investigation + bounded behaviour change | intent: authorized
+change | route: ODD secure | specialist: pm-odd, writer odd-apply | basis: WORKFLOW.md.
+Trigger: secure always-delegate (every mutation); S17 review by the owner.
+Dispatch: pm-odd unit `q114-worker-release-u1` (PM session `ses_e46079d08ffeCJOJP3V3wC76Z7`),
+writer `odd-apply` session `ses_e4606fc85ffe3Nh0FeDfaR2qes`, result commit `ac2df8c`
+(installed into the worktree, not committed).
+
+### T5 — release at `RESULT_READY` + pool-occupancy observability  [installed, uncommitted]
+- `buildPrepareResultOp` releases the worker after a successful export: `releaseWorker`, then
+  clear `workerName` and set `workerState: DESTROYED`, keeping state `RESULT_READY` and
+  `resultRef`, so apply/preview/retain/discard are unaffected.
+- `sweepIdle` releases a `RESULT_READY` record without the `idleMs` age gate (safety net).
+- `describePoolOccupancy` logs `queue_wait` / `queue_timeout` with queue depth, pool allocations
+  and every held session's `sessionID`, state, `workerState`, age and `workerName`; the
+  `QueuedTimedOutError` message carries the same snapshot and tells the delegating session to
+  report blocked to its coordinator.
+- Observed: focused `bun --cwd broker test tests/reaper.test.ts tests/queue.test.ts
+  tests/service-apply.test.ts` — 48 pass, 0 fail, 274 `expect()` calls. Full suite: 1963 tests,
+  6 failures — 1 new (`staging-chain.test.ts` immutability test, see T6) and 5 pre-existing
+  environment/drift failures (`v2-launch` ×2 nono-profile drift, `staging-stage-ops` ×2 and
+  `gate-verdict-auto` ×1 EACCES `mkdir /nonexistent`). Build `bun build --target=bun src/main.ts`
+  from `broker` succeeded.
+- Deviation, recorded: the writer's tracker edit was refused with `PLAN_ROOT_PROTECTED`
+  (`BROKER_PLAN_ROOT_PROTECTION`), so this section was landed by the orchestrator through
+  `host_plan_write` after the candidate was produced, not before the first source edit.
+- Reviewability: 495 authored changed lines, 25,879 authored patch bytes (broker-observed).
+  Exceeds the local 400-line per-commit guard; the owner splits source and tests at commit
+  time or records a `review-size-exception`.
+
+### T6 — correction: keep `sandbox_finish` idempotent after release; fix the staging test
+`staging-chain.test.ts` re-finishes a session after the first finish released its worker, so the
+test no longer models a reachable flow. Correction: return the existing `resultRef` unchanged
+when a re-finish arrives on `RESULT_READY` with no live worker, and re-ensure a worker in the
+test before the changed-content scenario so the `already pinned` refusal stays exercised.
+
+### T7 — pressure-aware sweep
+When the pool queue is non-empty, release idle `RESULT_READY` workers at once and
+export-then-release idle `SANDBOX_ACTIVE` workers; never a blind release of unexported edits.
+
+### T8 — size `maxWorkers` from measurement
+Record per-worker peak CPU and RSS under `bun --cwd broker test` and a build, then set
+`BROKER_MAX_WORKERS` from free RAM at peak, cores and parallel PM sessions. Note that
+`maxAggregateCpu: 8` and `maxAggregateMemBytes: 8 GiB` with 2 vCPU / 2 GiB per worker also cap
+the pool at 4, so raising `maxWorkers` alone changes nothing.
+
+
+## Revisions
+- r1 2026-11-08T07:32:38Z gentle-orchestrator: Record Q114 T5 installed candidate, T6-T8 plan and route evidence
