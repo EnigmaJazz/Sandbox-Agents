@@ -560,6 +560,71 @@ describe("failed rehydration cleanup (T11/C3)", () => {
     expect(control.ctx.pool.allocations[0]!.reserved).toBeFalsy();
   }, 60_000);
 
+  test("a failed rollback write logs its error while confirmed removal frees the allocation", async () => {
+    const vm = makeVm("rehydrate-rollback-write-fail", { maxWorkers: 1 });
+    const before = await releasedSession(vm);
+    const removalsAfterSetup = vm.calls.removed.length;
+    const originalError = new Error("bootstrap copy failed");
+    const persistenceError = new Error("rollback persistence failed");
+    const logEntries: Record<string, unknown>[] = [];
+    vm.ctx.logger = { log: (entry: Record<string, unknown>) => logEntries.push(entry) } as never;
+    vm.ctx.adapter.copyIn = async () => {
+      throw originalError;
+    };
+    const transition = vm.store.transition.bind(vm.store);
+    let rollbackAttempted = false;
+    vm.store.transition = ((sessionID, from, to, patch) => {
+      if (!rollbackAttempted && from === "CREATING_SANDBOX" && to === "RESULT_READY") {
+        rollbackAttempted = true;
+        throw persistenceError;
+      }
+      return transition(sessionID, from, to, patch);
+    }) as typeof vm.store.transition;
+
+    let caught: unknown;
+    try {
+      await buildEnsureWorkerOp(vm.ctx)(req("ensureWorker", "s1", { projectDir: vm.hostRepo }));
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBe(originalError);
+    expect(rollbackAttempted).toBe(true);
+    expect(vm.calls.removed.slice(removalsAfterSetup).filter((name) => name === "worker-s1")).toHaveLength(1);
+    expect(vm.ctx.pool.allocations.some((allocation) => allocation.sessionID === "s1")).toBe(false);
+    expect(vm.store.get("s1")!.workerName).toBeUndefined();
+    const rollbackLogs = logEntries.filter((entry) => entry.action === "release_rehydration_rollback_failed");
+    expect(rollbackLogs).toHaveLength(1);
+    expect(rollbackLogs[0]).toMatchObject({
+      sessionID: "s1",
+      operation: "ensureWorker",
+      result: "error",
+      error: persistenceError.message,
+    });
+    expect(vm.store.get("s1")!.resultRef).toBe(before.resultRef);
+    expect(vm.store.get("s1")!.baselineRef).toBe(before.baselineRef);
+
+    // Positive control: a successful rollback preserves the original error and emits no rollback-failure log.
+    const control = makeVm("rehydrate-rollback-control");
+    await releasedSession(control);
+    const controlLogs: Record<string, unknown>[] = [];
+    control.ctx.logger = { log: (entry: Record<string, unknown>) => controlLogs.push(entry) } as never;
+    control.ctx.adapter.copyIn = async () => {
+      throw originalError;
+    };
+    let controlError: unknown;
+    try {
+      await buildEnsureWorkerOp(control.ctx)(req("ensureWorker", "s1", { projectDir: control.hostRepo }));
+    } catch (err) {
+      controlError = err;
+    }
+    expect(controlError).toBe(originalError);
+    expect(control.store.get("s1")!.state).toBe("RESULT_READY");
+    expect(control.store.get("s1")!.workerName).toBeUndefined();
+    expect(control.ctx.pool.allocations.some((allocation) => allocation.sessionID === "s1")).toBe(false);
+    expect(controlLogs.some((entry) => entry.action === "release_rehydration_rollback_failed")).toBe(false);
+  }, 60_000);
+
   test("an unconfirmed cleanup keeps refs, name, FAILED and one held allocation; a later sweep clears it", async () => {
     const vm = makeVm("rehydrate-cleanup");
     const before = await releasedSession(vm);

@@ -11,16 +11,18 @@
  * - RESULT_READY -> release worker + allocation immediately (no age gate)
  *   through the SAME export-before-release policy as finishOrReleaseActive:
  *   a clean worktree is released, a dirty one is re-exported first, and an
- *   unreadable status (or a failed export) keeps the worker. State stays
+ *   unreadable status is never exported blind; the worker is kept. A failed
+ *   export also keeps the worker. State stays
  *   RESULT_READY and resultRef is kept: the result is already on the host side
  *   (git ref + bundle), so apply/preview/retain/discard still work. This is the
  *   safety net for a finish path that failed to release its own worker. A
  *   later ensureWorker re-creates it on demand.
  * - SANDBOX_ACTIVE + stale -> export-before-release through the same
  *   finishOrReleaseActive policy as sweepUnfinished: a clean worker is
- *   released (`reaped_active`), a dirty or unreadable one is exported to
- *   RESULT_READY first (`auto_finished`), and a failed export keeps the
- *   worker. No reaper path discards unexported edits.
+ *   released (`reaped_active`), a dirty one is exported to RESULT_READY first
+ *   (`auto_finished`), and an unreadable status is never exported blind; the
+ *   worker is kept. A failed export also keeps the worker. No reaper path
+ *   discards unexported edits.
  * - Terminal state (APPLIED/REJECTED/RETAINED/FAILED_CLOSED) still holding a
  *   live worker -> release it at once. Every path into those states should
  *   release its own worker; this catches the one that did not.
@@ -886,9 +888,10 @@ export async function releaseUnderPressure(
         continue;
       }
       // SANDBOX_ACTIVE: the same export-before-release policy as
-      // finishOrReleaseActive, under the lifecycle claim. A dirty or unreadable
-      // worker is exported and re-proven first; if the proof or the export
-      // fails the worker is KEPT (`pressure_skipped_dirty`).
+      // finishOrReleaseActive, under the lifecycle claim. A dirty worker is
+      // exported and re-proven first; an unreadable status is never exported
+      // blind, and if the proof or export fails the worker is KEPT
+      // (`pressure_skipped_dirty`).
       const entry = await finishOrReleaseActive(
         ctx,
         record,
