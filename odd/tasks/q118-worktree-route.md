@@ -2,11 +2,12 @@
 
 - **Feature:** `q118-worktree-route`
 - **Project:** `sandbox-integration`
-- **Status:** **Correction round 1 applied and verified; nothing committed.** All four post-code
-  review findings are closed, each with a RED-first test through the public broker op and a positive
-  control. The broker suite is green apart from the two known `tests/v2-launch.test.ts` profile-drift
-  failures. W1's paths plus `broker/tests/worktree-op-hardening.test.ts` remain uncommitted for the
-  owner (S17). W2 not started.
+- **Status:** **Correction batch 2 applied and verified; nothing committed.** The four post-code
+  review findings are closed (round 1), and the Codex Tier 4 MEDIUM blocker — an in-root project
+  alias that mutated before the routing refusal — is closed (batch 2). Test strength for the
+  filter, repository binding and profile grant is raised, and the TOCTOU residual is recorded as an
+  advisory. The broker suite is green apart from the two known `tests/v2-launch.test.ts`
+  profile-drift failures. W1's paths remain uncommitted for the owner (S17); W2 not started.
 - **Created:** 2026-11-10
 - **Delivery strategy:** `ask-on-risk`
 - **Chain strategy:** `stacked-to-main` (standing owner choice)
@@ -67,7 +68,7 @@ tool. Nothing creates the worktree. That is the whole gap.
 
 ## Scope
 
-### Unit W1 — broker core — CORRECTION ROUND 1 APPLIED, AWAITING OWNER COMMIT
+### Unit W1 — broker core — CORRECTION BATCH 2 APPLIED, AWAITING OWNER COMMIT
 
 Delivered in the worktree as result `ses_e39f89a04ffe0VNbzjPjWjI61h`, commit `918eca65`, 291
 authored changed lines across nine paths: `broker/src/{gitops,role-policy,server,service,types,
@@ -105,6 +106,42 @@ The tests drive the public op with the production `spawnArgv`; the old fake-spaw
 the defects were missed. Four tests, each with a positive control, in
 `broker/tests/worktree-op-hardening.test.ts`.
 
+### Correction batch 2 — Codex Tier 4 findings (2026-11-10, owner-authorized)
+
+Applied from result `refs/opencode-sandbox/result/ses_e39863ea5ffeHwc22dnwL1nvN3`, result commit
+`12c288f77edb85005fbafb421422e4c430def47e`, 67 authored changed lines across three paths:
+`broker/src/validation.ts`, `broker/tests/worktree-op-hardening.test.ts`,
+`broker/tests/v2-launch.test.ts`. One batch, no second round.
+
+1. **MEDIUM blocker — an in-root project alias mutated before it was refused.** `assertWorktreeTarget`
+   resolved `<root>/<project>` with `realpathSync`, so a symlink alias inside the root (for example
+   `root/sample -> root/actual`) produced the target `root/actual/<name>`; `worktree add` ran, and
+   only the later routing-identity comparison refused — leaving the branch and the worktree behind.
+   The op now refuses a project directory whose resolved path differs from the literal
+   `<root>/<project>` **before any spawn**, and the refusal sits after the containment check so an
+   escape still reports the escape. RED observed verbatim before the fix:
+   `worktree created at /tmp/git-worktree-hardening-TDznBS/worktrees/actual/topic, but project
+   routing post-condition failed; cleanup is not automatic` — the reviewer's claim, reproduced.
+   The regression test asserts the refusal **and** that no branch `topic` and no worktree at
+   `root/actual/topic` exist afterwards.
+2. **Repository binding covered the wrong commands.** The old filter excluded `rev-parse --verify`,
+   which is the base-resolution call — the most important repo-side command. The assertion now
+   classifies by `cwd`, so every repo-side call (base `rev-parse ... ^{commit}`, `show-ref`,
+   `worktree add`) must carry `GIT_DIR = gitDirFor(repoDir)` and every destination call must carry
+   `gitDirFor(target)`; no call may carry `-C`. It fails against the pre-round-1 code.
+3. **The filter test used a config key `worktree add` never executes.** `core.sshCommand` is not
+   run by a checkout. The test now commits `.gitattributes` (`*.txt filter=probe`), configures a
+   repository-local `filter.probe.smudge` pointing at an executable script with a marker, and
+   asserts the op refuses before the target exists **and** that the marker was never written. The
+   positive control is the same attribute with no local filter command: the attribute alone is
+   inert, the op resolves, and `tracked.txt` really is checked out.
+4. **The profile grant was pinned inside an already-failing test.** The review-clones assertion sat
+   in "reaches the same hosts and project roots as V1", which fails at `:94` on pre-existing
+   profile drift, so the assertion after it never ran. It now lives in its own test that pins
+   `meta.version` 0.1.3, the read grant, absence of a write grant, and absence of any read or write
+   grant on the broker state root or its parent.
+5. **TOCTOU residual — recorded, deliberately not fixed.** See the advisory under Constraints.
+
 ### Unit W2 — plugin surface and docs — NOT STARTED
 
 `opencode/plugins/lib/tool-specs-host-ops.ts` (`host_git_worktree`, one `ctx.ask`),
@@ -116,7 +153,7 @@ call-sweep tests plus the regenerated fixture.
 
 Deleting, moving, pruning or repairing worktrees; `--force`, `--detach`, `--orphan`, `--porcelain`;
 remote creation, fetch or push; switching an existing checkout; changing registered roots; any
-profile or sandbox grant change.
+profile or sandbox grant change; fixing the TOCTOU residual in this batch.
 
 ## Post-code security review (2026-11-10) — BLOCKERS
 
@@ -148,7 +185,8 @@ claims against `broker/src/gitguard.ts` myself.
 Reviewer also flagged as non-blocking: TOCTOU on canonical parents between the existence check and
 the spawn; post-creation refusal does not roll back; the tests bypass production hardening.
 
-All four are closed by correction round 1 above.
+All four are closed by correction round 1. The Codex Tier 4 review that followed returned the
+MEDIUM blocker and the test-strength findings closed by correction batch 2.
 
 ## Verification actually observed
 
@@ -166,9 +204,26 @@ All four are closed by correction round 1 above.
   tests/gitops.test.ts tests/host-git-guard-u2.test.ts tests/host-git-hardening.test.ts` — 95 pass,
   0 fail (writer-observed). RED observed before the fix on all four new tests.
 - Correction round 1: `host_test_run runner=broker-unit` on the installed tree at `gitHead 6aebe52`
-  — **2018 pass, 9 skip, 2 fail**, 9403 expect calls, 2029 tests across 111 files, exit 1. Both
-  failures are the known pre-existing `tests/v2-launch.test.ts:64` and `:94` profile-drift
-  assertions. `bun build --target=bun src/main.ts` succeeded (writer-observed).
+  — **2018 pass, 9 skip, 2 fail**, 9403 expect calls, 2029 tests across 111 files, exit 1.
+- Correction batch 2: alias RED observed before the fix — `rejects.toThrow(/alias/i)` failed with
+  `worktree created at .../worktrees/actual/topic, but project routing post-condition failed;
+  cleanup is not automatic` (writer-observed); the same run was **37 pass, 1 skip, 3 fail** (the
+  alias test plus the two known profile-drift failures).
+- Correction batch 2, post-fix targeted: `bun test tests/worktree-op-hardening.test.ts
+  tests/worktree-op.test.ts tests/v2-launch.test.ts` — **46 pass, 1 skip, 2 fail**, only
+  `v2-launch.test.ts:64` and `:94` (writer-observed).
+- Correction batch 2: `host_test_run runner=broker-unit` on the installed tree at `gitHead ca0829e`
+  — **2020 pass, 9 skip, 2 fail**, 9418 expect calls, 2031 tests across 111 files, exit 1; the two
+  new tests are the +2. Both failures are the known pre-existing `tests/v2-launch.test.ts:64` and
+  `:94` profile-drift assertions. `bun build --target=bun src/main.ts` succeeded (writer-observed).
+- Environment note: the writer's in-sandbox full `bun test` also showed two
+  `tests/staging-stage-ops.test.ts` failures from `EACCES: permission denied, mkdir '/nonexistent'`.
+  The host runner at `ca0829e` does not reproduce them; they are the environment-sensitive class
+  already known in this repository and unrelated to this diff.
+- Install note: `host_sandbox_result_install` first refused with `working tree diverged from
+  baseline at: broker/tests/worktree-op-hardening.test.ts` because that file was created
+  untracked (the baseline snapshot stages it, the host index did not). The owner staged that one
+  path; the same result then installed. No byte changed.
 
 ## Constraints
 
@@ -181,6 +236,23 @@ All four are closed by correction round 1 above.
   `host_sandbox_result_install`, and the owner commits.
 - Risk item 2/3: a Codex review before merge. The agent cannot commit S17 paths.
 - No push, no broker restart, no install into `~/.config`.
+
+### Advisory — TOCTOU residual on the canonical parents (NOT fixed, by instruction)
+
+`assertWorktreeTarget` resolves and checks `<root>/<project>` at validation time, and
+`buildGitWorktreeOp` (service.ts:4472-4486) spawns `git worktree add` afterwards. Between the two,
+a directory replaced by a symlink can redirect the spawn to a path that satisfied no check. The
+window is small and requires write access inside an already-registered worktree root, which is
+exactly where a sandboxed writer can write; so it is a real residual, not a theoretical one.
+
+Why it was not fixed here: closing it means holding the path identity across the spawn — an
+`O_NOFOLLOW` directory descriptor or a compare-after-create-then-rollback — which is a design
+change, not a one-line guard, and the owner authorized one correction batch only. Candidate shapes
+for a future unit: create the destination parent via a single `mkdirat`-style open on a validated
+directory fd, then run `worktree add` with `cwd` bound to that fd's path; or re-validate the
+canonical parents immediately after the add and delete the branch with `git branch -D` plus
+`git worktree remove --force` when the identity moved. The second shape also gives the rollback the
+current code lacks when a post-condition fails after creation.
 
 ## Route and trigger evidence
 
@@ -198,6 +270,9 @@ All four are closed by correction round 1 above.
   worktree (Q105: `planner`/`odd-apply` not dispatchable), so the coordinator-accepted direct-writer
   degradation continued. Verification: writer-observed targeted and full suites, then
   `host_test_run runner=broker-unit` by the orchestrator.
+- Correction batch 2: `route: delegated`, specialist `general` (one fresh writer, one batch), trigger
+  as above plus the Codex Tier 4 authorization. Verification: writer-observed RED and targeted
+  suites, then `host_test_run runner=broker-unit` by the orchestrator on the installed tree.
 
 ## Progress
 
@@ -213,6 +288,13 @@ All four are closed by correction round 1 above.
 - 2026-11-10: round applied (result commit `10ee9407`); four RED-first tests added; broker suite
   green apart from the two known profile-drift failures; exported, installed into the worktree, and
   left uncommitted for the owner.
+- 2026-11-10: Codex Tier 4 returned the profile unit PASS and one MEDIUM blocker plus three
+  test-strength findings on Q118.
+- 2026-11-10: correction batch 2 authorized and applied (result commit `12c288f7`); the in-root
+  alias is refused before any spawn with a no-leftovers regression test; the filter test uses a real
+  `filter.probe.smudge`; the repository binding covers the base `rev-parse`; the review-clones grant
+  is pinned in an independent test; the TOCTOU residual is recorded as an advisory.
+- 2026-11-10: broker suite at `ca0829e` — 2020 pass, 9 skip, 2 fail (both known profile drift).
 
 ## Open questions
 
@@ -223,13 +305,18 @@ All four are closed by correction round 1 above.
 3. W2 needs an owner decision on the installed-plugin path: `host_git_branch`/`host_git_head` are
    already absent from the retained-master surface although both are committed and granted, so a new
    tool may need a plugin reinstall and broker restart before any session can call it.
+4. The TOCTOU advisory above needs a future unit if the owner wants it closed; it is not part of
+   W1's delivery.
 
 ## Next step
 
-Owner: run the Codex review over the correction-round diff, then commit the S17 paths by hand. The
-exact path list is in "Owner commit list" below. Nothing is staged or committed by the agent.
+Owner: run the Codex review over the correction-batch-2 diff, then commit the S17 paths by hand.
+The exact path list is in "Owner commit list" below. Nothing is staged or committed by the agent
+except that the owner already staged the one untracked test file the install required.
 
 ## Owner commit list (exact)
+
+### Unit 1 — Q118 broker core (S17)
 
 Tracked modifications (9):
 - `broker/src/gitguard.ts`
@@ -242,12 +329,23 @@ Tracked modifications (9):
 - `broker/tests/gitops.test.ts`
 - `broker/tests/service-host-tools.test.ts`
 
-Untracked, need `git add`:
+New files (2) — `broker/tests/worktree-op-hardening.test.ts` is already staged (`A`) by the owner,
+`broker/tests/worktree-op.test.ts` still needs `git add`:
 - `broker/tests/worktree-op.test.ts`
 - `broker/tests/worktree-op-hardening.test.ts`
 
-Not part of the S17 commit (separate metadata unit):
-- `odd/tasks/q118-worktree-route.md`
+### Unit 2 — Q102 profile read grant (separate unit, Codex PASS)
+
+- `nono/profile/opencode-v2-secure.json` (version 0.1.3, the review-clones read grant)
+- `broker/tests/v2-launch.test.ts` (the independent grant test)
+
+Owner installs this one, not the agent:
+`./scripts/install-user-files-v2 --dry-run` then `./scripts/install-user-files-v2 --apply`, then
+relaunch the V2 process so the new profile is picked up.
+
+### Not part of either commit (metadata)
+
+- `odd/tasks/q118-worktree-route.md` (this tracker)
 
 
 ## Revisions
@@ -255,3 +353,4 @@ Not part of the S17 commit (separate metadata unit):
 - r2 2026-11-10T15:36:04Z gentle-orchestrator: Record W1 applied+verified, S17 commit refusal, Q105 PM-lane block and Q102 P0 gap
 - r3 2026-11-10T15:45:23Z gentle-orchestrator: Record security review blockers; W1 candidate not installable
 - r4 2026-11-10T17:13:11Z gentle-orchestrator: Correction round 1 applied and verified: findings 1-4 closed with RED-first tests; suite green apart from the two known profile-drift failures
+- r5 2026-11-10T17:57:06Z gentle-orchestrator: Correction batch 2 (Codex): alias refused before spawn, tests strengthened, TOCTOU advisory recorded; suite 2020 pass apart from known profile drift
