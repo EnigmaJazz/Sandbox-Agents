@@ -2,7 +2,11 @@
 
 - **Feature:** `q118-worktree-route`
 - **Project:** `sandbox-integration`
-- **Status:** **BLOCKED — W1 candidate is NOT installable.** Applied to the worktree, tests green, but a post-code security review found three blockers and one functional defect. Nothing committed; W2 not started.
+- **Status:** **Correction round 1 applied and verified; nothing committed.** All four post-code
+  review findings are closed, each with a RED-first test through the public broker op and a positive
+  control. The broker suite is green apart from the two known `tests/v2-launch.test.ts` profile-drift
+  failures. W1's paths plus `broker/tests/worktree-op-hardening.test.ts` remain uncommitted for the
+  owner (S17). W2 not started.
 - **Created:** 2026-11-10
 - **Delivery strategy:** `ask-on-risk`
 - **Chain strategy:** `stacked-to-main` (standing owner choice)
@@ -63,7 +67,7 @@ tool. Nothing creates the worktree. That is the whole gap.
 
 ## Scope
 
-### Unit W1 — broker core — CANDIDATE APPLIED, NOT INSTALLABLE
+### Unit W1 — broker core — CORRECTION ROUND 1 APPLIED, AWAITING OWNER COMMIT
 
 Delivered in the worktree as result `ses_e39f89a04ffe0VNbzjPjWjI61h`, commit `918eca65`, 291
 authored changed lines across nine paths: `broker/src/{gitops,role-policy,server,service,types,
@@ -74,6 +78,32 @@ authorizing first, resolving `repoDir` through `resolveCanonicalProjectRoot`, re
 to be an exact registered non-checkout root, refusing an existing target or branch, an
 unresolvable or flag-shaped base, a non-checkout `repoDir`, a checkout `rootDir`, and a project
 directory resolving outside the root; then verifying HEAD, symbolic-ref and project routing.
+
+### Correction round 1 — 2026-11-10 (owner-authorized)
+
+The owner authorized one correction round covering all four post-code findings. Applied in the
+worktree from result `refs/opencode-sandbox/result/ses_e39ccbd2fffeBW0tUTYuWppgZh`, result commit
+`10ee9407d0c99fbf0c69649f24301670273a0d38`, 100 authored changed lines across four paths:
+`broker/src/{gitguard,service,validation}.ts` and the new
+`broker/tests/worktree-op-hardening.test.ts`.
+
+1. **Smudge/process filter execution.** `worktree` joined `GIT_EXECUTION_SUBCOMMANDS`
+   (`broker/src/gitguard.ts`), so `git worktree add` gets the same repository-local-config refusal
+   as `checkout` and `switch` before any spawn. Joined wholesale: the broker only ever builds
+   `git worktree add`, and a future `worktree list` caller would simply be guarded too.
+2. **Post-conditions in production.** The destination checks run with `cwd: target` and
+   `GIT_DIR = gitDirFor(target)`, so no caller `-C` reaches `assertNoCallerConfigOverride`; a
+   created worktree is verified instead of being left behind with a failing op.
+3. **Destination inside an existing checkout.** `assertWorktreeTarget` walks `canonicalProject` up
+   to `canonicalRoot` and refuses any directory carrying a `.git` entry, so a checkout — or an
+   inside-root symlink alias into one — cannot receive the new worktree.
+4. **Validated repository identity.** `gitDirFor(repoDir)` is bound and passed as `GIT_DIR` to
+   every repo-side command (base resolution, branch existence, `worktree add`), so a rewritten
+   `.git` pointer cannot redirect metadata after validation.
+
+The tests drive the public op with the production `spawnArgv`; the old fake-spawn fixture was why
+the defects were missed. Four tests, each with a positive control, in
+`broker/tests/worktree-op-hardening.test.ts`.
 
 ### Unit W2 — plugin surface and docs — NOT STARTED
 
@@ -118,6 +148,8 @@ claims against `broker/src/gitguard.ts` myself.
 Reviewer also flagged as non-blocking: TOCTOU on canonical parents between the existence check and
 the spawn; post-creation refusal does not roll back; the tests bypass production hardening.
 
+All four are closed by correction round 1 above.
+
 ## Verification actually observed
 
 - `bun test tests/worktree-op.test.ts tests/gitops.test.ts`: 48 pass, 0 fail (writer-observed).
@@ -129,8 +161,14 @@ the spawn; post-creation refusal does not roll back; the tests bypass production
 - `host_git_commit` refuses: `refusing to commit protected paths (S17): broker/src/gitops.ts,
   broker/src/role-policy.ts, broker/src/server.ts, broker/src/service.ts, broker/src/types.ts,
   broker/src/validation.ts`. The owner commits S17 bytes.
-- Green tests do not clear blockers 1-3: they exercise a fake spawn, not the production choke
-  point.
+- Green tests do not clear blockers 1-3: they exercise a fake spawn, not the production choke point.
+- Correction round 1: `bun test tests/worktree-op-hardening.test.ts tests/worktree-op.test.ts
+  tests/gitops.test.ts tests/host-git-guard-u2.test.ts tests/host-git-hardening.test.ts` — 95 pass,
+  0 fail (writer-observed). RED observed before the fix on all four new tests.
+- Correction round 1: `host_test_run runner=broker-unit` on the installed tree at `gitHead 6aebe52`
+  — **2018 pass, 9 skip, 2 fail**, 9403 expect calls, 2029 tests across 111 files, exit 1. Both
+  failures are the known pre-existing `tests/v2-launch.test.ts:64` and `:94` profile-drift
+  assertions. `bun build --target=bun src/main.ts` succeeded (writer-observed).
 
 ## Constraints
 
@@ -154,6 +192,12 @@ the spawn; post-creation refusal does not roll back; the tests bypass production
   would most likely have been caught.
 - Owner decision: Q118 relayed 2026-11-10. Branch `refactor/p0-shared-tool-table` is explicitly
   NOT reused: its whole divergence from origin/master is four Q114 worker-release paths.
+- Correction round 1: `route: delegated`, specialist `general` (one fresh writer; result installed
+  then verified), trigger: the mutation rule (every project mutation is delegated; this orchestrator
+  is read-only) plus the owner's one-round authorization. The `pm-odd` lane is still unusable in this
+  worktree (Q105: `planner`/`odd-apply` not dispatchable), so the coordinator-accepted direct-writer
+  degradation continued. Verification: writer-observed targeted and full suites, then
+  `host_test_run runner=broker-unit` by the orchestrator.
 
 ## Progress
 
@@ -165,26 +209,49 @@ the spawn; post-creation refusal does not roll back; the tests bypass production
 - 2026-11-10: `host_git_commit` refused the S17 paths, as designed.
 - 2026-11-10: independent security review returned three blockers plus one functional defect.
   Candidate is not installable.
+- 2026-11-10: owner authorized one correction round covering review findings 1-4.
+- 2026-11-10: round applied (result commit `10ee9407`); four RED-first tests added; broker suite
+  green apart from the two known profile-drift failures; exported, installed into the worktree, and
+  left uncommitted for the owner.
 
 ## Open questions
 
-1. **Authorization for one further correction round.** The unit's single correction was spent on
-   the symlink hole; the review blockers arrived after it. Policy does not grant a second round
-   without an explicit decision.
-2. Should `worktree` join `GIT_EXECUTION_SUBCOMMANDS` wholesale, or be classified per subcommand so
-   `git worktree list` stays unguarded?
+1. ~~Authorization for one further correction round.~~ Answered 2026-11-10: the owner authorized
+   exactly one round covering findings 1-4. That round is spent; any further change is a new unit.
+2. ~~`worktree` wholesale or per subcommand?~~ Answered 2026-11-10: wholesale. The broker only builds
+   `git worktree add`; a guarded `worktree list` is the fail-closed direction and costs nothing today.
 3. W2 needs an owner decision on the installed-plugin path: `host_git_branch`/`host_git_head` are
-   already absent from the retained-master surface although both are committed and granted, so a
-   new tool may need a plugin reinstall and broker restart before any session can call it.
+   already absent from the retained-master surface although both are committed and granted, so a new
+   tool may need a plugin reinstall and broker restart before any session can call it.
 
 ## Next step
 
-Owner decision required. Either authorize one correction round covering blockers 1-4 (then Codex
-review and commit), or revert the nine paths in the worktree with
-`git checkout -- broker/src/gitops.ts broker/src/role-policy.ts broker/src/server.ts broker/src/service.ts broker/src/types.ts broker/src/validation.ts broker/tests/gitops.test.ts broker/tests/service-host-tools.test.ts` and remove the untracked `broker/tests/worktree-op.test.ts`.
+Owner: run the Codex review over the correction-round diff, then commit the S17 paths by hand. The
+exact path list is in "Owner commit list" below. Nothing is staged or committed by the agent.
+
+## Owner commit list (exact)
+
+Tracked modifications (9):
+- `broker/src/gitguard.ts`
+- `broker/src/gitops.ts`
+- `broker/src/role-policy.ts`
+- `broker/src/server.ts`
+- `broker/src/service.ts`
+- `broker/src/types.ts`
+- `broker/src/validation.ts`
+- `broker/tests/gitops.test.ts`
+- `broker/tests/service-host-tools.test.ts`
+
+Untracked, need `git add`:
+- `broker/tests/worktree-op.test.ts`
+- `broker/tests/worktree-op-hardening.test.ts`
+
+Not part of the S17 commit (separate metadata unit):
+- `odd/tasks/q118-worktree-route.md`
 
 
 ## Revisions
 - r1 2026-11-10T14:33:05Z gentle-orchestrator: Create Q118 tracker: one supported worktree route from a named base
 - r2 2026-11-10T15:36:04Z gentle-orchestrator: Record W1 applied+verified, S17 commit refusal, Q105 PM-lane block and Q102 P0 gap
 - r3 2026-11-10T15:45:23Z gentle-orchestrator: Record security review blockers; W1 candidate not installable
+- r4 2026-11-10T17:13:11Z gentle-orchestrator: Correction round 1 applied and verified: findings 1-4 closed with RED-first tests; suite green apart from the two known profile-drift failures
