@@ -2,7 +2,7 @@
 
 - **Feature:** `q118-worktree-route`
 - **Project:** `sandbox-integration`
-- **Status:** W1 applied and verified in the worktree; W2 not started; owner commit and Codex review pending (S17)
+- **Status:** **BLOCKED — W1 candidate is NOT installable.** Applied to the worktree, tests green, but a post-code security review found three blockers and one functional defect. Nothing committed; W2 not started.
 - **Created:** 2026-11-10
 - **Delivery strategy:** `ask-on-risk`
 - **Chain strategy:** `stacked-to-main` (standing owner choice)
@@ -31,18 +31,13 @@ Observed 2026-11-10 in this dispatch:
    `origin/master..refactor/p0-shared-tool-table` for this seat, a ref the sandbox cannot see. The
    broker is therefore the correct place to create the branch and the worktree.
 
-The consumption half already exists and needs no change:
-
-- `resolveWorktreeAwareRoot` (validation.ts:1401) accepts exactly `<root>/<project>/<name>` under a
-  registered root that is not itself a checkout, requiring its own `.git`.
-- `resolveProjectID` (validation.ts:1488) returns the virtual id `<rootID>~<project>~<name>`, and
-  `findProject` (validation.ts:1420) resolves it back while the rule holds.
-- `gitDirFor` (validation.ts:1468) verifies a linked worktree's `.git` pointer against git's own
-  back-link.
-- `resolveCanonicalProjectRoot` (service.ts:3567) therefore accepts the worktree for every host
-  tool, because `findProject` already returned the worktree path.
-
-Nothing creates the worktree. That is the whole gap.
+The consumption half already exists and needs no change: `resolveWorktreeAwareRoot`
+(validation.ts:1401) accepts exactly `<root>/<project>/<name>` under a registered root that is not
+itself a checkout; `resolveProjectID` (validation.ts:1488) returns the virtual id
+`<rootID>~<project>~<name>` and `findProject` (validation.ts:1420) resolves it back; `gitDirFor`
+(validation.ts:1468) verifies a linked worktree's `.git` pointer against git's own back-link;
+`resolveCanonicalProjectRoot` (service.ts:3567) therefore accepts the worktree for every host
+tool. Nothing creates the worktree. That is the whole gap.
 
 ## Findings (2026-11-10)
 
@@ -50,8 +45,8 @@ Nothing creates the worktree. That is the whole gap.
   function list; `host_git_head` was callable with no arguments and returned branch
   `feat/q102-p0-staging`, `detached: false`. So "delegate branch creation to a PM" is live, but it
   is a one-way door: `host_git_branch` is create-only by contract (D33), and `switch: true` would
-  strand a shared checkout on the new branch with no supported switch-back. A worktree does not
-  have that problem, because it carries its own HEAD.
+  strand a shared checkout on the new branch with no supported switch-back. A worktree carries its
+  own HEAD and does not have that problem.
 - **The `pm-odd` lane cannot run the ODD writer chain in this worktree.** Its subagent surface
   permits only `explore`, `gentle-ai-verify` and `gentle-ai-verify-routine`; `planner` and
   `odd-apply` are not dispatchable targets. The PM returned BLOCKED with zero mutation. This is
@@ -59,7 +54,7 @@ Nothing creates the worktree. That is the whole gap.
   around. The coordinator accepted a direct-writer degradation for W1.
 - **`host_plan_write` moves the branch HEAD.** Creating this tracker wrote metadata commit
   `ff99a5a` after the unit-start anchor had been captured at `b7e2b48`, so the first PM run
-  blocked with `UNIT_START_ANCHOR_MISMATCH`. The anchor must be captured after the tracker commit.
+  blocked with `UNIT_START_ANCHOR_MISMATCH`. Capture the anchor after the tracker commit.
 - **Q102 P0 is not fully clear.** P0 docs and the preflight spike are closed (T1, `88bc5dc`,
   owner-approved 2026-11-07), but OPEN-1 (where the review runs) is still an owner decision, no
   real state directory is chosen, the sandbox is DENIED the hypothetical state directory so a
@@ -68,44 +63,24 @@ Nothing creates the worktree. That is the whole gap.
 
 ## Scope
 
-### Unit W1 — broker core — APPLIED, VERIFIED
+### Unit W1 — broker core — CANDIDATE APPLIED, NOT INSTALLABLE
 
-- `broker/src/types.ts`: `gitWorktree` in `Operation`, `exempt-from-sandbox-guard`, `OPERATIONS`.
-- `broker/src/validation.ts`: payload allowlist; `HOST_MUTATION_OPERATIONS`;
-  `assertWorktreeTarget(root, project, name)` with canonical containment.
-- `broker/src/gitops.ts`: pure `buildGitWorktreeArgv({ branch, target, sha })`.
-- `broker/src/role-policy.ts`: `gitWorktree: "MUTATE_PROJECT"` and
-  `host_git_worktree: "HOST_APPROVED_MUTATION"`.
-- `broker/src/service.ts`: `buildGitWorktreeOp`; `broker/src/server.ts`: dispatch case.
-- Tests first in `broker/tests/worktree-op.test.ts`, `broker/tests/gitops.test.ts`,
-  `broker/tests/service-host-tools.test.ts`.
+Delivered in the worktree as result `ses_e39f89a04ffe0VNbzjPjWjI61h`, commit `918eca65`, 291
+authored changed lines across nine paths: `broker/src/{gitops,role-policy,server,service,types,
+validation}.ts` and `broker/tests/{gitops.test,service-host-tools.test,worktree-op.test}.ts`.
+
+Behaviour: `gitWorktree` creates `git worktree add -b <branch> <root>/<project>/<name> <sha>`,
+authorizing first, resolving `repoDir` through `resolveCanonicalProjectRoot`, requiring `rootDir`
+to be an exact registered non-checkout root, refusing an existing target or branch, an
+unresolvable or flag-shaped base, a non-checkout `repoDir`, a checkout `rootDir`, and a project
+directory resolving outside the root; then verifying HEAD, symbolic-ref and project routing.
 
 ### Unit W2 — plugin surface and docs — NOT STARTED
 
-- `opencode/plugins/lib/tool-specs-host-ops.ts`: `host_git_worktree`, exactly one `ctx.ask`.
-- `opencode/plugins/lib/host-tool-approval.ts`: `buildGitWorktreeAsk`.
-- Both `sandbox-permissions.jsonc` fragments: `"host_git_worktree": "ask"`.
-- `docs/config-manifest-host-tools.md` and `docs/TODO.md` rows.
-- Surface and call-sweep tests plus the regenerated fixture.
-
-### Fixed contract (W1, as delivered)
-
-1. `authorizeHostDispatch(ctx, "gitWorktree", sessionID, agent)` runs first, before payload
-   validation.
-2. `repoDir` resolves through `resolveCanonicalProjectRoot` and must be a git checkout.
-3. `rootDir` resolves through `resolveProjectID` and must be a registered root with no `.git`.
-4. `project` and `name` match `WORKTREE_SEGMENT_RE`; `branch` passes `assertGitBranch`; `base`
-   defaults to `HEAD` and resolves through `git rev-parse --verify --quiet <base>^{commit}` to
-   40 hex.
-5. Refusals before any mutation: target exists; `<root>/<project>` missing, not a directory, or
-   resolving outside the canonical root; branch already exists (status 0 refuses, 1 continues,
-   anything else fails closed); base unresolvable or flag-shaped.
-6. Fixed argv with `cwd = <canonical repoDir>`: `["git","worktree","add","-b",branch,target,sha]`.
-7. Post-conditions: HEAD equals `sha`; symbolic-ref equals `branch`; `resolveProjectID(target)`
-   yields the virtual id and `findProject` returns `target`. A mismatch fails closed and names the
-   created path; cleanup is a non-goal.
-8. Bounded, redacted output (`capAndRedact`, `GIT_OUTPUT_MAX_BYTES`).
-9. Orchestrator-only; W2 adds fragment `ask` plus one in-tool `ctx.ask`.
+`opencode/plugins/lib/tool-specs-host-ops.ts` (`host_git_worktree`, one `ctx.ask`),
+`host-tool-approval.ts` (`buildGitWorktreeAsk`), both `sandbox-permissions.jsonc` fragments
+(`"host_git_worktree": "ask"`), `docs/config-manifest-host-tools.md`, `docs/TODO.md`, surface and
+call-sweep tests plus the regenerated fixture.
 
 ### Non-goals
 
@@ -113,23 +88,49 @@ Deleting, moving, pruning or repairing worktrees; `--force`, `--detach`, `--orph
 remote creation, fetch or push; switching an existing checkout; changing registered roots; any
 profile or sandbox grant change.
 
-## W1 result (2026-11-10)
+## Post-code security review (2026-11-10) — BLOCKERS
 
-- Result `ses_e39f89a04ffe0VNbzjPjWjI61h`, commit `918eca65`, 291 authored changed lines across
-  nine paths, applied to the worktree with `host_sandbox_result_install`.
-- Two writer attempts were spent: the first produced the operation and the argv test but no
-  integration coverage; the single correction round added the refusal matrix and then closed a
-  real containment hole found in review (a symlinked `<root>/<project>` let `git worktree add`
-  create a tree outside the root before the routing post-condition refused).
-- `bun test tests/worktree-op.test.ts tests/gitops.test.ts`: 48 pass, 0 fail.
+Independent read-only `security-reviewer` pass over the applied diff. I verified the two decisive
+claims against `broker/src/gitguard.ts` myself.
+
+1. **BLOCKER — smudge/process filter execution.** `GIT_EXECUTION_SUBCOMMANDS`
+   (gitguard.ts:117-131) lists `checkout` and `switch` because checking out a tree runs the
+   repository's smudge/process filters, but **`worktree` is absent**. `git worktree add` checks out
+   a tree, so it runs those filters as the unconfined broker, and
+   `assertRepositoryLocalConfigSafe` is never applied. Smallest fix: classify `worktree` as
+   execution-bearing at the shared choke point.
+2. **BLOCKER — post-conditions always throw in production.** `assertNoCallerConfigOverride`
+   (gitguard.ts:226) refuses any caller-supplied global `-C`. The post-creation checks use
+   `["git","-C",target,...]`, so every successful creation would fail verification and leave the
+   worktree behind. The tests pass only because `worktree-op.test.ts:49-53` spawns `Bun.spawn`
+   directly and bypasses production hardening. Fix: run the destination checks with `cwd: target`
+   and no `-C`.
+3. **BLOCKER — destination inside an existing checkout.** `assertWorktreeTarget` checks
+   containment and absence but not that `<root>/<project>` is itself a checkout or an
+   inside-root alias into one. A source repository can therefore check its tree out into an
+   existing checkout's subtree, creating protected content before the routing post-condition
+   refuses.
+4. **BLOCKER — validated repository identity discarded.** `gitDirFor(repoDir)` is called and its
+   result thrown away; later commands rediscover the repository. For a linked worktree whose
+   `.git` pointer can be rewritten, the branch and worktree metadata can land in a foreign
+   repository after validation.
+
+Reviewer also flagged as non-blocking: TOCTOU on canonical parents between the existence check and
+the spawn; post-creation refusal does not roll back; the tests bypass production hardening.
+
+## Verification actually observed
+
+- `bun test tests/worktree-op.test.ts tests/gitops.test.ts`: 48 pass, 0 fail (writer-observed).
 - `host_test_run runner=broker-unit` on the installed tree at `gitHead ff99a5a`: **2014 pass,
   9 skip, 2 fail**, 9383 expect calls, 2025 tests across 110 files, exit 1. Both failures are the
-  known pre-existing `tests/v2-launch.test.ts:64` and `:94` profile-drift assertions; nothing in
-  this diff touches a profile.
+  known pre-existing `tests/v2-launch.test.ts:64` and `:94` profile-drift assertions; this diff
+  touches no profile.
 - `bun build --target=bun src/main.ts`: succeeded (writer-observed).
 - `host_git_commit` refuses: `refusing to commit protected paths (S17): broker/src/gitops.ts,
   broker/src/role-policy.ts, broker/src/server.ts, broker/src/service.ts, broker/src/types.ts,
-  broker/src/validation.ts`. The owner commits these bytes after the Codex review.
+  broker/src/validation.ts`. The owner commits S17 bytes.
+- Green tests do not clear blockers 1-3: they exercise a fake spawn, not the production choke
+  point.
 
 ## Constraints
 
@@ -140,33 +141,8 @@ profile or sandbox grant change.
 - S17 paths: `broker/src/**`, `opencode/plugins/**`, `opencode/config-fragments/**`,
   `opencode/plugins-v2/config-fragments/**`. `sandbox_apply` refuses them; land through
   `host_sandbox_result_install`, and the owner commits.
-- Risk item 2/3: a Codex review before merge. Stop at applied-and-verified; the commit is the
-  owner's because `host_git_commit` refuses S17 by design.
+- Risk item 2/3: a Codex review before merge. The agent cannot commit S17 paths.
 - No push, no broker restart, no install into `~/.config`.
-
-## Acceptance criteria
-
-- [x] A worktree is created at `<root>/<project>/<name>` from `repoDir` at `base`, on the new
-  branch `branch`, verified by HEAD and symbolic-ref.
-- [x] The created path resolves as `<rootID>~<project>~<name>` through `resolveProjectID`, and
-  `findProject` returns it; `gitDirFor` returns its linked git directory.
-- [x] Existing branch, existing target, missing project directory, unresolvable base, flag-shaped
-  base, non-checkout `repoDir`, git-checkout `rootDir` and a non-orchestrator caller are all
-  refused before mutation.
-- [x] A project directory resolving outside the root is refused before mutation, with a
-  regression test proving `git worktree add` is never invoked.
-- [ ] `host_git_head` on the new path reports `branch` and `sha` — the live "a session sees the new
-  HEAD" check. Not yet run: the tool is not on this seat's surface, and it needs an installed
-  plugin (W2) plus a broker restart, both owner actions.
-- [ ] Both fragments and the manifest carry the tool; the surface tests agree — W2.
-
-## Authorized scope
-
-`broker/src/{types,validation,gitops,role-policy,service,server}.ts`, `broker/tests/**`,
-`opencode/plugins/lib/{tool-specs-host-ops,host-tool-approval}.ts`,
-`opencode/config-fragments/sandbox-permissions.jsonc`,
-`opencode/plugins-v2/config-fragments/sandbox-permissions.jsonc`,
-`docs/config-manifest-host-tools.md`, `docs/TODO.md`.
 
 ## Route and trigger evidence
 
@@ -174,40 +150,41 @@ profile or sandbox grant change.
   `planner` pre-code advice → `odd-apply` writer | specialist: `pm-odd` | basis: WORKFLOW.md.
 - Recorded deviation (coordinator-accepted): the `pm-odd` lane could not dispatch `planner` or
   `odd-apply` (Q105), so W1 ran as a direct delegated `general` writer with the same fixed
-  contract. Pre-code advice was therefore not obtained; the Codex review and the owner's diff
-  review are the compensating gates for a Risk item 2/3 change.
+  contract. Pre-code advice was therefore not obtained — which is exactly where blockers 1 and 3
+  would most likely have been caught.
 - Owner decision: Q118 relayed 2026-11-10. Branch `refactor/p0-shared-tool-table` is explicitly
   NOT reused: its whole divergence from origin/master is four Q114 worker-release paths.
 
-## Checks
-
-Recorded in `## W1 result`.
-
 ## Progress
 
-- 2026-11-10: tracker created (r1, commit `ff99a5a`).
+- 2026-11-10: tracker created (r1, `ff99a5a`).
 - 2026-11-10: W1 dispatched to `pm-odd`; blocked twice (stale anchor, then missing dispatch
   authority). Degraded to a direct `general` writer.
-- 2026-11-10: W1 written, corrected once for a containment hole, applied to the worktree, and
-  verified through `host_test_run runner=broker-unit`.
+- 2026-11-10: W1 written; one correction round spent closing a symlink containment hole found in
+  my own review; applied to the worktree; full suite run through `host_test_run`.
 - 2026-11-10: `host_git_commit` refused the S17 paths, as designed.
+- 2026-11-10: independent security review returned three blockers plus one functional defect.
+  Candidate is not installable.
 
 ## Open questions
 
-1. W2 needs an owner decision on the installed-plugin path: `host_git_branch`/`host_git_head` are
+1. **Authorization for one further correction round.** The unit's single correction was spent on
+   the symlink hole; the review blockers arrived after it. Policy does not grant a second round
+   without an explicit decision.
+2. Should `worktree` join `GIT_EXECUTION_SUBCOMMANDS` wholesale, or be classified per subcommand so
+   `git worktree list` stays unguarded?
+3. W2 needs an owner decision on the installed-plugin path: `host_git_branch`/`host_git_head` are
    already absent from the retained-master surface although both are committed and granted, so a
    new tool may need a plugin reinstall and broker restart before any session can call it.
-2. `buildGitWorktreeOp`'s doc comment still ends with two sentences that describe `gitHead`
-   (`GIT_DIR` binding). Cosmetic; fold into W2 or the owner's edit.
-3. `MsbError` is used for a `git worktree add` failure. Semantically loose; `StateError` or
-   `GitGuardError` would read better. Left as is to keep the reviewed diff stable.
 
 ## Next step
 
-Owner: Codex review, then commit the nine paths. Then W2 (plugin surface, fragments, manifest,
-surface tests), which is what makes the tool reachable from a session.
+Owner decision required. Either authorize one correction round covering blockers 1-4 (then Codex
+review and commit), or revert the nine paths in the worktree with
+`git checkout -- broker/src/gitops.ts broker/src/role-policy.ts broker/src/server.ts broker/src/service.ts broker/src/types.ts broker/src/validation.ts broker/tests/gitops.test.ts broker/tests/service-host-tools.test.ts` and remove the untracked `broker/tests/worktree-op.test.ts`.
 
 
 ## Revisions
 - r1 2026-11-10T14:33:05Z gentle-orchestrator: Create Q118 tracker: one supported worktree route from a named base
 - r2 2026-11-10T15:36:04Z gentle-orchestrator: Record W1 applied+verified, S17 commit refusal, Q105 PM-lane block and Q102 P0 gap
+- r3 2026-11-10T15:45:23Z gentle-orchestrator: Record security review blockers; W1 candidate not installable
