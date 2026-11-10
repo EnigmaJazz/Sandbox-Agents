@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config.ts";
 import { PolicyError } from "../src/policy.ts";
 import { authorizeHostDispatch } from "../src/service.ts";
-import { buildGhIssueCreateOp, buildGitBranchOp, buildGitHeadOp, buildGitCommitOp, buildGitPushOp, buildRegisterProjectOp } from "../src/service.ts";
+import { buildGhIssueCreateOp, buildGitBranchOp, buildGitHeadOp, buildGitWorktreeOp, buildGitCommitOp, buildGitPushOp, buildRegisterProjectOp } from "../src/service.ts";
 import { MsbError } from "../src/msb.ts";
 import { StateError } from "../src/state.ts";
 import { GitGuardError, gitSubcommand } from "../src/gitguard.ts";

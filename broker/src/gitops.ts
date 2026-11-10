@@ -502,6 +502,20 @@ export function buildGitBranchArgv(input: GitBranchArgvInput): string[] {
     : ["git", "branch", input.name, input.base];
 }
 
+export interface GitWorktreeArgvInput {
+  branch: string;
+  target: string;
+  sha: string;
+}
+
+/** The only permitted worktree creation vector. */
+export function buildGitWorktreeArgv(input: GitWorktreeArgvInput): string[] {
+  assertGitBranch(input.branch);
+  if (!/^[0-9a-f]{40}$/.test(input.sha)) throw new ValidationError("invalid resolved worktree commit");
+  if (!input.target.startsWith("/")) throw new ValidationError("worktree target must be absolute");
+  return ["git", "worktree", "add", "-b", input.branch, input.target, input.sha];
+}
+
 export interface GitHeadArgv {
   /** `git symbolic-ref --short -q HEAD`: exit 0 prints the branch, exit 1 means detached. */
   branch: string[];

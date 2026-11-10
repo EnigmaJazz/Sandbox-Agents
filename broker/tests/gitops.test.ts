@@ -23,6 +23,7 @@ import {
   buildGitCommitArgv,
   buildGitPushArgv,
   buildGitBranchArgv,
+  buildGitWorktreeArgv,
   buildGitHeadArgv,
   buildGhIssueCreateArgv,
   capAndRedact,
@@ -362,6 +363,14 @@ describe("host git branch argv (§31) — create-only, fixed argv", () => {
         expect(element).not.toBe("--force");
       }
     }
+  });
+});
+
+describe("host git worktree argv — fixed creation vector", () => {
+  test("emits the exact branch, target and resolved SHA vector", () => {
+    expect(buildGitWorktreeArgv({ branch: "feature/new", target: "/tmp/root/project/new", sha: "0123456789abcdef0123456789abcdef01234567" })).toEqual([
+      "git", "worktree", "add", "-b", "feature/new", "/tmp/root/project/new", "0123456789abcdef0123456789abcdef01234567",
+    ]);
   });
 });
 

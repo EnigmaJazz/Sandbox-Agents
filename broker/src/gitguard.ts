@@ -111,8 +111,9 @@ const GIT_REMOTE_SUBCOMMANDS: ReadonlySet<string> = new Set(["push", "fetch"]);
  * diff drivers, ssh/proxy commands). Read-only plumbing needs no guard.
  * `switch` is execution-bearing for the same reason as `checkout`: checking a
  * branch out rewrites the working tree and therefore runs the repository's
- * smudge/process filters. `branch` alone changes no working-tree content and
- * stays unguarded.
+ * smudge/process filters. `worktree add` checks out a tree and therefore
+ * executes the same filters as `checkout`. `branch` alone changes no working-tree
+ * content and stays unguarded.
  */
 const GIT_EXECUTION_SUBCOMMANDS: ReadonlySet<string> = new Set([
   "add",
@@ -121,6 +122,7 @@ const GIT_EXECUTION_SUBCOMMANDS: ReadonlySet<string> = new Set([
   "restore",
   "checkout",
   "switch",
+  "worktree",
   "diff",
   "fetch",
   "update-ref",

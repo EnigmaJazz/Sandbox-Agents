@@ -1021,6 +1021,7 @@ export const HOST_MUTATION_OPERATIONS: readonly string[] = [
   "sddArchiveCompose",
   "gitCommit",
   "gitBranch",
+  "gitWorktree",
   "gitClearCommitIntent",
   "gitPush",
   "ghIssueCreate",
@@ -1238,6 +1239,7 @@ export const ALLOWED_PAYLOAD_KEYS: Record<string, readonly string[]> = {
   reviewPersistPreflight: ["projectDir", "runId", "finalizeRef", "mode"],
   gitCommit: ["projectDir", "message", "sandboxSessionID"],
   gitBranch: ["projectDir", "name", "base", "switch"],
+  gitWorktree: ["repoDir", "rootDir", "project", "name", "branch", "base"],
   gitHead: ["projectDir"],
   gitClearCommitIntent: ["projectDir", "sandboxSessionID"],
   gitPush: ["projectDir", "remote", "setUpstream", "allowProtectedBranch"],
@@ -1412,6 +1414,39 @@ export function resolveWorktreeAwareRoot(root: string, canonical: string): strin
 const WORKTREE_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 /** Separates `<rootID>~<project>~<name>`; broker project ids never contain it. */
 const WORKTREE_ID_SEP = "~";
+
+/** Validate a worktree destination beneath a registered, non-checkout root. */
+export function assertWorktreeTarget(root: string, project: unknown, name: unknown): string {
+  if (typeof project !== "string" || !WORKTREE_SEGMENT_RE.test(project) ||
+      typeof name !== "string" || !WORKTREE_SEGMENT_RE.test(name)) {
+    throw new ValidationError("worktree project and name must be safe path segments");
+  }
+  const canonicalRoot = realpathSync(root);
+  const projectDir = join(canonicalRoot, project);
+  if (!existsSync(projectDir)) throw new ValidationError("worktree project directory is missing");
+  const canonicalProject = realpathSync(projectDir);
+  if (!statSync(canonicalProject).isDirectory()) throw new ValidationError("worktree project path is not a directory");
+  if (canonicalProject === canonicalRoot || !isWithin(canonicalRoot, canonicalProject)) {
+    throw new ValidationError("worktree project directory escapes the registered root");
+  }
+  // The destination's routing identity is derived from the literal path segments
+  // <root>/<project>/<name>. An alias inside the root resolves to a different
+  // path, so the routing post-condition could only fail AFTER `worktree add` had
+  // already created the branch and the worktree. Refuse the alias before any spawn.
+  if (canonicalProject !== projectDir) {
+    throw new ValidationError(
+      "worktree project directory resolves through an alias; the destination must be the literal <root>/<project> path",
+    );
+  }
+  for (let directory = canonicalProject; directory !== canonicalRoot; directory = dirname(directory)) {
+    if (existsSync(join(directory, ".git"))) {
+      throw new ValidationError("worktree project directory is a git checkout; the destination would be inside an existing checkout");
+    }
+  }
+  const target = join(canonicalProject, name);
+  if (existsSync(target)) throw new ValidationError("worktree target already exists");
+  return target;
+}
 
 /**
  * Look a project up by id. A virtual id `<rootID>~<project>~<name>` names a worktree under a worktree root:

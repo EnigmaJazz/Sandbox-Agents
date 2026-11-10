@@ -44,6 +44,7 @@ import {
   assertExpectedResultCommit,
   assertExternalCopyTarget,
   assertGitBranch,
+  assertWorktreeTarget,
   assertGrepQuery,
   assertOrcaDispatchId,
   assertOrcaTaskId,
@@ -78,6 +79,7 @@ import {
   buildGitCommitArgv,
   buildGitPushArgv,
   buildGitBranchArgv,
+  buildGitWorktreeArgv,
   buildGitHeadArgv,
   isGitHeadBranchOutput,
   buildGhIssueCreateArgv,
@@ -4431,9 +4433,9 @@ export function buildGitBranchOp(ctx: OpContext): OpHandler {
 }
 
 /**
- * Read-only host git HEAD tool: the current branch name (`null` when HEAD is
- * detached) and the commit HEAD resolves to, for any approved project path,
- * linked worktrees included.
+ * Create a linked worktree under a canonical, registered worktree root. The
+ * destination is checked before the operation can mutate the host repository;
+ * a project directory that resolves outside the root is refused.
  *
  * Authorization runs first, before payload validation. Every step binds the
  * validated `gitDirFor(projectRoot)` as `GIT_DIR` (B2), so a worktree's `.git`
@@ -4443,6 +4445,67 @@ export function buildGitBranchOp(ctx: OpContext): OpHandler {
  * before any spawn (B1), with the environment the child receives. Unexpected
  * or truncated git output fails closed rather than being reported (B3).
  */
+export function buildGitWorktreeOp(ctx: OpContext): OpHandler {
+  return async (req) => {
+    authorizeHostDispatch(ctx, "gitWorktree", req.sessionID, req.agent);
+    const payload = payloadOf(req) as { repoDir?: unknown; rootDir?: unknown; project?: unknown; name?: unknown; branch?: unknown; base?: unknown };
+    const { projectRoot: repoDir } = resolveCanonicalProjectRoot(ctx, payload.repoDir);
+    const repoDotGit = join(repoDir, ".git");
+    if (!existsSync(repoDotGit)) throw new ValidationError("repoDir must be a git checkout");
+    const repoGitDir = gitDirFor(repoDir);
+    const rootID = resolveProjectID(payload.rootDir, ctx.config.projects);
+    const rootProject = findProject(ctx.config.projects, rootID);
+    if (!rootProject) throw new ValidationError("worktree root is not registered");
+    const rootDir = realpathSync(rootProject.path);
+    if (realpathSync(payload.rootDir as string) !== rootDir) throw new ValidationError("rootDir must be an exact registered root");
+    if (!statSync(rootDir).isDirectory() || existsSync(join(rootDir, ".git"))) {
+      throw new ValidationError("rootDir must be a registered directory without .git");
+    }
+    if (typeof payload.project !== "string" || typeof payload.name !== "string") {
+      throw new ValidationError("project and name must be strings");
+    }
+    const projectDir = join(rootDir, payload.project);
+    if (!existsSync(projectDir) || !statSync(projectDir).isDirectory()) {
+      throw new ValidationError("worktree project directory is missing or not a directory");
+    }
+    const target = assertWorktreeTarget(rootDir, payload.project, payload.name);
+    assertGitBranch(payload.branch);
+    const branch = payload.branch;
+    if (payload.base !== undefined && typeof payload.base !== "string") throw new ValidationError("base must be a string");
+    const base = (payload.base as string | undefined) ?? "HEAD";
+    if (base.startsWith("-")) throw new ValidationError("base must not start with '-'");
+    const repoEnv = { GIT_DIR: repoGitDir };
+    const run = (argv: string[]) => runHostStep(ctx, argv, repoDir, 60_000, repoEnv);
+    const resolved = await run(["git", "rev-parse", "--verify", "--quiet", `${base}^{commit}`]);
+    const sha = resolved.stdout.trim().toLowerCase();
+    if (resolved.status !== 0 || !/^[0-9a-f]{40}$/.test(sha)) throw new StateError("cannot create worktree: base does not resolve to a commit");
+    const exists = await run(["git", "show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+    if (exists.status === 0) throw new StateError(`cannot create worktree: branch '${branch}' already exists`);
+    if (exists.status !== 1) throw new StateError(`cannot create worktree: branch check failed (${capAndRedact(exists.stderr).trim()})`);
+    const argv = buildGitWorktreeArgv({ branch, target, sha });
+    const created = await run(argv);
+    if (created.status !== 0) throw new MsbError(`git worktree add failed: ${capAndRedact(created.stderr).trim()}`);
+    const failCreated = (why: string): never => { throw new StateError(`worktree created at ${target}, but ${why}; cleanup is not automatic`); };
+    let targetGitDir: string;
+    try {
+      targetGitDir = gitDirFor(target);
+    } catch {
+      failCreated("destination git directory could not be verified");
+    }
+    const targetEnv = { GIT_DIR: targetGitDir };
+    const head = await runHostStep(ctx, ["git", "rev-parse", "--verify", "HEAD"], target, 60_000, targetEnv);
+    if (head.status !== 0 || head.stdout.trim().toLowerCase() !== sha) failCreated("HEAD does not match the resolved base");
+    const headBranch = await runHostStep(ctx, ["git", "symbolic-ref", "--short", "-q", "HEAD"], target, 60_000, targetEnv);
+    if (headBranch.status !== 0 || headBranch.stdout.trim() !== branch) failCreated("HEAD is not on the requested branch");
+    const canonicalTarget = realpathSync(target);
+    const projectID = resolveProjectID(canonicalTarget, ctx.config.projects);
+    const expectedID = `${rootID}~${payload.project}~${payload.name}`;
+    if (projectID !== expectedID || findProject(ctx.config.projects, projectID)?.path !== canonicalTarget) failCreated("project routing post-condition failed");
+    return { repoDir, rootDir, project: payload.project, name: payload.name, branch, base, sha, target: canonicalTarget, projectID,
+      stdout: capAndRedact(created.stdout), stderr: capAndRedact(created.stderr) };
+  };
+}
+
 export function buildGitHeadOp(ctx: OpContext): OpHandler {
   return async (req) => {
     authorizeHostDispatch(ctx, "gitHead", req.sessionID, req.agent);

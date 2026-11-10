@@ -88,6 +88,7 @@ import {
   refuseStageReviewWorker,
   buildGitCommitOp,
   buildGitBranchOp,
+  buildGitWorktreeOp,
   buildGitHeadOp,
   buildGitClearCommitIntentOp,
   buildGitPushOp,
@@ -1007,6 +1008,8 @@ export class BrokerServer {
         return buildGitPushOp(this.ctx)(req);
       case "gitBranch":
         return buildGitBranchOp(this.ctx)(req);
+      case "gitWorktree":
+        return buildGitWorktreeOp(this.ctx)(req);
       case "gitHead":
         return buildGitHeadOp(this.ctx)(req);
       case "ghIssueCreate":
