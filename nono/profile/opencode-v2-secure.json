@@ -1,8 +1,8 @@
 {
   "meta": {
     "name": "opencode-v2-secure",
-    "version": "0.1.2",
-    "description": "Secured host OpenCode V2 process for the parallel V2 stack (docs/upgrades/opencode-v2.md, workstream V6). Own binary, XDG roots and port; ~/.claude and ~/.agents denied because V2 also reads them as config sources; the V1 tree is not granted. The V2 config root (which holds the security plugins) is read-only. Project .git directories are writable, as on V1: the gentle-ai review transport (an in-process plugin child) writes a frozen-git temp dir there, and without it refuses every lens with binding_mismatch (found 2026-10-30). This reopens hook/config planting by the sandboxed server; the proper fix is to run the transport on the host through the broker. NOT INSTALLED - delivery is manual (S17).",
+    "version": "0.1.3",
+    "description": "Secured host OpenCode V2 process for the parallel V2 stack (docs/upgrades/opencode-v2.md, workstream V6). Own binary, XDG roots and port; ~/.claude and ~/.agents denied because V2 also reads them as config sources; the V1 tree is not granted. The V2 config root (which holds the security plugins) is read-only. Project .git directories are writable, as on V1: the gentle-ai review transport (an in-process plugin child) writes a frozen-git temp dir there, and without it refuses every lens with binding_mismatch (found 2026-10-30). This reopens hook/config planting by the sandboxed server; the proper fix is to run the transport on the host through the broker. A read grant for the broker's shared review clones lets a staged candidate be read without granting the sandbox write access there (Q102 OPEN-1; review authority stays in the clone's own git directory). NOT INSTALLED - delivery is manual (S17).",
     "author": "agentic-sandbox-integration"
   },
   "extends": "default",
@@ -107,6 +107,7 @@
       "/home/james/mem-opt",
       "/home/james/agent-sandbox-integration",
       "/home/james/.nanobot/workspace",
+      "$HOME/.local/state/opencode-sandbox/review-clones",
       "$HOME/.local/share/opencode-v2/prefix",
       "$HOME/.local/share/opencode-v2/config",
       "$HOME/.local/share/claude",

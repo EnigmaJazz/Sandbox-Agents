@@ -90,15 +90,29 @@ describe("V2 nono profile", () => {
   });
 
   test("reaches the same hosts and project roots as V1, with the same isolation", () => {
-    // V2 adds api.anthropic.com for the Claude Agent provider (verified 2026-10-31: claude.ai is not needed) and read access to the Claude binary tree.
+    // V2 adds api.anthropic.com for the Claude Agent provider (verified 2026-10-31: claude.ai is not needed) and read access to the Claude binary tree. V2 also reads the broker's shared review clones (Q102 OPEN-1, read-only).
     expect(v2.network.allow_domain.filter((d: string) => d !== "api.anthropic.com")).toEqual(V1_PROFILE.network.allow_domain);
     expect(v2.network.allow_domain).toContain("api.anthropic.com");
-    const v2Only = ["$HOME/.local/share/opencode-v2/prefix", "$HOME/.local/share/opencode-v2/config", "$HOME/.local/share/claude"];
+    const v2Only = ["$HOME/.local/share/opencode-v2/prefix", "$HOME/.local/share/opencode-v2/config", "$HOME/.local/share/claude", "$HOME/.local/state/opencode-sandbox/review-clones"];
     expect(v2.filesystem.read.filter((p: string) => !v2Only.includes(p)).sort()).toEqual(
       V1_PROFILE.filesystem.read.filter((p: string) => p !== "$HOME/.agents/skills").sort(),
     );
     expect(v2.security).toEqual(V1_PROFILE.security);
     expect(v2.workdir).toEqual(V1_PROFILE.workdir);
+  });
+
+  test("grants read access to the broker's shared review clones and nothing wider", () => {
+    const reviewClones = "$HOME/.local/state/opencode-sandbox/review-clones";
+    expect(v2.meta.version).toBe("0.1.3");
+    expect(v2.filesystem.read).toContain(reviewClones);
+    const writable = [...v2.filesystem.allow, ...(v2.filesystem.allow_file ?? [])];
+    expect(writable).not.toContain(reviewClones);
+    // Only the narrow, disposable clone subtree is readable: neither the broker
+    // state root nor any parent may be granted read or write.
+    for (const parent of ["$HOME/.local/state", "$HOME/.local/state/opencode-sandbox"]) {
+      expect(v2.filesystem.read).not.toContain(parent);
+      expect(writable).not.toContain(parent);
+    }
   });
 
   const maybeNono = Bun.which("nono") ? test : test.skip; // skipped visibly when nono is not installed
